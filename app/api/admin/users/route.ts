@@ -1,13 +1,48 @@
-import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
+import { adminAuth, adminDb } from '@/lib/firebase-admin'; // Firebase Adminのインポート
 
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  { auth: { autoRefreshToken: false, persistSession: false } }
-);
+// ---------------------------------------------------------
+// ヘルパー: 1人のユーザーに関連するデータを全削除する関数
+// ---------------------------------------------------------
+async function deleteUserData(userId: string) {
+  // 1. 関連コレクションの定義
+  const collections = [
+    'attendance',
+    'submissions',
+    'requests',
+    'teacher_availability',
+    'shift_assignments'
+  ];
 
-// 削除機能 (個別削除 & 全削除)
+  // 2. 各コレクションから user_id が一致するドキュメントを検索して削除
+  // Firestoreには「一括削除」がないため、Query -> Batch Delete の手順を踏みます
+  const deletePromises = collections.map(async (colName) => {
+    const snapshot = await adminDb.collection(colName).where('user_id', '==', userId).get();
+    if (snapshot.empty) return;
+
+    const batch = adminDb.batch();
+    snapshot.docs.forEach((doc) => {
+      batch.delete(doc.ref);
+    });
+    await batch.commit();
+  });
+
+  await Promise.all(deletePromises);
+
+  // 3. Authユーザーの削除
+  try {
+    await adminAuth.deleteUser(userId);
+  } catch (e) {
+    console.log(`Auth user ${userId} not found or already deleted.`);
+  }
+
+  // 4. プロフィール(usersコレクション)の削除
+  await adminDb.collection('users').doc(userId).delete();
+}
+
+// ---------------------------------------------------------
+// DELETE: 削除機能 (個別削除 & 生徒一括削除)
+// ---------------------------------------------------------
 export async function DELETE(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
@@ -15,46 +50,27 @@ export async function DELETE(request: Request) {
 
     // A. 個別削除モード (ID指定あり)
     if (targetId) {
-      // 関連データを削除
-      await supabaseAdmin.from('attendance').delete().eq('user_id', targetId);
-      await supabaseAdmin.from('submissions').delete().eq('user_id', targetId);
-      await supabaseAdmin.from('requests').delete().eq('user_id', targetId);
-      await supabaseAdmin.from('teacher_availability').delete().eq('user_id', targetId);
-      await supabaseAdmin.from('shift_assignments').delete().eq('user_id', targetId);
-
-      // ユーザー削除
-      const { error } = await supabaseAdmin.auth.admin.deleteUser(targetId);
-      if (error) throw error;
-      
-      // プロフィールも念のため (Auth削除で消える設定なら不要だが安全策)
-      await supabaseAdmin.from('profiles').delete().eq('id', targetId);
-
+      await deleteUserData(targetId);
       return NextResponse.json({ success: true, message: '削除しました' });
     }
 
     // B. 全生徒削除モード (ID指定なし)
-    const { data: students } = await supabaseAdmin
-      .from('profiles')
-      .select('id')
-      .eq('role', 'student')
-      .limit(500);
+    // roleが 'student' のユーザーを検索 (最大500件)
+    const snapshot = await adminDb
+      .collection('users')
+      .where('role', '==', 'student')
+      .limit(500)
+      .get();
 
-    if (!students || students.length === 0) {
+    if (snapshot.empty) {
       return NextResponse.json({ success: true, count: 0, message: '削除対象がいません' });
     }
 
-    const userIds = students.map(s => s.id);
+    const userIds = snapshot.docs.map(doc => doc.id);
 
-    // 関連データ削除
-    await supabaseAdmin.from('attendance').delete().in('user_id', userIds);
-    await supabaseAdmin.from('submissions').delete().in('user_id', userIds);
-    await supabaseAdmin.from('requests').delete().in('user_id', userIds);
-
-    // ユーザー削除
-    const deletePromises = userIds.map(id => supabaseAdmin.auth.admin.deleteUser(id));
-    await Promise.all(deletePromises);
-    
-    await supabaseAdmin.from('profiles').delete().in('id', userIds);
+    // 並列処理で削除実行
+    // (数が多い場合はPromise.allの並列数を制限する必要がありますが、500程度ならVercelのタイムアウト内に収まる想定)
+    await Promise.all(userIds.map(id => deleteUserData(id)));
 
     return NextResponse.json({ 
       success: true, 
@@ -63,88 +79,128 @@ export async function DELETE(request: Request) {
     });
 
   } catch (error: any) {
+    console.error('DELETE Error:', error);
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
 }
 
-// 作成・更新機能
+// ---------------------------------------------------------
+// POST: 作成・更新機能
+// ---------------------------------------------------------
 export async function POST(request: Request) {
   try {
     const body = await request.json();
     const { users } = body; 
-    const { data: rules } = await supabaseAdmin.from('class_settings').select('*');
+    
+    // クラス設定(ルール)を取得
+    const rulesSnapshot = await adminDb.collection('class_settings').get();
+    const rules = rulesSnapshot.docs.map(doc => doc.data());
+
     const results = [];
     const errors = [];
     const processedIds = new Set();
 
     for (const user of users) {
-      // ID決定
+      // ID決定 (IDがない場合はスキップ)
       const loginId = user.lifetime_id || user.student_id;
       if (!loginId) {
         errors.push({ name: user.student_name, error: 'ID(生涯番号)がありません' });
         continue;
       }
+
+      // 重複チェック (今回のリクエスト内での重複)
       const strId = String(loginId).trim();
       if (processedIds.has(strId)) continue;
       processedIds.add(strId);
 
       const email = `${strId}@classbase.local`;
-      const password = user.password || 'class1234';
+      const password = user.password || 'class1234'; // パスワードがない場合はデフォルト
 
-      // ★修正: ロール指定があればそれを使う。なければ生徒。
+      // ロール設定
       const role = user.role || 'student';
 
       // 生徒の場合のみURL自動設定
       let autoUrl1 = null;
       let autoUrl2 = null;
+
       if (role === 'student') {
-        const scienceRule = rules?.find(r => r.grade === user.grade && r.day_of_week === user.day_of_week && r.subject_name === user.science_subject);
-        const socialRule = rules?.find(r => r.grade === user.grade && r.day_of_week === user.day_of_week && r.subject_name === user.social_subject);
+        const scienceRule = rules.find((r: any) => 
+          r.grade === user.grade && 
+          r.day_of_week === user.day_of_week && 
+          r.subject_name === user.science_subject
+        );
+        const socialRule = rules.find((r: any) => 
+          r.grade === user.grade && 
+          r.day_of_week === user.day_of_week && 
+          r.subject_name === user.social_subject
+        );
         autoUrl1 = scienceRule ? scienceRule.zoom_url : null;
         autoUrl2 = socialRule ? socialRule.zoom_url : null;
       }
 
       let userId = '';
-      const { data: existUsers } = await supabaseAdmin.auth.admin.listUsers();
-      const existUser = existUsers.users.find(u => u.email === email);
 
-      if (existUser) {
-        userId = existUser.id;
-        // パスワード更新
-        await supabaseAdmin.auth.admin.updateUserById(userId, { password: password });
-      } else {
-        const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
-          email: email, password: password, email_confirm: true, user_metadata: { name: user.student_name }
+      // Firebase Authでユーザー検索 (メールアドレスで確認)
+      try {
+        const existingUser = await adminAuth.getUserByEmail(email);
+        userId = existingUser.uid;
+        
+        // 既存ユーザー: パスワード更新
+        await adminAuth.updateUser(userId, {
+          password: password,
+          displayName: user.student_name
         });
-        if (authError) {
+
+      } catch (authError: any) {
+        // ユーザーが存在しない場合(auth/user-not-found)は新規作成
+        if (authError.code === 'auth/user-not-found') {
+          try {
+            const newUser = await adminAuth.createUser({
+              email: email,
+              password: password,
+              emailVerified: true,
+              displayName: user.student_name
+            });
+            userId = newUser.uid;
+          } catch (createError: any) {
+            errors.push({ name: user.student_name, error: createError.message });
+            continue;
+          }
+        } else {
+          // その他のエラー
           errors.push({ name: user.student_name, error: authError.message });
           continue;
         }
-        userId = authData.user!.id;
       }
 
-      await supabaseAdmin.from('profiles').upsert({
-        id: userId,
-        role: role, // ★修正: 正しいロールを保存
+      // Firestoreへの保存 (upsert相当: merge: true を使用)
+      await adminDb.collection('users').doc(userId).set({
+        id: userId, // ドキュメント内にIDを持たせておくと便利
+        role: role,
         student_name: user.student_name,
-        name_kana: user.name_kana,
-        grade: user.grade,
-        student_id: user.student_id,
-        lifetime_id: user.lifetime_id,
-        classroom: user.classroom,
-        phone_number: user.phone_number,
+        name_kana: user.name_kana || '',
+        grade: user.grade || '',
+        student_id: user.student_id || '',
+        lifetime_id: user.lifetime_id || '',
+        classroom: user.classroom || '',
+        phone_number: user.phone_number || '',
         email: email,
-        day_of_week: user.day_of_week,
-        science_subject: user.science_subject,
-        social_subject: user.social_subject,
-        zoom_url: autoUrl1,
+        day_of_week: user.day_of_week || '',
+        science_subject: user.science_subject || '',
+        social_subject: user.social_subject || '',
+        zoom_url: autoUrl1, // 自動設定されたURL
         zoom_url_2: autoUrl2,
-        raw_password: password
-      });
+        raw_password: password, // ※セキュリティ的には非推奨だが要件通り保存
+        updated_at: new Date()
+      }, { merge: true });
+
       results.push(user.student_name);
     }
+
     return NextResponse.json({ success: true, createdCount: results.length, results, errors });
+
   } catch (error: any) {
+    console.error('POST Error:', error);
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
 }
