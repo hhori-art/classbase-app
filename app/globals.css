@@ -1,0 +1,65 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --foreground-rgb: 0, 0, 0;
+  --background-start-rgb: 214, 219, 220;
+  --background-end-rgb: 255, 255, 255;
+}
+
+body {
+  color: rgb(var(--foreground-rgb));
+  background: #f9fafb; /* bg-gray-50 */
+}
+
+/* カレンダーのスタイル調整 (重要) */
+.calendar-custom .react-calendar {
+  width: 100% !important;
+  background: none !important;
+  border: none !important;
+  font-family: inherit !important;
+}
+.calendar-custom .react-calendar__tile {
+  padding: 10px 0 !important;
+  font-size: 0.9rem;
+  position: relative;
+  z-index: 1;
+}
+.calendar-custom .react-calendar__tile--now {
+  background: #eff6ff !important;
+  color: #2563eb !important;
+  border-radius: 12px;
+  font-weight: bold;
+}
+.calendar-custom .react-calendar__tile--active {
+  background: #2563eb !important;
+  color: white !important;
+  border-radius: 12px;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+}
+.calendar-custom .react-calendar__navigation button {
+  font-size: 1.1rem;
+  font-weight: bold;
+  color: #374151;
+}
+.calendar-custom .react-calendar__month-view__weekdays {
+  text-decoration: none !important;
+  font-size: 0.75rem;
+  color: #9ca3af;
+  text-transform: uppercase;
+}
+.calendar-custom abbr[title] {
+  text-decoration: none !important;
+}
+/* ドットマーカー */
+.dot-marker {
+  height: 5px;
+  width: 5px;
+  background-color: #f97316;
+  border-radius: 50%;
+  margin: 2px auto 0;
+}
+.react-calendar__tile--active .dot-marker {
+  background-color: white;
+}
