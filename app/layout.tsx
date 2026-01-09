@@ -1,5 +1,5 @@
-// app/layout.tsx
 import './globals.css';
+import { AuthProvider } from '@/app/context/AuthContext'; // ★追加
 
 export const metadata = {
   title: 'オンライン理社講座',
@@ -14,7 +14,10 @@ export default function RootLayout({
   return (
     <html lang="ja">
       <body className="bg-gray-50 text-gray-900 font-sans">
-        {children}
+        {/* ★AuthProviderで囲むことで、アプリ内のどこでもログイン情報を使えるようにする */}
+        <AuthProvider>
+          {children}
+        </AuthProvider>
       </body>
     </html>
   );
