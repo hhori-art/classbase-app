@@ -1,8 +1,10 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { createClient } from '@/lib/supabase-client';
-import { Video } from 'lucide-react';
+// Firebase関連のインポートに変更
+import { auth, db } from '@/lib/firebase';
+import { doc, setDoc, updateDoc, increment, serverTimestamp } from 'firebase/firestore';
+import { Video, Loader2 } from 'lucide-react';
 
 // プロップス: 時間指定を追加
 export default function ZoomButton({ 
@@ -22,7 +24,6 @@ export default function ZoomButton({
 }) {
   const [isVisible, setIsVisible] = useState(false);
   const [loading, setLoading] = useState(false);
-  const supabase = createClient();
 
   // 時間チェック機能
   useEffect(() => {
@@ -66,32 +67,52 @@ export default function ZoomButton({
 
   const handleJoinClass = async () => {
     if (!url) return;
+    
+    // 二重クリック防止
+    if (loading) return;
+
     if (!confirm(`${label}しますか？（出席として記録されます）`)) return;
 
     setLoading(true);
-    const today = new Date().toISOString().split('T')[0];
+    const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
 
     try {
-      const { data: { user } } = await supabase.auth.getUser();
+      const user = auth.currentUser;
+      
+      // ユーザーがいない場合はただZoomを開く
       if (!user) {
         window.open(url, '_blank');
         setLoading(false);
         return;
       }
-      // 出席記録
-      await supabase.from('attendance').upsert({
-        user_id: user.id,
+
+      // 1. 出席記録 (ドキュメントIDを "UID_YYYY-MM-DD" にすることで重複防止)
+      const attendanceId = `${user.uid}_${today}`;
+      const attendanceRef = doc(db, 'attendance', attendanceId);
+      
+      await setDoc(attendanceRef, {
+        user_id: user.uid,
         target_date: today,
         type: 'present',
         contacted_by: 'student',
-        reason: 'Zoom参加ボタンより自動登録'
-      }, { onConflict: 'user_id, target_date' });
+        reason: 'Zoom参加ボタンより自動登録',
+        created_at: serverTimestamp(), // サーバー時間
+        updated_at: serverTimestamp()
+      }, { merge: true }); // merge: true で上書き保存
       
-      // ポイント加算
-      await supabase.rpc('add_points', { user_id: user.id, amount: 10 });
+      // 2. ポイント加算 (Firestoreのincrement機能を使用)
+      // usersコレクションに points フィールドがあると仮定しています
+      const userRef = doc(db, 'users', user.uid);
+      await updateDoc(userRef, {
+        points: increment(10) // 現在の値に+10する
+      });
       
-    } catch (err) { console.error(err); }
+    } catch (err) { 
+      console.error("出席処理エラー:", err);
+      // エラーが出てもZoomには行けるようにする
+    }
 
+    // Zoomを開く
     window.open(url, '_blank');
     setLoading(false);
   };
@@ -99,7 +120,7 @@ export default function ZoomButton({
   // 表示期間外なら何も表示しない
   if (!isVisible) return null;
 
-  // URLがない場合も表示しない（あるいは「準備中」と出すかはお好みで）
+  // URLがない場合も表示しない
   if (!url) return null;
 
   // 色の切り替え
@@ -113,7 +134,7 @@ export default function ZoomButton({
     <button
       onClick={handleJoinClass}
       disabled={loading}
-      className={`w-full bg-gradient-to-r ${gradientClass} text-white p-5 rounded-2xl shadow-lg flex items-center justify-between group active:scale-[0.98] transition-all`}
+      className={`w-full bg-gradient-to-r ${gradientClass} text-white p-5 rounded-2xl shadow-lg flex items-center justify-between group active:scale-[0.98] transition-all disabled:opacity-70 disabled:cursor-not-allowed`}
     >
       <div className="flex flex-col items-start">
         <span className="text-sm opacity-90 font-bold mb-1 flex items-center gap-1">
@@ -121,7 +142,8 @@ export default function ZoomButton({
           {subLabel}
         </span>
         <span className="text-xl font-bold flex items-center gap-2">
-          <Video className="fill-white" /> {label}
+          {loading ? <Loader2 className="animate-spin" /> : <Video className="fill-white" />} 
+          {loading ? '処理中...' : label}
         </span>
       </div>
       <div className="bg-white/20 p-2 rounded-full group-hover:bg-white/30 transition-colors">
