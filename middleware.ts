@@ -4,31 +4,33 @@ import type { NextRequest } from 'next/server';
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // 1. 制限対象のパスかどうか判定
-  // 生徒用(/student)やトップページ(/)は対象外
+  // ★ 1. 制限の「対象外」にするパスを最初に定義
+  // 静的ファイル(画像、favicon、/_next など)と、拒否画面(/403)は常に許可
+  if (
+    pathname.startsWith('/_next') ||
+    pathname.startsWith('/static') ||
+    pathname.includes('favicon.ico') ||
+    pathname === '/403' ||
+    pathname === '/' // トップページも一旦許可
+  ) {
+    return NextResponse.next();
+  }
+
+  // ★ 2. 制限をかけたいパス（先生・マスター用）
   const isRestrictedPath = pathname.startsWith('/master') || pathname.startsWith('/teacher');
 
   if (isRestrictedPath) {
-    // 2. アクセス元のIPアドレスを取得
-    // 型エラー回避のため (request as any).ip としています
+    // アクセス元のIPを取得
     let ip = (request as any).ip || request.headers.get('x-forwarded-for') || '127.0.0.1';
+    if (ip.includes(',')) ip = ip.split(',')[0].trim();
 
-    // 複数のIPが含まれる場合（プロキシ経由など）、最初の1つを取得
-    if (ip.includes(',')) {
-      ip = ip.split(',')[0].trim();
-    }
-
-    // 環境変数から許可リストを取得
     const allowedIps = (process.env.ALLOWED_IPS || '').split(',');
-
-    // ローカル開発環境(localhost)は常に許可する (::1 はIPv6のlocalhost)
     const isLocal = ip === '::1' || ip === '127.0.0.1';
 
-    // 3. IPチェック
+    // 許可リストになければ /403 へ飛ばす
     if (!isLocal && !allowedIps.includes(ip)) {
-      console.warn(`Blocked access from IP: ${ip} to ${pathname}`);
-      
-      // 許可されていない場合は「アクセス拒否ページ」へリダイレクト
+      console.log(`Blocked: IP ${ip} tried to access ${pathname}`);
+      // 絶対URLでリダイレクト
       return NextResponse.redirect(new URL('/403', request.url));
     }
   }
@@ -36,11 +38,13 @@ export function middleware(request: NextRequest) {
   return NextResponse.next();
 }
 
-// ミドルウェアを適用するパスの設定
+// ミドルウェアを適用する範囲を絞る（パフォーマンス向上）
 export const config = {
   matcher: [
-    // /master と /teacher 配下のすべてのルートに適用
-    '/master/:path*',
+    /*
+     * /teacher, /master 配下のすべてのページに適用
+     */
     '/teacher/:path*',
+    '/master/:path*',
   ],
 };
