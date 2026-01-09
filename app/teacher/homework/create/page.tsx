@@ -1,14 +1,18 @@
 'use client';
 
 import { useState } from 'react';
-import { createClient } from '@/lib/supabase-client';
 import { useRouter } from 'next/navigation';
-import { ArrowLeft, Plus, Calendar, BookOpen } from 'lucide-react';
+// Firebase関連のインポートに変更
+import { db } from '@/lib/firebase';
+import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { useAuth } from '@/app/context/AuthContext'; // 認証コンテキスト（作成者ID用）
+
+import { ArrowLeft, Plus, Calendar, BookOpen, Loader2 } from 'lucide-react';
 import Link from 'next/link';
 
 export default function CreateAssignmentPage() {
   const router = useRouter();
-  const supabase = createClient();
+  const { user } = useAuth(); // 現在ログインしている先生の情報を取得
   const [loading, setLoading] = useState(false);
 
   // 入力フォームの状態
@@ -25,52 +29,61 @@ export default function CreateAssignmentPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!user) {
+      alert('ログインが必要です');
+      return;
+    }
+    
     setLoading(true);
 
     try {
-      const { error } = await supabase
-        .from('assignments')
-        .insert({
-          title: formData.title,
-          subject: formData.subject,
-          deadline: new Date(formData.deadline).toISOString(),
-          description: formData.description
-        });
-
-      if (error) throw error;
+      // ★修正: Firestoreへの追加処理
+      // コレクション名は 'homework_assignments' としています
+      await addDoc(collection(db, 'homework_assignments'), {
+        title: formData.title,
+        subject: formData.subject,
+        deadline: formData.deadline, // YYYY-MM-DD形式のまま保存
+        description: formData.description,
+        created_by: user.uid, // 作成した先生のID
+        teacher_name: user.displayName || '担当講師', // 先生の名前
+        created_at: serverTimestamp(), // 作成日時
+        is_completed_count: 0 // 完了者数の初期値
+      });
 
       alert('宿題を作成しました！');
       router.push('/teacher/homework'); // 一覧に戻る
       router.refresh();
 
     } catch (error) {
+      console.error('Error adding document: ', error);
       alert('作成に失敗しました');
-      console.error(error);
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-gray-100 p-4">
-      <div className="max-w-lg mx-auto bg-white p-8 rounded-2xl shadow-sm">
+    <div className="min-h-screen bg-gray-100 p-4 font-sans">
+      <div className="max-w-lg mx-auto bg-white p-8 rounded-2xl shadow-sm border border-gray-100">
         <div className="flex items-center gap-2 mb-6 text-gray-500">
-          <Link href="/teacher/homework" className="hover:text-gray-800 flex items-center">
-            <ArrowLeft size={20} className="mr-1" /> キャンセル
+          <Link href="/teacher/homework" className="hover:text-gray-800 flex items-center text-sm font-bold transition-colors">
+            <ArrowLeft size={18} className="mr-1" /> キャンセルして戻る
           </Link>
         </div>
 
-        <h1 className="text-2xl font-bold text-gray-800 mb-6 flex items-center gap-2">
-          <Plus className="bg-blue-100 text-blue-600 rounded-full p-1" size={32} />
+        <h1 className="text-2xl font-black text-gray-800 mb-8 flex items-center gap-3">
+          <span className="bg-indigo-100 text-indigo-600 rounded-full p-2">
+            <Plus size={24} strokeWidth={3} />
+          </span>
           新しい宿題を作成
         </h1>
 
         <form onSubmit={handleSubmit} className="space-y-6">
           {/* 科目選択 */}
           <div>
-            <label className="block text-sm font-bold text-gray-700 mb-2">科目</label>
+            <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">対象科目</label>
             <div className="flex gap-4">
-              <label className="cursor-pointer">
+              <label className="cursor-pointer flex-1">
                 <input
                   type="radio"
                   name="subject"
@@ -79,11 +92,11 @@ export default function CreateAssignmentPage() {
                   onChange={handleChange}
                   className="peer sr-only"
                 />
-                <div className="px-4 py-2 rounded-lg border-2 border-gray-200 peer-checked:border-green-500 peer-checked:bg-green-50 peer-checked:text-green-700 transition-all font-bold">
+                <div className="text-center px-4 py-3 rounded-xl border-2 border-gray-100 peer-checked:border-emerald-500 peer-checked:bg-emerald-50 peer-checked:text-emerald-700 transition-all font-bold text-gray-500 hover:bg-gray-50">
                   🧪 理科
                 </div>
               </label>
-              <label className="cursor-pointer">
+              <label className="cursor-pointer flex-1">
                 <input
                   type="radio"
                   name="subject"
@@ -92,7 +105,7 @@ export default function CreateAssignmentPage() {
                   onChange={handleChange}
                   className="peer sr-only"
                 />
-                <div className="px-4 py-2 rounded-lg border-2 border-gray-200 peer-checked:border-orange-500 peer-checked:bg-orange-50 peer-checked:text-orange-700 transition-all font-bold">
+                <div className="text-center px-4 py-3 rounded-xl border-2 border-gray-100 peer-checked:border-orange-500 peer-checked:bg-orange-50 peer-checked:text-orange-700 transition-all font-bold text-gray-500 hover:bg-gray-50">
                   🌏 社会
                 </div>
               </label>
@@ -101,9 +114,9 @@ export default function CreateAssignmentPage() {
 
           {/* タイトル */}
           <div>
-            <label className="block text-sm font-bold text-gray-700 mb-2">宿題のタイトル</label>
-            <div className="relative">
-              <BookOpen className="absolute left-3 top-3 text-gray-400" size={20} />
+            <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">宿題のタイトル</label>
+            <div className="relative group">
+              <BookOpen className="absolute left-3 top-3.5 text-gray-400 group-focus-within:text-indigo-500 transition-colors" size={20} />
               <input
                 type="text"
                 name="title"
@@ -111,45 +124,46 @@ export default function CreateAssignmentPage() {
                 value={formData.title}
                 onChange={handleChange}
                 placeholder="例：電流の性質 ワークp20-22"
-                className="w-full pl-10 pr-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-gray-900"
+                className="w-full pl-10 pr-4 py-3 bg-gray-50 border-2 border-gray-100 rounded-xl focus:border-indigo-500 focus:bg-white outline-none text-gray-900 font-bold transition-all"
               />
             </div>
           </div>
 
           {/* 期限 */}
           <div>
-            <label className="block text-sm font-bold text-gray-700 mb-2">提出期限</label>
-            <div className="relative">
-              <Calendar className="absolute left-3 top-3 text-gray-400" size={20} />
+            <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">提出期限</label>
+            <div className="relative group">
+              <Calendar className="absolute left-3 top-3.5 text-gray-400 group-focus-within:text-indigo-500 transition-colors" size={20} />
               <input
                 type="date"
                 name="deadline"
                 required
                 value={formData.deadline}
                 onChange={handleChange}
-                className="w-full pl-10 pr-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-gray-900"
+                className="w-full pl-10 pr-4 py-3 bg-gray-50 border-2 border-gray-100 rounded-xl focus:border-indigo-500 focus:bg-white outline-none text-gray-900 font-bold transition-all"
               />
             </div>
           </div>
 
           {/* 詳細 */}
           <div>
-            <label className="block text-sm font-bold text-gray-700 mb-2">詳細・メモ</label>
+            <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">詳細・メモ (任意)</label>
             <textarea
               name="description"
               rows={4}
               value={formData.description}
               onChange={handleChange}
-              placeholder="生徒への指示があればここに入力..."
-              className="w-full p-4 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-gray-900 resize-none"
+              placeholder="生徒への指示や補足があればここに入力..."
+              className="w-full p-4 bg-gray-50 border-2 border-gray-100 rounded-xl focus:border-indigo-500 focus:bg-white outline-none text-gray-900 font-medium resize-none transition-all"
             />
           </div>
 
           <button
             type="submit"
             disabled={loading}
-            className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold shadow-lg hover:bg-blue-700 transition-all active:scale-[0.98] disabled:opacity-50"
+            className="w-full bg-indigo-600 text-white py-4 rounded-xl font-bold shadow-lg shadow-indigo-200 hover:bg-indigo-700 hover:shadow-xl transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
+            {loading ? <Loader2 className="animate-spin" /> : <Plus strokeWidth={3} size={20}/>}
             {loading ? '作成中...' : 'この内容で宿題を出す'}
           </button>
         </form>
