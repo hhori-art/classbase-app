@@ -1,8 +1,17 @@
 'use client';
 
 import { useState } from 'react';
-import { createClient } from '@/lib/supabase-client';
-import { Zap, Filter, Clock } from 'lucide-react';
+// Firebase関連のインポート
+import { db } from '@/lib/firebase';
+import { 
+  collection, 
+  query, 
+  where, 
+  getDocs, 
+  writeBatch 
+} from 'firebase/firestore';
+
+import { Zap, Clock, Loader2 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 
 export default function BulkUrlUpdate() {
@@ -14,7 +23,6 @@ export default function BulkUrlUpdate() {
   const [url2, setUrl2] = useState('');
   
   const [loading, setLoading] = useState(false);
-  const supabase = createClient();
   const router = useRouter();
 
   const handleChange = (key: string, value: string) => {
@@ -35,37 +43,68 @@ export default function BulkUrlUpdate() {
     if (filters.day) conditions.push(`曜日: ${filters.day}`);
     if (filters.classroom) conditions.push(`教室: ${filters.classroom}`);
     
+    // 確認ダイアログ
+    let message = '';
     if (conditions.length === 0) {
-      if (!confirm(`【警告】条件なしで ${targets.join(' と ')} のURLを一括更新しますか？\n全生徒が対象になります。`)) return;
+      message = `【警告】条件なしで ${targets.join(' と ')} のURLを一括更新しますか？\n全生徒が対象になります。`;
     } else {
-      if (!confirm(`以下の条件の生徒の ${targets.join(' と ')} を更新します。\n\n条件:\n${conditions.join('\n')}\n\n実行しますか？`)) return;
+      message = `以下の条件の生徒の ${targets.join(' と ')} を更新します。\n\n条件:\n${conditions.join('\n')}\n\n実行しますか？`;
     }
+    if (!confirm(message)) return;
 
     setLoading(true);
     try {
+      // 1. クエリの構築 (usersコレクションから生徒を検索)
+      const usersRef = collection(db, 'users');
+      let q = query(usersRef, where('role', '==', 'student'));
+
+      // 各条件を追加
+      if (filters.grade) q = query(q, where('grade', '==', filters.grade));
+      if (filters.science) q = query(q, where('science_subject', '==', filters.science));
+      if (filters.social) q = query(q, where('social_subject', '==', filters.social));
+      if (filters.day) q = query(q, where('day_of_week', '==', filters.day));
+      if (filters.classroom) q = query(q, where('classroom', '==', filters.classroom));
+
+      // 2. 検索実行
+      const snapshot = await getDocs(q);
+
+      if (snapshot.empty) {
+        alert('条件に一致する生徒が見つかりませんでした');
+        setLoading(false);
+        return;
+      }
+
+      // 3. バッチ処理の準備
+      // 更新内容を作成
       const updates: any = {};
       if (url1) updates.zoom_url = url1;
       if (url2) updates.zoom_url_2 = url2;
 
-      let query = supabase.from('profiles').update(updates).eq('role', 'student');
+      // Firestoreのバッチは一度に500件までしか処理できないため、分割処理する
+      const chunks = [];
+      const docs = snapshot.docs;
+      for (let i = 0; i < docs.length; i += 500) {
+        chunks.push(docs.slice(i, i + 500));
+      }
 
-      if (filters.grade) query = query.eq('grade', filters.grade);
-      if (filters.science) query = query.eq('science_subject', filters.science);
-      if (filters.social) query = query.eq('social_subject', filters.social);
-      if (filters.day) query = query.eq('day_of_week', filters.day);
-      if (filters.classroom) query = query.eq('classroom', filters.classroom);
+      // 各チャンクごとにバッチを実行
+      for (const chunk of chunks) {
+        const batch = writeBatch(db);
+        chunk.forEach((doc) => {
+          batch.update(doc.ref, updates);
+        });
+        await batch.commit(); // コミット
+      }
 
-      const { error } = await query;
-      if (error) throw error;
-
-      alert('一括更新が完了しました！');
+      alert(`${snapshot.size}件のデータを更新しました！`);
+      
       if (url1) setUrl1('');
       if (url2) setUrl2('');
       router.refresh();
       
     } catch (e) {
       alert('更新に失敗しました');
-      console.error(e);
+      console.error("Bulk update error:", e);
     } finally {
       setLoading(false);
     }
@@ -117,7 +156,6 @@ export default function BulkUrlUpdate() {
             <option value="水">水曜</option>
             <option value="木">木曜</option>
             <option value="金">金曜</option>
-            {/* ★ここに追加 */}
             <option value="土">土曜</option>
           </select>
         </div>
@@ -158,8 +196,9 @@ export default function BulkUrlUpdate() {
         <button
           onClick={handleBulkUpdate}
           disabled={loading}
-          className="w-full md:w-auto bg-blue-600 text-white px-8 py-3 rounded-lg font-bold hover:bg-blue-700 transition-colors shadow-sm disabled:opacity-50 whitespace-nowrap h-[50px]"
+          className="w-full md:w-auto bg-blue-600 text-white px-8 py-3 rounded-lg font-bold hover:bg-blue-700 transition-colors shadow-sm disabled:opacity-50 whitespace-nowrap h-[50px] flex items-center justify-center"
         >
+          {loading ? <Loader2 className="animate-spin mr-2" size={20}/> : null}
           {loading ? '更新中...' : '適用する'}
         </button>
       </div>
