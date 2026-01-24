@@ -1,68 +1,44 @@
-import { db } from '@/lib/firebase';
-import { doc, getDoc, updateDoc, increment, arrayUnion, setDoc } from 'firebase/firestore';
-
-// ★ポイント設定
-export const POINTS = {
-  ATTENDANCE: 50, // 出席
-  QUIZ: 30,       // 小テスト（実力テスト）
-  HOMEWORK: 100,  // 宿題（タスク完了）
-};
-
-// ★ランク定義
+// ランク定義
+// Dashboardで rank.color を使用するため、colorプロパティを追加しました
 export const RANKS = [
-  { name: 'ビギナー', min: 0, color: 'text-green-500', icon: '🌱' },
-  { name: 'ブロンズ', min: 500, color: 'text-amber-700', icon: '🥉' },
-  { name: 'シルバー', min: 2000, color: 'text-gray-400', icon: '🥈' },
-  { name: 'ゴールド', min: 5000, color: 'text-yellow-500', icon: '🥇' },
-  { name: 'マスター', min: 10000, color: 'text-purple-500', icon: '👑' },
-];
-
-// ★バッジ定義
-export const BADGES = [
-  { id: 'first_login', name: 'はじめの一歩', desc: '初めてログインした', icon: '🐣' },
-  { id: 'hw_master', name: '宿題マスター', desc: '宿題を5回提出', icon: '📝' },
-  { id: 'quiz_king', name: 'クイズ王', desc: '小テストを10回実施', icon: '🎓' },
+  { name: 'ビギナー', min: 0, icon: '🌱', color: 'text-green-600' },
+  { name: 'ブロンズ', min: 100, icon: '🥉', color: 'text-orange-700' },
+  { name: 'シルバー', min: 500, icon: '🥈', color: 'text-gray-500' },
+  { name: 'ゴールド', min: 1000, icon: '🥇', color: 'text-yellow-500' },
+  { name: 'プラチナ', min: 3000, icon: '💎', color: 'text-cyan-500' },
+  { name: 'マスター', min: 5000, icon: '👑', color: 'text-purple-600' },
+  { name: 'レジェンド', min: 10000, icon: '🦄', color: 'text-rose-500' },
 ];
 
 export const getRank = (points: number) => {
-  return RANKS.slice().reverse().find(r => points >= r.min) || RANKS[0];
+  // ポイントに基づいてランクを判定（高い順にチェックして該当するものを返す）
+  return [...RANKS].reverse().find(r => points >= r.min) || RANKS[0];
 };
 
-// ポイント加算関数
-export const addPoints = async (userId: string, type: 'ATTENDANCE' | 'QUIZ' | 'HOMEWORK') => {
-  const userRef = doc(db, 'users', userId);
-  const userSnap = await getDoc(userRef);
+// バッジ定義
+export const BADGES = [
+  // --- 基本バッジ（最初から見える） ---
+  { id: 'badge_1', name: 'はじまりの葉', icon: '🌱', description: '最初の授業に参加した証', secret: false },
+  { id: 'badge_pencil', name: '学習家', icon: '✏️', description: '宿題を提出した証', secret: false },
+  { id: 'badge_book', name: '本の虫', icon: '📚', description: 'アーカイブを視聴した証', secret: false },
+  { id: 'badge_sun', name: '早起き', icon: '☀️', description: '午前の授業に参加した', secret: false },
   
-  if (!userSnap.exists()) return;
-  const userData = userSnap.data();
-
-  const today = new Date().toISOString().split('T')[0];
-
-  // 出席は1日1回まで
-  if (type === 'ATTENDANCE' && userData.last_attendance === today) {
-    return { success: false, message: '本日の出席ポイントは獲得済みです' };
-  }
-
-  const pointToAdd = POINTS[type];
+  // --- 継続・回数バッジ（見える） ---
+  { id: 'badge_fire_3', name: '三日熱中', icon: '🔥', description: '3回連続で出席した', secret: false },
+  { id: 'badge_star_10', name: 'スター生徒', icon: '⭐️', description: '累計10回出席した', secret: false },
+  { id: 'badge_medal', name: '継続の達人', icon: '🏅', description: '宿題を5回提出した', secret: false },
   
-  const updates: any = {
-    points: increment(pointToAdd),
-    updated_at: new Date().toISOString()
-  };
+  // --- 実力バッジ（見える） ---
+  { id: 'badge_brain', name: '博識博士', icon: '🧠', description: '理科と社会の両方を受けた', secret: false },
+  { id: 'badge_rocket', name: '急成長', icon: '🚀', description: '1週間で100ポイント獲得', secret: false },
 
-  if (type === 'ATTENDANCE') {
-    updates.last_attendance = today;
-  }
-  if (type === 'HOMEWORK') {
-    updates.homework_count = increment(1);
-  }
-
-  await updateDoc(userRef, updates);
-  
-  // バッジ獲得ロジック（例）
-  if (type === 'HOMEWORK' && (userData.homework_count || 0) + 1 >= 5) {
-     await updateDoc(userRef, { badges: arrayUnion('hw_master') });
-  }
-
-  return { success: true, earned: pointToAdd };
-};
+  // --- シークレットバッジ（獲得するまで「???」になる） ---
+  { id: 'badge_owl', name: '夜更かしフクロウ', icon: '🦉', description: '夜20時以降にログインした', secret: true },
+  { id: 'badge_ninja', name: '忍びの者', icon: '🥷', description: 'カメラオフで授業に参加', secret: true },
+  { id: 'badge_king', name: '富豪王', icon: '💰', description: '所持コインが1000枚を超えた', secret: true },
+  { id: 'badge_robot', name: 'メカニック', icon: '🤖', description: 'システム設定を変更した', secret: true },
+  { id: 'badge_alien', name: '宇宙人', icon: '👽', description: '誰もいない教室に入った', secret: true },
+  { id: 'badge_dragon', name: '伝説の龍', icon: '🐉', description: '全種類の授業を制覇した', secret: true },
+  { id: 'badge_rainbow', name: '虹色気分', icon: '🌈', description: '7日間連続ログイン達成', secret: true },
+  { id: 'badge_gem', name: 'トレジャーハンター', icon: '💎', description: '隠しページを見つけた', secret: true },
+];

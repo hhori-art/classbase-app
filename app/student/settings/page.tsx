@@ -2,107 +2,123 @@
 
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
+import { useSettings } from '@/app/context/SettingsContext';
 import { db, auth } from '@/lib/firebase';
-import { doc, updateDoc, getDoc } from 'firebase/firestore';
+import { doc, updateDoc } from 'firebase/firestore';
 import { updatePassword, updateProfile } from 'firebase/auth';
 import { 
-  ArrowLeft, User, Lock, Bell, LogOut, ChevronRight, 
-  Save, Loader2, Shield, GraduationCap, Target, Type, Volume2
+  ArrowLeft, User, Lock, LogOut, ChevronRight, 
+  Save, Loader2, Shield, Target, Type, 
+  Volume2, Smartphone, Download, Share, PlusSquare, HelpCircle, Check, Copy
 } from 'lucide-react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
 
 export default function StudentSettingsPage() {
   const { user, profile } = useAuth();
-  const router = useRouter();
+  const { textSize, setTextSize } = useSettings();
   
-  // プロフィール用
+  // --- State ---
   const [name, setName] = useState('');
-  
-  // 学習設定用
-  const [target, setTarget] = useState('定期テスト対策'); // 目標
-  const [textSize, setTextSize] = useState('normal'); // 文字サイズ
-  const [notification, setNotification] = useState({
-    homework: true,
-    class_reminder: true
+  const [target, setTarget] = useState('定期テスト対策');
+  const [settings, setSettings] = useState({
+    sound_bgm: true,
+    sound_se: true,
+    notification_homework: true,
+    notification_class: true,
+    notification_news: false,
   });
 
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{type: 'success'|'error', text: string} | null>(null);
+  const [hasChanges, setHasChanges] = useState(false);
 
-  // パスワード変更用
+  // パスワード関連
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [isPasswordExpanded, setIsPasswordExpanded] = useState(false);
 
-  // 初期値セット
+  // --- PWA (インストール機能) ---
+  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+  const [isIos, setIsIos] = useState(false);
+  const [isStandalone, setIsStandalone] = useState(false);
+  const [showManual, setShowManual] = useState(false);
+
   useEffect(() => {
+    // 1. プロフィール読み込み
     if (profile) {
       setName(profile.student_name || user?.displayName || '');
-      // Firestoreに保存された設定があれば読み込む（なければ初期値）
       if (profile.settings) {
         setTarget(profile.settings.target || '定期テスト対策');
-        setTextSize(profile.settings.text_size || 'normal');
-        setNotification(prev => ({ ...prev, ...profile.settings.notification }));
+        setSettings(prev => ({ ...prev, ...profile.settings }));
       }
     }
+
+    // 2. Android/PC用のインストールイベント捕捉
+    const handleBeforeInstallPrompt = (e: any) => {
+      e.preventDefault(); // ブラウザの自動バナーを抑制
+      setDeferredPrompt(e); // イベントを保存して後でボタンで発火させる
+      console.log("Install prompt captured!");
+    };
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+
+    // 3. iOS判定
+    const isIosDevice = /iPhone|iPad|iPod/.test(navigator.userAgent);
+    setIsIos(isIosDevice);
+
+    // 4. 既に追加済みか判定
+    const checkStandalone = () => {
+      const isApp = window.matchMedia('(display-mode: standalone)').matches || (window.navigator as any).standalone;
+      setIsStandalone(!!isApp);
+    };
+    checkStandalone();
+
+    return () => window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
   }, [profile, user]);
 
-  // 設定保存処理 (プロフィール + アプリ設定)
+  // 設定変更ハンドラ
+  const handleChange = (key: string, value: any) => {
+    setSettings(prev => ({ ...prev, [key]: value }));
+    setHasChanges(true);
+  };
+
+  // 文字サイズ変更
+  const handleTextSizeChange = (size: 'normal' | 'large') => {
+    setTextSize(size);
+    // 即座に反映させるためStateは更新しないが、見た目はContextで変わる
+  };
+
+  // 保存処理
   const handleSaveSettings = async () => {
     if (!user) return;
-    if (!name.trim()) return showMessage('error', 'お名前を入力してください');
-    
     setLoading(true);
     try {
-      // 1. Authの表示名更新
-      if (user.displayName !== name) {
-        await updateProfile(user, { displayName: name });
-      }
-      
-      // 2. Firestore更新 (名前 + 各種設定)
+      if (user.displayName !== name) await updateProfile(user, { displayName: name });
       const userRef = doc(db, 'users', user.uid);
       await updateDoc(userRef, { 
         student_name: name,
-        settings: {
-          target,
-          text_size: textSize,
-          notification
-        },
+        settings: { target, ...settings },
         updated_at: new Date().toISOString()
       });
-
       showMessage('success', '設定を保存しました！');
+      setHasChanges(false);
     } catch (e: any) {
-      console.error(e);
-      showMessage('error', '保存に失敗しました: ' + e.message);
+      showMessage('error', '保存に失敗しました');
     } finally {
       setLoading(false);
     }
   };
 
-  // パスワード変更処理
-  const handleChangePassword = async () => {
-    if (!user) return;
-    if (newPassword.length < 6) return showMessage('error', 'パスワードは6文字以上で設定してください');
-    if (newPassword !== confirmPassword) return showMessage('error', '確認用パスワードが一致しません');
-    if (!confirm('本当にパスワードを変更しますか？')) return;
-
-    setLoading(true);
-    try {
-      await updatePassword(user, newPassword);
-      showMessage('success', 'パスワードを変更しました！');
-      setNewPassword('');
-      setConfirmPassword('');
-      setIsPasswordExpanded(false);
-    } catch (e: any) {
-      if (e.code === 'auth/requires-recent-login') {
-        showMessage('error', '再ログインが必要です。一度ログアウトしてからお試しください。');
-      } else {
-        showMessage('error', '変更失敗: ' + e.message);
+  // ★インストールボタン押下時 (Android/PC)
+  const handleInstallClick = async () => {
+    if (deferredPrompt) {
+      deferredPrompt.prompt(); // ここでブラウザのインストール画面を強制呼び出し
+      const { outcome } = await deferredPrompt.userChoice;
+      if (outcome === 'accepted') {
+        setDeferredPrompt(null);
       }
-    } finally {
-      setLoading(false);
+    } else {
+      // イベントがない＝対応していないかiOS
+      setShowManual(true);
     }
   };
 
@@ -111,176 +127,221 @@ export default function StudentSettingsPage() {
     setTimeout(() => setMessage(null), 5000);
   };
 
+  const handleChangePassword = async () => {
+    if (!newPassword || newPassword !== confirmPassword) return showMessage('error', 'パスワード不一致');
+    setLoading(true);
+    try {
+      if(user) await updatePassword(user, newPassword);
+      showMessage('success', 'パスワードを変更しました');
+      setNewPassword(''); setConfirmPassword(''); setIsPasswordExpanded(false);
+    } catch(e) { showMessage('error', '再ログインが必要です'); }
+    finally { setLoading(false); }
+  };
+
   return (
-    <div className="min-h-screen bg-[#F0F4F8] p-6 pb-32 font-sans">
-      <div className="max-w-xl mx-auto">
+    <div className="min-h-screen bg-[#F0F4F8] p-6 pb-40 font-sans transition-all">
+      <div className="max-w-xl mx-auto space-y-8">
         
         {/* ヘッダー */}
-        <div className="flex items-center gap-4 mb-8">
+        <div className="flex items-center gap-4">
           <Link href="/student" className="bg-white p-3 rounded-full shadow-sm text-gray-600 hover:bg-gray-50 transition-colors">
             <ArrowLeft size={20} />
           </Link>
-          <h1 className="text-2xl font-extrabold text-gray-800 flex items-center gap-2">
-            <span className="bg-gray-200 text-gray-600 p-1.5 rounded-lg"><User size={24} /></span>
-            設定・アカウント
-          </h1>
+          <h1 className="text-2xl font-extrabold text-gray-800">設定・アカウント</h1>
         </div>
 
-        {/* メッセージ通知 */}
         {message && (
-          <div className={`mb-6 p-4 rounded-2xl text-sm font-bold flex items-center gap-2 animate-in slide-in-from-top-2 shadow-sm ${
-            message.type === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
-          }`}>
-            <Shield size={18}/> {message.text}
+          <div className={`p-4 rounded-2xl font-bold flex items-center gap-3 shadow-sm ${message.type === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+            <Shield size={20}/> {message.text}
           </div>
         )}
 
-        <div className="space-y-6">
-
-          {/* 1. 基本設定カード */}
-          <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
-            <h2 className="text-lg font-extrabold text-gray-800 mb-6 flex items-center gap-2">
-              <User size={20} className="text-indigo-500"/> プロフィール・学習設定
-            </h2>
+        {/* --- 0. アプリインストール (PWA) --- */}
+        {!isStandalone && (
+          <section className="bg-gradient-to-br from-indigo-600 to-blue-600 p-6 rounded-3xl shadow-lg text-white relative overflow-hidden">
+            <div className="absolute top-0 right-0 w-32 h-32 bg-white/10 rounded-full blur-3xl transform translate-x-10 -translate-y-10"></div>
             
-            <div className="space-y-6">
-              {/* 名前 */}
-              <div>
-                <label className="block text-xs font-bold text-gray-400 mb-2">お名前 (表示名)</label>
-                <input 
-                  type="text" 
-                  value={name} 
-                  onChange={(e) => setName(e.target.value)}
-                  className="w-full p-3 bg-gray-50 border-2 border-transparent focus:border-indigo-200 rounded-xl outline-none font-bold text-gray-700 transition-colors"
-                  placeholder="例: 山田 太郎"
-                />
-              </div>
-
-              {/* 学習目標 (ラジオボタン) */}
-              <div>
-                <label className="block text-xs font-bold text-gray-400 mb-2 flex items-center gap-1"><Target size={14}/> 今の目標</label>
-                <div className="grid grid-cols-2 gap-2">
-                  {['定期テスト対策', '受験対策', '苦手克服', '予習中心'].map((t) => (
-                    <button
-                      key={t}
-                      onClick={() => setTarget(t)}
-                      className={`p-2 rounded-xl text-sm font-bold border-2 transition-all ${
-                        target === t 
-                        ? 'bg-indigo-50 border-indigo-500 text-indigo-700' 
-                        : 'bg-white border-gray-100 text-gray-500 hover:bg-gray-50'
-                      }`}
-                    >
-                      {t}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* 文字サイズ */}
-              <div>
-                <label className="block text-xs font-bold text-gray-400 mb-2 flex items-center gap-1"><Type size={14}/> 文字サイズ</label>
-                <div className="flex bg-gray-50 p-1 rounded-xl">
-                  <button onClick={() => setTextSize('normal')} className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all ${textSize === 'normal' ? 'bg-white shadow text-gray-800' : 'text-gray-400'}`}>ふつう</button>
-                  <button onClick={() => setTextSize('large')} className={`flex-1 py-2 rounded-lg text-sm font-bold transition-all ${textSize === 'large' ? 'bg-white shadow text-gray-800' : 'text-gray-400'}`}>おおきめ</button>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* 2. 通知設定カード */}
-          <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
-            <h2 className="text-lg font-extrabold text-gray-800 mb-6 flex items-center gap-2">
-              <Bell size={20} className="text-orange-500"/> 通知設定
+            <h2 className="text-lg font-black flex items-center gap-2 mb-2 relative z-10">
+              <Smartphone size={24}/> ショートカットを作成
             </h2>
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-bold text-gray-700">宿題の締め切り通知</span>
-                <button 
-                  onClick={() => setNotification(p => ({...p, homework: !p.homework}))}
-                  className={`w-12 h-7 rounded-full p-1 transition-colors duration-300 ${notification.homework ? 'bg-orange-500' : 'bg-gray-200'}`}
-                >
-                  <div className={`w-5 h-5 bg-white rounded-full shadow-sm transition-transform duration-300 ${notification.homework ? 'translate-x-5' : 'translate-x-0'}`} />
-                </button>
+            <p className="text-sm font-bold opacity-90 mb-6 relative z-10">
+              ホーム画面に追加すると、全画面でアプリのように使えます。
+            </p>
+
+            {/* Android / PC: ボタン1つでインストール画面を出す */}
+            {deferredPrompt ? (
+              <button 
+                onClick={handleInstallClick}
+                className="relative z-10 w-full bg-white text-indigo-600 py-4 rounded-xl font-black shadow-lg flex items-center justify-center gap-2 active:scale-95 transition-transform animate-pulse"
+              >
+                <Download size={22}/> 今すぐ追加する
+              </button>
+            ) : (
+              // iOS またはイベント未発火時: ガイドを表示
+              <div className="relative z-10">
+                 {!showManual ? (
+                   <button 
+                     onClick={() => setShowManual(true)}
+                     className="w-full bg-white/20 border border-white/30 text-white py-3 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-white/30 transition-all"
+                   >
+                     <HelpCircle size={20}/> 追加ボタンが出ない場合
+                   </button>
+                 ) : (
+                   <div className="bg-white/10 backdrop-blur-md p-4 rounded-xl border border-white/20 animate-in fade-in">
+                     <p className="font-bold mb-3 flex items-center gap-2 text-sm">
+                       {isIos ? 'iPhone・iPadの手順' : 'ブラウザメニューの手順'}
+                     </p>
+                     
+                     {isIos ? (
+                       <ol className="space-y-3 text-sm font-bold opacity-90">
+                         <li className="flex items-center gap-2">
+                           <span className="bg-white text-indigo-600 w-6 h-6 rounded-full flex items-center justify-center shrink-0 text-xs">1</span>
+                           <span>画面下の <Share size={16} className="inline mx-1"/> (共有) をタップ</span>
+                         </li>
+                         <li className="flex items-center gap-2">
+                           <span className="bg-white text-indigo-600 w-6 h-6 rounded-full flex items-center justify-center shrink-0 text-xs">2</span>
+                           <span>「ホーム画面に追加」<PlusSquare size={16} className="inline mx-1"/> を探してタップ</span>
+                         </li>
+                         <li className="flex items-center gap-2">
+                           <span className="bg-white text-indigo-600 w-6 h-6 rounded-full flex items-center justify-center shrink-0 text-xs">3</span>
+                           <span>右上の「追加」をタップ</span>
+                         </li>
+                       </ol>
+                     ) : (
+                       <div className="text-sm font-bold opacity-90">
+                         ブラウザのメニューから「アプリをインストール」または「ホーム画面に追加」を選んでください。
+                       </div>
+                     )}
+                     
+                     <button 
+                       onClick={() => setShowManual(false)} 
+                       className="mt-4 w-full bg-white/20 py-2 rounded-lg text-xs font-bold hover:bg-white/30"
+                     >
+                       閉じる
+                     </button>
+                   </div>
+                 )}
               </div>
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-bold text-gray-700">授業開始のお知らせ</span>
-                <button 
-                  onClick={() => setNotification(p => ({...p, class_reminder: !p.class_reminder}))}
-                  className={`w-12 h-7 rounded-full p-1 transition-colors duration-300 ${notification.class_reminder ? 'bg-orange-500' : 'bg-gray-200'}`}
-                >
-                  <div className={`w-5 h-5 bg-white rounded-full shadow-sm transition-transform duration-300 ${notification.class_reminder ? 'translate-x-5' : 'translate-x-0'}`} />
-                </button>
+            )}
+          </section>
+        )}
+
+        {/* 既に追加済みの場合 */}
+        {isStandalone && (
+           <div className="bg-blue-50 text-blue-600 p-4 rounded-2xl text-center font-bold text-sm flex items-center justify-center gap-2 border border-blue-100">
+             <Check size={18}/> アプリとして使用中
+           </div>
+        )}
+
+        {/* --- 1. 文字サイズ設定 (全体反映) --- */}
+        <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
+          <h2 className="text-lg font-extrabold text-gray-800 mb-4 flex items-center gap-2">
+            <Type size={20} className="text-orange-500"/> 文字の大きさ
+          </h2>
+          <div className="flex bg-gray-100 p-1.5 rounded-2xl mb-4">
+            <button 
+              onClick={() => handleTextSizeChange('normal')} 
+              className={`flex-1 py-3 rounded-xl text-sm font-bold transition-all ${textSize === 'normal' ? 'bg-white shadow text-gray-800' : 'text-gray-400'}`}
+            >
+              ふつう
+            </button>
+            <button 
+              onClick={() => handleTextSizeChange('large')} 
+              className={`flex-1 py-3 rounded-xl text-lg font-bold transition-all ${textSize === 'large' ? 'bg-white shadow text-gray-800' : 'text-gray-400'}`}
+            >
+              おおきめ
+            </button>
+          </div>
+          <div className="p-4 bg-orange-50 rounded-xl border border-orange-100 text-orange-800 text-sm">
+            <span className="font-bold">確認：</span> アプリ全体の文字サイズが瞬時に変更されます。
+          </div>
+        </section>
+
+        {/* --- 2. プロフィール設定 --- */}
+        <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
+          <h2 className="text-lg font-extrabold text-gray-800 mb-6 flex items-center gap-2">
+            <User size={20} className="text-indigo-500"/> プロフィール
+          </h2>
+          <div className="space-y-4">
+            <div>
+              <label className="block text-xs font-bold text-gray-400 mb-2">お名前</label>
+              <input type="text" value={name} onChange={(e) => { setName(e.target.value); setHasChanges(true); }} className="w-full p-4 bg-gray-50 border-2 border-transparent focus:border-indigo-200 rounded-xl outline-none font-bold text-gray-700"/>
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-gray-400 mb-2">目標</label>
+              <div className="grid grid-cols-2 gap-2">
+                {['定期テスト対策', '受験対策', '苦手克服', '予習中心'].map((t) => (
+                  <button key={t} onClick={() => { setTarget(t); setHasChanges(true); }} className={`p-3 rounded-xl text-sm font-bold border-2 transition-all ${target === t ? 'bg-indigo-50 border-indigo-500 text-indigo-700' : 'bg-white border-gray-100 text-gray-400 hover:bg-gray-50'}`}>{t}</button>
+                ))}
               </div>
             </div>
           </div>
+        </section>
 
-          {/* 保存ボタン */}
+        {/* --- 3. 音・通知 --- */}
+        <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
+          <h2 className="text-lg font-extrabold text-gray-800 mb-6 flex items-center gap-2">
+            <Volume2 size={20} className="text-teal-500"/> 音・通知
+          </h2>
+          <div className="space-y-4">
+            {[
+              { key: 'notification_homework', label: '宿題の通知' },
+              { key: 'notification_class', label: '授業開始の通知' },
+              { key: 'sound_se', label: '効果音 (SE)' },
+            ].map((item) => (
+              <div key={item.key} className="flex items-center justify-between">
+                <span className="font-bold text-gray-700 text-sm">{item.label}</span>
+                <button 
+                  // @ts-ignore
+                  onClick={() => handleChange(item.key, !settings[item.key])}
+                  // @ts-ignore
+                  className={`w-12 h-7 rounded-full p-1 transition-colors duration-300 ${settings[item.key] ? 'bg-teal-500' : 'bg-gray-200'}`}
+                >
+                  {/* @ts-ignore */}
+                  <div className={`w-5 h-5 bg-white rounded-full shadow-sm transition-transform duration-300 ${settings[item.key] ? 'translate-x-5' : 'translate-x-0'}`} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* --- 保存ボタン --- */}
+        <div className="sticky bottom-20 z-20">
           <button 
             onClick={handleSaveSettings}
             disabled={loading}
-            className="w-full bg-gradient-to-r from-indigo-500 to-purple-500 text-white py-3.5 rounded-2xl font-bold shadow-lg shadow-indigo-200 hover:scale-[1.02] active:scale-95 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+            className={`w-full py-4 rounded-2xl font-black text-lg shadow-xl flex items-center justify-center gap-2 transition-all transform ${hasChanges ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white hover:scale-[1.02] active:scale-95 shadow-indigo-200' : 'bg-gray-200 text-gray-400'}`}
           >
-            {loading ? <Loader2 className="animate-spin" size={20}/> : <Save size={20}/>} 設定を保存する
+            {loading ? <Loader2 className="animate-spin" size={24}/> : <Save size={24}/>} 
+            {hasChanges ? '変更を保存する' : '保存済み'}
           </button>
-
-          {/* 3. パスワード変更 (折りたたみ) */}
-          <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100 mt-8">
-            <h2 className="text-lg font-extrabold text-gray-800 mb-2 flex items-center gap-2">
-              <Lock size={20} className="text-gray-400"/> セキュリティ
-            </h2>
-            
-            {!isPasswordExpanded ? (
-              <button 
-                onClick={() => setIsPasswordExpanded(true)}
-                className="w-full py-2 text-left text-sm font-bold text-gray-500 hover:text-gray-800 flex items-center justify-between group transition-colors"
-              >
-                <span>パスワードを変更する</span>
-                <ChevronRight size={18} className="text-gray-300 group-hover:text-gray-500"/>
-              </button>
-            ) : (
-              <div className="space-y-4 mt-4 animate-in fade-in">
-                <div>
-                  <label className="block text-xs font-bold text-gray-400 mb-1">新しいパスワード</label>
-                  <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="w-full p-3 bg-gray-50 border-2 border-transparent focus:border-gray-300 rounded-xl outline-none font-bold text-gray-700" placeholder="6文字以上" />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-gray-400 mb-1">確認用パスワード</label>
-                  <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className="w-full p-3 bg-gray-50 border-2 border-transparent focus:border-gray-300 rounded-xl outline-none font-bold text-gray-700" placeholder="もう一度入力" />
-                </div>
-                <div className="flex justify-end gap-2 pt-2">
-                  <button onClick={() => setIsPasswordExpanded(false)} className="px-4 py-2 text-gray-400 font-bold text-xs hover:bg-gray-50 rounded-lg">キャンセル</button>
-                  <button onClick={handleChangePassword} disabled={loading || !newPassword} className="bg-gray-800 text-white px-6 py-2 rounded-xl font-bold text-xs shadow hover:bg-black transition-all">変更する</button>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* クラス設定・その他 */}
-          <div className="pt-2 space-y-3">
-             <Link href="/student/change-request" className="block bg-white p-4 rounded-2xl shadow-sm border border-gray-100 flex items-center justify-between group hover:border-green-300 transition-all">
-               <div className="flex items-center gap-3">
-                 <div className="bg-green-100 text-green-600 p-2 rounded-lg"><GraduationCap size={20} /></div>
-                 <div>
-                   <div className="text-sm font-bold text-gray-800">科目・曜日の変更申請</div>
-                   <div className="text-[10px] text-gray-400">クラス変更はこちら</div>
-                 </div>
-               </div>
-               <ChevronRight size={18} className="text-gray-300 group-hover:text-green-500"/>
-             </Link>
-
-             <button 
-               onClick={() => auth.signOut()}
-               className="w-full bg-white border-2 border-red-50 text-red-400 py-3 rounded-2xl font-bold hover:bg-red-50 hover:text-red-600 transition-all flex items-center justify-center gap-2 mt-6"
-             >
-               <LogOut size={18}/> ログアウト
-             </button>
-          </div>
-          
-          <div className="text-center pb-4">
-             <p className="text-[10px] text-gray-300">Student App v1.0.0</p>
-          </div>
-
         </div>
+
+        {/* --- 4. セキュリティ --- */}
+        <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
+          <h2 className="text-lg font-extrabold text-gray-800 mb-2 flex items-center gap-2">
+            <Lock size={20} className="text-gray-400"/> セキュリティ
+          </h2>
+          {!isPasswordExpanded ? (
+            <button onClick={() => setIsPasswordExpanded(true)} className="w-full py-3 text-left font-bold text-gray-500 hover:text-gray-800 flex items-center justify-between"><span>パスワードを変更する</span><ChevronRight size={18}/></button>
+          ) : (
+            <div className="space-y-4 mt-4 animate-in fade-in">
+              <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="w-full p-3 bg-gray-50 rounded-xl font-bold" placeholder="新しいパスワード" />
+              <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className="w-full p-3 bg-gray-50 rounded-xl font-bold" placeholder="確認用" />
+              <div className="flex justify-end gap-2">
+                <button onClick={() => setIsPasswordExpanded(false)} className="px-4 py-2 text-gray-400 font-bold text-sm">キャンセル</button>
+                <button onClick={handleChangePassword} className="bg-gray-800 text-white px-6 py-2 rounded-xl font-bold text-sm">変更</button>
+              </div>
+            </div>
+          )}
+        </section>
+
+        <div className="pt-4 pb-10">
+           <button onClick={() => auth.signOut()} className="w-full bg-white border-2 border-red-50 text-red-400 py-4 rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-red-50">
+             <LogOut size={20}/> ログアウト
+           </button>
+        </div>
+
       </div>
     </div>
   );

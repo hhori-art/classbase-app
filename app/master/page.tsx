@@ -1,8 +1,8 @@
 'use client';
 
 import { useAuth } from '@/app/context/AuthContext';
-// Trash2 を追加しました
-import { Users, Calendar, Megaphone, Video, Settings, FileText, FileSpreadsheet, Database, Briefcase, Trash2 } from 'lucide-react';
+// Activity を追加
+import { Users, Calendar, Megaphone, Video, Settings, FileText, FileSpreadsheet, Database, Briefcase, Trash2, ShoppingBag, MessageCircle, Activity } from 'lucide-react';
 import Link from 'next/link';
 import LogoutButton from '@/app/components/LogoutButton';
 
@@ -10,6 +10,9 @@ export default function MasterDashboard() {
   const { user } = useAuth();
 
   const menuItems = [
+    // ★追加: 統計ダッシュボード
+    { title: '統計・分析', icon: <Activity size={24} />, href: '/master/stats', color: 'bg-cyan-600' },
+
     { title: '生徒・講師管理', icon: <FileSpreadsheet size={24} />, href: '/master/users', color: 'bg-blue-500' },
     { title: 'シフト作成・管理', icon: <Calendar size={24} />, href: '/master/shifts', color: 'bg-purple-500' },
     { title: 'お知らせ配信', icon: <Megaphone size={24} />, href: '/master/announcements', color: 'bg-orange-500' },
@@ -17,13 +20,19 @@ export default function MasterDashboard() {
     { title: 'PFデータ管理', icon: <FileText size={24} />, href: '/master/pf', color: 'bg-indigo-600' },
     { title: '承認・申請確認', icon: <Users size={24} />, href: '/master/requests', color: 'bg-green-600' },
     
-    // ★各種CSV一括登録
+    // コミュニティ管理 (みんなの広場)
+    { title: 'コミュニティ管理', icon: <MessageCircle size={24} />, href: '/master/community', color: 'bg-pink-500' },
+
+    // 景品・コイン設定
+    { title: '景品・コイン管理', icon: <ShoppingBag size={24} />, href: '/master/rewards', color: 'bg-yellow-500' },
+
+    // 各種CSV一括登録
     { title: 'CSV一括登録', icon: <Database size={24} />, href: '/master/imports', color: 'bg-teal-600' },
     
-    // ★アカウント一括削除 (新規追加)
+    // アカウント一括削除
     { title: 'アカウント一括削除', icon: <Trash2 size={24} />, href: '/master/delete', color: 'bg-rose-600' },
     
-    // ★勤怠管理・承認
+    // 勤怠管理・承認
     { title: '勤怠管理・承認', icon: <Briefcase size={24} />, href: '/master/attendance', color: 'bg-indigo-500' },
     
     { title: 'システム設定', icon: <Settings size={24} />, href: '/master/settings', color: 'bg-gray-600' },

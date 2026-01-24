@@ -1,16 +1,20 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useMemo } from 'react'; // useMemo追加
 import Link from 'next/link';
-import { ClipboardList, Calendar, CalendarPlus, MessageCircle, Users, MonitorPlay, Phone, BarChart3, LogOut, Briefcase, Video, MapPin, User, Loader2, Star } from 'lucide-react';
+import { 
+  ClipboardList, Calendar, CalendarPlus, MessageCircle, Users, MonitorPlay, 
+  Phone, BarChart3, LogOut, Briefcase, Video, MapPin, User, Loader2, Star,
+  AlertTriangle, ChevronLeft, ChevronRight, LayoutList, Layout // アイコン追加
+} from 'lucide-react';
 import { auth, db } from '@/lib/firebase';
 import { signOut } from 'firebase/auth';
 import { collection, query, where, getDocs } from 'firebase/firestore';
+import { useEffect } from 'react';
 
 import NewsWidget from '@/app/components/NewsWidget';
-import RiskMonitorWidget from '@/app/components/RiskMonitorWidget';
 
-// 閲覧用シフトデータの型定義
+// --- 型定義 ---
 type ShiftAssignment = {
   id: string;
   teacher_name: string;
@@ -19,13 +23,12 @@ type ShiftAssignment = {
   target_grade: string | null;
   target_subject: string | null;
   target_detail_subject: string | null;
-  target_meeting_id?: string | null; // ★追加: Zoom ID
+  target_meeting_id?: string | null; 
   unit: string | null;
   note: string;
   parent_id?: string;
 };
 
-// 表示用グループデータの型定義
 type ClassGroup = {
   id: string;
   main: ShiftAssignment | null;
@@ -37,7 +40,87 @@ type ClassGroup = {
   url: string | null;
 };
 
-// ▼▼▼ シフト閲覧コンポーネント ▼▼▼
+// --- サブコンポーネント ---
+
+function ClockIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+    </svg>
+  );
+}
+
+const EmptyState = ({ text, small }: { text: string, small?: boolean }) => (
+  <div className={`border-2 border-dashed border-gray-200 rounded-2xl flex items-center justify-center text-gray-300 font-bold text-xs ${small ? 'h-[40px]' : 'w-[100px] h-[100px]'}`}>
+    {text}
+  </div>
+);
+
+// クラスカード
+const ClassCard = ({ info, color, currentTeacherName }: { info: ClassGroup, color: 'emerald' | 'orange', currentTeacherName: string }) => {
+  const isEmerald = color === 'emerald';
+  const isMyMain = info.main?.teacher_name === currentTeacherName;
+
+  let bgHeader = isEmerald ? 'bg-emerald-50' : 'bg-orange-50';
+  let textHeader = isEmerald ? 'text-emerald-800' : 'text-orange-800';
+  let border = isEmerald ? 'border-emerald-100' : 'border-orange-100';
+  const badge = isEmerald ? 'bg-emerald-100 text-emerald-700' : 'bg-orange-100 text-orange-700';
+  const btn = isEmerald ? 'bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600' : 'bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600';
+
+  if (isMyMain) {
+    border = isEmerald ? 'border-emerald-500 ring-4 ring-emerald-50' : 'border-orange-500 ring-4 ring-orange-50';
+    bgHeader = isEmerald ? 'bg-emerald-100' : 'bg-orange-100';
+  }
+
+  return (
+    <div className={`w-[200px] bg-white border-2 ${border} rounded-2xl shadow-sm flex flex-col overflow-hidden shrink-0 transition-all ${isMyMain ? 'shadow-lg transform -translate-y-1' : ''}`}>
+      <div className={`${bgHeader} p-3 border-b ${isEmerald ? 'border-emerald-100' : 'border-orange-100'}`}>
+        <div className="flex justify-between items-start mb-1.5">
+          <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${badge}`}>{info.grade || '?'} / {info.place || '-'}</span>
+          {isMyMain && <span className="text-[9px] font-bold bg-gray-800 text-white px-2 py-0.5 rounded-full flex items-center gap-0.5 animate-pulse"><Star size={8} fill="white"/> あなた</span>}
+        </div>
+        <div className={`text-xs font-bold ${textHeader} line-clamp-1`}>{info.unit || '-'}</div>
+      </div>
+      
+      <div className="p-3 flex-1 flex flex-col gap-3">
+        <div className="flex items-center gap-2">
+          <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-[10px] font-bold shadow-sm ${isEmerald ? 'bg-emerald-400' : 'bg-orange-400'}`}>T</div>
+          <div className={`text-xs font-bold ${isMyMain ? 'text-gray-900 text-sm' : 'text-gray-600'}`}>{info.main?.teacher_name || '未定'}</div>
+        </div>
+
+        {info.subs.length > 0 && (
+          <div className="bg-gray-50 p-2 rounded-xl border border-gray-100 space-y-1">
+            <span className="text-[8px] text-gray-400 font-bold block uppercase tracking-wider mb-1">Support</span>
+            {info.subs.map((s) => {
+              const isMySub = s.teacher_name === currentTeacherName;
+              return (
+                <div key={s.id} className={`text-[10px] flex items-center gap-1.5 p-1 rounded ${isMySub ? 'font-bold text-indigo-700 bg-indigo-50 border border-indigo-100' : 'text-gray-600'}`}>
+                  <div className={`w-1.5 h-1.5 rounded-full ${isMySub ? 'bg-indigo-500' : 'bg-gray-300'}`}></div> 
+                  {s.teacher_name}
+                  {isMySub && <span className="text-[8px] text-indigo-400 ml-auto font-bold">YOU</span>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <div className="mt-auto pt-1">
+          {info.url ? (
+            <a href={info.url} target="_blank" rel="noreferrer" className={`w-full ${btn} text-white text-[10px] font-bold py-2.5 rounded-xl flex items-center justify-center gap-1.5 transition-transform active:scale-95 shadow-md`}>
+              <Video size={14}/> 入室する
+            </a>
+          ) : (
+            <div className="w-full bg-gray-100 text-gray-400 text-[10px] font-bold py-2.5 rounded-xl flex items-center justify-center gap-1 cursor-not-allowed border border-gray-200">
+              <Video size={14}/> URL未設定
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// シフトビューアー (1日分を表示するコンポーネント)
 const ShiftViewer = ({ date, teacherName }: { date: string, teacherName: string }) => {
   const [assignments, setAssignments] = useState<ShiftAssignment[]>([]);
   const [urlMaster, setUrlMaster] = useState<{[key: string]: string}>({});
@@ -48,12 +131,10 @@ const ShiftViewer = ({ date, teacherName }: { date: string, teacherName: string 
     const fetchShiftData = async () => {
       setLoading(true);
       try {
-        // シフト取得
         const q = query(collection(db, 'shift_assignments'), where('target_date', '==', date));
         const snap = await getDocs(q);
         setAssignments(snap.docs.map(d => ({ id: d.id, ...d.data() } as ShiftAssignment)));
 
-        // URLマスタ取得
         const uSnap = await getDocs(collection(db, 'subject_urls'));
         const urls: {[key: string]: string} = {};
         uSnap.forEach(d => { urls[d.id] = d.data().url; });
@@ -66,7 +147,6 @@ const ShiftViewer = ({ date, teacherName }: { date: string, teacherName: string 
     fetchShiftData();
   }, [date]);
 
-  // データ整形ロジック
   const getAllClassesForSubject = (time: string, subject: string) => {
     const slotAssignments = assignments.filter(a => a.note.includes(`【${time}】`) && a.target_subject === subject);
     if (slotAssignments.length === 0) return [];
@@ -80,13 +160,10 @@ const ShiftViewer = ({ date, teacherName }: { date: string, teacherName: string 
         (!sub.parent_id && sub.target_grade === main.target_grade && sub.target_detail_subject === main.target_detail_subject)
       );
 
-      // ★修正: Zoomリンク生成ロジック (Zoom ID優先)
       let joinUrl = null;
       if (main.target_meeting_id) {
-        // Zoom IDがある場合は直接リンク生成 (スペース除去)
         joinUrl = `https://zoom.us/j/${main.target_meeting_id.replace(/\s/g, '')}`;
       } else if (main.target_detail_subject && dayOfWeek) {
-        // なければURLマスタから取得
         joinUrl = urlMaster[`${main.target_detail_subject}_${dayOfWeek}`];
       }
 
@@ -98,7 +175,7 @@ const ShiftViewer = ({ date, teacherName }: { date: string, teacherName: string 
         grade: main.target_grade,
         unit: main.unit,
         place: main.target_detail_subject,
-        url: joinUrl // 生成したURLを設定
+        url: joinUrl
       };
     });
 
@@ -108,14 +185,7 @@ const ShiftViewer = ({ date, teacherName }: { date: string, teacherName: string 
     
     if (orphans.length > 0) {
       classes.push({ 
-        id: 'orphans', 
-        main: null, 
-        subs: orphans, 
-        subject, 
-        grade: '未割当', 
-        unit: '-', 
-        place: '-', 
-        url: null 
+        id: 'orphans', main: null, subs: orphans, subject, grade: '未割当', unit: '-', place: '-', url: null 
       });
     }
     return classes.sort((a, b) => (a.grade || '').localeCompare(b.grade || ''));
@@ -123,51 +193,52 @@ const ShiftViewer = ({ date, teacherName }: { date: string, teacherName: string 
 
   const getGeneralSupport = (time: string) => assignments.filter(a => a.role_type === 'general' && a.note.includes(`【${time}】`));
 
-  if (loading) return <div className="p-10 flex justify-center"><Loader2 className="animate-spin text-gray-400"/></div>;
+  if (loading) return <div className="p-8 flex justify-center border-t border-gray-100"><Loader2 className="animate-spin text-gray-300"/></div>;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {['1限', '2限'].map(period => (
-        <div key={period} className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-          <div className={`px-4 py-2 text-white font-bold text-sm flex items-center justify-between ${period === '1限' ? 'bg-blue-600' : 'bg-indigo-600'}`}>
-            <span>{period} ({period === '1限' ? '19:20 - 20:25' : '20:35 - 21:40'})</span>
+        <div key={period} className="bg-white rounded-xl border border-gray-100 overflow-hidden">
+          <div className={`px-4 py-2 text-white font-bold text-xs flex items-center justify-between ${period === '1限' ? 'bg-gradient-to-r from-blue-500 to-blue-600' : 'bg-gradient-to-r from-indigo-500 to-indigo-600'}`}>
+            <span className="flex items-center gap-2"><ClockIcon/> {period}</span>
+            <span className="text-[10px] opacity-90 font-mono">{period === '1限' ? '19:20 - 20:25' : '20:35 - 21:40'}</span>
           </div>
-          <div className="overflow-x-auto">
-            <div className="flex min-w-max divide-x divide-gray-100">
+          <div className="overflow-x-auto p-4 bg-[#F8FAFC]">
+            <div className="flex min-w-max gap-4">
               
               {/* 理科 */}
-              <div className="flex flex-col p-3 gap-2 min-w-[300px]">
-                <span className="text-xs font-bold text-emerald-700 bg-emerald-50 px-2 py-1 rounded inline-block w-fit">理科グループ</span>
+              <div className="flex flex-col gap-2 min-w-[280px]">
+                <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full w-fit flex items-center gap-1"><MonitorPlay size={10}/> 理科グループ</span>
                 <div className="flex gap-3">
                   {getAllClassesForSubject(period, '理科').map(info => (
                     <ClassCard key={info.id} info={info} color="emerald" currentTeacherName={teacherName} />
                   ))}
-                  {getAllClassesForSubject(period, '理科').length === 0 && <EmptyState text="授業なし"/>}
+                  {getAllClassesForSubject(period, '理科').length === 0 && <EmptyState text="なし" small/>}
                 </div>
               </div>
 
               {/* 社会 */}
-              <div className="flex flex-col p-3 gap-2 min-w-[300px]">
-                <span className="text-xs font-bold text-orange-700 bg-orange-50 px-2 py-1 rounded inline-block w-fit">社会グループ</span>
+              <div className="flex flex-col gap-2 min-w-[280px]">
+                <span className="text-[10px] font-bold text-orange-700 bg-orange-100 px-2 py-0.5 rounded-full w-fit flex items-center gap-1"><MapPin size={10}/> 社会グループ</span>
                 <div className="flex gap-3">
                   {getAllClassesForSubject(period, '社会').map(info => (
                     <ClassCard key={info.id} info={info} color="orange" currentTeacherName={teacherName} />
                   ))}
-                  {getAllClassesForSubject(period, '社会').length === 0 && <EmptyState text="授業なし"/>}
+                  {getAllClassesForSubject(period, '社会').length === 0 && <EmptyState text="なし" small/>}
                 </div>
               </div>
 
               {/* 全体サポート */}
-              <div className="flex flex-col p-3 gap-2 min-w-[180px] bg-gray-50/50">
-                <span className="text-xs font-bold text-gray-500 bg-gray-100 px-2 py-1 rounded inline-block w-fit">全体サポート</span>
+              <div className="flex flex-col gap-2 min-w-[160px]">
+                <span className="text-[10px] font-bold text-gray-600 bg-gray-200 px-2 py-0.5 rounded-full w-fit">全体サポート</span>
                 <div className="flex flex-col gap-2">
                   {getGeneralSupport(period).map(a => {
                     const isMe = a.teacher_name === teacherName;
                     return (
-                      <div key={a.id} className={`p-2 rounded border shadow-sm text-xs font-bold flex items-center gap-2 transition-all ${isMe ? 'bg-indigo-600 text-white border-indigo-600 shadow-md scale-105' : 'bg-white text-gray-700 border-gray-200'}`}>
+                      <div key={a.id} className={`p-2 rounded-lg border shadow-sm text-[10px] font-bold flex items-center gap-2 transition-all ${isMe ? 'bg-indigo-600 text-white border-indigo-600 shadow-md scale-105' : 'bg-white text-gray-700 border-gray-200'}`}>
                         <User size={12} className={isMe ? 'text-white' : 'text-gray-400'}/> 
                         {a.teacher_name}
-                        {isMe && <span className="ml-auto text-[8px] bg-white text-indigo-600 px-1.5 rounded">YOU</span>}
+                        {isMe && <span className="ml-auto text-[8px] bg-white text-indigo-600 px-1 rounded font-black">YOU</span>}
                       </div>
                     );
                   })}
@@ -183,77 +254,7 @@ const ShiftViewer = ({ date, teacherName }: { date: string, teacherName: string 
   );
 };
 
-// 授業カード (自分をハイライト)
-const ClassCard = ({ info, color, currentTeacherName }: { info: ClassGroup, color: 'emerald' | 'orange', currentTeacherName: string }) => {
-  const isEmerald = color === 'emerald';
-  const isMyMain = info.main?.teacher_name === currentTeacherName;
-
-  let bgHeader = isEmerald ? 'bg-emerald-50' : 'bg-orange-50';
-  let textHeader = isEmerald ? 'text-emerald-800' : 'text-orange-800';
-  let border = isEmerald ? 'border-emerald-100' : 'border-orange-100';
-  const badge = isEmerald ? 'bg-emerald-100 text-emerald-700' : 'bg-orange-100 text-orange-700';
-  const btn = isEmerald ? 'bg-emerald-500 hover:bg-emerald-600' : 'bg-orange-500 hover:bg-orange-600';
-
-  if (isMyMain) {
-    border = isEmerald ? 'border-emerald-500 ring-2 ring-emerald-200' : 'border-orange-500 ring-2 ring-orange-200';
-    bgHeader = isEmerald ? 'bg-emerald-100' : 'bg-orange-100';
-  }
-
-  return (
-    <div className={`w-[200px] bg-white border-2 ${border} rounded-xl shadow-sm flex flex-col overflow-hidden shrink-0 transition-all ${isMyMain ? 'shadow-md transform scale-[1.02]' : ''}`}>
-      <div className={`${bgHeader} p-2.5 border-b ${isEmerald ? 'border-emerald-100' : 'border-orange-100'}`}>
-        <div className="flex justify-between items-start mb-1.5">
-          <span className={`text-[10px] font-black px-1.5 py-0.5 rounded ${badge}`}>{info.grade} / {info.place}</span>
-          {isMyMain && <span className="text-[9px] font-bold bg-gray-800 text-white px-1.5 py-0.5 rounded-full flex items-center gap-0.5 animate-pulse"><Star size={8} fill="white"/> あなた</span>}
-        </div>
-        <div className={`text-xs font-bold ${textHeader} line-clamp-1`}>{info.unit || '-'}</div>
-      </div>
-      
-      <div className="p-2.5 flex-1 flex flex-col gap-2">
-        <div className="flex items-center gap-2">
-          <div className={`w-7 h-7 rounded-full flex items-center justify-center text-white text-[10px] font-bold ${isEmerald ? 'bg-emerald-300' : 'bg-orange-300'}`}>T</div>
-          <div className={`text-xs font-bold ${isMyMain ? 'text-gray-900 text-sm' : 'text-gray-600'}`}>{info.main?.teacher_name || '未定'}</div>
-        </div>
-
-        {info.subs.length > 0 && (
-          <div className="bg-gray-50 p-2 rounded-lg border border-gray-100 space-y-1">
-            <span className="text-[8px] text-gray-400 font-bold block uppercase tracking-wider">Support</span>
-            {info.subs.map((s) => {
-              const isMySub = s.teacher_name === currentTeacherName;
-              return (
-                <div key={s.id} className={`text-[10px] flex items-center gap-1.5 ${isMySub ? 'font-bold text-indigo-600 bg-indigo-50 px-1 rounded' : 'text-gray-600'}`}>
-                  <div className={`w-1.5 h-1.5 rounded-full ${isMySub ? 'bg-indigo-500' : 'bg-gray-300'}`}></div> 
-                  {s.teacher_name}
-                  {isMySub && <span className="text-[8px] text-indigo-400">(あなた)</span>}
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        <div className="mt-auto pt-1">
-          {info.url ? (
-            <a href={info.url} target="_blank" rel="noreferrer" className={`w-full ${btn} text-white text-[10px] font-bold py-2 rounded-lg flex items-center justify-center gap-1.5 transition-transform active:scale-95 shadow-sm`}>
-              <Video size={12}/> 入室
-            </a>
-          ) : (
-            <div className="w-full bg-gray-100 text-gray-400 text-[10px] font-bold py-2 rounded-lg flex items-center justify-center gap-1 cursor-not-allowed">
-              <Video size={12}/> URL未設定
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-};
-
-const EmptyState = ({ text, small }: { text: string, small?: boolean }) => (
-  <div className={`border-2 border-dashed border-gray-200 rounded-xl flex items-center justify-center text-gray-300 font-bold text-xs ${small ? 'h-[40px]' : 'w-[100px] h-[100px]'}`}>
-    {text}
-  </div>
-);
-
-// ▲▲▲ シフト閲覧コンポーネント終了 ▲▲▲
+// --- メインページコンポーネント ---
 
 type Props = {
   profile: any;
@@ -262,7 +263,35 @@ type Props = {
 };
 
 export default function TeacherDashboard({ profile, mainShifts, pendingCount }: Props) {
-  const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
+  
+  // ★表示モード: 'day' (1日) | 'week' (7日)
+  const [viewMode, setViewMode] = useState<'day' | 'week'>('day');
+
+  // 表示する日付リストを計算
+  const displayDates = useMemo(() => {
+    if (viewMode === 'day') {
+      return [selectedDate];
+    } else {
+      // 選択日を起点に7日分
+      const dates = [];
+      const base = new Date(selectedDate);
+      for (let i = 0; i < 7; i++) {
+        const d = new Date(base);
+        d.setDate(base.getDate() + i);
+        dates.push(d.toISOString().split('T')[0]);
+      }
+      return dates;
+    }
+  }, [selectedDate, viewMode]);
+
+  // 日付操作 (日モードなら±1日、週モードなら±7日)
+  const handleDateChange = (direction: number) => {
+    const d = new Date(selectedDate);
+    const increment = viewMode === 'week' ? 7 : 1;
+    d.setDate(d.getDate() + (direction * increment));
+    setSelectedDate(d.toISOString().split('T')[0]);
+  };
 
   const handleLogout = async () => {
     if (!confirm('ログアウトしますか？')) return;
@@ -271,84 +300,138 @@ export default function TeacherDashboard({ profile, mainShifts, pendingCount }: 
   };
 
   return (
-    <div className="min-h-screen bg-gray-100 p-4 md:p-6 pb-20 font-sans">
+    <div className="min-h-screen bg-[#F0F4F8] font-sans pb-20">
       
-      {/* ヘッダー */}
-      <header className="mb-6 flex justify-between items-center bg-white p-4 rounded-xl shadow-sm border border-gray-100">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-indigo-100 rounded-full flex items-center justify-center text-indigo-600 font-bold">
-            {profile?.name?.charAt(0) || 'T'}
-          </div>
-          <div>
-            <h1 className="text-lg font-bold text-gray-800">{profile?.name} 先生</h1>
-            <p className="text-xs text-gray-500">業務ポータル</p>
-          </div>
-        </div>
-        <button onClick={handleLogout} className="flex items-center gap-2 text-xs font-bold text-gray-500 hover:text-red-600 bg-gray-50 px-3 py-2 rounded-lg border border-gray-200 transition-colors">
-          <LogOut size={14}/> ログアウト
-        </button>
-      </header>
-
-      {/* 連絡事項 */}
-      <div className="mb-6">
-        <NewsWidget role="teacher" />
-      </div>
-
-      <div className="grid lg:grid-cols-12 gap-6">
+      <div className="max-w-7xl mx-auto p-4 sm:p-6 lg:p-8">
         
-        {/* 左カラム: メニュー (4/12) */}
-        <section className="lg:col-span-4 space-y-4">
-          {/* メニューグリッド */}
-          <div className="grid grid-cols-2 gap-3">
-            <Link href="/teacher/attendance" className="bg-white p-4 rounded-xl shadow-sm border border-gray-200 hover:border-teal-500 hover:bg-teal-50 transition-all flex flex-col items-center justify-center gap-2 text-center h-24 group no-underline">
-              <Briefcase size={24} className="text-teal-600 group-hover:scale-110 transition-transform"/>
-              <span className="text-xs font-bold text-gray-700">勤怠打刻</span>
-            </Link>
-            <Link href="/teacher/contacts" className="bg-white p-4 rounded-xl shadow-sm border border-gray-200 hover:border-green-500 hover:bg-green-50 transition-all flex flex-col items-center justify-center gap-2 text-center h-24 group no-underline">
-              <Phone size={24} className="text-green-600 group-hover:scale-110 transition-transform"/>
-              <span className="text-xs font-bold text-gray-700">連絡</span>
-            </Link>
-            <Link href="/teacher/chat" className="bg-white p-4 rounded-xl shadow-sm border border-gray-200 hover:border-blue-300 transition-all flex flex-col items-center justify-center gap-2 text-center h-24 no-underline">
-              <MessageCircle size={24} className="text-blue-600"/>
-              <span className="text-xs font-bold text-gray-700">チャット</span>
-            </Link>
-            <Link href="/teacher/homework" className="bg-white p-4 rounded-xl shadow-sm border border-gray-200 hover:border-orange-300 transition-all flex flex-col items-center justify-center gap-2 text-center h-24 no-underline relative">
-              <ClipboardList size={24} className="text-orange-500"/>
-              <span className="text-xs font-bold text-gray-700">宿題管理</span>
-              {pendingCount > 0 && <span className="bg-red-500 text-white text-[10px] px-1.5 py-0.5 rounded-full absolute top-2 right-2 animate-pulse">{pendingCount}</span>}
-            </Link>
-            <Link href="/teacher/pf" className="bg-white p-4 rounded-xl shadow-sm border border-gray-200 hover:border-indigo-300 transition-all flex flex-col items-center justify-center gap-2 text-center h-24 no-underline">
-              <BarChart3 size={24} className="text-indigo-600"/>
-              <span className="text-xs font-bold text-gray-700">PF</span>
-            </Link>
-            <Link href="/teacher/students" className="bg-white p-4 rounded-xl shadow-sm border border-gray-200 hover:border-purple-300 transition-all flex flex-col items-center justify-center gap-2 text-center h-24 no-underline">
-              <Users size={24} className="text-purple-600"/>
-              <span className="text-xs font-bold text-gray-700">名簿</span>
-            </Link>
-            <Link href="/teacher/shifts" className="bg-white p-4 rounded-xl shadow-sm border border-gray-200 hover:border-yellow-300 transition-all flex flex-col items-center justify-center gap-2 text-center h-24 no-underline col-span-2">
-              <CalendarPlus size={24} className="text-yellow-600"/>
-              <span className="text-xs font-bold text-gray-700">シフト提出</span>
-            </Link>
+        <div className="flex flex-col lg:flex-row gap-8 items-start">
+          
+          {/* === 左サイドバー === */}
+          <div className="w-full lg:w-80 lg:shrink-0 lg:sticky lg:top-8 space-y-6 z-20">
+            
+            {/* プロフィール */}
+            <div className="bg-white p-5 rounded-3xl shadow-sm border border-white/50">
+              <div className="flex items-center gap-4 mb-4">
+                <div className="w-14 h-14 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl flex items-center justify-center text-white text-xl font-bold shadow-md transform -rotate-3">
+                  {profile?.name?.charAt(0) || 'T'}
+                </div>
+                <div>
+                  <h1 className="text-lg font-extrabold text-gray-800">{profile?.name} 先生</h1>
+                  <p className="text-xs font-bold text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full inline-block">講師ポータル</p>
+                </div>
+              </div>
+              <button onClick={handleLogout} className="w-full flex items-center justify-center gap-2 text-xs font-bold text-gray-500 hover:text-red-500 hover:bg-red-50 bg-gray-50 p-3 rounded-xl transition-all">
+                <LogOut size={16}/> ログアウト
+              </button>
+            </div>
+
+            {/* メニュー */}
+            <div className="grid grid-cols-2 gap-3">
+              <Link href="/teacher/attendance" className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 hover:border-teal-500 hover:bg-teal-50 transition-all flex flex-col items-center justify-center gap-2 text-center h-28 group no-underline">
+                <div className="w-10 h-10 rounded-full bg-teal-100 text-teal-600 flex items-center justify-center group-hover:scale-110 transition-transform"><Briefcase size={20}/></div>
+                <span className="text-xs font-bold text-gray-700">勤怠打刻</span>
+              </Link>
+              <Link href="/teacher/contacts" className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 hover:border-green-500 hover:bg-green-50 transition-all flex flex-col items-center justify-center gap-2 text-center h-28 group no-underline">
+                <div className="w-10 h-10 rounded-full bg-green-100 text-green-600 flex items-center justify-center group-hover:scale-110 transition-transform"><Phone size={20}/></div>
+                <span className="text-xs font-bold text-gray-700">連絡</span>
+              </Link>
+              <Link href="/teacher/chat" className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 hover:border-blue-300 transition-all flex flex-col items-center justify-center gap-2 text-center h-28 group no-underline">
+                <div className="w-10 h-10 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center group-hover:scale-110 transition-transform"><MessageCircle size={20}/></div>
+                <span className="text-xs font-bold text-gray-700">チャット</span>
+              </Link>
+              <Link href="/teacher/homework" className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 hover:border-orange-300 transition-all flex flex-col items-center justify-center gap-2 text-center h-28 group no-underline relative">
+                <div className="w-10 h-10 rounded-full bg-orange-100 text-orange-600 flex items-center justify-center group-hover:scale-110 transition-transform"><ClipboardList size={20}/></div>
+                <span className="text-xs font-bold text-gray-700">宿題管理</span>
+                {pendingCount > 0 && <span className="bg-red-500 text-white text-[10px] px-2 py-0.5 rounded-full absolute top-2 right-2 border-2 border-white font-bold">{pendingCount}</span>}
+              </Link>
+              <Link href="/teacher/risk-monitor" className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 hover:border-red-300 transition-all flex flex-col items-center justify-center gap-2 text-center h-28 group no-underline">
+                <div className="w-10 h-10 rounded-full bg-red-100 text-red-600 flex items-center justify-center group-hover:scale-110 transition-transform animate-pulse"><AlertTriangle size={20}/></div>
+                <span className="text-xs font-bold text-gray-700">退塾アラート</span>
+              </Link>
+              <Link href="/teacher/pf" className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 hover:border-indigo-300 transition-all flex flex-col items-center justify-center gap-2 text-center h-28 group no-underline">
+                <div className="w-10 h-10 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center group-hover:scale-110 transition-transform"><BarChart3 size={20}/></div>
+                <span className="text-xs font-bold text-gray-700">PF管理</span>
+              </Link>
+              <Link href="/teacher/students" className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 hover:border-purple-300 transition-all flex flex-col items-center justify-center gap-2 text-center h-28 group no-underline">
+                <div className="w-10 h-10 rounded-full bg-purple-100 text-purple-600 flex items-center justify-center group-hover:scale-110 transition-transform"><Users size={20}/></div>
+                <span className="text-xs font-bold text-gray-700">生徒名簿</span>
+              </Link>
+              <Link href="/teacher/shifts" className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 hover:border-yellow-300 transition-all flex flex-col items-center justify-center gap-2 text-center h-28 group no-underline">
+                <div className="w-10 h-10 rounded-full bg-yellow-100 text-yellow-600 flex items-center justify-center group-hover:scale-110 transition-transform"><CalendarPlus size={20}/></div>
+                <span className="text-xs font-bold text-gray-700">シフト提出</span>
+              </Link>
+            </div>
           </div>
 
-          {/* AIリスクモニター */}
-          <RiskMonitorWidget />
-        </section>
+          {/* === 右カラム: メインコンテンツ === */}
+          <div className="flex-1 min-w-0 space-y-6">
+            
+            {/* お知らせウィジェット (上部へ移動) */}
+            <NewsWidget role="teacher" />
 
-        {/* 右カラム: 今日のシフト表 (8/12) */}
-        <section className="lg:col-span-8 space-y-4">
-          <div className="bg-white rounded-xl shadow-sm border-t-4 border-indigo-500 overflow-hidden min-h-[600px] flex flex-col">
-            <div className="p-4 border-b border-gray-100 bg-indigo-50/50 flex justify-between items-center">
-              <h2 className="text-base font-bold text-gray-800 flex items-center gap-2"><Calendar className="text-indigo-600" size={20}/> 本日の講師配置表</h2>
-              <span className="text-xs font-bold text-gray-500 bg-white px-3 py-1 rounded-full border border-gray-200">{today}</span>
-            </div>
-            <div className="p-4 bg-gray-50 flex-1">
-              {/* シフトビュワー埋め込み */}
-              <ShiftViewer date={today} teacherName={profile?.name || ''} />
+            {/* シフト表 */}
+            <div className="bg-white rounded-3xl shadow-lg border border-indigo-100 overflow-hidden flex flex-col">
+              <div className="p-6 bg-white border-b border-gray-100 flex flex-wrap justify-between items-center sticky top-0 z-10 backdrop-blur-sm bg-white/90 gap-4">
+                <h2 className="text-lg font-extrabold text-gray-800 flex items-center gap-2">
+                  <Calendar className="text-indigo-600" size={24}/> 
+                  授業配置
+                </h2>
+                
+                <div className="flex items-center gap-3">
+                  {/* 表示モード切り替え */}
+                  <div className="flex bg-gray-100 p-1 rounded-lg border border-gray-200">
+                    <button 
+                      onClick={() => setViewMode('day')}
+                      className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all flex items-center gap-1 ${viewMode === 'day' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-500 hover:bg-gray-200'}`}
+                    >
+                      <Layout size={14}/> 1日
+                    </button>
+                    <button 
+                      onClick={() => setViewMode('week')}
+                      className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all flex items-center gap-1 ${viewMode === 'week' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-500 hover:bg-gray-200'}`}
+                    >
+                      <LayoutList size={14}/> 週間
+                    </button>
+                  </div>
+
+                  {/* 日付操作 */}
+                  <div className="flex items-center bg-gray-50 rounded-xl p-1 border border-gray-100 shadow-inner">
+                    <button onClick={() => handleDateChange(-1)} className="p-1.5 hover:bg-white rounded-lg transition text-gray-500 hover:text-indigo-600 hover:shadow-sm"><ChevronLeft size={18}/></button>
+                    <input 
+                      type="date" 
+                      className="bg-transparent text-xs font-bold text-indigo-700 px-2 py-1 outline-none text-center w-28 cursor-pointer"
+                      value={selectedDate}
+                      onChange={(e) => setSelectedDate(e.target.value)}
+                    />
+                    <button onClick={() => handleDateChange(1)} className="p-1.5 hover:bg-white rounded-lg transition text-gray-500 hover:text-indigo-600 hover:shadow-sm"><ChevronRight size={18}/></button>
+                  </div>
+                </div>
+              </div>
+              
+              <div className={`p-4 sm:p-6 bg-white flex-1 space-y-8 ${viewMode === 'week' ? 'max-h-[800px] overflow-y-auto custom-scrollbar' : ''}`}>
+                {displayDates.map((date, idx) => {
+                  const dayStr = ['日','月','火','水','木','金','土'][new Date(date).getDay()];
+                  const isToday = date === new Date().toISOString().split('T')[0];
+                  
+                  return (
+                    <div key={date} className={idx > 0 ? "pt-4 border-t border-dashed border-gray-200" : ""}>
+                      {/* 日付ヘッダー (週間表示時のみ強調) */}
+                      {viewMode === 'week' && (
+                        <div className={`mb-3 flex items-center gap-2 ${isToday ? 'text-indigo-600' : 'text-gray-600'}`}>
+                          <span className="font-black text-sm">{new Date(date).getMonth()+1}/{new Date(date).getDate()} ({dayStr})</span>
+                          {isToday && <span className="text-[10px] bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full font-bold">Today</span>}
+                        </div>
+                      )}
+                      
+                      <ShiftViewer date={date} teacherName={profile?.name || ''} />
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           </div>
-        </section>
 
+        </div>
       </div>
     </div>
   );

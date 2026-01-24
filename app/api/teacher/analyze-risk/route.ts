@@ -1,134 +1,183 @@
 import { NextResponse } from 'next/server';
-import OpenAI from 'openai';
 import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs, orderBy, limit, doc, updateDoc, getDoc } from 'firebase/firestore';
+import { collection, query, where, getDocs, orderBy, limit, updateDoc, doc } from 'firebase/firestore';
+import OpenAI from 'openai';
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
-// 安全圏の基準 (これを満たす生徒はAI分析をスキップしてコスト削減)
-const SAFE_THRESHOLD = {
-  attendance: 90, // 出席率90%以上
-  score: 70       // 平均点70点以上
-};
+// ★足切りの基準値 (これより低いと詳細AI診断を実行)
+const ATTENDANCE_BORDER = 90; // 出席率90%未満なら要診断
+const HOMEWORK_BORDER = 70;   // 宿題提出率70%未満なら要診断
+
+// 1回の実行で処理する人数
+const DEFAULT_BATCH_SIZE = 10;
 
 export async function POST(req: Request) {
   try {
-    // フロントからは「何人処理するか」だけ受け取る（デフォルト5人）
-    // ※3000人いる場合、これを定期的に叩くか、ボタン連打で消化します
-    const { batchSize = 5 } = await req.json();
+    const { batchSize = DEFAULT_BATCH_SIZE } = await req.json();
 
-    // 1. 生徒一覧を取得
-    // 本来は「最終分析日が古い順」でクエリしたいが、Firestoreの複合インデックスが必要になるため
-    // ここでは全生徒(student)を取得して、コード側でフィルタリングする簡易実装にします
-    // ※3000人の場合、本来は cursor を使ったページネーションが必要ですが、今回は簡略化します
-    const usersQ = query(collection(db, 'users'), where('role', '==', 'student'));
-    const usersSnap = await getDocs(usersQ);
+    // 1. 分析対象の生徒を取得 (分析日時が古い順に取得してローテーションさせる)
+    const usersRef = collection(db, 'users');
+    const q = query(
+      usersRef, 
+      where('role', '==', 'student'),
+      orderBy('risk_analyzed_at', 'asc'), // ずっと分析されていない人から順に
+      limit(batchSize)
+    );
     
-    let processedCount = 0;
-    const results = [];
-    const now = new Date();
+    const snapshot = await getDocs(q);
+    const students = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
 
-    // 更新が必要な生徒を抽出
-    const candidates = usersSnap.docs.filter(doc => {
-      const data = doc.data();
-      // (A) 要注意フラグが立っている (チャットボットなどが検知)
-      if (data.requires_attention) return true;
-      
-      // (B) まだ一度も分析していない
-      if (!data.risk_analyzed_at) return true;
-
-      // (C) 前回の分析から3日以上経過している
-      const lastAnalyzed = new Date(data.risk_analyzed_at);
-      const diffDays = (now.getTime() - lastAnalyzed.getTime()) / (1000 * 3600 * 24);
-      return diffDays >= 3;
-    });
-
-    // 上限人数まで処理
-    for (const userDoc of candidates.slice(0, batchSize)) {
-      const studentId = userDoc.id;
-      const userData = userDoc.data();
-
-      // --- データ収集 ---
-      
-      // 小テスト平均
-      const quizQ = query(collection(db, 'users', studentId, 'quiz_results'), orderBy('created_at', 'desc'), limit(10));
-      const quizSnap = await getDocs(quizQ);
-      const quizRecs = quizSnap.docs.map(d => d.data());
-      const avgScore = quizRecs.length > 0 
-        ? (quizRecs.filter((r:any) => r.isCorrect).length / quizRecs.length) * 100 : 0;
-
-      // 出席率
-      const pfQ = query(collection(db, 'pf_records'), where('student_id', '==', studentId), limit(20));
-      const pfSnap = await getDocs(pfQ);
-      const pfRecs = pfSnap.docs.map(d => d.data());
-      const attendanceRate = pfRecs.length > 0
-        ? (pfRecs.filter((r:any) => r.attendance_status === '出').length / pfRecs.length) * 100 : 100;
-
-      // --- コスト削減ロジック (足切り) ---
-      // 成績・出席が良く、かつ「要注意フラグ」が立っていないならAIスキップ
-      if (!userData.requires_attention && attendanceRate >= SAFE_THRESHOLD.attendance && avgScore >= SAFE_THRESHOLD.score) {
-        // 安全とみなして更新
-        await updateDoc(doc(db, 'users', studentId), {
-          churn_risk: 5, // 低リスク固定
-          risk_reason: "出席率・成績ともに基準値以上で安定しています。",
-          risk_action: "現状維持（褒めて伸ばす）",
-          risk_analyzed_at: now.toISOString(),
-          requires_attention: false // フラグ解除
-        });
-        results.push({ name: userData.student_name, status: 'skipped_safe' });
-        processedCount++;
-        continue;
-      }
-
-      // --- AI分析実行 (リスクが高い、またはデータ不足の生徒のみ) ---
-      
-      // チャット履歴取得
-      const chatQ = query(collection(db, 'users', studentId, 'chats'), orderBy('created_at', 'desc'), limit(10));
-      const chatSnap = await getDocs(chatQ);
-      const chats = chatSnap.docs.map(d => d.data().text).reverse().join("\n");
-
-      const systemPrompt = `
-      学習塾の生徒の退塾リスク(0-100%)を判定してください。
-      名前: ${userData.student_name}
-      出席率: ${attendanceRate.toFixed(1)}%
-      テスト正答率: ${avgScore.toFixed(1)}%
-      チャット発言:
-      ${chats || '(なし)'}
-      
-      出力JSON: { "risk_score": 数値, "reason": "理由", "action_plan": "対応策" }
-      `;
-
-      try {
-        const completion = await openai.chat.completions.create({
-          model: "gpt-4o-mini",
-          messages: [{ role: "system", content: systemPrompt }],
-          response_format: { type: "json_object" },
-        });
-        const aiRes = JSON.parse(completion.choices[0].message.content || '{}');
-
-        await updateDoc(doc(db, 'users', studentId), {
-          churn_risk: aiRes.risk_score,
-          risk_reason: aiRes.reason,
-          risk_action: aiRes.action_plan,
-          risk_analyzed_at: now.toISOString(),
-          requires_attention: false // 分析完了したらフラグを下ろす
-        });
-        results.push({ name: userData.student_name, status: 'analyzed', score: aiRes.risk_score });
-
-      } catch (err) {
-        console.error(err);
-      }
-      processedCount++;
+    if (students.length === 0) {
+      return NextResponse.json({ processed: 0, message: 'No students to analyze.' });
     }
 
-    return NextResponse.json({ 
-      processed: processedCount, 
-      remaining: Math.max(0, candidates.length - processedCount),
-      details: results 
+    let processedCount = 0;
+    let aiAnalyzedCount = 0; // 実際にAI診断した人数
+
+    // 2. 生徒ごとに処理
+    const analysisPromises = students.map(async (student: any) => {
+      try {
+        // --- A. PFデータ (出席・宿題) の取得と計算 ---
+        const currentYear = new Date().getFullYear().toString();
+        const pfQuery = query(
+          collection(db, 'pf_records'),
+          where('student_id', '==', student.id),
+          where('year', '==', currentYear)
+        );
+        const pfSnap = await getDocs(pfQuery);
+        
+        let totalClasses = 0;
+        let absentCount = 0;
+        let hwTotal = 0;
+        let hwSubmitted = 0;
+
+        pfSnap.forEach(doc => {
+          const d = doc.data();
+          if (d.attendance_status) {
+            totalClasses++;
+            if (d.attendance_status === '欠') absentCount++;
+          }
+          if ((d.social_hw) || (d.science_hw)) {
+            hwTotal++;
+            const isSocialDone = d.social_hw && d.social_hw !== '未';
+            const isScienceDone = d.science_hw && d.science_hw !== '未';
+            if (isSocialDone || isScienceDone) hwSubmitted++; 
+          }
+        });
+
+        // データがない場合は100%扱いにしておく（または分析スキップ）
+        const attendanceRate = totalClasses > 0 ? Math.round(((totalClasses - absentCount) / totalClasses) * 100) : 100;
+        const homeworkRate = hwTotal > 0 ? Math.round((hwSubmitted / hwTotal) * 100) : 100;
+
+        // --- B. 足切り判定 (スクリーニング) ---
+        const isAttendanceGood = attendanceRate >= ATTENDANCE_BORDER;
+        const isHomeworkGood = homeworkRate >= HOMEWORK_BORDER;
+
+        // 両方クリアしている場合は「低リスク」として即時更新 (API節約)
+        if (isAttendanceGood && isHomeworkGood) {
+          await updateDoc(doc(db, 'users', student.id), {
+            churn_risk: 5, // 最低レベルのリスク
+            risk_reason: `出席・提出状況ともに良好です (出席:${attendanceRate}%, 提出:${homeworkRate}%)`,
+            risk_action: "現状維持（定期的な承認・声掛け）",
+            risk_analyzed_at: new Date().toISOString() // 更新日時を新しくして、次回の分析順位を下げる
+          });
+          processedCount++;
+          return; // ここで終了
+        }
+
+        // --- C. 要注意生徒のみ: チャット履歴取得 & 詳細AI分析 ---
+        aiAnalyzedCount++;
+        
+        const chatQuery = query(
+          collection(db, 'chat_logs'),
+          where('uid', '==', student.id),
+          orderBy('created_at', 'desc'),
+          limit(15) // 少し多めに文脈を読む
+        );
+        const chatSnap = await getDocs(chatQuery);
+        const chatHistory = chatSnap.docs
+          .map(d => {
+            const c = d.data();
+            return `${c.role === 'user' ? '生徒' : 'AI/先生'}: ${c.message}`;
+          })
+          .reverse()
+          .join('\n');
+
+        const prompt = `
+          あなたは学習塾のベテラン講師です。以下の「要注意生徒」のデータから退塾リスクを診断してください。
+          
+          【定量データ (警告値)】
+          ・氏名: ${student.student_name}
+          ・出席率: ${attendanceRate}% (基準 ${ATTENDANCE_BORDER}% 未満かも)
+          ・宿題提出率: ${homeworkRate}% (基準 ${HOMEWORK_BORDER}% 未満かも)
+          
+          【定性データ (直近の会話)】
+          ${chatHistory || '(履歴なし)'}
+
+          【診断ルール】
+          1. 数値が悪くても、チャットで「頑張る」「挽回したい」などの意欲が見えればリスクを少し下げる。
+          2. 数値が悪く、かつチャットで「疲れた」「意味ない」「辞めたい」等の発言があればリスク最大(90%以上)。
+          3. チャット履歴がない場合は、数値のみに基づいて厳しめに判定する。
+
+          出力JSON形式:
+          {
+            "risk_score": number, // 0-100
+            "reason": "string",   // 分析理由 (30文字程度。例: 出席率低下に加え、発言に疲労感が見られるため)
+            "action": "string"    // 推奨アクション (30文字程度。例: 面談を設定し、学習ペースの見直しを提案する)
+          }
+        `;
+
+        const completion = await openai.chat.completions.create({
+          model: "gpt-3.5-turbo",
+          messages: [{ role: "system", content: prompt }],
+          temperature: 0.7,
+          response_format: { type: "json_object" }
+        });
+
+        const resultStr = completion.choices[0].message.content;
+        if (!resultStr) throw new Error("AI response empty");
+        
+        const result = JSON.parse(resultStr);
+
+        // --- D. 結果保存 ---
+        await updateDoc(doc(db, 'users', student.id), {
+          churn_risk: result.risk_score,
+          risk_reason: result.reason,
+          risk_action: result.action,
+          risk_analyzed_at: new Date().toISOString()
+        });
+
+        processedCount++;
+
+      } catch (err) {
+        console.error(`Error analyzing student ${student.id}:`, err);
+      }
     });
 
-  } catch (e: any) {
-    console.error(e);
-    return NextResponse.json({ error: e.message }, { status: 500 });
+    await Promise.all(analysisPromises);
+
+    // 残り人数チェック
+    const remainingQ = query(
+      usersRef, 
+      where('role', '==', 'student'),
+      orderBy('risk_analyzed_at', 'asc'),
+      limit(1)
+    );
+    const remainingSnap = await getDocs(remainingQ);
+    const remaining = remainingSnap.empty ? 0 : 99;
+
+    return NextResponse.json({ 
+      processed: processedCount,
+      ai_analyzed: aiAnalyzedCount, // 実際にAIを使った人数
+      remaining: remaining > 0 ? 'あり' : 0,
+      message: 'Analysis complete' 
+    });
+
+  } catch (error: any) {
+    console.error('API Error:', error);
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }

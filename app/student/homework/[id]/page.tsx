@@ -3,10 +3,10 @@
 import { useState, useEffect, use, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { db, storage } from '@/lib/firebase';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc, updateDoc, increment, arrayUnion } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { useAuth } from '@/app/context/AuthContext';
-import { ArrowLeft, Clock, Send, CheckCircle, AlertCircle, Loader2, Image as ImageIcon, X, Plus, ExternalLink, RefreshCw, Calendar, FileText } from 'lucide-react';
+import { ArrowLeft, Clock, Send, CheckCircle, AlertCircle, Loader2, Image as ImageIcon, X, Plus, ExternalLink, RefreshCw, Calendar, FileText, Stamp, MessageCircle } from 'lucide-react';
 import Link from 'next/link';
 import Image from 'next/image';
 
@@ -76,7 +76,7 @@ export default function HomeworkDetailPage({ params }: { params: Promise<{ id: s
 
   const handleSubmit = async () => {
     if (!selectedFile) return alert('提出する画像を選択してください');
-    if (!confirm('この画像で提出しますか？')) return;
+    if (!confirm('この画像で提出しますか？\n(提出すると50コイン獲得できます！)')) return;
 
     setSubmitting(true);
     
@@ -107,7 +107,15 @@ export default function HomeworkDetailPage({ params }: { params: Promise<{ id: s
 
       await setDoc(subRef, submissionData, { merge: true });
 
-      alert('提出しました！');
+      const userRef = doc(db, 'users', user.uid);
+      await updateDoc(userRef, {
+        coins: increment(50),
+        total_coins: increment(50),
+        homework_count: increment(1),
+        earned_badges: arrayUnion('badge_1')
+      });
+
+      alert('提出しました！ 50コイン獲得！');
       setSelectedFile(null);
       setPreviewUrl(null);
       await fetchData();
@@ -125,12 +133,10 @@ export default function HomeworkDetailPage({ params }: { params: Promise<{ id: s
   const isLate = new Date() > new Date(assignment.deadline);
   const showForm = !submission || submission.status === 'resubmit';
 
-  // 科目ごとのアクセントカラー決定
   const isScience = assignment.subject?.includes('理科') || ['物理','化学','生物','地学'].some((s:string) => assignment.subject?.includes(s));
   const isSociety = assignment.subject?.includes('社会') || ['地理','歴史','公民'].some((s:string) => assignment.subject?.includes(s));
   const accentColor = isScience ? 'purple' : isSociety ? 'pink' : 'blue';
   
-  // Tailwindのクラスを動的に構築するためのマッピング (JITモードでは完全なクラス名が必要な場合が多いですが、ここでは簡易的に)
   const bgAccent = isScience ? 'bg-purple-500' : isSociety ? 'bg-pink-500' : 'bg-blue-500';
   const textAccent = isScience ? 'text-purple-600' : isSociety ? 'text-pink-600' : 'text-blue-600';
   const bgSoftAccent = isScience ? 'bg-purple-50' : isSociety ? 'bg-pink-50' : 'bg-blue-50';
@@ -150,7 +156,6 @@ export default function HomeworkDetailPage({ params }: { params: Promise<{ id: s
         {/* 課題情報カード */}
         <div className="bg-white rounded-[40px] shadow-xl shadow-indigo-100 overflow-hidden mb-8 relative border-4 border-white">
           <div className={`${bgSoftAccent} p-6 sm:p-8 relative`}>
-             {/* ステータスバッジ */}
              <div className="absolute top-6 right-6 z-10">
                 {submission?.status === 'checked' ? (
                    <span className="flex items-center gap-1.5 text-xs font-black text-green-600 bg-white px-4 py-2 rounded-full shadow-sm"><CheckCircle size={16} strokeWidth={3}/> 合格</span>
@@ -193,12 +198,38 @@ export default function HomeworkDetailPage({ params }: { params: Promise<{ id: s
           </div>
         </div>
 
+        {/* 先生からのコメント & スタンプ（合格時のみ表示） */}
+        {submission?.status === 'checked' && (
+           <div className="bg-green-50 border-4 border-green-200 p-6 rounded-[32px] mb-8 shadow-sm animate-in slide-in-from-top-2">
+             <h3 className="text-green-600 font-black flex items-center gap-2 mb-4 text-lg">
+               <Stamp size={24} strokeWidth={3}/>
+               先生からのコメント
+             </h3>
+             
+             {/* 先生コメント */}
+             {submission.teacher_comment && (
+               <div className="bg-white p-5 rounded-2xl text-gray-800 font-bold text-lg shadow-sm border border-green-100 relative mb-4">
+                 <div className="absolute -top-3 left-6 w-6 h-6 bg-white rotate-45 border-t border-l border-green-100"></div>
+                 <div className="flex items-start gap-2">
+                   <MessageCircle size={20} className="text-green-400 mt-1 shrink-0"/>
+                   {submission.teacher_comment}
+                 </div>
+               </div>
+             )}
+
+             {/* スタンプがなければデフォルトメッセージ */}
+             {!submission.teacher_comment && !submission.stamp_url && (
+               <p className="text-center font-bold text-green-600">よく頑張りました！合格です！🎉</p>
+             )}
+           </div>
+        )}
+
         {/* 再提出時のフィードバック表示 */}
         {submission?.status === 'resubmit' && submission.feedback && (
           <div className="bg-red-50 border-4 border-red-200 p-6 rounded-[32px] mb-8 shadow-sm animate-in slide-in-from-top-2">
             <h3 className="text-red-500 font-black flex items-center gap-2 mb-2 text-lg">
               <RefreshCw size={24} strokeWidth={3}/>
-              先生からのメッセージ
+              再提出について
             </h3>
             <div className="bg-white p-5 rounded-2xl text-gray-800 font-bold text-lg shadow-sm border border-red-100 relative">
               <div className="absolute -top-3 left-6 w-6 h-6 bg-white rotate-45 border-t border-l border-red-100"></div>
@@ -225,6 +256,14 @@ export default function HomeworkDetailPage({ params }: { params: Promise<{ id: s
                 onClick={() => setZoomImage(submission.imageUrl)}
               >
                 <Image src={submission.imageUrl} alt="提出画像" fill className="object-cover" unoptimized />
+                
+                {/* ★スタンプ表示 (画像の上にオーバーレイ) */}
+                {submission.status === 'checked' && submission.stamp_url && (
+                   <div className="absolute top-4 right-4 w-1/3 aspect-square rotate-12 drop-shadow-xl animate-in zoom-in duration-500">
+                     <Image src={submission.stamp_url} alt="先生からのスタンプ" fill className="object-contain" unoptimized />
+                   </div>
+                )}
+
                 <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white font-bold gap-2 backdrop-blur-sm">
                   <ExternalLink strokeWidth={3}/> 拡大して見る
                 </div>

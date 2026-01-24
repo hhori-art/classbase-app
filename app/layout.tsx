@@ -1,9 +1,16 @@
 import './globals.css';
-import { AuthProvider } from '@/app/context/AuthContext'; // ★追加
+import { AuthProvider } from '@/app/context/AuthContext';
+import { SettingsProvider } from '@/app/context/SettingsContext';
 
 export const metadata = {
-  title: 'オンライン理社講座',
+  // ★ここを変更
+  title: '理社講座アプリ', 
   description: '生徒管理・学習支援システム',
+  manifest: '/manifest.json',
+  icons: {
+    icon: '/icon.png',
+    apple: '/icon.png',
+  },
 };
 
 export default function RootLayout({
@@ -14,9 +21,10 @@ export default function RootLayout({
   return (
     <html lang="ja">
       <body className="bg-gray-50 text-gray-900 font-sans">
-        {/* ★AuthProviderで囲むことで、アプリ内のどこでもログイン情報を使えるようにする */}
         <AuthProvider>
-          {children}
+          <SettingsProvider>
+            {children}
+          </SettingsProvider>
         </AuthProvider>
       </body>
     </html>

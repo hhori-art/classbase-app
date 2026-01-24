@@ -1,53 +1,70 @@
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 export async function POST(req: Request) {
   try {
-    const { recentResults, availableQuestions } = await req.json();
+    const { grade, subject, unitName, unitContent } = await req.json();
 
+    if (!grade || !subject) {
+      return NextResponse.json({ error: '学年または科目が指定されていません' }, { status: 400 });
+    }
+
+    // スライド内容がない場合のフォールバック（一般的な問題作成）
+    const slideContext = unitContent || ""; 
+
+    // プロンプトの作成
     const systemPrompt = `
-    あなたは個別指導のプロフェッショナルです。
-    生徒の直近の回答履歴を分析し、候補の中から「最も学習効果が高い次の1問」を選んでIDを返してください。
-    
-    【選定ロジック】
-    - 正解が続いている -> 難易度を上げる
-    - 間違えた -> 基礎問題に戻るか、類似問題を選ぶ
-    
-    出力フォーマット(JSON): { "next_question_id": "ID_STRING", "reason": "選定理由" }
+    あなたは中学校のベテラン教師です。
+    生徒がゲーム感覚で学習内容を確認できるよう、指定された【学年】と【科目・分野】に基づいた4択クイズを10問作成してください。
+
+    【制約事項】
+    - 出力は必ず以下のJSON形式のみとしてください。余計な会話は不要です。
+    - 難易度はその学年の標準レベルに合わせること。
+    - 単なる用語の暗記だけでなく、理屈を問う問題や、事例問題などバリエーションを持たせること。
+    - 「解説」は生徒を励ますような口調（「〜だよ！」「すごいね！」など）を含めてください。
+
+    【JSON出力フォーマット】
+    {
+      "questions": [
+        {
+          "id": "一意のID文字列",
+          "question": "問題文",
+          "correct_answer": "正解の選択肢",
+          "wrong_answers": ["不正解1", "不正解2", "不正解3"],
+          "explanation": "解説文"
+        }
+      ]
+    }
     `;
 
-    // 候補問題のデータ量を削減して送信（コスト節約）
-    // 問題文全文ではなく、IDと難易度と冒頭部分だけでも判断可能なら削る手もあるが、
-    // gpt-4o-miniは安いので一旦全文送っても大丈夫です。
-    const questionPool = availableQuestions.map((q: any) => ({
-      id: q.id,
-      diff: q.difficulty,
-      txt: q.question
-    }));
+    const userPrompt = slideContext 
+      ? `以下の学習内容に基づいて、${grade}の${subject}に関するクイズを10問作成してください。\n\n【学習内容】\n${slideContext}`
+      : `${grade}の${subject}に関する重要単元のクイズを10問作成してください。`;
 
     const completion = await openai.chat.completions.create({
-      // ★ここを変更: コスト最適化
       model: "gpt-4o-mini",
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: JSON.stringify({ 
-            history: recentResults, 
-            pool: questionPool
-          }) 
-        }
+        { role: "user", content: userPrompt }
       ],
       response_format: { type: "json_object" },
+      temperature: 0.8, // バリエーションを出すため少し温度を上げる
     });
 
-    const content = completion.choices[0].message.content;
-    const result = JSON.parse(content || '{}');
-    
-    return NextResponse.json(result);
+    const responseContent = completion.choices[0].message.content;
+    if (!responseContent) throw new Error('AIからの応答が空でした');
+
+    const data = JSON.parse(responseContent);
+    const questions = Array.isArray(data) ? data : (data.questions || data.quiz || []);
+
+    return NextResponse.json({ questions });
 
   } catch (e: any) {
-    console.error("Adaptive API Error:", e);
-    return NextResponse.json({ error: e.message }, { status: 500 });
+    console.error("AI Quest Gen Error:", e);
+    return NextResponse.json({ error: e.message || '問題生成中にエラーが発生しました' }, { status: 500 });
   }
 }

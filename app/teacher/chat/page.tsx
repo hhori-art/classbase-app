@@ -1,71 +1,137 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { db } from '@/lib/firebase';
 import { 
-  collection, 
-  query, 
-  where, 
-  getDocs, 
-  addDoc, 
-  orderBy, 
-  onSnapshot, 
-  serverTimestamp 
+  collection, query, where, getDocs, addDoc, onSnapshot, serverTimestamp, limit 
 } from 'firebase/firestore';
 import { useAuth } from '@/app/context/AuthContext';
-import { MessageCircle, ArrowLeft, Search, Send, User, Loader2 } from 'lucide-react';
+import { 
+  MessageCircle, ArrowLeft, Search, Send, User, Loader2, Bot, 
+  AlertTriangle, Users, Filter, X, CheckCircle, Calendar, BookOpen, MapPin 
+} from 'lucide-react';
 import Link from 'next/link';
 
+// メッセージの型定義
+type ChatLogMessage = {
+  id: string;
+  uid: string;
+  role: 'user' | 'assistant' | 'teacher';
+  message: string;
+  teacher_name?: string;
+  student_name?: string;
+  is_alert?: boolean;
+  created_at: any;
+  createdAtDate: Date;
+};
+
 export default function TeacherChatPage() {
-  const { user } = useAuth();
+  const { user, profile } = useAuth();
   const [students, setStudents] = useState<any[]>([]);
   const [filteredStudents, setFilteredStudents] = useState<any[]>([]);
   const [selectedStudent, setSelectedStudent] = useState<any>(null);
-  const [messages, setMessages] = useState<any[]>([]);
+  
+  const [messages, setMessages] = useState<ChatLogMessage[]>([]);
   const [inputText, setInputText] = useState('');
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
 
-  // メッセージ自動スクロール用
+  // 動的な絞り込み選択肢用ステート
+  const [availableOptions, setAvailableOptions] = useState({
+    grades: [] as string[],
+    classrooms: [] as string[],
+    days: [] as string[],
+    subjects: [] as string[], // 全ての科目をここに統合
+  });
+
+  // 一斉送信モーダル用ステート
+  const [isBulkModalOpen, setIsBulkModalOpen] = useState(false);
+  const [bulkMessage, setBulkMessage] = useState('');
+  
+  // 詳細なフィルタリング設定
+  const [bulkFilters, setBulkFilters] = useState({
+    grades: [] as string[],
+    classrooms: [] as string[],
+    days: [] as string[],
+    subjects: [] as string[], 
+  });
+  
+  const [sendingBulk, setSendingBulk] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // 1. 生徒リストと最終メッセージの取得
+  // 1. 生徒リスト取得 & 選択肢の生成
   useEffect(() => {
-    const fetchChatList = async () => {
+    const fetchList = async () => {
       try {
-        // 全生徒を取得
         const sQ = query(collection(db, 'users'), where('role', '==', 'student'));
         const sSnap = await getDocs(sQ);
         const allStudents = sSnap.docs.map(d => ({ id: d.id, ...d.data() }));
 
-        // 全ての個別メッセージを取得して、生徒ごとに最新のものを探す
-        // (データ量が多い場合は非効率ですが、Supabase版のロジックを再現します)
-        // private_messages コレクション: { student_id, content, is_from_student, created_at, ... }
-        const mQ = query(collection(db, 'private_messages'), orderBy('created_at', 'desc'));
-        const mSnap = await getDocs(mQ);
-        const allMsgs = mSnap.docs.map(d => d.data());
+        // ★登録されている情報から選択肢を動的生成
+        const gradeSet = new Set<string>();
+        const classroomSet = new Set<string>();
+        const daySet = new Set<string>();
+        const subjectSet = new Set<string>(); // 科目用セット
 
-        const list = allStudents.map((s: any) => {
-          // この生徒IDに関連するメッセージを探す
-          const lastMsg = allMsgs.find((m: any) => m.student_id === s.id);
-          return { ...s, lastMessage: lastMsg };
-        })
-        .filter((s: any) => s.lastMessage) // メッセージがある生徒のみ表示
-        .sort((a: any, b: any) => {
-          const timeA = a.lastMessage?.created_at ? new Date(a.lastMessage.created_at).getTime() : 0;
-          const timeB = b.lastMessage?.created_at ? new Date(b.lastMessage.created_at).getTime() : 0;
-          return timeB - timeA;
+        allStudents.forEach((s: any) => {
+          if (s.grade) gradeSet.add(s.grade);
+          if (s.classroom && s.classroom !== '') classroomSet.add(s.classroom);
+          if (s.day_of_week && s.day_of_week !== '') daySet.add(s.day_of_week);
+
+          // ★登録科目（subject_1~5, science, social）をすべてスキャンしてリスト化
+          const checkAndAdd = (val: any) => {
+            if (val && typeof val === 'string' && val.trim() !== '') {
+              subjectSet.add(val);
+            }
+          };
+
+          // 通常科目
+          [s.subject_1, s.subject_2, s.subject_3, s.subject_4, s.subject_5].forEach(checkAndAdd);
+          
+          // 理科・社会（文字列として入っている場合）
+          checkAndAdd(s.subject_science);
+          checkAndAdd(s.subject_social);
         });
 
-        setStudents(list);
-        setFilteredStudents(list);
+        const dayOrder = ['月', '火', '水', '木', '金', '土', '日'];
+        const sortDays = (a: string, b: string) => {
+          return dayOrder.indexOf(a.charAt(0)) - dayOrder.indexOf(b.charAt(0));
+        };
+
+        setAvailableOptions({
+          grades: Array.from(gradeSet).sort(),
+          classrooms: Array.from(classroomSet).sort(),
+          days: Array.from(daySet).sort(sortDays),
+          subjects: Array.from(subjectSet).sort(), // 五十音順などにソート
+        });
+
+        // アラート情報の付与
+        const enrichedStudents = await Promise.all(allStudents.map(async (s) => {
+          try {
+            const alertQ = query(
+              collection(db, 'chat_logs'), 
+              where('uid', '==', s.id), 
+              where('is_alert', '==', true),
+              limit(1)
+            );
+            const alertSnap = await getDocs(alertQ);
+            return { ...s, hasAlert: !alertSnap.empty };
+          } catch (e) {
+            return { ...s, hasAlert: false };
+          }
+        }));
+
+        enrichedStudents.sort((a, b) => (b.hasAlert ? 1 : 0) - (a.hasAlert ? 1 : 0));
+
+        setStudents(enrichedStudents);
+        setFilteredStudents(enrichedStudents);
       } catch (e) {
         console.error(e);
       } finally {
         setLoading(false);
       }
     };
-    fetchChatList();
+    fetchList();
   }, []);
 
   // 検索フィルタ
@@ -77,15 +143,15 @@ export default function TeacherChatPage() {
     setFilteredStudents(result);
   }, [search, students]);
 
-  // 生徒選択 & リアルタイムリスナー設定
+  // チャット監視
   useEffect(() => {
     if (!selectedStudent) return;
+    setMessages([]);
 
-    // 選択された生徒とのメッセージをリアルタイム監視
     const q = query(
-      collection(db, 'private_messages'),
-      where('student_id', '==', selectedStudent.id),
-      orderBy('created_at', 'asc')
+      collection(db, 'chat_logs'),
+      where('uid', '==', selectedStudent.id),
+      limit(100)
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -94,59 +160,159 @@ export default function TeacherChatPage() {
         return {
           id: doc.id,
           ...data,
-          // FirestoreのTimestampをDateに変換して扱いやすくする
-          createdAtDate: data.created_at ? new Date(data.created_at.seconds * 1000) : new Date() 
-        };
+          createdAtDate: data.created_at ? new Date(data.created_at.seconds * 1000) : new Date()
+        } as ChatLogMessage;
       });
-      setMessages(msgs);
       
-      // スクロール
-      setTimeout(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-      }, 100);
+      msgs.sort((a, b) => a.createdAtDate.getTime() - b.createdAtDate.getTime());
+      setMessages(msgs);
     });
 
     return () => unsubscribe();
   }, [selectedStudent]);
 
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
   const handleSend = async () => {
     if (!inputText.trim() || !selectedStudent || !user) return;
-    
     try {
-      await addDoc(collection(db, 'private_messages'), {
-        student_id: selectedStudent.id, // 相手の生徒ID
-        teacher_id: user.uid,           // 送信した講師ID
-        content: inputText,
-        is_from_student: false,         // 講師からのメッセージ
+      await addDoc(collection(db, 'chat_logs'), {
+        uid: selectedStudent.id,
+        role: 'teacher',
+        teacher_name: profile?.name || '担当講師',
+        student_name: selectedStudent.student_name,
+        message: inputText,
         created_at: serverTimestamp()
       });
-
       setInputText('');
-      // リアルタイムリスナーが画面を更新するので、ここで手動更新は不要
     } catch (e) {
       alert('送信エラー');
       console.error(e);
     }
   };
 
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  // --- 一斉送信関連ロジック ---
+
+  // ターゲット計算 (AND条件)
+  const bulkTargets = useMemo(() => {
+    if (
+      bulkFilters.grades.length === 0 && 
+      bulkFilters.classrooms.length === 0 &&
+      bulkFilters.days.length === 0 &&
+      bulkFilters.subjects.length === 0
+    ) {
+      return [];
+    }
+
+    return students.filter(s => {
+      // 1. 学年フィルタ
+      if (bulkFilters.grades.length > 0 && (!s.grade || !bulkFilters.grades.includes(s.grade))) return false;
+      
+      // 2. 校舎フィルタ
+      if (bulkFilters.classrooms.length > 0 && (!s.classroom || !bulkFilters.classrooms.includes(s.classroom))) return false;
+
+      // 3. 曜日フィルタ
+      if (bulkFilters.days.length > 0 && (!s.day_of_week || !bulkFilters.days.includes(s.day_of_week))) return false;
+
+      // 4. 受講科目フィルタ (OR条件: 指定した科目のいずれか1つでも持っていればOK)
+      if (bulkFilters.subjects.length > 0) {
+        // 生徒が持っている全科目を配列化
+        const mySubjects = [
+          s.subject_1, s.subject_2, s.subject_3, s.subject_4, s.subject_5,
+          s.subject_science,
+          s.subject_social
+        ].filter(v => v && typeof v === 'string'); // null/undefined除去
+
+        // 選択されたフィルタ科目のうち、生徒が持っている科目が一つでもあるか
+        const hasSubject = bulkFilters.subjects.some(filterSub => mySubjects.includes(filterSub));
+        if (!hasSubject) return false;
+      }
+
+      return true;
+    });
+  }, [bulkFilters, students]);
+
+  // フィルタ切り替えヘルパー
+  const toggleFilter = (type: 'grades' | 'classrooms' | 'days' | 'subjects', value: string) => {
+    setBulkFilters(prev => {
+      const current = prev[type];
+      if (current.includes(value)) {
+        return { ...prev, [type]: current.filter(v => v !== value) };
+      } else {
+        return { ...prev, [type]: [...current, value] };
+      }
+    });
+  };
+
+  // 一斉送信実行
+  const handleBulkSend = async () => {
+    if (!bulkMessage.trim()) return alert('メッセージを入力してください');
+    if (bulkTargets.length === 0) return alert('条件に一致する生徒がいません');
+    if (!confirm(`${bulkTargets.length}名のチャットにメッセージを一斉送信しますか？`)) return;
+
+    setSendingBulk(true);
+    try {
+      const tasks = bulkTargets.map(student => 
+        addDoc(collection(db, 'chat_logs'), {
+          uid: student.id,
+          role: 'teacher',
+          teacher_name: profile?.name || '担当講師',
+          student_name: student.student_name,
+          message: bulkMessage,
+          is_broadcast: true, 
+          created_at: serverTimestamp()
+        })
+      );
+
+      await Promise.all(tasks);
+      
+      alert('送信が完了しました');
+      setIsBulkModalOpen(false);
+      setBulkMessage('');
+    } catch (e) {
+      console.error(e);
+      alert('送信中にエラーが発生しました');
+    } finally {
+      setSendingBulk(false);
+    }
+  };
+
   return (
-    <div className="min-h-screen bg-gray-100 p-6 flex flex-col h-screen overflow-hidden">
+    <div className="min-h-screen bg-gray-100 p-6 flex flex-col h-screen overflow-hidden font-sans">
       <div className="flex-none mb-4">
         <Link href="/teacher" className="flex items-center text-gray-500 hover:text-gray-800"><ArrowLeft size={18}/> 管理画面へ戻る</Link>
       </div>
 
-      <div className="flex flex-1 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-        {/* 左サイドバー: 生徒リスト */}
-        <div className="w-1/3 border-r border-gray-200 flex flex-col">
+      <div className="flex flex-1 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden relative">
+        
+        {/* 左サイドバー */}
+        <div className="w-1/3 border-r border-gray-200 flex flex-col min-w-[300px]">
           <div className="p-4 border-b border-gray-200 bg-gray-50">
-            <h2 className="font-bold text-gray-700 mb-2 flex items-center gap-2">
-              <MessageCircle size={18}/> 個別相談リスト
-            </h2>
+            <div className="flex justify-between items-center mb-3">
+              <h2 className="font-bold text-gray-700 flex items-center gap-2">
+                <MessageCircle size={18}/> チャット一覧
+              </h2>
+              <button 
+                onClick={() => setIsBulkModalOpen(true)}
+                className="bg-indigo-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg shadow-sm hover:bg-indigo-700 flex items-center gap-1 transition-all"
+              >
+                <Users size={14}/> 一斉送信
+              </button>
+            </div>
             <div className="relative">
               <Search className="absolute left-3 top-2.5 text-gray-400" size={16} />
               <input 
                 type="text" 
-                placeholder="名前や学年で検索..." 
+                placeholder="生徒名検索..." 
                 className="w-full pl-9 p-2 border rounded-lg text-sm bg-white focus:ring-2 focus:ring-blue-200 outline-none"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
@@ -158,93 +324,207 @@ export default function TeacherChatPage() {
             {loading ? (
               <div className="flex justify-center py-10"><Loader2 className="animate-spin text-gray-400"/></div>
             ) : filteredStudents.length === 0 ? (
-              <div className="p-4 text-center text-xs text-gray-400">メッセージ履歴のある生徒はいません</div>
+              <div className="p-4 text-center text-xs text-gray-400">生徒が見つかりません</div>
             ) : (
-              filteredStudents.map(student => (
-                <div 
-                  key={student.id} 
-                  onClick={() => setSelectedStudent(student)}
-                  className={`p-4 border-b border-gray-100 cursor-pointer hover:bg-gray-50 transition-colors ${selectedStudent?.id === student.id ? 'bg-blue-50 border-l-4 border-l-blue-500' : ''}`}
-                >
-                  <div className="flex justify-between items-start">
-                    <div className="font-bold text-gray-800 text-sm">{student.student_name}</div>
-                    <span className={`text-[10px] px-1.5 py-0.5 rounded ${student.grade?.includes('3') ? 'bg-red-100 text-red-600' : 'bg-green-100 text-green-600'}`}>
-                      {student.grade}
-                    </span>
+              filteredStudents.map(student => {
+                const dateStr = student.lastMessageAt ? new Date(student.lastMessageAt * 1000).toLocaleDateString() : '';
+                return (
+                  <div 
+                    key={student.id} 
+                    onClick={() => setSelectedStudent(student)}
+                    className={`p-4 border-b border-gray-100 cursor-pointer hover:bg-gray-50 transition-colors ${selectedStudent?.id === student.id ? 'bg-blue-50 border-l-4 border-l-blue-500' : ''}`}
+                  >
+                    <div className="flex justify-between items-center mb-1">
+                      <div className="font-bold text-gray-800 text-sm flex items-center gap-2">
+                        {student.student_name}
+                        {student.hasAlert && (
+                          <span className="bg-red-100 text-red-600 text-[10px] px-1.5 py-0.5 rounded-full flex items-center gap-1 animate-pulse">
+                            <AlertTriangle size={10}/> Alert
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-[10px] text-gray-400">{student.grade}</span>
+                    </div>
+                    <div className="flex justify-between items-center text-[10px] text-gray-400">
+                      <span className="flex items-center gap-1">
+                        <span className="w-2 h-2 rounded-full bg-gray-300"></span> 履歴を確認
+                      </span>
+                      <span>{dateStr}</span>
+                    </div>
                   </div>
-                  <p className="text-xs text-gray-500 mt-1 line-clamp-1 truncate">
-                    {student.lastMessage?.is_from_student ? '📩' : '↩️'} {student.lastMessage?.content}
-                  </p>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
         </div>
 
-        {/* 右メインエリア: チャット画面 */}
+        {/* 右メインエリア */}
         <div className="flex-1 flex flex-col bg-gray-50">
           {selectedStudent ? (
             <>
-              {/* チャットヘッダー */}
-              <div className="p-4 bg-white border-b border-gray-200 flex items-center gap-3 shadow-sm z-10">
+              <div className="p-4 bg-white border-b border-gray-200 shadow-sm z-10 flex items-center gap-3">
                 <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center text-blue-600 border border-blue-200">
                   <User size={20} />
                 </div>
                 <div>
-                  <div className="font-bold text-gray-800 text-lg">{selectedStudent.student_name}</div>
-                  <div className="text-xs text-gray-500 font-mono">ID: {selectedStudent.lifetime_id}</div>
+                  <div className="font-bold text-gray-800 text-lg flex items-center gap-2">
+                    {selectedStudent.student_name}
+                    {selectedStudent.hasAlert && <AlertTriangle size={18} className="text-red-500"/>}
+                  </div>
+                  <div className="flex gap-2 text-xs text-gray-500 font-mono">
+                    <span>{selectedStudent.classroom}</span>
+                    <span>{selectedStudent.day_of_week}</span>
+                  </div>
                 </div>
               </div>
 
-              {/* メッセージ表示エリア */}
-              <div className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar">
-                {messages.map(msg => (
-                  <div key={msg.id} className={`flex ${msg.is_from_student ? 'justify-start' : 'justify-end'}`}>
-                    <div className={`max-w-[70%] p-3 rounded-2xl text-sm shadow-sm ${
-                      msg.is_from_student 
-                        ? 'bg-white border border-gray-200 text-gray-800 rounded-tl-none' 
-                        : 'bg-blue-600 text-white rounded-tr-none'
-                    }`}>
-                      <div className="whitespace-pre-wrap leading-relaxed">{msg.content}</div>
-                      <div className={`text-[10px] mt-1 text-right ${msg.is_from_student ? 'text-gray-400' : 'text-blue-200'}`}>
-                        {msg.createdAtDate.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+              <div className="flex-1 overflow-y-auto p-4 space-y-6 custom-scrollbar bg-[#F4F6F8]">
+                {messages.map(msg => {
+                  const isTeacher = msg.role === 'teacher';
+                  const isAI = msg.role === 'assistant';
+                  const isStudent = msg.role === 'user';
+                  const alertStyle = msg.is_alert ? 'border-2 border-red-400 bg-red-50 ring-2 ring-red-100' : '';
+
+                  return (
+                    <div key={msg.id} className={`flex ${isTeacher ? 'justify-end' : 'justify-start'}`}>
+                      <div className={`flex flex-col max-w-[75%] ${isTeacher ? 'items-end' : 'items-start'}`}>
+                        <div className="flex items-center gap-1 mb-1 px-1">
+                          {isAI && <span className="text-[10px] font-bold text-purple-600 flex items-center gap-1"><Bot size={10}/> AI Tutor</span>}
+                          {isTeacher && <span className="text-[10px] font-bold text-blue-600">{msg.teacher_name || '講師'}</span>}
+                          {isStudent && <span className="text-[10px] font-bold text-gray-500">生徒</span>}
+                        </div>
+                        <div className={`p-3.5 rounded-2xl text-sm shadow-sm relative ${
+                          isTeacher 
+                            ? 'bg-blue-600 text-white rounded-tr-none' 
+                            : isAI 
+                              ? `bg-white text-gray-800 border border-gray-200 rounded-tl-none ${alertStyle}`
+                              : 'bg-green-50 text-gray-800 border border-green-100 rounded-tl-none'
+                        }`}>
+                          {msg.is_alert && <div className="flex items-center gap-1 text-red-500 font-bold text-xs mb-1 pb-1 border-b border-red-200"><AlertTriangle size={12}/> AI Alert: 要確認</div>}
+                          <div className="whitespace-pre-wrap leading-relaxed">{msg.message}</div>
+                        </div>
+                        <div className="text-[9px] text-gray-400 mt-1 px-1">{msg.createdAtDate.toLocaleString([], {month:'numeric', day:'numeric', hour: '2-digit', minute:'2-digit'})}</div>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
                 <div ref={messagesEndRef} />
               </div>
 
-              {/* 入力エリア */}
               <div className="p-4 bg-white border-t border-gray-200">
-                <div className="flex gap-2">
-                  <input 
-                    type="text" 
-                    className="flex-1 p-3 border border-gray-300 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 bg-gray-50 transition-all"
-                    placeholder="メッセージを入力..."
-                    value={inputText}
-                    onChange={(e) => setInputText(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-                  />
-                  <button 
-                    onClick={handleSend} 
-                    disabled={!inputText.trim()}
-                    className="bg-blue-600 text-white p-3 rounded-xl hover:bg-blue-700 transition-colors disabled:opacity-50 shadow-md shadow-blue-100"
-                  >
-                    <Send size={20} />
-                  </button>
+                <div className="flex gap-2 items-end">
+                  <div className="flex-1 bg-gray-50 border border-gray-300 rounded-2xl p-2 focus-within:ring-2 focus-within:ring-blue-500 transition-all">
+                    <textarea 
+                      className="w-full bg-transparent outline-none text-sm p-1 resize-none h-16"
+                      placeholder="メッセージを入力 (Ctrl+Enterで送信)"
+                      value={inputText}
+                      onChange={(e) => setInputText(e.target.value)}
+                      onKeyDown={handleKeyDown}
+                    />
+                  </div>
+                  <button onClick={handleSend} disabled={!inputText.trim()} className="bg-blue-600 text-white p-3 rounded-full hover:bg-blue-700 transition-colors disabled:opacity-50 shadow-lg shadow-blue-100 mb-1"><Send size={18} /></button>
                 </div>
+                <p className="text-[10px] text-gray-400 mt-1 text-center">※ Enterで改行、Ctrl(Command)+Enterで送信</p>
               </div>
             </>
           ) : (
             <div className="flex-1 flex items-center justify-center text-gray-400 flex-col gap-4">
-              <div className="w-20 h-20 bg-gray-100 rounded-full flex items-center justify-center">
-                <MessageCircle size={40} className="text-gray-300" />
-              </div>
+              <div className="w-24 h-24 bg-gray-100 rounded-full flex items-center justify-center"><MessageCircle size={48} className="text-gray-300" /></div>
               <p className="text-sm font-bold">左のリストから生徒を選択してください</p>
             </div>
           )}
         </div>
+
+        {/* === 一斉送信モーダル === */}
+        {isBulkModalOpen && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
+            <div className="bg-white w-full max-w-2xl h-[90vh] rounded-3xl shadow-2xl flex flex-col overflow-hidden">
+              
+              <div className="bg-gray-800 text-white p-5 flex justify-between items-center shrink-0">
+                <h3 className="font-bold flex items-center gap-2 text-lg"><Users size={20}/> チャット一斉送信</h3>
+                <button onClick={() => setIsBulkModalOpen(false)} className="hover:bg-white/20 p-2 rounded-full transition-colors"><X size={20}/></button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-6 bg-gray-50 space-y-6">
+                
+                {/* 絞り込み設定 */}
+                <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-200 space-y-5">
+                  <h4 className="font-bold text-gray-700 flex items-center gap-2 text-sm"><Filter size={16}/> 送信先の絞り込み (AND条件)</h4>
+                  
+                  {/* 学年 */}
+                  <div>
+                    <p className="text-xs font-bold text-gray-400 mb-2 flex items-center gap-1"><Users size={12}/> 学年</p>
+                    <div className="flex flex-wrap gap-2">
+                      {availableOptions.grades.length > 0 ? availableOptions.grades.map(g => (
+                        <button key={g} onClick={() => toggleFilter('grades', g)} className={`px-3 py-1.5 rounded-full text-xs font-bold transition-all border ${bulkFilters.grades.includes(g) ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'}`}>{g}</button>
+                      )) : <span className="text-xs text-gray-400">登録なし</span>}
+                    </div>
+                  </div>
+
+                  {/* 校舎 */}
+                  <div>
+                    <p className="text-xs font-bold text-gray-400 mb-2 flex items-center gap-1"><MapPin size={12}/> 校舎</p>
+                    <div className="flex flex-wrap gap-2">
+                      {availableOptions.classrooms.length > 0 ? availableOptions.classrooms.map(s => (
+                        <button key={s} onClick={() => toggleFilter('classrooms', s)} className={`px-3 py-1.5 rounded-full text-xs font-bold transition-all border ${bulkFilters.classrooms.includes(s) ? 'bg-green-600 text-white border-green-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'}`}>{s}</button>
+                      )) : <span className="text-xs text-gray-400">登録なし</span>}
+                    </div>
+                  </div>
+
+                  {/* 曜日 */}
+                  <div>
+                    <p className="text-xs font-bold text-gray-400 mb-2 flex items-center gap-1"><Calendar size={12}/> 通塾曜日</p>
+                    <div className="flex flex-wrap gap-2">
+                      {availableOptions.days.length > 0 ? availableOptions.days.map(d => (
+                        <button key={d} onClick={() => toggleFilter('days', d)} className={`px-3 py-1.5 rounded-full text-xs font-bold transition-all border ${bulkFilters.days.includes(d) ? 'bg-orange-500 text-white border-orange-500' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'}`}>{d}</button>
+                      )) : <span className="text-xs text-gray-400">登録なし</span>}
+                    </div>
+                  </div>
+
+                  {/* 受講科目（全て動的） */}
+                  <div>
+                    <p className="text-xs font-bold text-gray-400 mb-2 flex items-center gap-1"><BookOpen size={12}/> 受講科目 (いずれかを受講)</p>
+                    <div className="flex flex-wrap gap-2">
+                      {availableOptions.subjects.length > 0 ? availableOptions.subjects.map(sub => (
+                        <button key={sub} onClick={() => toggleFilter('subjects', sub)} className={`px-3 py-1.5 rounded-full text-xs font-bold transition-all border ${bulkFilters.subjects.includes(sub) ? 'bg-teal-600 text-white border-teal-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'}`}>{sub}</button>
+                      )) : <span className="text-xs text-gray-400">登録科目なし</span>}
+                    </div>
+                  </div>
+
+                  <div className="bg-blue-50 text-blue-700 px-4 py-3 rounded-xl text-sm font-bold flex items-center justify-between">
+                    <span>条件一致:</span>
+                    <span className="text-lg">{bulkTargets.length} 名</span>
+                  </div>
+                </div>
+
+                {/* メッセージ入力 */}
+                <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-200">
+                  <h4 className="font-bold text-gray-700 mb-3 text-sm">メッセージ内容</h4>
+                  <textarea 
+                    className="w-full h-32 p-4 bg-gray-50 border border-gray-300 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 text-sm resize-none"
+                    placeholder="生徒のチャット画面に直接届きます..."
+                    value={bulkMessage}
+                    onChange={(e) => setBulkMessage(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div className="p-5 border-t bg-white shrink-0 shadow-[0_-8px_30px_rgba(0,0,0,0.04)] z-10 flex justify-end gap-3">
+                <button onClick={() => setIsBulkModalOpen(false)} className="px-6 py-3 rounded-xl font-bold text-gray-500 hover:bg-gray-100 transition-colors">キャンセル</button>
+                <button 
+                  onClick={handleBulkSend}
+                  disabled={sendingBulk || bulkTargets.length === 0 || !bulkMessage.trim()}
+                  className="px-8 py-3 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 shadow-lg shadow-indigo-200 transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                >
+                  {sendingBulk ? <Loader2 className="animate-spin" size={20}/> : <Send size={20}/>}
+                  {sendingBulk ? '送信中...' : '一斉送信する'}
+                </button>
+              </div>
+
+            </div>
+          </div>
+        )}
+
       </div>
     </div>
   );

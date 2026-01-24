@@ -1,25 +1,10 @@
 'use client';
 
 import Link from 'next/link';
-import { ArrowLeft, Database, FileText, UserPlus, Calendar, AlertTriangle, Users, Brain } from 'lucide-react';
+import { ArrowLeft, Database, FileText, UserPlus, Calendar, AlertTriangle, Users, Presentation } from 'lucide-react';
 import AccountImportButton from '@/app/components/AccountImportButton';
 import PfImportButton from '@/app/components/PfImportButton';
 import ShiftImportButton from '@/app/components/ShiftImportButton';
-// ★QuizImportButton は先ほど作成した QuizManager コンポーネントに統合されているので
-// ここでは QuizManager をインポートする、もしくは単体の QuizImportButton を使うか選択が必要です。
-// 今回は「インポートセンター」という一覧ページなので、ボタン単体を表示するコンポーネントを想定しています。
-// もし QuizManager 全体を表示したい場合は、このページではなく別ページに飛ばすか、ここに埋め込む形になります。
-// ここでは、ボタン単体として機能するラッパーまたはコンポーネントとして配置します。
-
-// ★簡易的なボタンコンポーネントとして、先ほどのQuizManagerの一部機能だけを持つボタンを作成するか、
-// あるいはページ遷移させるのがUIとしては綺麗かもしれません。
-// ここでは、直感的に使えるように「QuizImportButton」コンポーネント（Shift-JIS対応版）を想定して配置します。
-
-import QuizImportButton from '@/app/components/QuizManager'; 
-// ↑ もしQuizImportButton.tsxがない場合は、QuizManagerからボタン部分だけ切り出すか、
-//   QuizManager全体を配置することになります。
-//   今回は、このページ内で完結させるため、先ほど作成した「QuizManager」をこのページの下部に配置する、
-//   あるいはインポートボタンだけをここに置く形にします。
 
 export default function ImportCenterPage() {
   return (
@@ -148,28 +133,31 @@ export default function ImportCenterPage() {
             </div>
           </section>
 
-          {/* 5. 小テスト問題 (★新規追加) */}
+          {/* 5. スライド・教材データ管理 (旧6から繰り上げ) */}
           <section className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
-            <div className="bg-indigo-50 p-5 border-b border-indigo-100 flex items-center gap-4">
-              <div className="bg-white p-3 rounded-xl text-indigo-600 shadow-sm">
-                <Brain size={28} />
+            <div className="bg-teal-50 p-5 border-b border-teal-100 flex items-center gap-4">
+              <div className="bg-white p-3 rounded-xl text-teal-600 shadow-sm">
+                <Presentation size={28} />
               </div>
               <div>
-                <h2 className="text-xl font-bold text-gray-800">5. 小テスト問題 (AI学習用)</h2>
-                <p className="text-sm text-gray-500">アダプティブ学習で使用する問題データを登録・管理します。</p>
+                <h2 className="text-xl font-bold text-gray-800">5. スライド・教材データ登録</h2>
+                <p className="text-sm text-gray-500">AI問題生成の元となる学習単元データを登録します。</p>
               </div>
             </div>
             <div className="p-6">
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
                 <div className="text-sm text-gray-600 space-y-1 flex-1">
-                  <p><strong>機能:</strong> CSV一括登録、問題一覧の確認、個別/全削除</p>
-                  <p><strong>CSV形式:</strong> 問題文, 正解, 誤答1, 誤答2... (Shift-JIS対応)</p>
+                  <p><strong>機能:</strong> 単元ごとのスライド内容（テキスト）の登録・編集・削除</p>
+                  <p>ここで登録した内容に基づいて、AIがその単元に特化した問題を生成します。</p>
                 </div>
                 <div className="shrink-0">
-                  {/* ここでQuizImportButtonの代わりに、管理画面へのリンクや
-                      モーダルを開くボタンなどを置くのが一般的ですが、
-                      今回は直接インポート機能を呼び出すボタンコンポーネントを配置します */}
-                   <QuizImportButton />
+                  <Link 
+                    href="/master/slides" 
+                    className="inline-flex items-center gap-2 bg-teal-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-teal-700 transition-colors shadow-sm"
+                  >
+                    <Presentation size={20} />
+                    スライド管理へ
+                  </Link>
                 </div>
               </div>
             </div>

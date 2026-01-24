@@ -1,12 +1,10 @@
 {
-  "name": "ClassBase 理社講座",
-  "short_name": "ClassBase",
-  "description": "オンライン理社講座の学習管理アプリ",
-  "start_url": "/",
+  "name": "理社講座アプリ",
+  "short_name": "理社講座",
+  "start_url": "/student",
   "display": "standalone",
-  "background_color": "#ffffff",
-  "theme_color": "#ffffff",
-  "orientation": "portrait",
+  "background_color": "#F0F4F8",
+  "theme_color": "#f97316",
   "icons": [
     {
       "src": "/icon.png",
