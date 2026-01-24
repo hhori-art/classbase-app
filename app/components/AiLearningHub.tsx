@@ -67,9 +67,16 @@ export default function AiLearningHub({ userId }: { userId: string }) {
 
     if (isCorrect) {
       setFeedback('correct');
-      // ポイント加算（モードによって種類を変える）
-      const pointType = activeTab === 'TASK' ? 'HOMEWORK' : 'QUIZ';
-      await addPoints(userId, pointType);
+      
+      // ▼▼▼ 修正箇所 ▼▼▼
+      // ポイント数と理由を定義
+      const reason = activeTab === 'TASK' ? 'HOMEWORK' : 'QUIZ';
+      const points = activeTab === 'TASK' ? 50 : 20; // 宿題なら50pt, クイズなら20pt
+
+      // addPoints(userId, amount, reason) の順で渡す
+      await addPoints(userId, points, reason);
+      // ▲▲▲ 修正箇所 ▲▲▲
+
     } else {
       setFeedback('wrong');
     }
