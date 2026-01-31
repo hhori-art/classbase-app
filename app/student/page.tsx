@@ -28,15 +28,12 @@ const CLASS_TIMES = {
   period2: { start: '20:35', end: '21:40' }
 };
 
-type Props = { 
-  initialProfile?: any; 
-};
-
-export default function StudentDashboard({ initialProfile }: Props) {
+// ★修正: 引数（Props）を削除しました。
+export default function StudentDashboard() {
   const { user, profile: authProfile, loading: authLoading } = useAuth();
   
-  // 初期データの決定 (Props優先 -> AuthContext -> null)
-  const [userData, setUserData] = useState<any>(initialProfile || authProfile || null);
+  // 初期データは AuthContext から取得、または null
+  const [userData, setUserData] = useState<any>(authProfile || null);
   
   const [isTrophyOpen, setIsTrophyOpen] = useState(false);
   const [popMessage, setPopMessage] = useState<string | null>(null);
@@ -62,12 +59,10 @@ export default function StudentDashboard({ initialProfile }: Props) {
 
   // userDataの同期と初期化ロジック
   useEffect(() => {
-    // ユーザーIDの特定 (Props または AuthContext から)
-    const targetUid = initialProfile?.uid || user?.uid;
-
-    if (targetUid) {
+    // userが存在する場合のみ実行
+    if (user?.uid) {
       // リアルタイムリスナーの設定
-      const unsub = onSnapshot(doc(db, 'users', targetUid), (docSnap) => {
+      const unsub = onSnapshot(doc(db, 'users', user.uid), (docSnap) => {
         if (docSnap.exists()) {
           const data = docSnap.data();
           setUserData(data);
@@ -81,11 +76,10 @@ export default function StudentDashboard({ initialProfile }: Props) {
       setNow(new Date());
       const timer = setInterval(() => setNow(new Date()), 60000);
 
-      // 初期データがある場合の一回目実行
-      const initialData = initialProfile || authProfile;
-      if (initialData) {
-        if (initialData.day_of_week) checkNextClass(initialData.day_of_week);
-        if (initialData.grade) checkUrgentHomework(initialData.grade, initialData.subjects);
+      // 初期データ(AuthContext由来)がある場合の一回目実行
+      if (authProfile) {
+        if (authProfile.day_of_week) checkNextClass(authProfile.day_of_week);
+        if (authProfile.grade) checkUrgentHomework(authProfile.grade, authProfile.subjects);
       }
 
       return () => {
@@ -94,12 +88,11 @@ export default function StudentDashboard({ initialProfile }: Props) {
       };
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialProfile, user, authProfile]); // checkNextClass, checkUrgentHomework は依存配列に含めない
+  }, [user, authProfile]); 
 
   // 未回答依頼チェック
   useEffect(() => {
-    const targetUid = initialProfile?.uid || user?.uid;
-    if (!targetUid) return;
+    if (!user?.uid) return;
 
     const checkRegistrations = async () => {
       try {
@@ -109,7 +102,7 @@ export default function StudentDashboard({ initialProfile }: Props) {
 
         if (activeRequests.length === 0) return;
 
-        const myRegQuery = query(collection(db, 'student_registrations'), where('student_id', '==', targetUid));
+        const myRegQuery = query(collection(db, 'student_registrations'), where('student_id', '==', user.uid));
         const myRegSnap = await getDocs(myRegQuery);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const myAnsweredIds = myRegSnap.docs.map((d: any) => d.data().request_id);
@@ -129,7 +122,7 @@ export default function StudentDashboard({ initialProfile }: Props) {
     };
 
     checkRegistrations();
-  }, [initialProfile, user]);
+  }, [user]);
 
   const checkNextClass = async (dayOfWeek: string) => {
     if (!dayOfWeek) return;
@@ -253,6 +246,9 @@ export default function StudentDashboard({ initialProfile }: Props) {
       </div>
     );
   }
+
+  // 未ログインの場合は AuthContext 側で処理されるか、何も表示しない
+  if (!user) return null;
 
   return (
     <div className="min-h-screen bg-[#F0F4F8] pb-32 font-sans relative overflow-hidden">
