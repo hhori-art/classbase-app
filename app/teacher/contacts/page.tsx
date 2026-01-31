@@ -52,9 +52,6 @@ export default function TeacherContactsPage() {
     try {
       // 1. 現在の週番号を取得
       const settingsSnap = await getDoc(doc(db, 'settings', 'global'));
-      
-      // ★修正: current_week が undefined の場合に備えて、必ず '1' などの値が入るように修正
-      // これが "Unsupported field value: undefined" エラーの対策です
       const data = settingsSnap.data();
       const week = (data && data.current_week) ? data.current_week : '1';
       
@@ -66,8 +63,6 @@ export default function TeacherContactsPage() {
       const allStudents = userSnap.docs.map(d => ({ id: d.id, ...d.data() }));
 
       // 3. PFレコード(今週の出席状況)を取得して除外リストを作成
-      // 出席(出), 欠席(欠), 遅刻(遅) がすでについている生徒は除外対象
-      // ★修正した week 変数を使うのでエラーになりません
       const pfQ = query(collection(db, 'pf_records'), where('week_number', '==', week));
       const pfSnap = await getDocs(pfQ);
       
@@ -79,18 +74,12 @@ export default function TeacherContactsPage() {
 
       // 4. フィルタリング実行 (未出席かつ未連絡のみ残す)
       const targetList = allStudents.filter((st: any) => {
-        // (A) 曜日・学年フィルター
-        // filters.day が空なら全曜日、そうでなければ一致するもの
         if (filters.day && st.day_of_week !== filters.day) return false;
         if (filters.grade && st.grade !== filters.grade) return false;
 
-        // (B) ステータスチェック
         const status = statusMap.get(st.uid);
-        
-        // すでに出席(Zoom含む)、欠席(申請含む)、遅刻がついている場合はリストから消す
         if (status === '出' || status === '欠' || status === '遅') return false;
 
-        // ステータスがない(未定) または '未' の場合のみ表示
         return true;
       });
 
@@ -103,13 +92,11 @@ export default function TeacherContactsPage() {
     }
   };
 
-  // 電話済み処理 (ステータスは変えず、ログだけ残す)
   const handleMarkCalled = async (student: any) => {
     const note = inputNotes[student.uid] || '';
     if (!confirm(`${student.student_name} さんに電話済みとして記録しますか？`)) return;
 
     try {
-      // ログ保存
       await addDoc(collection(db, 'contact_logs'), {
         student_id: student.uid,
         student_name: student.student_name,
@@ -119,7 +106,6 @@ export default function TeacherContactsPage() {
         created_at: serverTimestamp()
       });
 
-      // ローカル表示更新 (グレーアウトなど)
       setCalledStates(prev => ({ ...prev, [student.uid]: true }));
       alert('電話記録を保存しました');
     } catch (e) {
@@ -128,7 +114,6 @@ export default function TeacherContactsPage() {
     }
   };
 
-  // 欠席確定処理 (PFレコードを更新してリストから消す)
   const handleConfirmAbsence = async (student: any) => {
     const note = inputNotes[student.uid] || '電話確認による欠席';
     if (!confirm(`${student.student_name} さんを「欠席」として確定しますか？\n(リストから消えます)`)) return;
@@ -137,16 +122,14 @@ export default function TeacherContactsPage() {
       const recordId = `${student.uid}_w${currentWeek}`;
       const pfRef = doc(db, 'pf_records', recordId);
 
-      // PFレコードを更新 (または作成)
       await setDoc(pfRef, {
         student_id: student.uid,
         week_number: currentWeek,
-        attendance_status: '欠', // これでリストから除外される
+        attendance_status: '欠', 
         note: note,
         updated_at: new Date().toISOString()
       }, { merge: true });
 
-      // ログ保存
       await addDoc(collection(db, 'contact_logs'), {
         student_id: student.uid,
         student_name: student.student_name,
@@ -157,7 +140,6 @@ export default function TeacherContactsPage() {
       });
 
       alert('欠席登録しました');
-      // リストから即座に除外
       setStudents(prev => prev.filter(s => s.uid !== student.uid));
 
     } catch (e) {
@@ -172,7 +154,8 @@ export default function TeacherContactsPage() {
         
         {/* ヘッダー */}
         <div className="flex items-center gap-4 mb-6">
-          <Link href="/teacher" className="bg-white p-2 rounded-full shadow text-gray-600"><ArrowLeft size={20} /></Link>
+          {/* ★修正: リンク先を /teacher から /teacher/work に変更 */}
+          <Link href="/teacher/work" className="bg-white p-2 rounded-full shadow text-gray-600"><ArrowLeft size={20} /></Link>
           <div>
             <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
               <Phone className="text-blue-600" /> 未連絡・欠席確認リスト
@@ -275,7 +258,6 @@ export default function TeacherContactsPage() {
                     />
                     
                     <div className="flex gap-2">
-                      {/* 電話済みボタン */}
                       <button
                         onClick={() => handleMarkCalled(student)}
                         disabled={isCalled}
@@ -288,7 +270,6 @@ export default function TeacherContactsPage() {
                         {isCalled ? <><CheckCircle size={14}/> 電話済</> : <><PhoneOff size={14}/> 電話のみ(留守等)</>}
                       </button>
                       
-                      {/* 欠席確定ボタン */}
                       <button
                         onClick={() => handleConfirmAbsence(student)}
                         className="flex-1 bg-red-500 text-white px-4 py-2.5 rounded-lg text-xs font-bold hover:bg-red-600 shadow-md shadow-red-100 flex items-center justify-center gap-1 transition-all active:scale-95"

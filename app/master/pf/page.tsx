@@ -3,9 +3,9 @@
 import { useState, useEffect, useMemo } from 'react';
 import { db } from '@/lib/firebase';
 import { collection, query, where, getDocs, doc, writeBatch, getDoc } from 'firebase/firestore';
-import { ArrowLeft, Save, Loader2, Search, Download, RefreshCw, ChevronLeft, ChevronRight, Calendar, Filter } from 'lucide-react';
+import { ArrowLeft, Save, Loader2, Search, Download, RefreshCw, ChevronLeft, ChevronRight, Calendar, Filter, UserCheck, BookOpen, AlertTriangle } from 'lucide-react';
 import Link from 'next/link';
-import PfImportButton from '@/app/components/PfImportButton'; // インポートボタン
+import PfImportButton from '@/app/components/PfImportButton';
 
 interface Student {
   id: string;
@@ -19,20 +19,24 @@ interface Student {
   [key: string]: any;
 }
 
+// 3月スタート、翌年2月までのマップ
 const MONTH_MAP: { [key: string]: number[] } = {
-  '3月': [1, 2, 3],
-  '4月': [4, 5, 6, 7],
-  '5月': [8, 9, 10, 11],
-  '6月': [12, 13, 14, 15],
-  '7月': [16, 17, 18, 19],
-  '8月': [20, 21, 22],
-  '9月': [23, 24, 25, 26],
-  '10月': [27, 28, 29, 30],
-  '11月': [31, 32, 33, 34],
-  '12月': [35, 36, 37, 38],
-  '全期間': Array.from({ length: 40 }, (_, i) => i + 1),
+  '3月': [1, 2, 3, 4],
+  '4月': [5, 6, 7, 8],
+  '5月': [9, 10, 11, 12],
+  '6月': [13, 14, 15, 16],
+  '7月': [17, 18, 19, 20],
+  '8月': [21, 22, 23, 24],
+  '9月': [25, 26, 27, 28],
+  '10月': [29, 30, 31, 32],
+  '11月': [33, 34, 35, 36],
+  '12月': [37, 38, 39, 40],
+  '1月': [41, 42, 43, 44],
+  '2月': [45, 46, 47, 48],
+  '全期間': Array.from({ length: 48 }, (_, i) => i + 1),
 };
 
+const MONTH_ORDER = ['3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月', '1月', '2月'];
 const DAYS_OPTIONS = ['月', '火', '水', '木', '金', '土'];
 
 export default function MasterPFPage() {
@@ -56,24 +60,26 @@ export default function MasterPFPage() {
 
   const visibleWeeks = MONTH_MAP[selectedMonth] || MONTH_MAP['全期間'];
 
-  // データ取得関数
+  // 今月の自動選択
+  useEffect(() => {
+    const today = new Date();
+    const month = today.getMonth() + 1;
+    const monthStr = `${month}月`;
+    if (MONTH_MAP[monthStr]) {
+      setSelectedMonth(monthStr);
+    }
+  }, []);
+
+  // データ取得
   const fetchData = async () => {
     setLoading(true);
     try {
-      // 設定取得
       const settingsSnap = await getDoc(doc(db, 'settings', 'global'));
       if (settingsSnap.exists()) {
         const data = settingsSnap.data();
-        // ここでは初期ロード時のみ設定値を反映し、ユーザー操作後はStateを優先する
-        if (!currentWeek || currentWeek === '1') setCurrentWeek(data.current_week || '1');
-        
-        // 月の自動選択
-        const w = Number(data.current_week || '1');
-        const m = Object.keys(MONTH_MAP).find(k => k!=='全期間' && MONTH_MAP[k].includes(w));
-        if (m) setSelectedMonth(m);
+        if (data.current_week) setCurrentWeek(data.current_week);
       }
 
-      // 生徒一覧
       const qUsers = query(collection(db, 'users'), where('role', '==', 'student'));
       const snapUsers = await getDocs(qUsers);
       
@@ -96,7 +102,6 @@ export default function MasterPFPage() {
       list.forEach((s, i) => s.index = i + 1);
 
       setStudents(list);
-      
       const cls = Array.from(new Set(list.map(s => s.classroom).filter(Boolean))).sort();
       setClassrooms(cls);
 
@@ -111,7 +116,7 @@ export default function MasterPFPage() {
     fetchData();
   }, []);
 
-  // レコード取得 (年度や生徒が変わった時)
+  // レコード取得
   useEffect(() => {
     const fetchRecords = async () => {
       if (students.length === 0) return;
@@ -160,11 +165,11 @@ export default function MasterPFPage() {
     const hwRate = totalClasses > 0 ? Math.round((hwSubmittedCount / totalClasses) * 100) : 0;
 
     let attAlert = '';
-    if (absentCount >= 3) attAlert = '要対応③';
-    else if (absentCount >= 1) attAlert = '要対応①';
+    if (absentCount >= 3) attAlert = '警告③';
+    else if (absentCount >= 1) attAlert = '注意①';
 
     let hwAlert = '';
-    if (totalClasses > 0 && hwRate < 50) hwAlert = '要対応';
+    if (totalClasses > 0 && hwRate < 50) hwAlert = '低提出';
 
     return { attRate, hwRate, attAlert, hwAlert };
   };
@@ -199,24 +204,29 @@ export default function MasterPFPage() {
     setFilteredStudents(result);
   }, [students, searchQuery, filterClassroom, filterDay, filterGrade, sortBy, records, currentWeek]);
 
-  // 今週の統計
-  const weekStats = useMemo(() => {
-    if (filteredStudents.length === 0) return { att: 0, hw: 0, late: 0 };
-    let totalAtt = 0, totalLate = 0, totalHw = 0, count = 0;
+  // 全体統計
+  const summaryStats = useMemo(() => {
+    if (filteredStudents.length === 0) return { attAvg: 0, hwAvg: 0, alertCount: 0 };
+
+    let totalAttRate = 0;
+    let totalHwRate = 0;
+    let alertCount = 0;
+    let validCount = 0;
+
     filteredStudents.forEach(s => {
-      const rec = records[s.id]?.[currentWeek];
-      if (rec) {
-        count++;
-        if (rec.attendance_status === '出') totalAtt++;
-        if (rec.attendance_status === '遅') { totalAtt++; totalLate++; }
-        if ((rec.social_hw && rec.social_hw !== '未') || (rec.science_hw && rec.science_hw !== '未')) totalHw++;
-      }
+      const stats = calculateStats(s.id);
+      totalAttRate += stats.attRate;
+      totalHwRate += stats.hwRate;
+      if (stats.attAlert || stats.hwAlert) alertCount++;
+      validCount++;
     });
-    if (count === 0) return { att: 0, hw: 0, late: 0 };
-    return { att: Math.round((totalAtt/count)*100), late: totalLate, hw: Math.round((totalHw/count)*100) };
+
+    const attAvg = validCount > 0 ? Math.round(totalAttRate / validCount) : 0;
+    const hwAvg = validCount > 0 ? Math.round(totalHwRate / validCount) : 0;
+
+    return { attAvg, hwAvg, alertCount };
   }, [filteredStudents, records, currentWeek]);
 
-  // 入力ハンドラ
   const handleInputChange = (studentId: string, week: number, field: string, value: string) => {
     setRecords(prev => ({
       ...prev,
@@ -230,7 +240,6 @@ export default function MasterPFPage() {
     }));
   };
 
-  // 保存
   const handleSave = async () => {
     if (!confirm(`${currentYear}年度のデータとして保存しますか？`)) return;
     setSaving(true);
@@ -252,7 +261,6 @@ export default function MasterPFPage() {
     finally { setSaving(false); }
   };
 
-  // CSVエクスポート
   const handleExportCSV = () => {
     let csv = `\uFEFF${currentYear}年度PFデータ\nNo,教室,生涯番号,氏名,学年,年間出席率,年間宿題率\n`;
     filteredStudents.forEach(s => {
@@ -267,75 +275,98 @@ export default function MasterPFPage() {
   };
 
   const switchMonth = (dir: 'prev' | 'next') => {
-    const months = Object.keys(MONTH_MAP).filter(m => m !== '全期間');
-    const idx = months.indexOf(selectedMonth);
+    const idx = MONTH_ORDER.indexOf(selectedMonth);
     let newIdx = dir === 'next' ? idx + 1 : idx - 1;
-    if (newIdx < 0) newIdx = months.length - 1;
-    if (newIdx >= months.length) newIdx = 0;
-    setSelectedMonth(months[newIdx]);
+    if (newIdx < 0) newIdx = MONTH_ORDER.length - 1;
+    if (newIdx >= MONTH_ORDER.length) newIdx = 0;
+    setSelectedMonth(MONTH_ORDER[newIdx]);
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 p-4 pb-20 font-sans text-xs">
+    <div className="min-h-screen bg-gray-100 p-4 pb-20 font-sans text-xs">
       
-      {/* 統合ヘッダー */}
+      {/* ヘッダー */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 mb-4 sticky top-0 z-30">
-        <div className="bg-indigo-900 text-white p-2 rounded-t-xl flex justify-between items-center">
+        
+        {/* 最上部 */}
+        <div className="bg-slate-800 text-white p-3 rounded-t-xl flex flex-wrap justify-between items-center gap-3">
           <div className="flex items-center gap-3">
-            <Link href="/master" className="p-1 hover:bg-white/20 rounded-full"><ArrowLeft size={16}/></Link>
-            <h1 className="font-bold flex items-center gap-2 text-sm"><RefreshCw size={16}/> 【管理者】PFデータ管理</h1>
+            <Link href="/master" className="p-1.5 hover:bg-white/20 rounded-full transition-colors"><ArrowLeft size={18}/></Link>
+            <h1 className="font-bold flex items-center gap-2 text-base"><RefreshCw size={18} className="text-cyan-400"/> PF管理</h1>
           </div>
 
-          <div className="flex items-center gap-2 bg-indigo-800/50 px-3 py-1 rounded-lg border border-white/10">
-            <Calendar size={14} className="text-white/70"/>
-            <select className="bg-transparent font-bold text-white outline-none cursor-pointer text-sm" value={currentYear} onChange={(e) => setCurrentYear(e.target.value)}>
-              {[2024, 2025, 2026, 2027].map(y => <option key={y} value={y} className="text-black">{y}年度</option>)}
-            </select>
-          </div>
-          
-          <div className="flex items-center gap-2">
-             <span className="text-[10px] opacity-70">集計週:</span>
-             <select className="bg-white/10 border border-white/30 rounded px-1 py-0.5 text-xs outline-none cursor-pointer" value={currentWeek} onChange={(e) => setCurrentWeek(e.target.value)}>
-               {Array.from({length:40},(_,i)=>i+1).map(w => <option key={w} value={String(w)} className="text-black">第 {w} 週</option>)}
-             </select>
-          </div>
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2 bg-slate-700 px-3 py-1.5 rounded-lg border border-slate-600">
+              <Calendar size={14} className="text-cyan-400"/>
+              <select className="bg-transparent font-bold text-white outline-none cursor-pointer text-sm" value={currentYear} onChange={(e) => setCurrentYear(e.target.value)}>
+                {[2024, 2025, 2026, 2027].map(y => <option key={y} value={y} className="text-black">{y}年度</option>)}
+              </select>
+            </div>
+            
+            <div className="flex items-center gap-2">
+               <span className="text-[10px] opacity-70">集計基準:</span>
+               <select className="bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs outline-none cursor-pointer text-white font-mono" value={currentWeek} onChange={(e) => setCurrentWeek(e.target.value)}>
+                 {Array.from({length:48},(_,i)=>i+1).map(w => <option key={w} value={String(w)} className="text-black">第 {w} 週</option>)}
+               </select>
+            </div>
 
-          {/* ★管理者用インポートボタン */}
-          <div>
             <PfImportButton onSuccess={fetchData} />
           </div>
         </div>
 
+        {/* 統計ダッシュボード */}
+        <div className="grid grid-cols-3 divide-x divide-gray-100 border-b border-gray-200 bg-white">
+          <div className="p-3 flex flex-col items-center justify-center">
+            <span className="text-[10px] font-bold text-gray-400 flex items-center gap-1 mb-1"><UserCheck size={12}/> 全体出席率</span>
+            <span className={`text-xl font-black font-mono ${summaryStats.attAvg >= 90 ? 'text-blue-600' : summaryStats.attAvg >= 80 ? 'text-gray-700' : 'text-red-500'}`}>
+              {summaryStats.attAvg}%
+            </span>
+          </div>
+          <div className="p-3 flex flex-col items-center justify-center">
+            <span className="text-[10px] font-bold text-gray-400 flex items-center gap-1 mb-1"><BookOpen size={12}/> 宿題提出率</span>
+            <span className={`text-xl font-black font-mono ${summaryStats.hwAvg >= 80 ? 'text-green-600' : summaryStats.hwAvg >= 50 ? 'text-orange-500' : 'text-red-500'}`}>
+              {summaryStats.hwAvg}%
+            </span>
+          </div>
+          <div className="p-3 flex flex-col items-center justify-center bg-red-50/30">
+            <span className="text-[10px] font-bold text-red-400 flex items-center gap-1 mb-1"><AlertTriangle size={12}/> アラート対象</span>
+            <span className="text-xl font-black font-mono text-red-600">{summaryStats.alertCount} <span className="text-xs font-medium">名</span></span>
+          </div>
+        </div>
+
         {/* フィルター & 操作 */}
-        <div className="p-2 flex flex-wrap gap-3 items-center justify-between bg-white rounded-b-xl">
+        <div className="p-3 flex flex-wrap gap-3 items-center justify-between bg-gray-50 rounded-b-xl border-t border-gray-200">
           <div className="flex flex-wrap gap-2 items-center">
-            <div className="flex items-center bg-gray-100 rounded-lg p-0.5 border border-gray-200 mr-2">
-              <button onClick={() => switchMonth('prev')} className="p-1 hover:bg-white rounded shadow-sm"><ChevronLeft size={14}/></button>
-              <select className="bg-transparent text-xs font-bold px-2 outline-none cursor-pointer text-indigo-700" value={selectedMonth} onChange={e => setSelectedMonth(e.target.value)}>
-                {Object.keys(MONTH_MAP).map(m => <option key={m} value={m}>{m}</option>)}
+            {/* 月選択 */}
+            <div className="flex items-center bg-white rounded-lg p-0.5 border border-gray-300 shadow-sm mr-2">
+              <button onClick={() => switchMonth('prev')} className="p-1.5 hover:bg-gray-100 rounded text-gray-500"><ChevronLeft size={14}/></button>
+              <select className="bg-transparent text-sm font-bold px-2 outline-none cursor-pointer text-slate-700 py-1" value={selectedMonth} onChange={e => setSelectedMonth(e.target.value)}>
+                {MONTH_ORDER.map(m => <option key={m} value={m}>{m}</option>)}
+                <option value="全期間">全期間</option>
               </select>
-              <button onClick={() => switchMonth('next')} className="p-1 hover:bg-white rounded shadow-sm"><ChevronRight size={14}/></button>
+              <button onClick={() => switchMonth('next')} className="p-1.5 hover:bg-gray-100 rounded text-gray-500"><ChevronRight size={14}/></button>
             </div>
 
+            {/* 検索・絞り込み */}
             <div className="relative">
-              <Search className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400" size={12}/>
-              <input type="text" className="pl-7 pr-2 py-1 border rounded-md text-xs w-24 md:w-32 outline-none" placeholder="氏名/ID..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" size={14}/>
+              <input type="text" className="pl-8 pr-3 py-1.5 border border-gray-300 rounded-lg text-xs w-28 md:w-40 outline-none focus:border-cyan-500 transition-colors" placeholder="氏名/ID..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
             </div>
             
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1 bg-white border border-gray-300 rounded-lg px-2 py-1.5">
               <Filter size={12} className="text-gray-400" />
-              <select className="bg-gray-50 border rounded-md px-1 py-1 text-xs outline-none cursor-pointer max-w-[100px]" value={filterClassroom} onChange={e => setFilterClassroom(e.target.value)}>
+              <select className="bg-transparent text-xs outline-none cursor-pointer font-medium text-gray-600" value={filterClassroom} onChange={e => setFilterClassroom(e.target.value)}>
                 <option value="all">全校舎</option>
                 {classrooms.map(c => <option key={c} value={c}>{c}</option>)}
               </select>
             </div>
             
-            <select className="bg-gray-50 border rounded-md px-1 py-1 text-xs outline-none cursor-pointer" value={filterDay} onChange={e => setFilterDay(e.target.value)}>
+            <select className="bg-white border border-gray-300 rounded-lg px-2 py-1.5 text-xs outline-none cursor-pointer font-medium text-gray-600" value={filterDay} onChange={e => setFilterDay(e.target.value)}>
               <option value="all">全曜日</option>
               {DAYS_OPTIONS.map(d => <option key={d} value={d}>{d}</option>)}
             </select>
 
-            <select className="bg-gray-50 border rounded-md px-1 py-1 text-xs outline-none cursor-pointer" value={filterGrade} onChange={e => setFilterGrade(e.target.value)}>
+            <select className="bg-white border border-gray-300 rounded-lg px-2 py-1.5 text-xs outline-none cursor-pointer font-medium text-gray-600" value={filterGrade} onChange={e => setFilterGrade(e.target.value)}>
               <option value="all">全学年</option>
               <option value="中1">中1</option>
               <option value="中2">中2</option>
@@ -344,42 +375,48 @@ export default function MasterPFPage() {
           </div>
 
           <div className="flex gap-2">
-            <select className="bg-orange-50 border border-orange-100 rounded-md px-2 py-1 text-[10px] text-orange-700 font-bold outline-none cursor-pointer" value={sortBy} onChange={e => setSortBy(e.target.value as any)}>
+            <select className="bg-orange-50 border border-orange-200 rounded-lg px-3 py-1.5 text-[10px] text-orange-700 font-bold outline-none cursor-pointer" value={sortBy} onChange={e => setSortBy(e.target.value as any)}>
               <option value="id">ID順</option>
               <option value="attendance">欠席多い順</option>
               <option value="homework">未提出多い順</option>
             </select>
 
-            <button onClick={handleExportCSV} className="flex items-center gap-1 bg-gray-100 text-gray-600 px-3 py-1 rounded-md font-bold hover:bg-gray-200 text-[10px]"><Download size={12}/> CSV</button>
-            <button onClick={handleSave} disabled={saving} className="flex items-center gap-1 bg-indigo-600 text-white px-3 py-1 rounded-md font-bold hover:bg-indigo-700 disabled:opacity-50 text-[10px]">{saving ? <Loader2 className="animate-spin" size={12}/> : <Save size={12}/>} 保存</button>
+            <button onClick={handleExportCSV} className="flex items-center gap-1 bg-white border border-gray-300 text-gray-600 px-3 py-1.5 rounded-lg font-bold hover:bg-gray-50 text-[10px] shadow-sm"><Download size={12}/> CSV</button>
+            <button onClick={handleSave} disabled={saving} className="flex items-center gap-1 bg-cyan-600 text-white px-4 py-1.5 rounded-lg font-bold hover:bg-cyan-700 disabled:opacity-50 text-[10px] shadow-sm shadow-cyan-200 transition-all active:scale-95">{saving ? <Loader2 className="animate-spin" size={12}/> : <Save size={12}/>} 保存</button>
           </div>
         </div>
       </div>
 
       {/* メインテーブル */}
       {loading ? (
-        <div className="flex justify-center items-center h-64"><Loader2 className="animate-spin text-indigo-400"/></div>
+        <div className="flex justify-center items-center h-64"><Loader2 className="animate-spin text-cyan-500" size={32}/></div>
       ) : (
-        <div className="bg-white rounded-lg shadow-sm border border-gray-300 overflow-x-auto max-h-[75vh]">
+        <div className="bg-white rounded-lg shadow-md border border-gray-300 overflow-x-auto max-h-[75vh]">
           <table className="min-w-max border-collapse text-[10px]">
-            <thead className="bg-gray-100 text-gray-700 font-bold sticky top-0 z-20 shadow-sm h-10">
+            <thead className="bg-gray-100 text-gray-700 font-bold sticky top-0 z-20 shadow-sm h-12">
               <tr>
+                {/* 固定カラム */}
                 <th className="p-1 border border-gray-300 w-8 text-center sticky left-0 bg-gray-100 z-30">No</th>
                 <th className="p-1 border border-gray-300 w-12 text-center sticky left-8 bg-gray-100 z-30">教室</th>
                 <th className="p-1 border border-gray-300 w-16 text-center sticky left-20 bg-gray-100 z-30">ID</th>
-                <th className="p-1 border border-gray-300 w-24 text-center sticky left-36 bg-gray-100 z-30 shadow-md">氏名</th>
+                <th className="p-1 border border-gray-300 w-24 text-center sticky left-36 bg-gray-100 z-30 shadow-[4px_0_5px_-2px_rgba(0,0,0,0.1)]">氏名</th>
                 <th className="p-1 border border-gray-300 w-8 text-center">学年</th>
                 <th className="p-1 border border-gray-300 w-8 text-center">曜</th>
-                <th className="p-1 border border-gray-300 w-12 text-center bg-red-50 text-red-700">出席<br/>警報</th>
-                <th className="p-1 border border-gray-300 w-12 text-center bg-orange-50 text-orange-700">宿題<br/>警報</th>
-                <th className="p-1 border border-gray-300 w-10 text-center">出率</th>
-                <th className="p-1 border border-gray-300 w-10 text-center">提率</th>
+                
+                {/* 統計カラム */}
+                <th className="p-1 border border-gray-300 w-10 text-center bg-red-50 text-red-700">出席<br/>警報</th>
+                <th className="p-1 border border-gray-300 w-10 text-center bg-orange-50 text-orange-700">宿題<br/>警報</th>
+                <th className="p-1 border border-gray-300 w-8 text-center">出率</th>
+                <th className="p-1 border border-gray-300 w-8 text-center">提率</th>
 
+                {/* 週ごとの入力カラム（縦積み） */}
                 {visibleWeeks.map(w => (
-                  <th key={w} colSpan={3} className={`p-0 border border-gray-300 text-center min-w-[75px] ${String(w)===currentWeek ? 'bg-indigo-100 text-indigo-900 border-indigo-300 border-2' : 'bg-blue-50/50'}`}>
-                    第{w}週
-                    <div className="grid grid-cols-3 text-[9px] font-normal border-t border-gray-300/50">
-                      <span className="border-r">出</span><span className="border-r">社</span><span>理</span>
+                  <th key={w} className={`p-0 border border-gray-300 text-center min-w-[40px] max-w-[50px] ${String(w)===currentWeek ? 'bg-cyan-100 text-cyan-900 border-cyan-400 border-2' : 'bg-slate-50'}`}>
+                    <div className="py-0.5 text-[9px]">w{w}</div>
+                    <div className="flex flex-col text-[8px] font-normal border-t border-gray-300/50">
+                      <span className="border-b border-gray-300/50 bg-white/50 h-4 leading-4">出</span>
+                      <span className="border-b border-gray-300/50 bg-white/50 h-4 leading-4">社</span>
+                      <span className="h-4 leading-4 bg-white/50">理</span>
                     </div>
                   </th>
                 ))}
@@ -387,21 +424,22 @@ export default function MasterPFPage() {
             </thead>
             <tbody className="text-gray-800 bg-white">
               {filteredStudents.length === 0 ? (
-                <tr><td colSpan={20} className="p-10 text-center text-gray-400 text-sm">該当生徒なし (CSVインポートで生徒情報を更新してください)</td></tr>
+                <tr><td colSpan={20} className="p-10 text-center text-gray-400 text-sm font-bold bg-gray-50">該当なし</td></tr>
               ) : filteredStudents.map((student) => {
                 const stats = calculateStats(student.id);
                 return (
-                  <tr key={student.id} className="hover:bg-yellow-50 transition-colors h-8">
-                    <td className="p-1 border border-gray-300 text-center sticky left-0 bg-white z-10 font-mono">{student.index}</td>
-                    <td className="p-1 border border-gray-300 text-center sticky left-8 bg-white z-10">{student.classroom?.substring(0,3)}</td>
-                    <td className="p-1 border border-gray-300 text-center sticky left-20 bg-white z-10 font-mono text-[9px]">{student.lifetime_id}</td>
-                    <td className="p-1 border border-gray-300 font-bold sticky left-36 bg-white z-10 shadow-md whitespace-nowrap overflow-hidden text-ellipsis max-w-[96px]">{student.student_name}</td>
+                  <tr key={student.id} className="hover:bg-yellow-50 transition-colors h-14 group">
+                    <td className="p-1 border border-gray-300 text-center sticky left-0 bg-white group-hover:bg-yellow-50 z-10 font-mono">{student.index}</td>
+                    <td className="p-1 border border-gray-300 text-center sticky left-8 bg-white group-hover:bg-yellow-50 z-10">{student.classroom?.substring(0,3)}</td>
+                    <td className="p-1 border border-gray-300 text-center sticky left-20 bg-white group-hover:bg-yellow-50 z-10 font-mono text-[9px]">{student.lifetime_id}</td>
+                    <td className="p-1 border border-gray-300 font-bold sticky left-36 bg-white group-hover:bg-yellow-50 z-10 shadow-[4px_0_5px_-2px_rgba(0,0,0,0.1)] whitespace-nowrap overflow-hidden text-ellipsis max-w-[96px]">{student.student_name}</td>
                     <td className="p-1 border border-gray-300 text-center">{student.grade}</td>
                     <td className="p-1 border border-gray-300 text-center">{student.day_of_week}</td>
-                    <td className={`p-1 border border-gray-300 text-center font-bold text-[9px] ${stats.attAlert ? 'bg-red-100 text-red-600' : ''}`}>{stats.attAlert}</td>
-                    <td className={`p-1 border border-gray-300 text-center font-bold text-[9px] ${stats.hwAlert ? 'bg-orange-100 text-orange-600' : ''}`}>{stats.hwAlert}</td>
+                    <td className={`p-1 border border-gray-300 text-center font-bold text-[8px] ${stats.attAlert ? 'bg-red-100 text-red-600' : ''}`}>{stats.attAlert}</td>
+                    <td className={`p-1 border border-gray-300 text-center font-bold text-[8px] ${stats.hwAlert ? 'bg-orange-100 text-orange-600' : ''}`}>{stats.hwAlert}</td>
                     <td className="p-1 border border-gray-300 text-center font-mono">{stats.attRate}%</td>
                     <td className="p-1 border border-gray-300 text-center font-mono">{stats.hwRate}%</td>
+                    
                     {visibleWeeks.map(w => {
                       const rec = records[student.id]?.[w] || {};
                       const att = rec.attendance_status || '';
@@ -409,13 +447,18 @@ export default function MasterPFPage() {
                       const sci = rec.science_hw || '';
                       const isCurrent = String(w) === currentWeek;
                       return (
-                        <td key={w} className={`p-0 border border-gray-300 ${isCurrent ? 'bg-indigo-50 border-x-2 border-indigo-200' : ''}`}>
-                          <div className="grid grid-cols-3 h-full min-h-[28px]">
-                            <select className={`h-full w-full text-center outline-none appearance-none cursor-pointer border-r border-gray-100 font-bold text-[9px] ${att==='欠'?'bg-red-50 text-red-600':att==='遅'?'bg-yellow-50 text-yellow-600':att==='出'?'bg-blue-50 text-blue-600':'bg-transparent'}`} value={att} onChange={(e) => handleInputChange(student.id, w, 'attendance_status', e.target.value)}>
+                        <td key={w} className={`p-0 border border-gray-300 ${isCurrent ? 'bg-cyan-50 border-x-2 border-cyan-200' : ''}`}>
+                          {/* 縦積み入力フィールド */}
+                          <div className="flex flex-col h-full w-full">
+                            <select 
+                              className={`h-5 w-full text-center outline-none appearance-none cursor-pointer border-b border-gray-200 font-bold text-[9px] ${att==='欠'?'bg-red-50 text-red-600':att==='遅'?'bg-yellow-50 text-yellow-600':att==='出'?'bg-blue-50 text-blue-600':'bg-transparent hover:bg-gray-50'}`} 
+                              value={att} 
+                              onChange={(e) => handleInputChange(student.id, w, 'attendance_status', e.target.value)}
+                            >
                               <option value=""></option><option value="出">出</option><option value="遅">遅</option><option value="欠">欠</option>
                             </select>
-                            <input type="text" className="h-full w-full text-center outline-none border-r border-gray-100 focus:bg-orange-50 font-mono text-[9px] bg-transparent p-0" value={soc} onChange={(e) => handleInputChange(student.id, w, 'social_hw', e.target.value)} />
-                            <input type="text" className="h-full w-full text-center outline-none focus:bg-green-50 font-mono text-[9px] bg-transparent p-0" value={sci} onChange={(e) => handleInputChange(student.id, w, 'science_hw', e.target.value)} />
+                            <input type="text" className="h-5 w-full text-center outline-none border-b border-gray-200 focus:bg-orange-100 font-mono text-[9px] bg-transparent p-0 hover:bg-gray-50" value={soc} onChange={(e) => handleInputChange(student.id, w, 'social_hw', e.target.value)} />
+                            <input type="text" className="h-5 w-full text-center outline-none focus:bg-green-100 font-mono text-[9px] bg-transparent p-0 hover:bg-gray-50" value={sci} onChange={(e) => handleInputChange(student.id, w, 'science_hw', e.target.value)} />
                           </div>
                         </td>
                       );

@@ -184,7 +184,8 @@ export default function TeacherShiftSubmissionPage() {
         
         {/* ヘッダー */}
         <div className="flex items-center gap-4 mb-6">
-          <Link href="/teacher" className="bg-white p-2 rounded-full shadow hover:bg-gray-50 text-gray-600 transition-colors">
+          {/* ★修正: リンク先を /teacher から /teacher/work に変更 */}
+          <Link href="/teacher/work" className="bg-white p-2 rounded-full shadow hover:bg-gray-50 text-gray-600 transition-colors">
             <ArrowLeft size={20} />
           </Link>
           <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-2">

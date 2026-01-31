@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs, orderBy } from 'firebase/firestore';
+import { collection, query, where, getDocs } from 'firebase/firestore';
 import { Loader2 } from 'lucide-react';
 
 // 表示用コンポーネント
@@ -11,30 +11,30 @@ import TeacherDashboard from '@/app/components/TeacherDashboard';
 
 export default function TeacherPage() {
   const { user, profile, loading } = useAuth();
+  
+  // Dashboard内でデータ取得するようになったため、ここでは単純に権限チェックのみでもOKですが、
+  // 必要に応じて他のデータを取得します。今回はエラー解消のため、Propsとして渡すデータを用意します。
   const [mainShifts, setMainShifts] = useState<any[]>([]);
   const [pendingCount, setPendingCount] = useState(0);
   const [dataLoading, setDataLoading] = useState(true);
 
-  // データ取得ロジック
   useEffect(() => {
     if (!user) return;
 
     const fetchData = async () => {
       try {
-        const todayStr = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+        const todayStr = new Date().toISOString().split('T')[0];
 
-        // 1. 今日のシフト取得 (shift_assignments)
-        // role_typeが 'main' のものを取得
+        // メインシフト (Dashboard内でも取得しているが、Propsとして渡すために取得)
         const shiftsQuery = query(
           collection(db, 'shift_assignments'),
           where('target_date', '==', todayStr),
           where('role_type', '==', 'main')
         );
         const shiftsSnap = await getDocs(shiftsQuery);
-        const shifts = shiftsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        setMainShifts(shifts);
+        setMainShifts(shiftsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
 
-        // 2. 未チェック宿題数取得 (submissions where status == pending)
+        // 未チェック宿題
         const pendingQuery = query(
           collection(db, 'submissions'),
           where('status', '==', 'pending')
@@ -52,7 +52,7 @@ export default function TeacherPage() {
     fetchData();
   }, [user]);
 
-  // 権限チェック (講師以外はリダイレクト)
+  // 権限チェック
   useEffect(() => {
     if (!loading && profile) {
       if (profile.role === 'student') window.location.href = '/student';
@@ -60,7 +60,6 @@ export default function TeacherPage() {
     }
   }, [loading, profile]);
 
-  // ローディング
   if (loading || dataLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
@@ -69,13 +68,11 @@ export default function TeacherPage() {
     );
   }
 
-  // 未ログイン
   if (!user) {
     if (typeof window !== 'undefined') window.location.href = '/';
     return null;
   }
 
-  // 表示
   return (
     <TeacherDashboard 
       profile={profile}

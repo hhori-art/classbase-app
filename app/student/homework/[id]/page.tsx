@@ -11,6 +11,7 @@ import Link from 'next/link';
 import Image from 'next/image';
 
 export default function HomeworkDetailPage({ params }: { params: Promise<{ id: string }> }) {
+  // Next.js 13+ (App Router) の params アンラップ
   const { id } = use(params);
   const assignmentId = id;
 
@@ -38,10 +39,18 @@ export default function HomeworkDetailPage({ params }: { params: Promise<{ id: s
 
   const fetchData = async () => {
     try {
-      const assignSnap = await getDoc(doc(db, 'assignments', assignmentId));
-      if (!assignSnap.exists()) throw new Error('課題が見つかりませんでした');
+      // ★修正: コレクション名を 'assignments' から 'homework_assignments' に変更
+      const assignSnap = await getDoc(doc(db, 'homework_assignments', assignmentId));
+      
+      if (!assignSnap.exists()) {
+        // ID間違いなどで存在しない場合
+        console.error('Homework not found:', assignmentId);
+        setAssignment(null); 
+        return;
+      }
       setAssignment({ id: assignSnap.id, ...assignSnap.data() });
 
+      // 提出状況の取得
       const subId = `${assignmentId}_${user!.uid}`;
       const subSnap = await getDoc(doc(db, 'submissions', subId));
 
@@ -83,12 +92,14 @@ export default function HomeworkDetailPage({ params }: { params: Promise<{ id: s
     try {
       if (!user) throw new Error('ログインセッション切れ');
 
+      // 画像アップロード
       const fileExtension = selectedFile.name.split('.').pop() || 'jpg';
       const storagePath = `submissions/${assignmentId}/${user.uid}_${Date.now()}.${fileExtension}`;
       const storageRef = ref(storage, storagePath);
       const snapshot = await uploadBytes(storageRef, selectedFile);
       const imageUrl = await getDownloadURL(snapshot.ref);
 
+      // Firestoreへ保存
       const subId = `${assignmentId}_${user.uid}`;
       const subRef = doc(db, 'submissions', subId);
 
@@ -100,25 +111,28 @@ export default function HomeworkDetailPage({ params }: { params: Promise<{ id: s
         student_name: studentName,
         imageUrl: imageUrl,
         comment: comment,
-        status: 'submitted',
+        status: 'submitted', // 提出済み (先生確認待ち)
         submitted_at: new Date().toISOString(),
         feedback: null
       };
 
       await setDoc(subRef, submissionData, { merge: true });
 
+      // コイン付与 (初回提出時のみなど制御が必要な場合は別途ロジック追加)
+      // ここでは提出ごとに加算（または1課題につき1回にするならsubmissionsコレクションをチェックするなど）
       const userRef = doc(db, 'users', user.uid);
       await updateDoc(userRef, {
         coins: increment(50),
         total_coins: increment(50),
         homework_count: increment(1),
-        earned_badges: arrayUnion('badge_1')
+        // 初めてならバッジ付与などの処理
+        earned_badges: arrayUnion('badge_pencil') 
       });
 
       alert('提出しました！ 50コイン獲得！');
       setSelectedFile(null);
       setPreviewUrl(null);
-      await fetchData();
+      await fetchData(); // 画面更新
 
     } catch (e: any) {
       alert('エラー: ' + e.message);
@@ -131,15 +145,17 @@ export default function HomeworkDetailPage({ params }: { params: Promise<{ id: s
   if (!assignment) return <div className="min-h-screen flex items-center justify-center text-gray-400 font-bold">課題が見つかりません</div>;
 
   const isLate = new Date() > new Date(assignment.deadline);
+  // 再提出ステータスの場合もフォームを表示する
   const showForm = !submission || submission.status === 'resubmit';
 
-  const isScience = assignment.subject?.includes('理科') || ['物理','化学','生物','地学'].some((s:string) => assignment.subject?.includes(s));
-  const isSociety = assignment.subject?.includes('社会') || ['地理','歴史','公民'].some((s:string) => assignment.subject?.includes(s));
-  const accentColor = isScience ? 'purple' : isSociety ? 'pink' : 'blue';
+  // 科目判定
+  const subject = assignment.subject || '';
+  const isScience = subject.includes('理科') || ['物理','化学','生物','地学'].some((s:string) => subject.includes(s));
+  const isSociety = subject.includes('社会') || ['地理','歴史','公民'].some((s:string) => subject.includes(s));
   
-  const bgAccent = isScience ? 'bg-purple-500' : isSociety ? 'bg-pink-500' : 'bg-blue-500';
-  const textAccent = isScience ? 'text-purple-600' : isSociety ? 'text-pink-600' : 'text-blue-600';
-  const bgSoftAccent = isScience ? 'bg-purple-50' : isSociety ? 'bg-pink-50' : 'bg-blue-50';
+  const bgAccent = isScience ? 'bg-green-500' : isSociety ? 'bg-yellow-500' : 'bg-blue-500';
+  const textAccent = isScience ? 'text-green-600' : isSociety ? 'text-yellow-600' : 'text-blue-600';
+  const bgSoftAccent = isScience ? 'bg-green-50' : isSociety ? 'bg-yellow-50' : 'bg-blue-50';
 
   return (
     <div className="min-h-screen bg-[#F0F4F8] p-4 pb-32 font-sans sm:p-8">
@@ -191,8 +207,8 @@ export default function HomeworkDetailPage({ params }: { params: Promise<{ id: s
           <div className="p-6 sm:p-8 pt-6">
             <div className="flex items-start gap-3">
               <FileText className="text-gray-300 mt-1 shrink-0" size={24}/>
-              <div className="prose prose-stone prose-sm sm:prose-base max-w-none text-gray-700 font-medium leading-relaxed">
-                {assignment.description}
+              <div className="prose prose-stone prose-sm sm:prose-base max-w-none text-gray-700 font-medium leading-relaxed whitespace-pre-wrap">
+                {assignment.description || '詳細はありません'}
               </div>
             </div>
           </div>
@@ -257,7 +273,7 @@ export default function HomeworkDetailPage({ params }: { params: Promise<{ id: s
               >
                 <Image src={submission.imageUrl} alt="提出画像" fill className="object-cover" unoptimized />
                 
-                {/* ★スタンプ表示 (画像の上にオーバーレイ) */}
+                {/* スタンプ表示 */}
                 {submission.status === 'checked' && submission.stamp_url && (
                    <div className="absolute top-4 right-4 w-1/3 aspect-square rotate-12 drop-shadow-xl animate-in zoom-in duration-500">
                      <Image src={submission.stamp_url} alt="先生からのスタンプ" fill className="object-contain" unoptimized />
@@ -282,7 +298,7 @@ export default function HomeworkDetailPage({ params }: { params: Promise<{ id: s
               <div className="flex flex-col items-center">
                 {previewUrl ? (
                   <div className="relative w-full sm:w-2/3 aspect-[4/3] rounded-3xl overflow-hidden border-4 border-orange-100 shadow-lg bg-gray-50 group">
-                    <Image src={previewUrl} alt="プレビュー" fill className="object-contain" />
+                    <Image src={previewUrl} alt="プレビュー" fill className="object-contain" unoptimized />
                     <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-all flex items-center justify-center">
                       <button 
                         onClick={clearSelection} 

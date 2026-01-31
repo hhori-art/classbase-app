@@ -5,7 +5,7 @@ import { useAuth } from '@/app/context/AuthContext';
 import { useSettings } from '@/app/context/SettingsContext';
 import { db, auth } from '@/lib/firebase';
 import { doc, updateDoc } from 'firebase/firestore';
-import { updatePassword, updateProfile } from 'firebase/auth';
+import { updatePassword } from 'firebase/auth';
 import { 
   ArrowLeft, User, Lock, LogOut, ChevronRight, 
   Save, Loader2, Shield, Target, Type, 
@@ -55,9 +55,8 @@ export default function StudentSettingsPage() {
 
     // 2. Android/PC用のインストールイベント捕捉
     const handleBeforeInstallPrompt = (e: any) => {
-      e.preventDefault(); // ブラウザの自動バナーを抑制
-      setDeferredPrompt(e); // イベントを保存して後でボタンで発火させる
-      console.log("Install prompt captured!");
+      e.preventDefault(); 
+      setDeferredPrompt(e); 
     };
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
 
@@ -84,18 +83,16 @@ export default function StudentSettingsPage() {
   // 文字サイズ変更
   const handleTextSizeChange = (size: 'normal' | 'large') => {
     setTextSize(size);
-    // 即座に反映させるためStateは更新しないが、見た目はContextで変わる
   };
 
-  // 保存処理
+  // 保存処理 (名前の更新を削除)
   const handleSaveSettings = async () => {
     if (!user) return;
     setLoading(true);
     try {
-      if (user.displayName !== name) await updateProfile(user, { displayName: name });
       const userRef = doc(db, 'users', user.uid);
       await updateDoc(userRef, { 
-        student_name: name,
+        // student_name: name, // 名前変更は無効化
         settings: { target, ...settings },
         updated_at: new Date().toISOString()
       });
@@ -108,16 +105,15 @@ export default function StudentSettingsPage() {
     }
   };
 
-  // ★インストールボタン押下時 (Android/PC)
+  // インストールボタン押下時
   const handleInstallClick = async () => {
     if (deferredPrompt) {
-      deferredPrompt.prompt(); // ここでブラウザのインストール画面を強制呼び出し
+      deferredPrompt.prompt(); 
       const { outcome } = await deferredPrompt.userChoice;
       if (outcome === 'accepted') {
         setDeferredPrompt(null);
       }
     } else {
-      // イベントがない＝対応していないかiOS
       setShowManual(true);
     }
   };
@@ -168,7 +164,6 @@ export default function StudentSettingsPage() {
               ホーム画面に追加すると、全画面でアプリのように使えます。
             </p>
 
-            {/* Android / PC: ボタン1つでインストール画面を出す */}
             {deferredPrompt ? (
               <button 
                 onClick={handleInstallClick}
@@ -177,7 +172,6 @@ export default function StudentSettingsPage() {
                 <Download size={22}/> 今すぐ追加する
               </button>
             ) : (
-              // iOS またはイベント未発火時: ガイドを表示
               <div className="relative z-10">
                  {!showManual ? (
                    <button 
@@ -226,14 +220,13 @@ export default function StudentSettingsPage() {
           </section>
         )}
 
-        {/* 既に追加済みの場合 */}
         {isStandalone && (
            <div className="bg-blue-50 text-blue-600 p-4 rounded-2xl text-center font-bold text-sm flex items-center justify-center gap-2 border border-blue-100">
              <Check size={18}/> アプリとして使用中
            </div>
         )}
 
-        {/* --- 1. 文字サイズ設定 (全体反映) --- */}
+        {/* --- 1. 文字サイズ設定 --- */}
         <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
           <h2 className="text-lg font-extrabold text-gray-800 mb-4 flex items-center gap-2">
             <Type size={20} className="text-orange-500"/> 文字の大きさ
@@ -252,12 +245,9 @@ export default function StudentSettingsPage() {
               おおきめ
             </button>
           </div>
-          <div className="p-4 bg-orange-50 rounded-xl border border-orange-100 text-orange-800 text-sm">
-            <span className="font-bold">確認：</span> アプリ全体の文字サイズが瞬時に変更されます。
-          </div>
         </section>
 
-        {/* --- 2. プロフィール設定 --- */}
+        {/* --- 2. プロフィール設定 (表示のみ) --- */}
         <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
           <h2 className="text-lg font-extrabold text-gray-800 mb-6 flex items-center gap-2">
             <User size={20} className="text-indigo-500"/> プロフィール
@@ -265,7 +255,10 @@ export default function StudentSettingsPage() {
           <div className="space-y-4">
             <div>
               <label className="block text-xs font-bold text-gray-400 mb-2">お名前</label>
-              <input type="text" value={name} onChange={(e) => { setName(e.target.value); setHasChanges(true); }} className="w-full p-4 bg-gray-50 border-2 border-transparent focus:border-indigo-200 rounded-xl outline-none font-bold text-gray-700"/>
+              <div className="w-full p-4 bg-gray-50 border border-gray-100 rounded-xl font-bold text-gray-700">
+                {name}
+              </div>
+              <p className="text-[10px] text-gray-400 mt-1 pl-1">※お名前の変更は先生にお伝えください</p>
             </div>
             <div>
               <label className="block text-xs font-bold text-gray-400 mb-2">目標</label>

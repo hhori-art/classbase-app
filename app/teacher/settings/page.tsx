@@ -1,122 +1,339 @@
 'use client';
 
-import { useState, useEffect, Suspense } from 'react';
-import { useSearchParams } from 'next/navigation';
-import { db } from '@/lib/firebase';
-import { collection, getDocs } from 'firebase/firestore';
-import { ArrowLeft, SlidersHorizontal, Loader2, Link as LinkIcon } from 'lucide-react';
-import Link from 'next/link';
+import { useState, useEffect } from 'react';
+import { useAuth } from '@/app/context/AuthContext';
+// import { useSettings } from '@/app/context/SettingsContext'; 
+import { db, auth } from '@/lib/firebase';
+import { doc, updateDoc } from 'firebase/firestore';
+import { updatePassword, signOut } from 'firebase/auth';
+import { 
+  User, Lock, LogOut, ChevronRight, 
+  Save, Loader2, Shield, Bell, Type, 
+  Smartphone, Download, Share, PlusSquare, HelpCircle, Check, Briefcase
+} from 'lucide-react';
 
-function SettingsContent() {
-  const searchParams = useSearchParams();
-  const isFromMaster = searchParams.get('from') === 'master';
-  const backLink = isFromMaster ? '/master' : '/teacher';
+export default function TeacherSettingsPage() {
+  const { user, profile } = useAuth();
+  
+  // const { textSize, setTextSize } = useSettings();
+  const [textSize, setTextSize] = useState('normal'); 
 
-  const [rules, setRules] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
+  // --- State ---
+  const [name, setName] = useState('');
+  const [settings, setSettings] = useState({
+    notification_shift: true,
+    notification_student: true,
+    notification_admin: true,
+    sound_bgm: false,
+  });
+
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState<{type: 'success'|'error', text: string} | null>(null);
+  const [hasChanges, setHasChanges] = useState(false);
+
+  // パスワード関連
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [isPasswordExpanded, setIsPasswordExpanded] = useState(false);
+
+  // --- PWA (インストール機能) ---
+  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+  const [isIos, setIsIos] = useState(false);
+  const [isStandalone, setIsStandalone] = useState(false);
+  const [showManual, setShowManual] = useState(false);
 
   useEffect(() => {
-    const fetchRules = async () => {
-      try {
-        // 管理者画面で設定した "subject_urls" コレクションを取得
-        const querySnapshot = await getDocs(collection(db, 'subject_urls'));
-        const data = querySnapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data()
-        }));
-
-        // 曜日順にソート (月 -> 土)
-        const daysOrder = ['月', '火', '水', '木', '金', '土', '日'];
-        data.sort((a: any, b: any) => {
-          return daysOrder.indexOf(a.day_of_week) - daysOrder.indexOf(b.day_of_week);
-        });
-
-        setRules(data);
-      } catch (e) {
-        console.error('Error fetching settings:', e);
-      } finally {
-        setLoading(false);
+    if (profile) {
+      setName(profile.name || user?.displayName || '');
+      if (profile.settings) {
+        setSettings(prev => ({ ...prev, ...profile.settings }));
       }
-    };
+    }
 
-    fetchRules();
-  }, []);
+    const handleBeforeInstallPrompt = (e: any) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    };
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+
+    const isIosDevice = /iPhone|iPad|iPod/.test(navigator.userAgent);
+    setIsIos(isIosDevice);
+
+    const checkStandalone = () => {
+      const isApp = window.matchMedia('(display-mode: standalone)').matches || (window.navigator as any).standalone;
+      setIsStandalone(!!isApp);
+    };
+    checkStandalone();
+
+    return () => window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+  }, [profile, user]);
+
+  const handleChange = (key: string, value: any) => {
+    setSettings(prev => ({ ...prev, [key]: value }));
+    setHasChanges(true);
+  };
+
+  const handleTextSizeChange = (size: 'normal' | 'large') => {
+    setTextSize(size);
+    document.documentElement.style.fontSize = size === 'large' ? '110%' : '100%';
+  };
+
+  // 保存処理 (名前の更新を削除)
+  const handleSaveSettings = async () => {
+    if (!user) return;
+    setLoading(true);
+    try {
+      const userRef = doc(db, 'users', user.uid);
+      await updateDoc(userRef, { 
+        // name: name, // 名前変更は無効化
+        settings: settings,
+        updated_at: new Date().toISOString()
+      });
+      
+      showMessage('success', '設定を保存しました！');
+      setHasChanges(false);
+    } catch (e: any) {
+      console.error(e);
+      showMessage('error', '保存に失敗しました');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleInstallClick = async () => {
+    if (deferredPrompt) {
+      deferredPrompt.prompt();
+      const { outcome } = await deferredPrompt.userChoice;
+      if (outcome === 'accepted') {
+        setDeferredPrompt(null);
+      }
+    } else {
+      setShowManual(true);
+    }
+  };
+
+  const showMessage = (type: 'success'|'error', text: string) => {
+    setMessage({ type, text });
+    setTimeout(() => setMessage(null), 5000);
+  };
+
+  const handleChangePassword = async () => {
+    if (!newPassword || newPassword !== confirmPassword) return showMessage('error', 'パスワード不一致');
+    setLoading(true);
+    try {
+      if(user) await updatePassword(user, newPassword);
+      showMessage('success', 'パスワードを変更しました');
+      setNewPassword(''); setConfirmPassword(''); setIsPasswordExpanded(false);
+    } catch(e) { showMessage('error', '再ログインが必要です'); }
+    finally { setLoading(false); }
+  };
+
+  const handleLogout = async () => {
+    if (!confirm('ログアウトしますか？')) return;
+    await signOut(auth);
+    window.location.href = '/';
+  };
 
   return (
-    <div className={`min-h-screen p-6 pb-20 ${isFromMaster ? 'bg-gray-100' : 'bg-gray-50'}`}>
-      <div className="max-w-4xl mx-auto">
+    <div className="min-h-screen bg-[#F0F4F8] p-4 sm:p-6 lg:p-8 font-sans transition-all pb-32">
+      <div className="max-w-xl mx-auto space-y-8">
         
         {/* ヘッダー */}
-        <div className="flex items-center gap-4 mb-6">
-          <Link href={backLink} className="bg-white p-2 rounded-full shadow hover:bg-gray-50 text-gray-600 transition-colors">
-            <ArrowLeft size={20} />
-          </Link>
-          <div>
-            <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
-              <SlidersHorizontal className="text-green-600" /> 授業URL自動割当ルール
-            </h1>
-            <p className="text-xs text-gray-500">
-              {isFromMaster ? 'マスター権限で設定中' : '現在の科目・曜日ごとのZoom URL設定一覧'}
-            </p>
-          </div>
+        <div className="flex items-center gap-4">
+          <h1 className="text-2xl font-extrabold text-gray-800 flex items-center gap-2">
+            <Briefcase className="text-indigo-600"/> 設定・アカウント
+          </h1>
         </div>
 
-        <div className="bg-white p-6 rounded-xl shadow-sm mb-6 border border-gray-100">
-           <p className="text-sm text-gray-500 mb-4 flex justify-between items-center">
-             <span>現在登録されているルール ({rules.length}件)</span>
-             {loading && <Loader2 className="animate-spin text-gray-400" size={16}/>}
-           </p>
-           
-           <div className="space-y-3">
-             {!loading && rules.length === 0 ? (
-               <div className="text-center py-8 text-gray-400 border border-dashed rounded-lg">
-                 ルールが設定されていません
-               </div>
-             ) : (
-               rules.map((rule) => (
-                 <div key={rule.id} className="border border-gray-100 p-4 rounded-lg flex flex-col md:flex-row justify-between items-start md:items-center bg-gray-50 hover:bg-white transition-colors gap-3">
-                   <div>
-                     <div className="flex items-center gap-2 mb-1">
-                       <span className="font-bold text-gray-800 text-lg">
-                         {rule.subject}
-                       </span>
-                       <span className={`text-xs font-bold px-2 py-0.5 rounded text-white ${
-                         rule.day_of_week === '土' ? 'bg-blue-400' : 'bg-orange-400'
-                       }`}>
-                         {rule.day_of_week}曜
-                       </span>
-                     </div>
-                     <div className="flex items-center gap-1 text-xs text-blue-600 break-all font-mono bg-blue-50 px-2 py-1 rounded">
-                       <LinkIcon size={12} />
-                       {rule.url || 'URL未設定'}
-                     </div>
+        {message && (
+          <div className={`p-4 rounded-2xl font-bold flex items-center gap-3 shadow-sm ${message.type === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+            <Shield size={20}/> {message.text}
+          </div>
+        )}
+
+        {/* --- 0. アプリインストール (PWA) --- */}
+        {!isStandalone && (
+          <section className="bg-gradient-to-br from-indigo-600 to-purple-700 p-6 rounded-3xl shadow-lg text-white relative overflow-hidden">
+            <div className="absolute top-0 right-0 w-32 h-32 bg-white/10 rounded-full blur-3xl transform translate-x-10 -translate-y-10"></div>
+            
+            <h2 className="text-lg font-black flex items-center gap-2 mb-2 relative z-10">
+              <Smartphone size={24}/> アプリとして使う
+            </h2>
+            <p className="text-sm font-bold opacity-90 mb-6 relative z-10 leading-relaxed">
+              ホーム画面に追加すると、<br/>全画面表示でスムーズに業務を行えます。
+            </p>
+
+            {deferredPrompt ? (
+              <button 
+                onClick={handleInstallClick}
+                className="relative z-10 w-full bg-white text-indigo-600 py-3 rounded-xl font-black shadow-lg flex items-center justify-center gap-2 active:scale-95 transition-transform"
+              >
+                <Download size={20}/> 追加する
+              </button>
+            ) : (
+              <div className="relative z-10">
+                 {!showManual ? (
+                   <button 
+                     onClick={() => setShowManual(true)}
+                     className="w-full bg-white/20 border border-white/30 text-white py-3 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-white/30 transition-all text-sm"
+                   >
+                     <HelpCircle size={18}/> 追加方法を見る
+                   </button>
+                 ) : (
+                   <div className="bg-white/10 backdrop-blur-md p-4 rounded-xl border border-white/20 animate-in fade-in">
+                     <p className="font-bold mb-3 flex items-center gap-2 text-sm">
+                       {isIos ? 'iPhone・iPadの手順' : 'ブラウザメニューの手順'}
+                     </p>
+                     
+                     {isIos ? (
+                       <ol className="space-y-2 text-xs font-bold opacity-90">
+                         <li className="flex items-center gap-2">
+                           <span className="bg-white text-indigo-600 w-5 h-5 rounded-full flex items-center justify-center shrink-0 text-[10px]">1</span>
+                           <span>画面下の <Share size={14} className="inline mx-1"/> (共有) をタップ</span>
+                         </li>
+                         <li className="flex items-center gap-2">
+                           <span className="bg-white text-indigo-600 w-5 h-5 rounded-full flex items-center justify-center shrink-0 text-[10px]">2</span>
+                           <span>「ホーム画面に追加」<PlusSquare size={14} className="inline mx-1"/> をタップ</span>
+                         </li>
+                         <li className="flex items-center gap-2">
+                           <span className="bg-white text-indigo-600 w-5 h-5 rounded-full flex items-center justify-center shrink-0 text-[10px]">3</span>
+                           <span>右上の「追加」をタップ</span>
+                         </li>
+                       </ol>
+                     ) : (
+                       <div className="text-xs font-bold opacity-90">
+                         ブラウザメニューから「ホーム画面に追加」を選択してください。
+                       </div>
+                     )}
+                     
+                     <button 
+                       onClick={() => setShowManual(false)} 
+                       className="mt-3 w-full bg-white/20 py-2 rounded-lg text-xs font-bold hover:bg-white/30"
+                     >
+                       閉じる
+                     </button>
                    </div>
-                   <div className="text-[10px] text-gray-400 bg-white border px-2 py-1 rounded-full whitespace-nowrap">
-                     自動適用
-                   </div>
-                 </div>
-               ))
-             )}
+                 )}
+              </div>
+            )}
+          </section>
+        )}
+
+        {isStandalone && (
+           <div className="bg-blue-50 text-blue-600 p-3 rounded-2xl text-center font-bold text-xs flex items-center justify-center gap-2 border border-blue-100">
+             <Check size={16}/> アプリとして使用中
            </div>
+        )}
+
+        {/* --- 1. 文字サイズ設定 --- */}
+        <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
+          <h2 className="text-sm font-extrabold text-gray-500 uppercase tracking-wider mb-4 flex items-center gap-2">
+            <Type size={18}/> 表示設定
+          </h2>
+          <div className="flex bg-gray-100 p-1 rounded-xl">
+            <button 
+              onClick={() => handleTextSizeChange('normal')} 
+              className={`flex-1 py-2.5 rounded-lg text-xs font-bold transition-all ${textSize === 'normal' ? 'bg-white shadow-sm text-gray-800' : 'text-gray-400'}`}
+            >
+              標準
+            </button>
+            <button 
+              onClick={() => handleTextSizeChange('large')} 
+              className={`flex-1 py-2.5 rounded-lg text-sm font-bold transition-all ${textSize === 'large' ? 'bg-white shadow-sm text-gray-800' : 'text-gray-400'}`}
+            >
+              拡大
+            </button>
+          </div>
+        </section>
+
+        {/* --- 2. プロフィール設定 (表示のみ) --- */}
+        <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
+          <h2 className="text-sm font-extrabold text-gray-500 uppercase tracking-wider mb-4 flex items-center gap-2">
+            <User size={18}/> プロフィール
+          </h2>
+          <div className="space-y-4">
+            <div>
+              <label className="block text-xs font-bold text-gray-400 mb-2">表示名</label>
+              <div className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold text-gray-700 text-sm">
+                {name}
+              </div>
+            </div>
+            
+            {/* ★修正: @sozogakuen.co.jp を削除して表示 */}
+            <div>
+              <label className="block text-xs font-bold text-gray-400 mb-2">ログインID</label>
+              <div className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold text-gray-700 text-sm font-mono tracking-wide">
+                {user?.email?.replace('@sozogakuen.co.jp', '')}
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* --- 3. 通知設定 --- */}
+        <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
+          <h2 className="text-sm font-extrabold text-gray-500 uppercase tracking-wider mb-4 flex items-center gap-2">
+            <Bell size={18}/> 通知・サウンド
+          </h2>
+          <div className="space-y-4">
+            {[
+              { key: 'notification_shift', label: 'シフト提出のリマインド' },
+              { key: 'notification_student', label: '生徒からの連絡' },
+              { key: 'notification_admin', label: '運営からのお知らせ' },
+            ].map((item) => (
+              <div key={item.key} className="flex items-center justify-between">
+                <span className="font-bold text-gray-700 text-sm">{item.label}</span>
+                <button 
+                  // @ts-ignore
+                  onClick={() => handleChange(item.key, !settings[item.key])}
+                  // @ts-ignore
+                  className={`w-11 h-6 rounded-full p-1 transition-colors duration-300 flex items-center ${settings[item.key] ? 'bg-indigo-500' : 'bg-gray-200'}`}
+                >
+                  {/* @ts-ignore */}
+                  <div className={`w-4 h-4 bg-white rounded-full shadow-sm transition-transform duration-300 ${settings[item.key] ? 'translate-x-5' : 'translate-x-0'}`} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* --- 保存ボタン --- */}
+        <div className="sticky bottom-24 z-20">
+          <button 
+            onClick={handleSaveSettings}
+            disabled={loading}
+            className={`w-full py-4 rounded-2xl font-black text-sm shadow-xl flex items-center justify-center gap-2 transition-all transform ${hasChanges ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white hover:scale-[1.02] active:scale-95 shadow-indigo-200' : 'bg-gray-200 text-gray-400'}`}
+          >
+            {loading ? <Loader2 className="animate-spin" size={18}/> : <Save size={18}/>} 
+            {hasChanges ? '変更を保存する' : '保存済み'}
+          </button>
         </div>
-        
-        {/* 説明書き */}
-        <div className="bg-blue-50 p-4 rounded-lg border border-blue-100 text-xs text-blue-800 leading-relaxed">
-          <strong>💡 仕組みについて</strong><br/>
-          ここで表示されているURLが、生徒の「科目変更申請」などが承認された際に自動的に割り当てられます。<br/>
-          変更が必要な場合は、管理者メニューの「システム設定」から行ってください。
+
+        {/* --- 4. セキュリティ --- */}
+        <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
+          <h2 className="text-sm font-extrabold text-gray-500 uppercase tracking-wider mb-2 flex items-center gap-2">
+            <Lock size={18}/> セキュリティ
+          </h2>
+          {!isPasswordExpanded ? (
+            <button onClick={() => setIsPasswordExpanded(true)} className="w-full py-3 text-left font-bold text-gray-500 hover:text-gray-800 flex items-center justify-between text-sm"><span>パスワードを変更する</span><ChevronRight size={16}/></button>
+          ) : (
+            <div className="space-y-3 mt-3 animate-in fade-in">
+              <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="w-full p-3 bg-gray-50 rounded-xl font-bold text-sm" placeholder="新しいパスワード" />
+              <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className="w-full p-3 bg-gray-50 rounded-xl font-bold text-sm" placeholder="確認用" />
+              <div className="flex justify-end gap-2">
+                <button onClick={() => setIsPasswordExpanded(false)} className="px-4 py-2 text-gray-400 font-bold text-xs">キャンセル</button>
+                <button onClick={handleChangePassword} className="bg-gray-800 text-white px-5 py-2 rounded-xl font-bold text-xs">変更</button>
+              </div>
+            </div>
+          )}
+        </section>
+
+        <div className="pt-4 pb-10">
+           <button onClick={handleLogout} className="w-full bg-white border-2 border-red-50 text-red-400 py-3 rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-red-50 text-sm transition-colors">
+             <LogOut size={18}/> ログアウト
+           </button>
         </div>
 
       </div>
     </div>
-  );
-}
-
-export default function ClassSettingsPage() {
-  return (
-    // useSearchParamsを使うためSuspenseでラップする
-    <Suspense fallback={<div className="min-h-screen flex items-center justify-center"><Loader2 className="animate-spin text-gray-400"/></div>}>
-      <SettingsContent />
-    </Suspense>
   );
 }

@@ -1,20 +1,15 @@
 'use client';
 
-import { useState, useMemo } from 'react'; // useMemo追加
-import Link from 'next/link';
+import { useState, useMemo, useEffect } from 'react';
 import { 
-  ClipboardList, Calendar, CalendarPlus, MessageCircle, Users, MonitorPlay, 
-  Phone, BarChart3, LogOut, Briefcase, Video, MapPin, User, Loader2, Star,
-  AlertTriangle, ChevronLeft, ChevronRight, LayoutList, Layout // アイコン追加
+  Calendar, MonitorPlay, MapPin, User, Loader2, Star,
+  ChevronLeft, ChevronRight, LayoutList, Layout, Home, Video, Maximize2, Minimize2
 } from 'lucide-react';
-import { auth, db } from '@/lib/firebase';
-import { signOut } from 'firebase/auth';
+import { db } from '@/lib/firebase';
 import { collection, query, where, getDocs } from 'firebase/firestore';
-import { useEffect } from 'react';
-
 import NewsWidget from '@/app/components/NewsWidget';
 
-// --- 型定義 ---
+// --- 型定義 (変更なし) ---
 type ShiftAssignment = {
   id: string;
   teacher_name: string;
@@ -40,7 +35,8 @@ type ClassGroup = {
   url: string | null;
 };
 
-// --- サブコンポーネント ---
+// --- サブコンポーネント (ClockIcon, EmptyState, ClassCard, ShiftViewer) ---
+// ※変更ありませんが、コード全体を示すため再掲します
 
 function ClockIcon() {
   return (
@@ -56,7 +52,6 @@ const EmptyState = ({ text, small }: { text: string, small?: boolean }) => (
   </div>
 );
 
-// クラスカード
 const ClassCard = ({ info, color, currentTeacherName }: { info: ClassGroup, color: 'emerald' | 'orange', currentTeacherName: string }) => {
   const isEmerald = color === 'emerald';
   const isMyMain = info.main?.teacher_name === currentTeacherName;
@@ -120,7 +115,6 @@ const ClassCard = ({ info, color, currentTeacherName }: { info: ClassGroup, colo
   );
 };
 
-// シフトビューアー (1日分を表示するコンポーネント)
 const ShiftViewer = ({ date, teacherName }: { date: string, teacherName: string }) => {
   const [assignments, setAssignments] = useState<ShiftAssignment[]>([]);
   const [urlMaster, setUrlMaster] = useState<{[key: string]: string}>({});
@@ -159,7 +153,7 @@ const ShiftViewer = ({ date, teacherName }: { date: string, teacherName: string 
         sub.parent_id === main.id || 
         (!sub.parent_id && sub.target_grade === main.target_grade && sub.target_detail_subject === main.target_detail_subject)
       );
-
+      
       let joinUrl = null;
       if (main.target_meeting_id) {
         joinUrl = `https://zoom.us/j/${main.target_meeting_id.replace(/\s/g, '')}`;
@@ -167,16 +161,7 @@ const ShiftViewer = ({ date, teacherName }: { date: string, teacherName: string 
         joinUrl = urlMaster[`${main.target_detail_subject}_${dayOfWeek}`];
       }
 
-      return {
-        id: main.id,
-        main,
-        subs: relatedSubs,
-        subject: main.target_subject,
-        grade: main.target_grade,
-        unit: main.unit,
-        place: main.target_detail_subject,
-        url: joinUrl
-      };
+      return { id: main.id, main, subs: relatedSubs, subject: main.target_subject, grade: main.target_grade, unit: main.unit, place: main.target_detail_subject, url: joinUrl };
     });
 
     const orphans = subs.filter(sub => 
@@ -184,9 +169,7 @@ const ShiftViewer = ({ date, teacherName }: { date: string, teacherName: string 
     );
     
     if (orphans.length > 0) {
-      classes.push({ 
-        id: 'orphans', main: null, subs: orphans, subject, grade: '未割当', unit: '-', place: '-', url: null 
-      });
+      classes.push({ id: 'orphans', main: null, subs: orphans, subject, grade: '未割当', unit: '-', place: '-', url: null });
     }
     return classes.sort((a, b) => (a.grade || '').localeCompare(b.grade || ''));
   };
@@ -205,8 +188,6 @@ const ShiftViewer = ({ date, teacherName }: { date: string, teacherName: string 
           </div>
           <div className="overflow-x-auto p-4 bg-[#F8FAFC]">
             <div className="flex min-w-max gap-4">
-              
-              {/* 理科 */}
               <div className="flex flex-col gap-2 min-w-[280px]">
                 <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full w-fit flex items-center gap-1"><MonitorPlay size={10}/> 理科グループ</span>
                 <div className="flex gap-3">
@@ -216,8 +197,6 @@ const ShiftViewer = ({ date, teacherName }: { date: string, teacherName: string 
                   {getAllClassesForSubject(period, '理科').length === 0 && <EmptyState text="なし" small/>}
                 </div>
               </div>
-
-              {/* 社会 */}
               <div className="flex flex-col gap-2 min-w-[280px]">
                 <span className="text-[10px] font-bold text-orange-700 bg-orange-100 px-2 py-0.5 rounded-full w-fit flex items-center gap-1"><MapPin size={10}/> 社会グループ</span>
                 <div className="flex gap-3">
@@ -227,8 +206,6 @@ const ShiftViewer = ({ date, teacherName }: { date: string, teacherName: string 
                   {getAllClassesForSubject(period, '社会').length === 0 && <EmptyState text="なし" small/>}
                 </div>
               </div>
-
-              {/* 全体サポート */}
               <div className="flex flex-col gap-2 min-w-[160px]">
                 <span className="text-[10px] font-bold text-gray-600 bg-gray-200 px-2 py-0.5 rounded-full w-fit">全体サポート</span>
                 <div className="flex flex-col gap-2">
@@ -245,7 +222,6 @@ const ShiftViewer = ({ date, teacherName }: { date: string, teacherName: string 
                   {getGeneralSupport(period).length === 0 && <EmptyState text="なし" small/>}
                 </div>
               </div>
-
             </div>
           </div>
         </div>
@@ -254,38 +230,32 @@ const ShiftViewer = ({ date, teacherName }: { date: string, teacherName: string 
   );
 };
 
-// --- メインページコンポーネント ---
-
+// --- メインコンポーネント ---
 type Props = {
   profile: any;
-  mainShifts: any[];
-  pendingCount: number;
+  mainShifts?: any[]; 
+  pendingCount?: number; 
 };
 
-export default function TeacherDashboard({ profile, mainShifts, pendingCount }: Props) {
+export default function TeacherDashboard({ profile }: Props) {
   const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
-  
-  // ★表示モード: 'day' (1日) | 'week' (7日)
   const [viewMode, setViewMode] = useState<'day' | 'week'>('day');
+  
+  // ★追加: 拡大モードの状態
+  const [isExpanded, setIsExpanded] = useState(false);
 
-  // 表示する日付リストを計算
   const displayDates = useMemo(() => {
-    if (viewMode === 'day') {
-      return [selectedDate];
-    } else {
-      // 選択日を起点に7日分
-      const dates = [];
-      const base = new Date(selectedDate);
-      for (let i = 0; i < 7; i++) {
-        const d = new Date(base);
-        d.setDate(base.getDate() + i);
-        dates.push(d.toISOString().split('T')[0]);
-      }
-      return dates;
+    if (viewMode === 'day') return [selectedDate];
+    const dates = [];
+    const base = new Date(selectedDate);
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(base);
+      d.setDate(base.getDate() + i);
+      dates.push(d.toISOString().split('T')[0]);
     }
+    return dates;
   }, [selectedDate, viewMode]);
 
-  // 日付操作 (日モードなら±1日、週モードなら±7日)
   const handleDateChange = (direction: number) => {
     const d = new Date(selectedDate);
     const increment = viewMode === 'week' ? 7 : 1;
@@ -293,144 +263,83 @@ export default function TeacherDashboard({ profile, mainShifts, pendingCount }: 
     setSelectedDate(d.toISOString().split('T')[0]);
   };
 
-  const handleLogout = async () => {
-    if (!confirm('ログアウトしますか？')) return;
-    await signOut(auth);
-    window.location.href = '/';
-  };
+  // ★追加: 拡大・縮小に応じたクラス
+  const containerClasses = isExpanded 
+    ? 'fixed inset-0 z-50 bg-[#F0F4F8] p-4 lg:p-8 overflow-hidden flex flex-col' // フルスクリーン
+    : 'p-4 sm:p-6 lg:p-8 space-y-6 animate-in fade-in duration-300'; // 通常
+
+  const calendarContainerClasses = isExpanded
+    ? 'bg-white rounded-3xl shadow-2xl border border-indigo-100 flex flex-col h-full overflow-hidden'
+    : 'bg-white rounded-[32px] shadow-lg border border-indigo-100 overflow-hidden flex flex-col';
 
   return (
-    <div className="min-h-screen bg-[#F0F4F8] font-sans pb-20">
+    <div className={containerClasses}>
       
-      <div className="max-w-7xl mx-auto p-4 sm:p-6 lg:p-8">
-        
-        <div className="flex flex-col lg:flex-row gap-8 items-start">
-          
-          {/* === 左サイドバー === */}
-          <div className="w-full lg:w-80 lg:shrink-0 lg:sticky lg:top-8 space-y-6 z-20">
-            
-            {/* プロフィール */}
-            <div className="bg-white p-5 rounded-3xl shadow-sm border border-white/50">
-              <div className="flex items-center gap-4 mb-4">
-                <div className="w-14 h-14 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl flex items-center justify-center text-white text-xl font-bold shadow-md transform -rotate-3">
-                  {profile?.name?.charAt(0) || 'T'}
-                </div>
-                <div>
-                  <h1 className="text-lg font-extrabold text-gray-800">{profile?.name} 先生</h1>
-                  <p className="text-xs font-bold text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full inline-block">講師ポータル</p>
-                </div>
-              </div>
-              <button onClick={handleLogout} className="w-full flex items-center justify-center gap-2 text-xs font-bold text-gray-500 hover:text-red-500 hover:bg-red-50 bg-gray-50 p-3 rounded-xl transition-all">
-                <LogOut size={16}/> ログアウト
+      {/* 通常モード時のみヘッダーとお知らせを表示 */}
+      {!isExpanded && (
+        <>
+          <h2 className="text-2xl font-extrabold text-gray-800 flex items-center gap-2 mb-4">
+            <Home className="text-indigo-600" size={28}/> 先生のホーム
+          </h2>
+          <NewsWidget role="teacher" />
+        </>
+      )}
+
+      {/* カレンダーコンテナ */}
+      <div className={calendarContainerClasses}>
+        <div className="p-6 bg-white border-b border-gray-100 flex flex-wrap justify-between items-center sticky top-0 z-10 backdrop-blur-sm bg-white/90 gap-4">
+          <div className="flex items-center gap-3">
+            {/* 拡大時は戻るボタンを表示 */}
+            {isExpanded && (
+              <button onClick={() => setIsExpanded(false)} className="p-2 hover:bg-gray-100 rounded-full transition-colors mr-2">
+                <ChevronLeft size={24} className="text-gray-600"/>
               </button>
-            </div>
-
-            {/* メニュー */}
-            <div className="grid grid-cols-2 gap-3">
-              <Link href="/teacher/attendance" className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 hover:border-teal-500 hover:bg-teal-50 transition-all flex flex-col items-center justify-center gap-2 text-center h-28 group no-underline">
-                <div className="w-10 h-10 rounded-full bg-teal-100 text-teal-600 flex items-center justify-center group-hover:scale-110 transition-transform"><Briefcase size={20}/></div>
-                <span className="text-xs font-bold text-gray-700">勤怠打刻</span>
-              </Link>
-              <Link href="/teacher/contacts" className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 hover:border-green-500 hover:bg-green-50 transition-all flex flex-col items-center justify-center gap-2 text-center h-28 group no-underline">
-                <div className="w-10 h-10 rounded-full bg-green-100 text-green-600 flex items-center justify-center group-hover:scale-110 transition-transform"><Phone size={20}/></div>
-                <span className="text-xs font-bold text-gray-700">連絡</span>
-              </Link>
-              <Link href="/teacher/chat" className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 hover:border-blue-300 transition-all flex flex-col items-center justify-center gap-2 text-center h-28 group no-underline">
-                <div className="w-10 h-10 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center group-hover:scale-110 transition-transform"><MessageCircle size={20}/></div>
-                <span className="text-xs font-bold text-gray-700">チャット</span>
-              </Link>
-              <Link href="/teacher/homework" className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 hover:border-orange-300 transition-all flex flex-col items-center justify-center gap-2 text-center h-28 group no-underline relative">
-                <div className="w-10 h-10 rounded-full bg-orange-100 text-orange-600 flex items-center justify-center group-hover:scale-110 transition-transform"><ClipboardList size={20}/></div>
-                <span className="text-xs font-bold text-gray-700">宿題管理</span>
-                {pendingCount > 0 && <span className="bg-red-500 text-white text-[10px] px-2 py-0.5 rounded-full absolute top-2 right-2 border-2 border-white font-bold">{pendingCount}</span>}
-              </Link>
-              <Link href="/teacher/risk-monitor" className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 hover:border-red-300 transition-all flex flex-col items-center justify-center gap-2 text-center h-28 group no-underline">
-                <div className="w-10 h-10 rounded-full bg-red-100 text-red-600 flex items-center justify-center group-hover:scale-110 transition-transform animate-pulse"><AlertTriangle size={20}/></div>
-                <span className="text-xs font-bold text-gray-700">退塾アラート</span>
-              </Link>
-              <Link href="/teacher/pf" className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 hover:border-indigo-300 transition-all flex flex-col items-center justify-center gap-2 text-center h-28 group no-underline">
-                <div className="w-10 h-10 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center group-hover:scale-110 transition-transform"><BarChart3 size={20}/></div>
-                <span className="text-xs font-bold text-gray-700">PF管理</span>
-              </Link>
-              <Link href="/teacher/students" className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 hover:border-purple-300 transition-all flex flex-col items-center justify-center gap-2 text-center h-28 group no-underline">
-                <div className="w-10 h-10 rounded-full bg-purple-100 text-purple-600 flex items-center justify-center group-hover:scale-110 transition-transform"><Users size={20}/></div>
-                <span className="text-xs font-bold text-gray-700">生徒名簿</span>
-              </Link>
-              <Link href="/teacher/shifts" className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 hover:border-yellow-300 transition-all flex flex-col items-center justify-center gap-2 text-center h-28 group no-underline">
-                <div className="w-10 h-10 rounded-full bg-yellow-100 text-yellow-600 flex items-center justify-center group-hover:scale-110 transition-transform"><CalendarPlus size={20}/></div>
-                <span className="text-xs font-bold text-gray-700">シフト提出</span>
-              </Link>
-            </div>
+            )}
+            <h3 className="text-lg font-bold text-gray-800 flex items-center gap-2">
+              <Calendar className="text-indigo-500" size={20}/> 講師配置
+            </h3>
           </div>
+          
+          <div className="flex items-center gap-3">
+            {/* ★追加: 拡大/縮小ボタン */}
+            <button 
+              onClick={() => setIsExpanded(!isExpanded)}
+              className="p-2 bg-indigo-50 text-indigo-600 rounded-xl hover:bg-indigo-100 transition-colors"
+              title={isExpanded ? "縮小" : "拡大"}
+            >
+              {isExpanded ? <Minimize2 size={20}/> : <Maximize2 size={20}/>}
+            </button>
 
-          {/* === 右カラム: メインコンテンツ === */}
-          <div className="flex-1 min-w-0 space-y-6">
+            <div className="flex bg-gray-100 p-1 rounded-xl border border-gray-200">
+              <button onClick={() => setViewMode('day')} className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1 ${viewMode === 'day' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-500 hover:bg-gray-200'}`}><Layout size={14}/> 1日</button>
+              <button onClick={() => setViewMode('week')} className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1 ${viewMode === 'week' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-500 hover:bg-gray-200'}`}><LayoutList size={14}/> 週間</button>
+            </div>
             
-            {/* お知らせウィジェット (上部へ移動) */}
-            <NewsWidget role="teacher" />
-
-            {/* シフト表 */}
-            <div className="bg-white rounded-3xl shadow-lg border border-indigo-100 overflow-hidden flex flex-col">
-              <div className="p-6 bg-white border-b border-gray-100 flex flex-wrap justify-between items-center sticky top-0 z-10 backdrop-blur-sm bg-white/90 gap-4">
-                <h2 className="text-lg font-extrabold text-gray-800 flex items-center gap-2">
-                  <Calendar className="text-indigo-600" size={24}/> 
-                  授業配置
-                </h2>
-                
-                <div className="flex items-center gap-3">
-                  {/* 表示モード切り替え */}
-                  <div className="flex bg-gray-100 p-1 rounded-lg border border-gray-200">
-                    <button 
-                      onClick={() => setViewMode('day')}
-                      className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all flex items-center gap-1 ${viewMode === 'day' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-500 hover:bg-gray-200'}`}
-                    >
-                      <Layout size={14}/> 1日
-                    </button>
-                    <button 
-                      onClick={() => setViewMode('week')}
-                      className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all flex items-center gap-1 ${viewMode === 'week' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-500 hover:bg-gray-200'}`}
-                    >
-                      <LayoutList size={14}/> 週間
-                    </button>
-                  </div>
-
-                  {/* 日付操作 */}
-                  <div className="flex items-center bg-gray-50 rounded-xl p-1 border border-gray-100 shadow-inner">
-                    <button onClick={() => handleDateChange(-1)} className="p-1.5 hover:bg-white rounded-lg transition text-gray-500 hover:text-indigo-600 hover:shadow-sm"><ChevronLeft size={18}/></button>
-                    <input 
-                      type="date" 
-                      className="bg-transparent text-xs font-bold text-indigo-700 px-2 py-1 outline-none text-center w-28 cursor-pointer"
-                      value={selectedDate}
-                      onChange={(e) => setSelectedDate(e.target.value)}
-                    />
-                    <button onClick={() => handleDateChange(1)} className="p-1.5 hover:bg-white rounded-lg transition text-gray-500 hover:text-indigo-600 hover:shadow-sm"><ChevronRight size={18}/></button>
-                  </div>
-                </div>
-              </div>
-              
-              <div className={`p-4 sm:p-6 bg-white flex-1 space-y-8 ${viewMode === 'week' ? 'max-h-[800px] overflow-y-auto custom-scrollbar' : ''}`}>
-                {displayDates.map((date, idx) => {
-                  const dayStr = ['日','月','火','水','木','金','土'][new Date(date).getDay()];
-                  const isToday = date === new Date().toISOString().split('T')[0];
-                  
-                  return (
-                    <div key={date} className={idx > 0 ? "pt-4 border-t border-dashed border-gray-200" : ""}>
-                      {/* 日付ヘッダー (週間表示時のみ強調) */}
-                      {viewMode === 'week' && (
-                        <div className={`mb-3 flex items-center gap-2 ${isToday ? 'text-indigo-600' : 'text-gray-600'}`}>
-                          <span className="font-black text-sm">{new Date(date).getMonth()+1}/{new Date(date).getDate()} ({dayStr})</span>
-                          {isToday && <span className="text-[10px] bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full font-bold">Today</span>}
-                        </div>
-                      )}
-                      
-                      <ShiftViewer date={date} teacherName={profile?.name || ''} />
-                    </div>
-                  );
-                })}
-              </div>
+            <div className="flex items-center bg-gray-50 rounded-xl p-1 border border-gray-100 shadow-inner">
+              <button onClick={() => handleDateChange(-1)} className="p-1.5 hover:bg-white rounded-lg transition text-gray-500 hover:text-indigo-600"><ChevronLeft size={18}/></button>
+              <input type="date" className="bg-transparent text-xs font-bold text-indigo-700 px-2 py-1 outline-none text-center w-28 cursor-pointer" value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)}/>
+              <button onClick={() => handleDateChange(1)} className="p-1.5 hover:bg-white rounded-lg transition text-gray-500 hover:text-indigo-600"><ChevronRight size={18}/></button>
             </div>
           </div>
-
+        </div>
+        
+        {/* スクロール領域 (拡大時は高さを最大化) */}
+        <div className={`p-4 sm:p-6 bg-white flex-1 space-y-8 overflow-y-auto custom-scrollbar ${viewMode === 'week' || isExpanded ? 'max-h-full' : 'max-h-[600px]'}`}>
+          {displayDates.map((date, idx) => {
+            const dayStr = ['日','月','火','水','木','金','土'][new Date(date).getDay()];
+            const isToday = date === new Date().toISOString().split('T')[0];
+            return (
+              <div key={date} className={idx > 0 ? "pt-6 border-t border-dashed border-gray-200" : ""}>
+                {viewMode === 'week' && (
+                  <div className={`mb-3 flex items-center gap-2 ${isToday ? 'text-indigo-600' : 'text-gray-600'}`}>
+                    <span className="font-black text-sm">{new Date(date).getMonth()+1}/{new Date(date).getDate()} ({dayStr})</span>
+                    {isToday && <span className="text-[10px] bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full font-bold">Today</span>}
+                  </div>
+                )}
+                <ShiftViewer date={date} teacherName={profile?.name || ''} />
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>

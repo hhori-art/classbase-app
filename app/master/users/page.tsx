@@ -2,8 +2,8 @@
 
 import { useState, useEffect } from 'react';
 import { db } from '@/lib/firebase';
-import { collection, getDocs, doc, setDoc, deleteDoc, query, orderBy, writeBatch, where } from 'firebase/firestore';
-import { Users, Search, Plus, Edit, Trash2, ArrowLeft, GraduationCap, UserCheck, Save, X, Loader2, FileUp, AlertTriangle } from 'lucide-react';
+import { collection, getDocs, doc, setDoc, deleteDoc, query, orderBy, writeBatch } from 'firebase/firestore';
+import { Users, Search, Plus, Edit, Trash2, ArrowLeft, GraduationCap, UserCheck, Save, X, Loader2, FileUp, AlertTriangle, Shield, Mail } from 'lucide-react';
 import Link from 'next/link';
 
 // ユーザー型定義
@@ -11,14 +11,14 @@ interface UserData {
   id: string; // Firestore Doc ID
   uid?: string;
   role: 'student' | 'teacher' | 'master';
-  student_name?: string; // 生徒用
-  name?: string;         // 講師用
+  student_name?: string; 
+  name?: string;         
   lifetime_id: string;   // ログインID
+  email?: string;        // ★追加: 既存データ対応（メールアドレス）
   grade?: string;
   classroom?: string;
-  // ★修正: 具体的な科目フィールドを追加
-  subject_science?: string; // 例: 地学
-  subject_social?: string;  // 例: 歴史A
+  subject_science?: string;
+  subject_social?: string;
   day_of_week?: string;
   initial_password?: string;
   created_at?: string;
@@ -29,7 +29,7 @@ export default function UserManagementPage() {
   const [filteredUsers, setFilteredUsers] = useState<UserData[]>([]);
   const [loading, setLoading] = useState(true);
   
-  const [activeTab, setActiveTab] = useState<'student' | 'teacher'>('student');
+  const [activeTab, setActiveTab] = useState<'student' | 'teacher' | 'master'>('student');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [isBulkDeleting, setIsBulkDeleting] = useState(false);
@@ -38,7 +38,6 @@ export default function UserManagementPage() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingUser, setEditingUser] = useState<UserData | null>(null);
   
-  // フォーム用
   const [formData, setFormData] = useState<Partial<UserData> & { displayName: string }>({
     role: 'student',
     displayName: '',
@@ -46,8 +45,8 @@ export default function UserManagementPage() {
     initial_password: 'class1234',
     grade: '',
     classroom: '',
-    subject_science: '', // ★追加
-    subject_social: '',  // ★追加
+    subject_science: '',
+    subject_social: '',
     day_of_week: ''
   });
 
@@ -71,11 +70,11 @@ export default function UserManagementPage() {
       const lower = searchQuery.toLowerCase();
       result = result.filter(u => 
         (u.student_name || u.name || '').toLowerCase().includes(lower) ||
-        String(u.lifetime_id).includes(lower) ||
+        String(u.lifetime_id || u.email || '').toLowerCase().includes(lower) ||
         (u.grade || '').includes(lower) ||
         (u.classroom || '').includes(lower) ||
-        (u.subject_science || '').includes(lower) || // ★検索対象に追加
-        (u.subject_social || '').includes(lower)     // ★検索対象に追加
+        (u.subject_science || '').includes(lower) ||
+        (u.subject_social || '').includes(lower)
       );
     }
     setFilteredUsers(result);
@@ -92,11 +91,12 @@ export default function UserManagementPage() {
       const duplicates: string[] = [];
 
       users.forEach(u => {
-        if (!u.lifetime_id) return;
-        if (uniqueMap.has(u.lifetime_id)) {
+        const key = u.lifetime_id || u.email;
+        if (!key) return;
+        if (uniqueMap.has(key)) {
           duplicates.push(u.id);
         } else {
-          uniqueMap.set(u.lifetime_id, u);
+          uniqueMap.set(key, u);
         }
       });
 
@@ -116,11 +116,11 @@ export default function UserManagementPage() {
     }
   };
 
-  // ▼▼▼ CSVインポート機能 (科目対応) ▼▼▼
+  // ▼▼▼ CSVインポート機能 ▼▼▼
   const handleCSVImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (!confirm(`「${file.name}」を取り込みますか？\n既存のIDは上書き更新されます。`)) {
+    if (!confirm(`「${file.name}」を取り込みますか？\n現在のタブ「${activeTab === 'student' ? '生徒' : activeTab === 'teacher' ? '講師' : '管理者'}」として登録されます。\n既存のIDは上書き更新されます。`)) {
       e.target.value = ''; return;
     }
 
@@ -137,8 +137,6 @@ export default function UserManagementPage() {
         const idxName = headers.findIndex(h => h.includes('氏名'));
         const idxID = headers.findIndex(h => h.includes('ID'));
         const idxPass = headers.findIndex(h => h.includes('パスワード'));
-        
-        // ★修正: 理科・社会それぞれの列を検出
         const idxScience = headers.findIndex(h => h.includes('理科'));
         const idxSocial = headers.findIndex(h => h.includes('社会'));
 
@@ -147,7 +145,8 @@ export default function UserManagementPage() {
         const batch = writeBatch(db);
         let count = 0;
 
-        const existingUserMap = new Map(users.map(u => [u.lifetime_id, u.id]));
+        // ID重複チェック用マップ (lifetime_id または email)
+        const existingUserMap = new Map(users.map(u => [u.lifetime_id || u.email, u.id]));
 
         for (let i = 1; i < rows.length; i++) {
           const cols = rows[i].split(',');
@@ -156,13 +155,12 @@ export default function UserManagementPage() {
           const name = cols[idxName]?.trim();
           const loginId = cols[idxID]?.trim();
           const pass = idxPass !== -1 ? cols[idxPass]?.trim() : 'class1234';
-          
-          // ★修正: それぞれの値を取得
           const valScience = idxScience !== -1 ? cols[idxScience]?.trim() : null;
           const valSocial = idxSocial !== -1 ? cols[idxSocial]?.trim() : null;
 
           if (!name || !loginId) continue;
 
+          // 既存IDがあれば更新、なければ新規ID発行
           const docId = existingUserMap.get(loginId) || doc(collection(db, 'users')).id;
           const docRef = doc(db, 'users', docId);
 
@@ -170,7 +168,7 @@ export default function UserManagementPage() {
           
           const data: any = {
             role: activeTab,
-            lifetime_id: loginId,
+            lifetime_id: loginId, // ここにID（メールアドレス）を保存
             initial_password: pass,
             uid: docId,
             updated_at: new Date().toISOString()
@@ -179,7 +177,6 @@ export default function UserManagementPage() {
           if (isStudent) {
             data.student_name = name;
             data.name = null;
-            // ★修正: 該当があれば保存
             if (valScience) data.subject_science = valScience;
             if (valSocial) data.subject_social = valSocial;
           } else {
@@ -212,7 +209,7 @@ export default function UserManagementPage() {
     if (!formData.displayName || !formData.lifetime_id) return alert('名前とログインIDは必須です');
     
     if (!editingUser) {
-      const exists = users.some(u => u.lifetime_id === formData.lifetime_id);
+      const exists = users.some(u => (u.lifetime_id === formData.lifetime_id) || (u.email === formData.lifetime_id));
       if (exists) return alert('このIDは既に使用されています');
     }
 
@@ -232,7 +229,6 @@ export default function UserManagementPage() {
         saveData.name = null;
         saveData.grade = formData.grade;
         saveData.classroom = formData.classroom;
-        // ★修正: 2つの科目を保存
         saveData.subject_science = formData.subject_science;
         saveData.subject_social = formData.subject_social;
         saveData.day_of_week = formData.day_of_week;
@@ -265,20 +261,21 @@ export default function UserManagementPage() {
       setFormData({ 
         ...user, 
         displayName: user.student_name || user.name || '',
-        subject_science: user.subject_science || '', // ★セット
-        subject_social: user.subject_social || ''    // ★セット
+        lifetime_id: user.lifetime_id || user.email || '', // emailも考慮してセット
+        subject_science: user.subject_science || '',
+        subject_social: user.subject_social || ''
       });
     } else {
       setEditingUser(null);
       setFormData({ 
-        role: activeTab, 
+        role: activeTab,
         displayName: '', 
         lifetime_id: '', 
         initial_password: 'class1234', 
         grade: activeTab === 'student' ? '中1' : '', 
         classroom: '', 
-        subject_science: '', // ★初期化
-        subject_social: '',  // ★初期化
+        subject_science: '',
+        subject_social: '',
         day_of_week: '' 
       });
     }
@@ -310,9 +307,9 @@ export default function UserManagementPage() {
             </Link>
             <div>
               <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
-                <Users className="text-blue-600" /> 生徒・講師管理
+                <Users className="text-blue-600" /> ユーザー管理
               </h1>
-              <p className="text-xs text-gray-500">ユーザー情報の登録・インポート・重複削除</p>
+              <p className="text-xs text-gray-500">生徒・講師・管理者のID発行と編集</p>
             </div>
           </div>
 
@@ -343,7 +340,7 @@ export default function UserManagementPage() {
           </div>
         </div>
 
-        {/* タブ */}
+        {/* タブ切り替え */}
         <div className="flex flex-col sm:flex-row justify-between items-end sm:items-center mb-4 gap-4 border-b border-gray-200 pb-2">
           <div className="flex gap-2">
             <button onClick={() => setActiveTab('student')} className={`px-6 py-3 font-bold text-sm flex items-center gap-2 border-b-2 -mb-2.5 transition-colors ${activeTab === 'student' ? 'border-blue-600 text-blue-600 bg-blue-50/50' : 'border-transparent text-gray-500'}`}>
@@ -351,6 +348,9 @@ export default function UserManagementPage() {
             </button>
             <button onClick={() => setActiveTab('teacher')} className={`px-6 py-3 font-bold text-sm flex items-center gap-2 border-b-2 -mb-2.5 transition-colors ${activeTab === 'teacher' ? 'border-purple-600 text-purple-600 bg-purple-50/50' : 'border-transparent text-gray-500'}`}>
               <UserCheck size={18}/> 講師 ({users.filter(u => u.role === 'teacher').length})
+            </button>
+            <button onClick={() => setActiveTab('master')} className={`px-6 py-3 font-bold text-sm flex items-center gap-2 border-b-2 -mb-2.5 transition-colors ${activeTab === 'master' ? 'border-gray-800 text-gray-800 bg-gray-100' : 'border-transparent text-gray-500'}`}>
+              <Shield size={18}/> 管理者 ({users.filter(u => u.role === 'master').length})
             </button>
           </div>
           
@@ -378,10 +378,10 @@ export default function UserManagementPage() {
                 <thead className="bg-gray-50 text-gray-600 font-bold border-b border-gray-200">
                   <tr>
                     <th className="p-4 w-10"><input type="checkbox" className="w-4 h-4" onChange={(e) => handleSelectAll(e.target.checked)} checked={filteredUsers.length > 0 && selectedIds.size === filteredUsers.length}/></th>
-                    <th className="p-4">氏名</th>
-                    <th className="p-4">ログインID</th>
+                    <th className="p-4 w-40">氏名</th>
+                    <th className="p-4 w-64">ログインID</th>
                     <th className="p-4">パスワード</th>
-                    {/* ★修正: 生徒用カラムに科目追加 */}
+                    
                     {activeTab === 'student' && (
                       <>
                         <th className="p-4">学年</th>
@@ -390,6 +390,7 @@ export default function UserManagementPage() {
                         <th className="p-4">社会</th>
                       </>
                     )}
+                    
                     <th className="p-4 text-center">操作</th>
                   </tr>
                 </thead>
@@ -397,15 +398,24 @@ export default function UserManagementPage() {
                   {filteredUsers.map((user) => (
                     <tr key={user.id} className={`hover:bg-gray-50 transition-colors ${selectedIds.has(user.id) ? 'bg-blue-50/30' : ''}`}>
                       <td className="p-4"><input type="checkbox" className="w-4 h-4 cursor-pointer" checked={selectedIds.has(user.id)} onChange={(e) => handleSelectOne(user.id, e.target.checked)}/></td>
+                      
                       <td className="p-4 font-bold text-gray-800 flex items-center gap-2">
-                        <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold ${user.role === 'student' ? 'bg-blue-400' : 'bg-purple-400'}`}>
+                        <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold ${
+                          user.role === 'student' ? 'bg-blue-400' : 
+                          user.role === 'teacher' ? 'bg-purple-400' : 'bg-gray-700'
+                        }`}>
                           {(user.student_name || user.name || '?')[0]}
                         </div>
-                        {user.student_name || user.name || <span className="text-gray-400">未設定</span>}
+                        <span className="truncate max-w-[120px]">{user.student_name || user.name || <span className="text-gray-400">未設定</span>}</span>
                       </td>
-                      <td className="p-4 font-mono text-gray-600">{user.lifetime_id}</td>
-                      <td className="p-4 text-gray-400 text-xs">{user.initial_password || '********'}</td>
-                      {/* ★修正: 具体的な科目を表示 */}
+
+                      {/* ★修正: lifetime_id が無ければ email を表示するフォールバック追加 */}
+                      <td className="p-4 font-mono text-gray-700 font-medium break-all">
+                        {user.lifetime_id || user.email || <span className="text-gray-300">-</span>}
+                      </td>
+
+                      <td className="p-4 text-gray-400 text-xs font-mono">{user.initial_password || '********'}</td>
+                      
                       {activeTab === 'student' && (
                         <>
                           <td className="p-4"><span className="px-2 py-1 rounded bg-gray-100 text-xs font-bold text-gray-600">{user.grade || '-'}</span></td>
@@ -414,6 +424,7 @@ export default function UserManagementPage() {
                           <td className="p-4 text-gray-600 font-bold">{user.subject_social || '-'}</td>
                         </>
                       )}
+                      
                       <td className="p-4 flex justify-center gap-2">
                         <button onClick={() => handleOpenModal(user)} className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded"><Edit size={16}/></button>
                         <button onClick={() => handleDelete(user.id)} className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded"><Trash2 size={16}/></button>
@@ -436,31 +447,39 @@ export default function UserManagementPage() {
               <button onClick={() => setIsModalOpen(false)}><X size={20}/></button>
             </div>
             <div className="p-6 space-y-4">
-              {/* 基本情報 */}
+              
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="text-xs font-bold text-gray-500">権限</label>
-                  <select className="w-full p-2 border rounded mt-1 bg-gray-50" value={formData.role} onChange={e => setFormData({...formData, role: e.target.value as any})} disabled={!!editingUser}>
-                    <option value="student">生徒</option><option value="teacher">講師</option><option value="master">管理者</option>
+                  <select 
+                    className="w-full p-2 border rounded mt-1 bg-gray-50" 
+                    value={formData.role} 
+                    onChange={e => setFormData({...formData, role: e.target.value as any})} 
+                    disabled={!!editingUser}
+                  >
+                    <option value="student">生徒</option>
+                    <option value="teacher">講師</option>
+                    <option value="master">管理者</option>
                   </select>
                 </div>
                 <div>
-                  <label className="text-xs font-bold text-gray-500">ID</label>
+                  <label className="text-xs font-bold text-gray-500">ID (ログイン用)</label>
                   <input className="w-full p-2 border rounded mt-1 font-mono" value={formData.lifetime_id} onChange={e => setFormData({...formData, lifetime_id: e.target.value})}/>
                 </div>
               </div>
+
               <div>
                 <label className="text-xs font-bold text-gray-500">氏名</label>
                 <input className="w-full p-2 border rounded mt-1" value={formData.displayName} onChange={e => setFormData({...formData, displayName: e.target.value})}/>
               </div>
+              
               <div>
                 <label className="text-xs font-bold text-gray-500">パスワード</label>
                 <input className="w-full p-2 border rounded mt-1 font-mono bg-gray-50" value={formData.initial_password} onChange={e => setFormData({...formData, initial_password: e.target.value})}/>
               </div>
               
-              {/* ★修正: 生徒用フォーム (理科・社会を追加) */}
               {formData.role === 'student' && (
-                <>
+                <div className="p-4 bg-blue-50/50 rounded-xl space-y-4 border border-blue-100">
                   <div className="grid grid-cols-2 gap-4">
                      <div>
                        <label className="text-xs font-bold text-gray-500">学年</label>
@@ -493,7 +512,7 @@ export default function UserManagementPage() {
                       />
                     </div>
                   </div>
-                </>
+                </div>
               )}
               
               <button onClick={handleSave} className="w-full bg-blue-600 text-white py-3 rounded-lg font-bold hover:bg-blue-700 shadow mt-4 flex justify-center items-center gap-2">

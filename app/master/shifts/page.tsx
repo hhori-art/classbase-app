@@ -2,11 +2,13 @@
 
 import { useState, useEffect } from 'react';
 import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs, addDoc, deleteDoc, doc, updateDoc } from 'firebase/firestore';
-import { Calendar, UserCheck, Briefcase, Trash2, ArrowLeft, Video, Save, Loader2, Link as LinkIcon, Users, MapPin, User, UserPlus, X, Settings } from 'lucide-react';
+import { collection, query, where, getDocs, addDoc, deleteDoc, doc, updateDoc, orderBy, limit, getDoc } from 'firebase/firestore';
+import { Briefcase, Trash2, ArrowLeft, Video, Save, Loader2, Link as LinkIcon, Users, MapPin, User, UserPlus, X, Settings, Monitor, MessageSquare, BarChart2, UserCheck, GripVertical, CheckCircle, HelpCircle, AlertCircle } from 'lucide-react';
 import Link from 'next/link';
 import ShiftImportButton from '@/app/components/ShiftImportButton';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, CartesianGrid } from 'recharts';
 
+// 型定義
 type ShiftAssignment = {
   id: string;
   user_id: string;
@@ -18,9 +20,19 @@ type ShiftAssignment = {
   target_detail_subject: string | null;
   target_place?: string | null;
   target_meeting_id?: string | null;
+  target_signin_address?: string | null;
   unit: string | null;
   note: string;
   parent_id?: string;
+};
+
+type Teacher = {
+  id: string;
+  student_name?: string;
+  name?: string;
+  lifetime_id?: string;
+  role: string;
+  survey_url?: string;
 };
 
 type ClassGroup = {
@@ -43,12 +55,25 @@ const SUBJECT_DETAILS = {
 export default function MasterShiftPage() {
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
   const [dayOfWeek, setDayOfWeek] = useState('');
-  const [allTeachers, setAllTeachers] = useState<any[]>([]);
+  const [allTeachers, setAllTeachers] = useState<Teacher[]>([]);
   const [availabilities, setAvailabilities] = useState<any[]>([]);
   const [assignments, setAssignments] = useState<ShiftAssignment[]>([]);
   const [urlMaster, setUrlMaster] = useState<{[key: string]: string}>({});
 
   const [editingShift, setEditingShift] = useState<ShiftAssignment | null>(null);
+
+  // アンケート関連
+  const [surveyQuestions, setSurveyQuestions] = useState<any[]>([]);
+  const [surveyResults, setSurveyResults] = useState<any[]>([]);
+  const [isSurveyModalOpen, setIsSurveyModalOpen] = useState(false);
+  const [selectedTeacherForResults, setSelectedTeacherForResults] = useState<{id: string, name: string} | null>(null);
+  const [surveyLoading, setSurveyLoading] = useState(false);
+
+  // ドラッグ＆ドロップ用
+  const [draggedTeacher, setDraggedTeacher] = useState<Teacher | null>(null);
+  const [dragOverCardId, setDragOverCardId] = useState<string | null>(null);
+  // ★修正: zoneに 'general' を追加
+  const [dragOverZone, setDragOverZone] = useState<'main' | 'sub' | 'general' | null>(null);
 
   const [form, setForm] = useState({
     userId: '',
@@ -68,7 +93,7 @@ export default function MasterShiftPage() {
     try {
       const tQ = query(collection(db, 'users'), where('role', '==', 'teacher'));
       const tSnap = await getDocs(tQ);
-      setAllTeachers(tSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+      setAllTeachers(tSnap.docs.map(d => ({ id: d.id, ...d.data() } as Teacher)));
 
       const avQ = query(collection(db, 'teacher_availability'), where('available_date', '==', date));
       const avSnap = await getDocs(avQ);
@@ -82,6 +107,11 @@ export default function MasterShiftPage() {
       const urls: {[key: string]: string} = {};
       urlSnap.forEach(doc => { urls[doc.id] = doc.data().url; });
       setUrlMaster(urls);
+
+      const tmplSnap = await getDoc(doc(db, 'survey_templates', 'default'));
+      if (tmplSnap.exists()) {
+        setSurveyQuestions(tmplSnap.data().questions || []);
+      }
 
     } catch (e) { console.error(e); } finally { setLoading(false); }
   };
@@ -99,52 +129,107 @@ export default function MasterShiftPage() {
     if (form.subject === '社会' && !SUBJECT_DETAILS['社会'].includes(form.detail_subject)) setForm(prev => ({ ...prev, detail_subject: '地理' }));
   }, [form.subject]);
 
-  const handleAssign = async () => {
-    if (!form.userId) return alert('先生を選択してください');
-    const teacher = allTeachers.find(t => t.id === form.userId);
-    const teacherName = teacher?.student_name || teacher?.name || '不明';
-    const systemNote = `【${form.time_slot}】`;
-
-    let targetGrade: string | null = form.grade;
-    let targetSubject: string | null = form.subject;
-    let targetDetail: string | null = form.detail_subject;
-    let targetPlace: string | null = form.studio;
-    let parentId: string | null = null;
-
-    if (form.role === 'sub') {
-      if (!form.targetClassId) return alert('サポートに入る授業を選択してください');
-      const parentClass = assignments.find(a => a.id === form.targetClassId);
-      if (!parentClass) return alert('選択された授業が見つかりません');
-      targetGrade = parentClass.target_grade || '';
-      targetSubject = parentClass.target_subject || '';
-      targetDetail = parentClass.target_detail_subject || '';
-      targetPlace = parentClass.target_place || ''; 
-      parentId = parentClass.id;
-    } else if (form.role === 'general') {
-      targetGrade = null;
-      targetSubject = null;
-      targetDetail = null;
-      targetPlace = null;
-    }
-
+  // 配置処理
+  const executeAssign = async (
+    teacherId: string, 
+    role: 'main' | 'sub' | 'general', 
+    targetClass?: ShiftAssignment,
+    periodStr: string = '1限'
+  ) => {
+    const teacher = allTeachers.find(t => t.id === teacherId);
+    if (!teacher) return;
+    const teacherName = teacher.student_name || teacher.name || '不明';
+    
     try {
-      await addDoc(collection(db, 'shift_assignments'), {
-        user_id: form.userId,
+      const shiftData: any = {
+        user_id: teacherId,
         teacher_name: teacherName,
         target_date: date,
-        role_type: form.role,
-        target_grade: targetGrade,
-        target_subject: targetSubject,
-        target_detail_subject: targetDetail,
-        target_place: targetPlace, 
-        unit: form.role === 'main' ? form.unit : null,
-        parent_id: parentId,
-        note: systemNote,
+        role_type: role,
+        note: `【${periodStr}】`,
         created_at: new Date().toISOString()
-      });
+      };
+
+      if (role === 'main') {
+        if (targetClass) {
+           await updateDoc(doc(db, 'shift_assignments', targetClass.id), {
+             user_id: teacherId,
+             teacher_name: teacherName
+           });
+        } else {
+           shiftData.target_grade = form.grade;
+           shiftData.target_subject = form.subject;
+           shiftData.target_detail_subject = form.detail_subject;
+           shiftData.target_place = form.studio;
+           shiftData.unit = form.unit;
+           await addDoc(collection(db, 'shift_assignments'), shiftData);
+        }
+      } else if (role === 'sub') {
+        if (!targetClass) return;
+        shiftData.target_grade = targetClass.target_grade;
+        shiftData.target_subject = targetClass.target_subject;
+        shiftData.target_detail_subject = targetClass.target_detail_subject;
+        shiftData.target_place = targetClass.target_place;
+        shiftData.parent_id = targetClass.id;
+        await addDoc(collection(db, 'shift_assignments'), shiftData);
+      } else {
+        // general
+        await addDoc(collection(db, 'shift_assignments'), shiftData);
+      }
+      
       fetchData();
-      if (form.role === 'sub') setForm(prev => ({...prev, userId: ''}));
     } catch (e: any) { alert('エラー: ' + e.message); }
+  };
+
+  const handleManualAssign = () => {
+    if (!form.userId) return alert('先生を選択してください');
+    let targetClass: ShiftAssignment | undefined = undefined;
+    if (form.role === 'sub' && form.targetClassId) {
+      targetClass = assignments.find(a => a.id === form.targetClassId);
+    }
+    executeAssign(form.userId, form.role as any, targetClass, form.time_slot);
+  };
+
+  // DnDハンドラ
+  const handleDragStart = (e: React.DragEvent, teacher: Teacher) => {
+    setDraggedTeacher(teacher);
+    e.dataTransfer.effectAllowed = 'copy';
+  };
+
+  // ★修正: zone引数に 'general' を許可
+  const handleDragOver = (e: React.DragEvent, cardId: string, zone: 'main' | 'sub' | 'general') => {
+    e.preventDefault();
+    setDragOverCardId(cardId);
+    setDragOverZone(zone);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    setDragOverCardId(null);
+    setDragOverZone(null);
+  };
+
+  // ★修正: ドロップ時に全体サポート(general)も処理
+  const handleDrop = async (e: React.DragEvent, targetClass: ShiftAssignment | null, zone: 'main' | 'sub' | 'general', periodStr?: string) => {
+    e.preventDefault();
+    setDragOverCardId(null);
+    setDragOverZone(null);
+
+    if (!draggedTeacher) return;
+
+    const actualPeriodStr = periodStr || (targetClass?.note.includes('1限') ? '1限' : '2限');
+
+    if (zone === 'main' && targetClass) {
+      if (!confirm(`「${targetClass.target_subject}」の担当講師を\n「${draggedTeacher.student_name || draggedTeacher.name}」先生に変更しますか？`)) return;
+      await executeAssign(draggedTeacher.id, 'main', targetClass, actualPeriodStr);
+    } else if (zone === 'sub' && targetClass) {
+      if (!confirm(`「${targetClass.target_subject}」に\n「${draggedTeacher.student_name || draggedTeacher.name}」先生をサポートとして追加しますか？`)) return;
+      await executeAssign(draggedTeacher.id, 'sub', targetClass, actualPeriodStr);
+    } else if (zone === 'general') {
+      // ★全体サポートへの追加
+      if (!confirm(`「${actualPeriodStr}」の全体サポートに\n「${draggedTeacher.student_name || draggedTeacher.name}」先生を追加しますか？`)) return;
+      await executeAssign(draggedTeacher.id, 'general', undefined, actualPeriodStr);
+    }
+    setDraggedTeacher(null);
   };
 
   const handleDelete = async (id: string) => {
@@ -161,18 +246,75 @@ export default function MasterShiftPage() {
       await updateDoc(doc(db, 'shift_assignments', editingShift.id), {
         target_place: editingShift.target_place,
         unit: editingShift.unit,
-        target_meeting_id: editingShift.target_meeting_id
+        target_meeting_id: editingShift.target_meeting_id,
+        target_signin_address: editingShift.target_signin_address
       });
       setEditingShift(null);
       fetchData();
     } catch (e) { alert('更新エラー'); }
   };
 
-  const getAvailableClasses = () => {
-    return assignments.filter(a =>
-      a.role_type === 'main' &&
-      a.note.includes(`【${form.time_slot}】`)
-    ).sort((a, b) => (a.target_grade || '').localeCompare(b.target_grade || ''));
+  const handleShowSurveyResults = async (e: React.MouseEvent, teacherId: string, teacherName: string) => {
+    e.stopPropagation();
+    if (!teacherId) return;
+    setSelectedTeacherForResults({ id: teacherId, name: teacherName });
+    setSurveyLoading(true);
+    setIsSurveyModalOpen(true);
+    try {
+      const q = query(
+        collection(db, 'survey_responses'),
+        where('teacher_id', '==', teacherId),
+        orderBy('created_at', 'desc'),
+        limit(100)
+      );
+      const snap = await getDocs(q);
+      const results = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      setSurveyResults(results);
+    } catch (err) {
+      console.error(err);
+      setSurveyResults([]);
+    } finally {
+      setSurveyLoading(false);
+    }
+  };
+
+  const calculateRatingStats = (questionId: number) => {
+    const counts = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+    let total = 0;
+    let sum = 0;
+    surveyResults.forEach((res: any) => {
+      const val = res.answers?.[questionId];
+      if (val && typeof val === 'number') {
+        // @ts-ignore
+        if (counts[val] !== undefined) {
+          // @ts-ignore
+          counts[val]++;
+          sum += val;
+          total++;
+        }
+      }
+    });
+    const average = total > 0 ? (sum / total).toFixed(1) : '0.0';
+    const data = [
+      { name: '5', count: counts[5], fill: '#4ade80' },
+      { name: '4', count: counts[4], fill: '#a3e635' },
+      { name: '3', count: counts[3], fill: '#facc15' },
+      { name: '2', count: counts[2], fill: '#fb923c' },
+      { name: '1', count: counts[1], fill: '#f87171' },
+    ];
+    return { average, total, data };
+  };
+
+  const getTextAnswers = (questionId: number) => {
+    return surveyResults
+      .filter((res: any) => res.answers?.[questionId])
+      .map((res: any) => ({
+        id: res.id,
+        text: res.answers[questionId],
+        date: res.created_at?.seconds ? new Date(res.created_at.seconds * 1000).toLocaleDateString() : '',
+        student: res.student_name,
+        subject: res.subject
+      }));
   };
 
   const getAllClassesForSubject = (time: string, subject: string) => {
@@ -213,23 +355,6 @@ export default function MasterShiftPage() {
       };
     });
 
-    const orphans = subs.filter(sub =>
-      !mains.some(main => sub.parent_id === main.id || (!sub.parent_id && main.target_grade === sub.target_grade && main.target_detail_subject === sub.target_detail_subject))
-    );
-    if (orphans.length > 0) {
-      classes.push({
-        id: 'orphans',
-        main: null,
-        subs: orphans,
-        subject: subject,
-        grade: '未割当',
-        unit: '-',
-        place: '-',
-        studio: null,
-        url: null
-      });
-    }
-
     classes.sort((a, b) => {
       if (a.grade !== b.grade) return (a.grade || '').localeCompare(b.grade || '');
       return (a.place || '').localeCompare(b.place || '');
@@ -240,6 +365,57 @@ export default function MasterShiftPage() {
 
   const getGeneralSupport = (time: string) => {
     return assignments.filter(a => a.role_type === 'general' && a.note.includes(`【${time}】`));
+  };
+
+  const groupedTeachers = {
+    available: [] as Teacher[],
+    maybe: [] as Teacher[],
+    others: [] as Teacher[]
+  };
+
+  allTeachers.forEach(t => {
+    const avail = availabilities.find(a => a.user_id === t.id);
+    if (avail && avail.status === 'possible') {
+      if (avail.note?.includes('〇') || avail.note?.includes('可')) {
+        groupedTeachers.available.push(t);
+      } else if (avail.note?.includes('△')) {
+        groupedTeachers.maybe.push(t);
+      } else {
+        groupedTeachers.others.push(t);
+      }
+    } else {
+      groupedTeachers.others.push(t);
+    }
+  });
+
+  const renderTeacherList = (list: Teacher[], type: 'available' | 'maybe' | 'others') => {
+    if (list.length === 0) return <div className="text-xs text-gray-400 p-2">該当なし</div>;
+    
+    return list.map(t => {
+      const assignedCount = assignments.filter(a => a.user_id === t.id).length;
+      return (
+        <div 
+          key={t.id}
+          draggable 
+          onDragStart={(e) => handleDragStart(e, t)}
+          onClick={() => setForm({ ...form, userId: t.id })}
+          className={`p-3 rounded-xl border mb-2 cursor-grab active:cursor-grabbing transition-all text-sm group relative flex justify-between items-center shadow-sm
+            ${form.userId === t.id ? 'ring-2 ring-indigo-500 bg-indigo-50 border-indigo-500' : 'bg-white hover:bg-gray-50 border-slate-200'}
+            ${assignedCount > 0 ? 'opacity-70 bg-gray-50' : ''}
+          `}
+        >
+          <div className="flex items-center gap-2">
+            <GripVertical size={14} className="text-gray-300" />
+            <div>
+              <span className="font-bold text-slate-700 block">{t.student_name || t.name}</span>
+              {assignedCount > 0 && <span className="text-[9px] text-white bg-green-500 px-1.5 py-0.5 rounded-full inline-block mt-0.5">配置済: {assignedCount}</span>}
+            </div>
+          </div>
+          {type === 'available' && <CheckCircle size={16} className="text-green-500" />}
+          {type === 'maybe' && <HelpCircle size={16} className="text-yellow-500" />}
+        </div>
+      );
+    });
   };
 
   return (
@@ -269,123 +445,71 @@ export default function MasterShiftPage() {
         </div>
 
         <div className="flex flex-col lg:flex-row gap-6 items-start">
-          {/* 左カラム: 操作パネル (省略なし) */}
-          <div className="w-full lg:w-[320px] flex flex-col gap-6 shrink-0">
-            <div className="bg-white p-5 rounded-2xl shadow-lg border-2 border-indigo-100">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="font-bold text-slate-700 text-sm flex gap-2 items-center">
-                  <Save size={18} className="text-indigo-600"/> 配置コンソール
+          {/* 左カラム */}
+          <div className="w-full lg:w-[320px] flex flex-col gap-6 shrink-0 h-[calc(100vh-200px)] overflow-y-auto custom-scrollbar pr-2">
+            
+            <div className="bg-white p-4 rounded-2xl shadow-sm border border-indigo-100 shrink-0">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-bold text-slate-700 text-xs flex gap-2 items-center">
+                  <Save size={16} className="text-indigo-600"/> 新規クラス作成
                 </h3>
               </div>
-              <div className="space-y-4">
-                <div className={`p-3 rounded-xl text-center font-bold text-sm min-h-[44px] flex items-center justify-center border-2 transition-all ${form.userId ? 'bg-indigo-600 text-white border-indigo-600 shadow-md' : 'bg-slate-50 text-slate-400 border-dashed border-slate-300'}`}>
-                  {allTeachers.find(t => t.id === form.userId)?.student_name || allTeachers.find(t => t.id === form.userId)?.name || "リストから先生を選択"}
+              <div className="space-y-3">
+                <div className={`p-2 rounded text-center font-bold text-xs border ${form.userId ? 'bg-indigo-50 border-indigo-300 text-indigo-700' : 'bg-gray-50 text-gray-400 border-dashed'}`}>
+                  {allTeachers.find(t => t.id === form.userId)?.student_name || "先生を選択してください"}
                 </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1 block">時限</label>
-                    <select className="w-full p-2.5 border-2 border-slate-100 rounded-xl text-sm font-bold text-slate-700 outline-none" value={form.time_slot} onChange={e => setForm({...form, time_slot: e.target.value})}>
-                      <option>1限</option><option>2限</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1 block">役割</label>
-                    <select className="w-full p-2.5 border-2 border-slate-100 rounded-xl text-sm font-bold text-slate-700 outline-none" value={form.role} onChange={e => setForm({...form, role: e.target.value})}>
-                      <option value="main">授業 (Main)</option>
-                      <option value="sub">サポート (Sub)</option>
-                      <option value="general">全体サポート</option>
-                    </select>
-                  </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <select className="w-full p-2 border rounded text-xs" value={form.time_slot} onChange={e => setForm({...form, time_slot: e.target.value})}>
+                    <option>1限</option><option>2限</option>
+                  </select>
+                  <select className="w-full p-2 border rounded text-xs" value={form.role} onChange={e => setForm({...form, role: e.target.value})}>
+                    <option value="main">メイン</option>
+                    <option value="general">全体</option>
+                  </select>
                 </div>
-
                 {form.role === 'main' && (
-                  <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 space-y-3 animate-in fade-in zoom-in-95">
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1 block">学年</label>
-                        <select className="w-full p-2 border border-slate-200 rounded-lg text-sm font-bold outline-none" value={form.grade} onChange={e => setForm({...form, grade: e.target.value})}>
-                          <option>中1</option><option>中2</option><option>中3</option>
-                        </select>
-                      </div>
-                      <div>
-                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1 block">教科</label>
-                        <select className="w-full p-2 border border-slate-200 rounded-lg text-sm font-bold outline-none" value={form.subject} onChange={e => setForm({...form, subject: e.target.value})}>
-                          <option>理科</option><option>社会</option>
-                        </select>
-                      </div>
-                    </div>
-                    <div>
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1 block">場所 (詳細科目)</label>
-                      <select className="w-full p-2 border border-slate-200 rounded-lg text-sm font-bold text-indigo-700 bg-white outline-none" value={form.detail_subject} onChange={e => setForm({...form, detail_subject: e.target.value})}>
-                        {(form.subject === '理科' ? SUBJECT_DETAILS['理科'] : SUBJECT_DETAILS['社会']).map(sub => (
-                          <option key={sub} value={sub}>{sub}</option>
-                        ))}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1 block">実施スタジオ</label>
-                      <input type="text" placeholder="例: 元町 6F1" className="w-full p-2 border border-slate-200 rounded-lg text-sm outline-none" value={form.studio} onChange={e => setForm({...form, studio: e.target.value})} />
-                    </div>
-                    <div>
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1 block">単元名</label>
-                      <input type="text" placeholder="例: 力のつり合い" className="w-full p-2 border border-slate-200 rounded-lg text-sm outline-none" value={form.unit} onChange={e => setForm({...form, unit: e.target.value})} />
-                    </div>
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <select className="border rounded p-1" value={form.grade} onChange={e => setForm({...form, grade: e.target.value})}><option>中1</option><option>中2</option><option>中3</option></select>
+                    <select className="border rounded p-1" value={form.subject} onChange={e => setForm({...form, subject: e.target.value})}><option>理科</option><option>社会</option></select>
+                    <input className="border rounded p-1 col-span-2" placeholder="詳細科目" value={form.detail_subject} onChange={e => setForm({...form, detail_subject: e.target.value})}/>
                   </div>
                 )}
-
-                {form.role === 'sub' && (
-                  <div className="bg-yellow-50 p-3 rounded-xl border border-yellow-100 space-y-3 animate-in fade-in zoom-in-95">
-                    <div>
-                      <label className="text-[10px] font-bold text-yellow-600 uppercase tracking-wider mb-1 block flex items-center gap-1"><UserPlus size={12}/> 対象の授業を選択</label>
-                      <select className="w-full p-2 border border-yellow-200 rounded-lg text-xs font-bold text-slate-700 bg-white outline-none" value={form.targetClassId} onChange={e => setForm({...form, targetClassId: e.target.value})}>
-                        <option value="">授業を選択してください...</option>
-                        {getAvailableClasses().length === 0 && <option disabled>授業がありません</option>}
-                        {getAvailableClasses().map(cls => (
-                          <option key={cls.id} value={cls.id}>
-                            {cls.target_grade} {cls.target_subject}({cls.target_detail_subject}) - {cls.teacher_name}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-                )}
-
-                <button onClick={handleAssign} disabled={!form.userId || (form.role === 'sub' && !form.targetClassId)} className={`w-full py-3.5 rounded-xl font-bold shadow-lg transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 ${form.role === 'sub' ? 'bg-yellow-500 hover:bg-yellow-600 text-white shadow-yellow-200' : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-200'}`}>
-                  <Users size={18}/> {form.role === 'sub' ? 'サポートに追加' : '配置する'}
-                </button>
+                <button onClick={handleManualAssign} className="w-full bg-indigo-600 text-white text-xs font-bold py-2 rounded hover:bg-indigo-700">配置</button>
               </div>
             </div>
 
-            {/* 待機リスト */}
-            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
-              <div className="bg-slate-50 p-3 border-b border-slate-200">
-                <h2 className="font-bold text-slate-600 text-xs uppercase tracking-wider flex items-center gap-2"><UserCheck size={14}/> 待機中の先生</h2>
+            <div className="space-y-4">
+              <div>
+                <h3 className="text-xs font-bold text-green-700 bg-green-50 px-3 py-2 rounded-lg mb-2 flex items-center gap-2">
+                  <CheckCircle size={14}/> 出勤可能 (シフト提出済)
+                </h3>
+                <div className="space-y-1">
+                  {renderTeacherList(groupedTeachers.available, 'available')}
+                </div>
               </div>
-              <div className="p-2 space-y-1">
-                {loading ? <div className="flex justify-center py-10"><Loader2 className="animate-spin text-indigo-400"/></div> : 
-                  allTeachers.map(t => {
-                    const avail = availabilities.find(a => a.user_id === t.id);
-                    const assignedCount = assignments.filter(a => a.user_id === t.id).length;
-                    return (
-                      <div key={t.id} onClick={() => setForm({ ...form, userId: t.id })} className={`p-3 rounded-xl border cursor-pointer transition-all text-sm group relative ${form.userId === t.id ? 'border-indigo-500 bg-indigo-50 ring-1 ring-indigo-300' : assignedCount > 0 ? 'border-slate-100 bg-slate-50 opacity-60' : 'border-slate-100 hover:bg-slate-50 hover:border-indigo-200'}`}>
-                        <div className="flex justify-between items-center">
-                          <div>
-                            <span className="font-bold text-slate-700 block">{t.student_name || t.name}</span>
-                            {assignedCount > 0 && <span className="text-[10px] text-green-600 font-bold bg-green-50 px-1.5 rounded mt-0.5 inline-block">配置済 ({assignedCount})</span>}
-                          </div>
-                          {avail ? <span className="text-[10px] bg-green-100 text-green-700 px-2 py-1 rounded-full font-bold shadow-sm">{avail.note || '〇'}</span> : <span className="text-[10px] text-slate-300">-</span>}
-                        </div>
-                      </div>
-                    );
-                  })
-                }
+
+              <div>
+                <h3 className="text-xs font-bold text-yellow-700 bg-yellow-50 px-3 py-2 rounded-lg mb-2 flex items-center gap-2">
+                  <HelpCircle size={14}/> 調整可能
+                </h3>
+                <div className="space-y-1">
+                  {renderTeacherList(groupedTeachers.maybe, 'maybe')}
+                </div>
+              </div>
+
+              <div>
+                <h3 className="text-xs font-bold text-gray-500 bg-gray-100 px-3 py-2 rounded-lg mb-2 flex items-center gap-2">
+                  <User size={14}/> その他 / 未提出
+                </h3>
+                <div className="space-y-1 opacity-80">
+                  {renderTeacherList(groupedTeachers.others, 'others')}
+                </div>
               </div>
             </div>
           </div>
 
-          {/* 右カラム: スケジュールボード */}
-          <div className="flex-1 space-y-10 min-w-0">
+          {/* 右カラム */}
+          <div className="flex-1 space-y-8 min-w-0">
             {['1限', '2限'].map((period) => (
               <div key={period} className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
                 <div className={`p-4 text-white font-black text-lg flex justify-between items-center shadow-sm ${period === '1限' ? 'bg-gradient-to-r from-blue-600 to-blue-500' : 'bg-gradient-to-r from-indigo-600 to-indigo-500'}`}>
@@ -395,177 +519,82 @@ export default function MasterShiftPage() {
                   </div>
                 </div>
 
-                <div className="overflow-x-auto custom-scrollbar">
+                <div className="overflow-x-auto custom-scrollbar pb-4">
                   <div className="flex gap-0 min-w-max divide-x divide-slate-100">
-                    {/* 理科エリア */}
                     <div className="flex flex-col p-4 gap-3">
                       <div className="flex items-center gap-2 mb-2">
                         <span className="bg-emerald-100 text-emerald-800 text-xs font-black px-3 py-1 rounded-full whitespace-nowrap">理科グループ</span>
                       </div>
                       <div className="flex gap-4">
                         {getAllClassesForSubject(period, '理科').map(info => (
-                          <div key={info.id} className="w-[240px] bg-white border-2 border-emerald-100 rounded-xl shadow-sm flex flex-col overflow-hidden relative group hover:shadow-md transition-all shrink-0">
-                            <div className="bg-emerald-50/50 p-3 border-b border-emerald-50 relative">
-                              <div className="flex justify-between items-start mb-2">
-                                <span className="text-xs font-black text-emerald-600 bg-emerald-100 px-2 py-0.5 rounded shadow-sm whitespace-nowrap">{info.grade} / {info.place}</span>
-                                {info.main && (
-                                  <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                    <button onClick={() => setEditingShift(info.main)} className="text-slate-400 hover:text-blue-500"><Settings size={14}/></button>
-                                    <button onClick={() => handleDelete(info.main!.id)} className="text-slate-400 hover:text-red-500"><Trash2 size={14}/></button>
-                                  </div>
-                                )}
-                              </div>
-                              <div className="text-sm font-bold text-slate-800 line-clamp-2 min-h-[1.25em]">
-                                {info.unit || <span className="text-slate-300 font-normal text-xs">単元未設定</span>}
-                              </div>
-                              {info.studio && (
-                                <div className="flex items-center gap-1 text-[10px] text-emerald-600 font-bold mt-1">
-                                  <MapPin size={10}/> {info.studio}
-                                </div>
-                              )}
-                            </div>
-
-                            <div className="p-3 flex-1 flex flex-col gap-3">
-                              <div className="flex items-center gap-3">
-                                <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-600 shrink-0">
-                                  <User size={16}/>
-                                </div>
-                                <div>
-                                  <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mb-0.5">Teacher</span>
-                                  <span className="font-bold text-slate-800 text-sm">{info.main?.teacher_name || '未定'}</span>
-                                </div>
-                              </div>
-
-                              {info.subs.length > 0 && (
-                                <div className="bg-slate-50 p-2 rounded-lg border border-slate-100">
-                                  <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mb-1">Support</span>
-                                  <div className="space-y-1">
-                                    {info.subs.map((sub: ShiftAssignment) => (
-                                      <div key={sub.id} className="flex justify-between items-center text-xs">
-                                        <span className="text-slate-600 font-medium flex items-center gap-1">
-                                          <div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div> {sub.teacher_name}
-                                        </span>
-                                        <button onClick={() => handleDelete(sub.id)} className="text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100"><Trash2 size={10}/></button>
-                                      </div>
-                                    ))}
-                                  </div>
-                                </div>
-                              )}
-
-                              <div className="mt-auto pt-2">
-                                {info.url ? (
-                                  <a href={info.url} target="_blank" rel="noreferrer" className="w-full bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold py-2 rounded-lg flex items-center justify-center gap-2 transition-all active:scale-95 shadow-sm shadow-emerald-200">
-                                    <Video size={14}/> 授業に参加
-                                  </a>
-                                ) : (
-                                  <div className="w-full bg-slate-100 text-slate-400 text-xs font-bold py-2 rounded-lg flex items-center justify-center gap-2 cursor-not-allowed">
-                                    <Video size={14}/> URL未設定
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          </div>
+                           <ClassCard 
+                             key={info.id} 
+                             info={info} 
+                             allTeachers={allTeachers}
+                             onDelete={handleDelete}
+                             onEdit={setEditingShift}
+                             onShowResults={handleShowSurveyResults}
+                             onDragOver={handleDragOver}
+                             onDragLeave={handleDragLeave}
+                             onDrop={(e: any, t: any, z: any) => handleDrop(e, t, z, period)}
+                             dragOverCardId={dragOverCardId}
+                             dragOverZone={dragOverZone}
+                           />
                         ))}
-                        {getAllClassesForSubject(period, '理科').length === 0 && (
-                          <div className="w-[200px] h-[100px] border-2 border-dashed border-slate-200 rounded-xl flex items-center justify-center text-slate-300 font-bold text-sm shrink-0">授業予定なし</div>
-                        )}
                       </div>
                     </div>
 
-                    {/* 社会エリア */}
                     <div className="flex flex-col p-4 gap-3">
                       <div className="flex items-center gap-2 mb-2">
                         <span className="bg-orange-100 text-orange-800 text-xs font-black px-3 py-1 rounded-full whitespace-nowrap">社会グループ</span>
                       </div>
                       <div className="flex gap-4">
                         {getAllClassesForSubject(period, '社会').map(info => (
-                          <div key={info.id} className="w-[240px] bg-white border-2 border-orange-100 rounded-xl shadow-sm flex flex-col overflow-hidden relative group hover:shadow-md transition-all shrink-0">
-                            <div className="bg-orange-50/50 p-3 border-b border-orange-50 relative">
-                              <div className="flex justify-between items-start mb-2">
-                                <span className="text-xs font-black text-orange-600 bg-orange-100 px-2 py-0.5 rounded shadow-sm whitespace-nowrap">{info.grade} / {info.place}</span>
-                                {info.main && (
-                                  <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                    <button onClick={() => setEditingShift(info.main)} className="text-slate-400 hover:text-blue-500"><Settings size={14}/></button>
-                                    <button onClick={() => handleDelete(info.main!.id)} className="text-slate-400 hover:text-red-500"><Trash2 size={14}/></button>
-                                  </div>
-                                )}
-                              </div>
-                              <div className="text-sm font-bold text-slate-800 line-clamp-2 min-h-[1.25em]">
-                                {info.unit || <span className="text-slate-300 font-normal text-xs">単元未設定</span>}
-                              </div>
-                              {info.studio && (
-                                <div className="flex items-center gap-1 text-[10px] text-orange-600 font-bold mt-1">
-                                  <MapPin size={10}/> {info.studio}
-                                </div>
-                              )}
-                            </div>
-
-                            <div className="p-3 flex-1 flex flex-col gap-3">
-                              <div className="flex items-center gap-3">
-                                <div className="w-8 h-8 rounded-full bg-orange-100 flex items-center justify-center text-orange-600 shrink-0">
-                                  <User size={16}/>
-                                </div>
-                                <div>
-                                  <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mb-0.5">Teacher</span>
-                                  <span className="font-bold text-slate-800 text-sm">{info.main?.teacher_name || '未定'}</span>
-                                </div>
-                              </div>
-
-                              {info.subs.length > 0 && (
-                                <div className="bg-slate-50 p-2 rounded-lg border border-slate-100">
-                                  <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mb-1">Support</span>
-                                  <div className="space-y-1">
-                                    {info.subs.map((sub: ShiftAssignment) => (
-                                      <div key={sub.id} className="flex justify-between items-center text-xs">
-                                        <span className="text-slate-600 font-medium flex items-center gap-1">
-                                          <div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div> {sub.teacher_name}
-                                        </span>
-                                        <button onClick={() => handleDelete(sub.id)} className="text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100"><Trash2 size={10}/></button>
-                                      </div>
-                                    ))}
-                                  </div>
-                                </div>
-                              )}
-
-                              <div className="mt-auto pt-2">
-                                {info.url ? (
-                                  <a href={info.url} target="_blank" rel="noreferrer" className="w-full bg-orange-500 hover:bg-orange-600 text-white text-xs font-bold py-2 rounded-lg flex items-center justify-center gap-2 transition-all active:scale-95 shadow-sm shadow-orange-200">
-                                    <Video size={14}/> 授業に参加
-                                  </a>
-                                ) : (
-                                  <div className="w-full bg-slate-100 text-slate-400 text-xs font-bold py-2 rounded-lg flex items-center justify-center gap-2 cursor-not-allowed">
-                                    <Video size={14}/> URL未設定
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          </div>
+                           <ClassCard 
+                             key={info.id} 
+                             info={info} 
+                             allTeachers={allTeachers}
+                             onDelete={handleDelete}
+                             onEdit={setEditingShift}
+                             onShowResults={handleShowSurveyResults}
+                             onDragOver={handleDragOver}
+                             onDragLeave={handleDragLeave}
+                             onDrop={(e: any, t: any, z: any) => handleDrop(e, t, z, period)}
+                             dragOverCardId={dragOverCardId}
+                             dragOverZone={dragOverZone}
+                           />
                         ))}
-                        {getAllClassesForSubject(period, '社会').length === 0 && (
-                          <div className="w-[200px] h-[100px] border-2 border-dashed border-slate-200 rounded-xl flex items-center justify-center text-slate-300 font-bold text-sm shrink-0">授業予定なし</div>
-                        )}
                       </div>
                     </div>
 
-                    {/* 全体サポート */}
-                    <div className="flex flex-col p-4 gap-3 w-[200px] shrink-0 bg-slate-50/50">
+                    {/* ★修正: 全体サポート欄にドラッグ＆ドロップ用ハンドラを追加 */}
+                    <div 
+                      className={`flex flex-col p-4 gap-3 w-[200px] shrink-0 transition-colors ${
+                        dragOverCardId === `general-${period}` ? 'bg-indigo-50 border-2 border-dashed border-indigo-300 rounded-xl' : 'bg-slate-50/50'
+                      }`}
+                      onDragOver={(e) => handleDragOver(e, `general-${period}`, 'general')}
+                      onDragLeave={handleDragLeave}
+                      onDrop={(e) => handleDrop(e, null, 'general', period)}
+                    >
                       <div className="flex items-center gap-2 mb-2">
                         <span className="bg-slate-200 text-slate-600 text-xs font-black px-3 py-1 rounded-full whitespace-nowrap">全体サポート</span>
                       </div>
                       <div className="flex flex-col gap-2">
                         {getGeneralSupport(period).map(a => (
-                          <div key={a.id} className="w-full bg-white border border-slate-200 rounded-xl p-3 flex items-center justify-between shadow-sm relative group">
-                            <div className="flex items-center gap-3">
-                              <div className="w-8 h-8 rounded-full bg-slate-200 flex items-center justify-center text-slate-500">
-                                <User size={16}/>
+                          <div key={a.id} className="w-full bg-white border border-slate-200 rounded-xl p-3 flex items-center justify-between shadow-sm">
+                            <div className="flex items-center gap-3 min-w-0">
+                              <div className="w-8 h-8 rounded-full bg-slate-200 flex items-center justify-center text-slate-500 shrink-0"><User size={16}/></div>
+                              <div className="min-w-0">
+                                <button onClick={(e) => handleShowSurveyResults(e, a.user_id, a.teacher_name)} className="font-bold text-slate-700 text-sm hover:underline">{a.teacher_name}</button>
                               </div>
-                              <span className="font-bold text-slate-700 text-sm">{a.teacher_name}</span>
                             </div>
-                            <button onClick={() => handleDelete(a.id)} className="text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"><Trash2 size={14}/></button>
+                            <button onClick={() => handleDelete(a.id)} className="text-slate-300 hover:text-red-500"><Trash2 size={14}/></button>
                           </div>
                         ))}
                         {getGeneralSupport(period).length === 0 && (
-                          <div className="text-slate-300 text-xs font-bold py-2">配置なし</div>
+                          <div className="text-[10px] text-slate-400 text-center py-4 border border-dashed border-slate-300 rounded-lg">
+                            ここにドラッグ
+                          </div>
                         )}
                       </div>
                     </div>
@@ -596,15 +625,203 @@ export default function MasterShiftPage() {
                 <input className="w-full p-2 border rounded mt-1" value={editingShift.unit || ''} onChange={e => setEditingShift({...editingShift, unit: e.target.value})}/>
               </div>
               <div>
+                <label className="text-xs font-bold text-gray-500">Zoomサインインアドレス</label>
+                <input className="w-full p-2 border rounded mt-1 font-mono" value={editingShift.target_signin_address || ''} onChange={e => setEditingShift({...editingShift, target_signin_address: e.target.value})} placeholder="abc@sozogakuen.co.jp"/>
+              </div>
+              <div>
                 <label className="text-xs font-bold text-gray-500">Zoom ID (ミーティングID)</label>
                 <input className="w-full p-2 border rounded mt-1 font-mono" value={editingShift.target_meeting_id || ''} onChange={e => setEditingShift({...editingShift, target_meeting_id: e.target.value})} placeholder="123 456 7890"/>
-                <p className="text-[10px] text-gray-400 mt-1">※ 設定すると「授業に参加」ボタンが自動的にこのIDのZoomリンクになります</p>
               </div>
               <button onClick={handleUpdate} className="w-full bg-blue-600 text-white py-3 rounded-lg font-bold hover:bg-blue-700 shadow mt-4 flex justify-center items-center gap-2"><Save size={18}/> 保存</button>
             </div>
           </div>
         </div>
       )}
+
+      {/* アンケート結果モーダル */}
+      {isSurveyModalOpen && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl w-full max-w-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="bg-slate-800 text-white p-5 shrink-0 flex justify-between items-center">
+              <div>
+                <h3 className="font-bold text-lg flex items-center gap-2">
+                  <BarChart2 size={20}/> アンケート集計
+                </h3>
+                <p className="text-xs opacity-80 mt-1">
+                  対象: <span className="font-bold text-yellow-300 text-sm">{selectedTeacherForResults?.name}</span> 先生
+                </p>
+              </div>
+              <button onClick={() => setIsSurveyModalOpen(false)} className="text-slate-400 hover:text-white transition-colors bg-white/10 p-2 rounded-full"><X size={20}/></button>
+            </div>
+            
+            <div className="p-6 overflow-y-auto custom-scrollbar bg-slate-50 flex-1">
+              {surveyLoading ? (
+                <div className="flex justify-center py-20"><Loader2 className="animate-spin text-indigo-500" size={30}/></div>
+              ) : surveyResults.length === 0 ? (
+                <div className="text-center py-20 text-gray-400 font-bold">
+                  まだ回答データがありません
+                </div>
+              ) : (
+                <div className="space-y-8">
+                  {surveyQuestions.map(q => {
+                    if (q.type === 'rating') {
+                      const { average, total, data } = calculateRatingStats(q.id);
+                      return (
+                        <div key={q.id} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100">
+                          <h4 className="font-bold text-slate-800 mb-4 text-sm">{q.text}</h4>
+                          <div className="flex items-center justify-between mb-4">
+                            <div>
+                              <span className="text-3xl font-black text-indigo-600">{average}</span>
+                              <span className="text-xs text-slate-400 ml-1">/ 5.0</span>
+                            </div>
+                            <span className="text-xs font-bold bg-slate-100 text-slate-500 px-2 py-1 rounded">回答数: {total}</span>
+                          </div>
+                          <div className="h-32 w-full">
+                            <ResponsiveContainer width="100%" height="100%">
+                              <BarChart data={data} layout="vertical" margin={{ top: 0, right: 30, left: 0, bottom: 0 }}>
+                                <CartesianGrid strokeDasharray="3 3" horizontal={false} />
+                                <XAxis type="number" hide />
+                                <YAxis dataKey="name" type="category" width={20} tick={{fontSize: 10, fontWeight: 'bold'}} />
+                                <Tooltip cursor={{fill: 'transparent'}} />
+                                <Bar dataKey="count" radius={[0, 4, 4, 0]} barSize={12}>
+                                  {data.map((entry, index) => (
+                                    <Cell key={`cell-${index}`} fill={entry.fill} />
+                                  ))}
+                                </Bar>
+                              </BarChart>
+                            </ResponsiveContainer>
+                          </div>
+                        </div>
+                      );
+                    } else {
+                      const answers = getTextAnswers(q.id);
+                      if (answers.length === 0) return null;
+                      return (
+                        <div key={q.id} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100">
+                          <h4 className="font-bold text-slate-800 mb-3 text-sm">{q.text}</h4>
+                          <div className="space-y-3 max-h-60 overflow-y-auto custom-scrollbar pr-2">
+                            {answers.map((a: any) => (
+                              <div key={a.id} className="bg-slate-50 p-3 rounded-xl text-xs">
+                                <p className="text-slate-700 leading-relaxed mb-2">{a.text}</p>
+                                <div className="flex justify-between text-[10px] text-slate-400 border-t border-slate-200 pt-2">
+                                  <span>{a.date}</span>
+                                  <span>{a.subject}</span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    }
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ClassCard (DnD対応)
+function ClassCard({ info, allTeachers, onDelete, onEdit, onShowResults, onDragOver, onDragLeave, onDrop, dragOverCardId, dragOverZone }: any) {
+  const isTarget = dragOverCardId === info.id;
+  
+  return (
+    <div 
+      className={`w-[240px] bg-white border-2 rounded-xl shadow-sm flex flex-col overflow-hidden relative group hover:shadow-md transition-all shrink-0
+        ${info.subject === '理科' ? 'border-emerald-100' : 'border-orange-100'}
+        ${isTarget ? 'ring-2 ring-indigo-500 scale-[1.02]' : ''}
+      `}
+    >
+      <div className={`p-3 border-b relative ${info.subject === '理科' ? 'bg-emerald-50/50 border-emerald-50' : 'bg-orange-50/50 border-orange-50'}`}>
+        <div className="flex justify-between items-start mb-2">
+          <span className={`text-xs font-black px-2 py-0.5 rounded shadow-sm whitespace-nowrap ${info.subject === '理科' ? 'text-emerald-600 bg-emerald-100' : 'text-orange-600 bg-orange-100'}`}>
+            {info.grade} / {info.place}
+          </span>
+          {info.main && (
+            <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+              <button onClick={() => onEdit(info.main)} className="text-slate-400 hover:text-blue-500"><Settings size={14}/></button>
+              <button onClick={() => onDelete(info.main!.id)} className="text-slate-400 hover:text-red-500"><Trash2 size={14}/></button>
+            </div>
+          )}
+        </div>
+        <div className="text-sm font-bold text-slate-800 line-clamp-2 min-h-[1.25em]">
+          {info.unit || <span className="text-slate-300 font-normal text-xs">単元未設定</span>}
+        </div>
+        {info.studio && (
+          <div className={`flex items-center gap-1 text-[10px] font-bold mt-1 ${info.subject === '理科' ? 'text-emerald-600' : 'text-orange-600'}`}>
+            <MapPin size={10}/> {info.studio}
+          </div>
+        )}
+      </div>
+
+      <div className="flex-1 flex flex-col relative">
+        <div 
+          className={`p-3 flex-1 transition-colors ${isTarget && dragOverZone === 'main' ? 'bg-indigo-100' : ''}`}
+          onDragOver={(e) => onDragOver(e, info.id, 'main')}
+          onDragLeave={onDragLeave}
+          onDrop={(e) => onDrop(e, info.main, 'main')}
+        >
+          <div className="flex items-start gap-3">
+            <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-1 ${info.subject === '理科' ? 'bg-emerald-100 text-emerald-600' : 'bg-orange-100 text-orange-600'}`}>
+              <User size={16}/>
+            </div>
+            <div className="min-w-0">
+              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mb-0.5">Teacher (Main)</span>
+              <button 
+                onClick={(e) => info.main?.user_id && onShowResults(e, info.main.user_id, info.main.teacher_name)}
+                className="font-bold text-slate-800 text-sm hover:text-indigo-600 hover:underline decoration-indigo-300 text-left flex items-center gap-1 group/link"
+              >
+                {info.main?.teacher_name || '未定'}
+                <BarChart2 size={12} className="text-slate-400 group-hover/link:text-indigo-500"/>
+              </button>
+              <span className="text-[10px] text-indigo-500 block truncate font-mono bg-indigo-50 px-1 py-0.5 rounded w-fit mt-0.5" title={info.main?.target_signin_address || '未設定'}>
+                 <Monitor size={8} className="inline mr-1"/>
+                 {info.main?.target_signin_address || <span className="text-slate-300">-</span>}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div 
+          className={`p-2 border-t border-slate-100 min-h-[60px] transition-colors ${isTarget && dragOverZone === 'sub' ? 'bg-yellow-50' : 'bg-slate-50'}`}
+          onDragOver={(e) => onDragOver(e, info.id, 'sub')}
+          onDragLeave={onDragLeave}
+          onDrop={(e) => onDrop(e, info.main, 'sub')}
+        >
+          <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mb-1">Support (Drop here)</span>
+          <div className="space-y-1">
+            {info.subs.map((sub: any) => (
+              <div key={sub.id} className="flex justify-between items-center text-xs">
+                <div className="min-w-0 flex flex-col">
+                  <button
+                    onClick={(e) => onShowResults(e, sub.user_id, sub.teacher_name)} 
+                    className="text-slate-600 font-medium flex items-center gap-1 hover:text-indigo-600 hover:underline"
+                  >
+                    <div className="w-1.5 h-1.5 rounded-full bg-slate-300 shrink-0"></div> {sub.teacher_name}
+                  </button>
+                </div>
+                <button onClick={() => onDelete(sub.id)} className="text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 shrink-0 ml-1"><Trash2 size={10}/></button>
+              </div>
+            ))}
+            {info.subs.length === 0 && <div className="text-[10px] text-slate-300 text-center py-2">No Support</div>}
+          </div>
+        </div>
+
+        <div className="mt-auto p-2 bg-white border-t border-slate-100">
+          {info.url ? (
+            <a href={info.url} target="_blank" rel="noreferrer" className={`w-full text-white text-xs font-bold py-2 rounded-lg flex items-center justify-center gap-2 transition-all active:scale-95 shadow-sm ${info.subject === '理科' ? 'bg-emerald-500 hover:bg-emerald-600 shadow-emerald-200' : 'bg-orange-500 hover:bg-orange-600 shadow-orange-200'}`}>
+              <Video size={14}/> 授業に参加
+            </a>
+          ) : (
+            <div className="w-full bg-slate-100 text-slate-400 text-xs font-bold py-2 rounded-lg flex items-center justify-center gap-2 cursor-not-allowed">
+              <Video size={14}/> URL未設定
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

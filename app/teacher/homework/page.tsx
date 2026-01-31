@@ -88,7 +88,8 @@ export default function TeacherHomeworkPage() {
         {/* ヘッダー */}
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-4">
-            <Link href="/teacher" className="bg-white p-2 rounded-full shadow hover:bg-gray-100 text-gray-600">
+            {/* ★修正: リンク先を /teacher から /teacher/work に変更 */}
+            <Link href="/teacher/work" className="bg-white p-2 rounded-full shadow hover:bg-gray-100 text-gray-600">
               <ArrowLeft size={20} />
             </Link>
             <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-2">

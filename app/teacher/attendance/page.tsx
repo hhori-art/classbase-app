@@ -7,7 +7,8 @@ import { collection, query, where, getDocs, addDoc, updateDoc, doc, orderBy, lim
 import { 
   Clock, CheckCircle, AlertCircle, Play, Square, Briefcase, 
   ArrowLeft, Plus, Trash2, Save, X, Edit3, Train, 
-  Layout, ChevronLeft, Calendar, Copy, ChevronRight, Loader2, RefreshCw
+  Layout, ChevronLeft, ChevronRight, Loader2, Copy,
+  Calendar
 } from 'lucide-react';
 import Link from 'next/link';
 
@@ -16,7 +17,7 @@ interface WorkSegment {
   end: string;
   type: 'lesson' | 'office';
   note: string;
-  isAuto?: boolean; // 自動生成されたかどうか
+  isAuto?: boolean;
 }
 
 interface Transportation {
@@ -130,7 +131,6 @@ export default function TeacherAttendancePage() {
     setSegments(newSegs);
   };
   
-  // 新規追加時は、直前の終了時間を開始時間としてセットする便利機能
   const addSegment = () => {
     let nextStart = '';
     if (segments.length > 0) {
@@ -162,17 +162,14 @@ export default function TeacherAttendancePage() {
     } catch (e) { console.error(e); }
   };
 
-  // ★隙間を埋める処理（プレビュー用・保存用共通）
   const fillGaps = (currentSegments: WorkSegment[], startTime: string, endTime: string | null) => {
     if (!startTime || !endTime) return currentSegments;
 
-    // 時間変換ヘルパー (HH:MM -> 分)
     const toMinutes = (s: string) => {
       if(!s) return -1;
       const [h, m] = s.split(':').map(Number);
       return h * 60 + m;
     };
-    // 分 -> HH:MM
     const toTimeStr = (m: number) => {
       const h = Math.floor(m / 60);
       const min = m % 60;
@@ -184,7 +181,6 @@ export default function TeacherAttendancePage() {
     const startMin = shiftStart.getHours() * 60 + shiftStart.getMinutes();
     const endMin = shiftEnd.getHours() * 60 + shiftEnd.getMinutes();
 
-    // ユーザー入力をソート
     const sorted = [...currentSegments]
       .filter(s => s.start && s.end)
       .sort((a, b) => toMinutes(a.start) - toMinutes(b.start));
@@ -196,7 +192,6 @@ export default function TeacherAttendancePage() {
       const segStart = toMinutes(seg.start);
       const segEnd = toMinutes(seg.end);
 
-      // 隙間があれば事務で埋める
       if (cursor < segStart) {
         result.push({
           start: toTimeStr(cursor),
@@ -207,16 +202,12 @@ export default function TeacherAttendancePage() {
         });
       }
 
-      // 重複・包含チェック（簡易）
       if (segEnd > cursor) {
-        // 現在のカーソルより後ろに伸びている有効な部分だけ採用またはそのまま採用
-        // ここでは単純にユーザー入力を優先して追加
         result.push(seg);
         cursor = Math.max(cursor, segEnd);
       }
     }
 
-    // 末尾の隙間を埋める
     if (cursor < endMin) {
       result.push({
         start: toTimeStr(cursor),
@@ -233,9 +224,7 @@ export default function TeacherAttendancePage() {
   const saveData = async () => {
     if (!editingRecord) return;
     try {
-      // 保存時に隙間を埋める
       const filledSegments = fillGaps(segments, editingRecord.start_time, editingRecord.end_time);
-
       const formattedExpenses = expenses.map(e => ({ ...e, cost: Number(e.cost) }));
       await updateDoc(doc(db, 'work_records', editingRecord.id), {
         work_segments: filledSegments,
@@ -271,7 +260,6 @@ export default function TeacherAttendancePage() {
     return { hours: Math.floor(totalMinutes / 60), minutes: totalMinutes % 60, cost: totalTransportCost };
   }, [history]);
 
-  // ソート済みの表示用セグメント
   const sortedSegments = useMemo(() => {
     return [...segments].sort((a, b) => a.start.localeCompare(b.start));
   }, [segments]);
@@ -280,7 +268,8 @@ export default function TeacherAttendancePage() {
     <div className="min-h-screen bg-gray-50 p-6 pb-32 font-sans">
       <div className="max-w-lg mx-auto">
         <div className="flex items-center gap-4 mb-8">
-          <Link href="/teacher" className="bg-white p-3 rounded-full shadow-sm hover:bg-gray-50 text-gray-600 transition-colors"><ArrowLeft size={20} /></Link>
+          {/* ★修正: リンク先を /teacher から /teacher/work に変更 */}
+          <Link href="/teacher/work" className="bg-white p-3 rounded-full shadow-sm hover:bg-gray-50 text-gray-600 transition-colors"><ArrowLeft size={20} /></Link>
           <h1 className="text-2xl font-black text-gray-800 flex items-center gap-2"><Briefcase className="text-blue-600" /> 勤怠打刻</h1>
         </div>
 
@@ -334,8 +323,6 @@ export default function TeacherAttendancePage() {
           {history.length === 0 ? <div className="text-center py-12 bg-white rounded-3xl border-2 border-dashed border-gray-100"><Clock size={40} className="mx-auto text-gray-200 mb-2"/><p className="text-gray-400 font-bold text-sm">この月の履歴はありません</p></div> : history.map((rec) => {
              const duration = rec.end_time ? calcDurationMinutes(rec.start_time, rec.end_time) : 0;
              if(currentSession && currentSession.id === rec.id) return null;
-             
-             // 表示用にセグメントを時間順ソート
              const displaySegments = rec.work_segments?.slice().sort((a: WorkSegment, b: WorkSegment) => a.start.localeCompare(b.start));
 
              return (
@@ -353,7 +340,6 @@ export default function TeacherAttendancePage() {
                   </div>
                 </div>
                 
-                {/* テーブル形式でのプレビュー */}
                 {displaySegments?.length > 0 ? (
                   <div className="bg-gray-50 rounded-xl overflow-hidden border border-gray-100 mb-4">
                     {displaySegments.map((seg: WorkSegment, i: number) => (
@@ -376,7 +362,7 @@ export default function TeacherAttendancePage() {
         </div>
       </div>
 
-      {/* 詳細編集モーダル */}
+      {/* 詳細編集モーダル (既存コードそのまま) */}
       {editingRecord && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-end sm:items-center justify-center z-50 p-0 sm:p-4 animate-in fade-in duration-200">
           <div className="bg-white w-full max-w-lg h-[95vh] sm:h-[85vh] rounded-t-[32px] sm:rounded-[32px] shadow-2xl flex flex-col overflow-hidden">
@@ -386,8 +372,6 @@ export default function TeacherAttendancePage() {
             </div>
             
             <div className="flex-1 overflow-y-auto p-6 bg-gray-50 space-y-8 custom-scrollbar">
-              
-              {/* テーブル形式の詳細入力 */}
               <section>
                 <div className="flex justify-between items-center mb-3">
                   <h4 className="text-sm font-bold text-gray-700 flex items-center gap-2"><Clock size={16}/> 時間割・内訳</h4>
@@ -408,16 +392,7 @@ export default function TeacherAttendancePage() {
                     <tbody className="divide-y divide-gray-100">
                       {sortedSegments.map((seg, i) => (
                         <tr key={i} className={`transition-colors ${seg.type === 'lesson' ? 'bg-blue-50/40' : 'bg-orange-50/40'}`}>
-                          <td className="p-2"><input type="time" className="w-full bg-white rounded border border-gray-300 font-mono text-xs font-bold p-1" value={seg.start} onChange={(e) => {
-                            const newSegs = [...segments]; 
-                            // 並び替え前のインデックスを探す必要があるが、簡単のためここでは直接編集（stateはまだソートされていない）
-                            // 簡易実装: map内だが、segments配列自体の更新はindexで行う
-                            // ※注意: sortedSegmentsを使っているためiがずれる可能性がある。
-                            // 正しくは segments を操作する。ここではソートせず表示するか、IDを持たせるのが理想だが、
-                            // 今回は入力順序をユーザーに委ね、表示だけソートせずそのまま出す形に戻すのが安全。
-                            // → 下記の実装では segments をそのままマップします（自動ソートは表示のみ）
-                            updateSegment(i, 'start', e.target.value);
-                          }} /></td>
+                          <td className="p-2"><input type="time" className="w-full bg-white rounded border border-gray-300 font-mono text-xs font-bold p-1" value={seg.start} onChange={(e) => updateSegment(i, 'start', e.target.value)} /></td>
                           <td className="p-2"><input type="time" className="w-full bg-white rounded border border-gray-300 font-mono text-xs font-bold p-1" value={seg.end} onChange={(e) => updateSegment(i, 'end', e.target.value)} /></td>
                           <td className="p-2">
                             <div className="flex rounded-md bg-white border border-gray-300 overflow-hidden shadow-sm">
@@ -438,7 +413,6 @@ export default function TeacherAttendancePage() {
                 </div>
               </section>
 
-              {/* 交通費 */}
               <section className="pt-6 border-t border-gray-200">
                 <div className="flex justify-between items-center mb-3"><h4 className="text-sm font-bold text-gray-700 flex items-center gap-2"><Train size={16}/> 交通費申請</h4><div className="flex gap-2"><button onClick={handleCopyLastTransport} className="text-xs bg-blue-50 text-blue-600 px-3 py-1.5 rounded-full font-bold hover:bg-blue-100 flex items-center gap-1"><Copy size={12}/> 前回をコピー</button><button onClick={addExpense} className="text-xs bg-green-100 text-green-700 px-3 py-1.5 rounded-full font-bold hover:bg-green-200 flex items-center gap-1"><Plus size={12}/> 追加</button></div></div>
                 <div className="space-y-3">{expenses.map((exp, i) => (

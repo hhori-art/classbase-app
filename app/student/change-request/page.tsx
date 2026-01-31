@@ -8,9 +8,9 @@ import { doc, getDoc, collection, addDoc, serverTimestamp } from 'firebase/fires
 import { ArrowLeft, CheckCircle, Loader2, Send, Calendar, BookOpen, MessageSquare, Info } from 'lucide-react';
 import Link from 'next/link';
 
-// 科目ごとの選択肢を定義
-const SUBJECT_OPTIONS_1 = ['地理', '歴史', '公民'];
-const SUBJECT_OPTIONS_2 = ['物理', '化学', '生物', '地学'];
+// 科目ごとの選択肢
+const OPTIONS_SOCIAL = ['地理', '歴史', '公民'];
+const OPTIONS_SCIENCE = ['物理', '化学', '生物', '地学'];
 
 export default function StudentChangeRequestPage() {
   const { user } = useAuth();
@@ -24,8 +24,8 @@ export default function StudentChangeRequestPage() {
   // フォーム状態
   const [form, setForm] = useState({
     day: '',
-    subject1: '', 
-    subject2: '',
+    science: '', 
+    social: '',
     reason: ''
   });
 
@@ -40,10 +40,12 @@ export default function StudentChangeRequestPage() {
           const data = docSnap.data();
           setProfile(data);
           
+          // ★修正: 正しいフィールド名からデータを読み込む
+          // (データがない場合はリストの先頭をデフォルトにする)
           setForm({
             day: data.day_of_week || '月',
-            subject1: data.subject_1 || SUBJECT_OPTIONS_1[0],
-            subject2: data.subject_2 || SUBJECT_OPTIONS_2[0],
+            science: data.subject_science || OPTIONS_SCIENCE[0], // 理科
+            social: data.subject_social || OPTIONS_SOCIAL[0],   // 社会
             reason: ''
           });
         }
@@ -61,26 +63,36 @@ export default function StudentChangeRequestPage() {
     if (!form.reason.trim()) return alert('変更理由を入力してください');
     if (!user) return;
 
-    if (!confirm('変更申請を送信しますか？')) return;
+    // 変更がない場合のチェック (任意)
+    if (
+      form.day === profile.day_of_week &&
+      form.science === profile.subject_science &&
+      form.social === profile.subject_social
+    ) {
+      if(!confirm('変更箇所がありませんが、申請を送信しますか？')) return;
+    } else {
+      if (!confirm('変更申請を送信しますか？')) return;
+    }
 
     setSubmitting(true);
     try {
       await addDoc(collection(db, 'requests'), {
         student_id: user.uid,
-        user_id: user.uid,
+        user_id: user.uid, // 管理画面での参照用
         student_name: profile?.student_name || user.displayName || '生徒',
         target_grade: profile?.grade,
         
         type: 'change', 
         status: 'pending',
         
+        // ★修正: 明確なフィールド名で保存
         target_day: form.day,
-        target_subject_1: form.subject1,
-        target_subject_2: form.subject2,
+        target_science: form.science,
+        target_social: form.social,
         reason: form.reason,
 
-        // コンテンツ内容もラベルに合わせて更新
-        content: `【変更希望】\n曜日: ${form.day}\n社会: ${form.subject1}\n理科: ${form.subject2}\n理由: ${form.reason}`,
+        // 管理者通知用のテキスト
+        content: `【変更希望】\n曜日: ${form.day}\n理科: ${form.science}\n社会: ${form.social}\n理由: ${form.reason}`,
         
         created_at: serverTimestamp()
       });
@@ -148,16 +160,25 @@ export default function StudentChangeRequestPage() {
                   <p className="text-lg font-black leading-snug">
                     現在の登録情報
                   </p>
-                  <div className="mt-3 inline-flex flex-wrap gap-2">
-                    <span className="bg-white/20 px-3 py-1 rounded-lg text-sm font-bold backdrop-blur-sm">
-                      {profile.day_of_week || '未設定'}曜日
-                    </span>
-                    <span className="bg-white/20 px-3 py-1 rounded-lg text-sm font-bold backdrop-blur-sm">
-                      {profile.subject_1 || '社会未設定'}
-                    </span>
-                    <span className="bg-white/20 px-3 py-1 rounded-lg text-sm font-bold backdrop-blur-sm">
-                      {profile.subject_2 || '理科未設定'}
-                    </span>
+                  <div className="mt-3 flex flex-col gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold opacity-70 w-8">曜日</span>
+                      <span className="bg-white/20 px-3 py-1 rounded-lg text-sm font-bold backdrop-blur-sm">
+                        {profile.day_of_week || '未設定'}曜日
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold opacity-70 w-8">理科</span>
+                      <span className="bg-white/20 px-3 py-1 rounded-lg text-sm font-bold backdrop-blur-sm">
+                        {profile.subject_science || '未設定'}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold opacity-70 w-8">社会</span>
+                      <span className="bg-white/20 px-3 py-1 rounded-lg text-sm font-bold backdrop-blur-sm">
+                        {profile.subject_social || '未設定'}
+                      </span>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -187,27 +208,7 @@ export default function StudentChangeRequestPage() {
                 </div>
               </div>
 
-              {/* 社会選択（旧：科目1） */}
-              <div>
-                <label className="flex items-center gap-2 text-sm font-black text-gray-700 mb-3">
-                  <span className="bg-pink-100 text-pink-600 p-1.5 rounded-lg"><BookOpen size={18} strokeWidth={3}/></span>
-                  社会
-                </label>
-                <div className="relative">
-                  <select 
-                    className="w-full p-4 bg-pink-50/50 text-gray-800 border-2 border-transparent rounded-2xl font-bold outline-none focus:bg-white focus:border-pink-400 focus:ring-4 focus:ring-pink-100 transition-all appearance-none cursor-pointer"
-                    value={form.subject1} 
-                    onChange={e => setForm({...form, subject1: e.target.value})}
-                  >
-                     {SUBJECT_OPTIONS_1.map(subj => (
-                       <option key={subj} value={subj}>{subj}</option>
-                     ))}
-                  </select>
-                  <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-pink-400">▼</div>
-                </div>
-              </div>
-
-              {/* 理科選択（旧：科目2） */}
+              {/* 理科選択 */}
               <div>
                 <label className="flex items-center gap-2 text-sm font-black text-gray-700 mb-3">
                   <span className="bg-purple-100 text-purple-600 p-1.5 rounded-lg"><BookOpen size={18} strokeWidth={3}/></span>
@@ -216,14 +217,34 @@ export default function StudentChangeRequestPage() {
                 <div className="relative">
                   <select 
                     className="w-full p-4 bg-purple-50/50 text-gray-800 border-2 border-transparent rounded-2xl font-bold outline-none focus:bg-white focus:border-purple-400 focus:ring-4 focus:ring-purple-100 transition-all appearance-none cursor-pointer"
-                    value={form.subject2} 
-                    onChange={e => setForm({...form, subject2: e.target.value})}
+                    value={form.science} 
+                    onChange={e => setForm({...form, science: e.target.value})}
                   >
-                     {SUBJECT_OPTIONS_2.map(subj => (
+                     {OPTIONS_SCIENCE.map(subj => (
                        <option key={subj} value={subj}>{subj}</option>
                      ))}
                   </select>
                   <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-purple-400">▼</div>
+                </div>
+              </div>
+
+              {/* 社会選択 */}
+              <div>
+                <label className="flex items-center gap-2 text-sm font-black text-gray-700 mb-3">
+                  <span className="bg-pink-100 text-pink-600 p-1.5 rounded-lg"><BookOpen size={18} strokeWidth={3}/></span>
+                  社会
+                </label>
+                <div className="relative">
+                  <select 
+                    className="w-full p-4 bg-pink-50/50 text-gray-800 border-2 border-transparent rounded-2xl font-bold outline-none focus:bg-white focus:border-pink-400 focus:ring-4 focus:ring-pink-100 transition-all appearance-none cursor-pointer"
+                    value={form.social} 
+                    onChange={e => setForm({...form, social: e.target.value})}
+                  >
+                     {OPTIONS_SOCIAL.map(subj => (
+                       <option key={subj} value={subj}>{subj}</option>
+                     ))}
+                  </select>
+                  <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-pink-400">▼</div>
                 </div>
               </div>
 

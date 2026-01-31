@@ -1,8 +1,8 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { db } from '@/lib/firebase';
-import { collection, getDocs } from 'firebase/firestore';
+import { collection, getDocs, doc, setDoc } from 'firebase/firestore';
 import { addPoints } from '@/lib/gamification';
 import { 
   Brain, Target, Play, RotateCcw, Trophy, BookOpen, Loader2
@@ -11,9 +11,54 @@ import {
 // 学習モードの定義
 type Mode = 'TASK' | 'QUIZ';
 
+// 日付取得ヘルパー
+const getTodayString = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+// ★追加: クイズのストックデータ (30問以上用意してランダム性を高める)
+const QUIZ_STOCK = [
+  // --- 理科 ---
+  { id: 'sci_1', question: '植物が光合成を行うために必要なものは、光、水と何？', correct_answer: '二酸化炭素', wrong_answers: ['酸素', '窒素', '水素'] },
+  { id: 'sci_2', question: '物質が酸素と激しく結びついて光や熱を出す現象を何という？', correct_answer: '燃焼', wrong_answers: ['還元', '蒸発', '昇華'] },
+  { id: 'sci_3', question: 'ヒトの心臓にある部屋の数は全部でいくつ？', correct_answer: '4つ', wrong_answers: ['2つ', '3つ', '5つ'] },
+  { id: 'sci_4', question: '電圧の単位はボルト(V)ですが、電流の単位は？', correct_answer: 'アンペア(A)', wrong_answers: ['ワット(W)', 'オーム(Ω)', 'ジュール(J)'] },
+  { id: 'sci_5', question: '地震の揺れの大きさを表す尺度は「震度」ですが、地震そのものの規模を表す尺度は？', correct_answer: 'マグニチュード', wrong_answers: ['デシベル', 'ヘクトパスカル', 'ガル'] },
+  { id: 'sci_6', question: '水に溶かすと電気を通す物質を何という？', correct_answer: '電解質', wrong_answers: ['非電解質', '絶縁体', '半導体'] },
+  { id: 'sci_7', question: 'アゲハチョウの幼虫が食べる植物は？', correct_answer: 'ミカン科の葉', wrong_answers: ['キャベツ', 'クローバー', 'サクラの葉'] },
+  { id: 'sci_8', question: '音が空気中を伝わる速さは、およそ毎秒何メートル？', correct_answer: '約340m', wrong_answers: ['約1500m', '約30万km', '約100m'] },
+  { id: 'sci_9', question: '顕微鏡で観察する際、最初にする操作は？', correct_answer: '低倍率で全体を見る', wrong_answers: ['高倍率で細部を見る', 'プレパラートを動かす', '反射鏡を外す'] },
+  { id: 'sci_10', question: '光が鏡に当たって跳ね返ることを何という？', correct_answer: '反射', wrong_answers: ['屈折', '全反射', '分散'] },
+  
+  // --- 社会 ---
+  { id: 'soc_1', question: '日本で一番大きな湖は？', correct_answer: '琵琶湖', wrong_answers: ['霞ヶ浦', 'サロマ湖', '猪苗代湖'] },
+  { id: 'soc_2', question: '聖徳太子が定めた、役人の心構えを示した決まりは？', correct_answer: '十七条の憲法', wrong_answers: ['冠位十二階', '御成敗式目', '武家諸法度'] },
+  { id: 'soc_3', question: '「鳴くよウグイス」で覚えられる平安京への遷都は何年？', correct_answer: '794年', wrong_answers: ['710年', '1192年', '1603年'] },
+  { id: 'soc_4', question: '日本の最南端の島は？', correct_answer: '沖ノ鳥島', wrong_answers: ['南鳥島', '与那国島', '択捉島'] },
+  { id: 'soc_5', question: 'アメリカ独立宣言が発表されたのは何年？', correct_answer: '1776年', wrong_answers: ['1492年', '1789年', '1865年'] },
+  { id: 'soc_6', question: '日本国憲法の三大原則は、国民主権、平和主義と何？', correct_answer: '基本的人権の尊重', wrong_answers: ['五箇条の御誓文', '王政復古の大号令', '自由民権運動'] },
+  { id: 'soc_7', question: '地図記号で「⛆」は何を表す？', correct_answer: '温泉', wrong_answers: ['工場', '発電所', '消防署'] },
+  { id: 'soc_8', question: '江戸幕府を開いた人物は？', correct_answer: '徳川家康', wrong_answers: ['織田信長', '豊臣秀吉', '源頼朝'] },
+  { id: 'soc_9', question: '世界で一番面積の大きい国は？', correct_answer: 'ロシア', wrong_answers: ['カナダ', 'アメリカ', '中国'] },
+  { id: 'soc_10', question: '「学問のすゝめ」を書いた人物は？', correct_answer: '福沢諭吉', wrong_answers: ['大隈重信', '伊藤博文', '夏目漱石'] },
+
+  // --- 情報・雑学 ---
+  { id: 'info_1', question: '「AI」は何の略？', correct_answer: 'Artificial Intelligence', wrong_answers: ['Auto Internet', 'Apple Inc.', 'Advanced Interface'] },
+  { id: 'info_2', question: 'Webサイトを閲覧するためのソフトを何という？', correct_answer: 'ブラウザ', wrong_answers: ['コンパイラ', 'エディタ', 'サーバー'] },
+  { id: 'info_3', question: '情報の単位で、8ビット(bit)は何バイト(Byte)？', correct_answer: '1バイト', wrong_answers: ['8バイト', '10バイト', '100バイト'] },
+  { id: 'info_4', question: 'プログラミング言語「Python」の名前の由来は？', correct_answer: 'コメディ番組', wrong_answers: ['蛇', '開発者の名前', '宝石'] },
+  { id: 'info_5', question: '「IoT」は何の略？', correct_answer: 'Internet of Things', wrong_answers: ['Input of Text', 'Image of Technology', 'Internal of Tool'] },
+  { id: 'info_6', question: 'コンピュータの頭脳と呼ばれる部品は？', correct_answer: 'CPU', wrong_answers: ['HDD', 'RAM', 'GPU'] },
+  { id: 'info_7', question: 'キーボードのショートカット「Ctrl + C」の機能は？', correct_answer: 'コピー', wrong_answers: ['貼り付け', '切り取り', '元に戻す'] },
+  { id: 'info_8', question: 'インターネット上の住所にあたるものを何という？', correct_answer: 'IPアドレス', wrong_answers: ['MACアドレス', 'メールアドレス', 'ハッシュ値'] },
+  { id: 'info_9', question: 'Excelなどの表計算ソフトで、縦の列を何という？', correct_answer: 'カラム(列)', wrong_answers: ['ロウ(行)', 'セル', 'シート'] },
+  { id: 'info_10', question: '「バグ(bug)」の元々の意味は？', correct_answer: '虫', wrong_answers: ['故障', '穴', '間違い'] },
+];
+
 export default function AiLearningHub({ userId }: { userId: string }) {
   const [activeTab, setActiveTab] = useState<Mode>('TASK');
-  const [progress, setProgress] = useState(35); // タスク進捗率（デモ用初期値）
+  const [progress, setProgress] = useState(35);
   const [quizzes, setQuizzes] = useState<any[]>([]);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [isLearning, setIsLearning] = useState(false);
@@ -27,31 +72,41 @@ export default function AiLearningHub({ userId }: { userId: string }) {
     setActiveTab(mode);
     
     try {
+      // 1. Firestoreからクイズを取得
       const snap = await getDocs(collection(db, 'quizzes'));
-      let data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      let dbQuizzes = snap.docs.map(d => ({ id: d.id, ...d.data() }));
       
-      if (data.length === 0) {
-        alert('問題がまだ登録されていません');
+      // 2. ストックデータとマージ (ID重複排除)
+      const allQuizzes = [...dbQuizzes];
+      QUIZ_STOCK.forEach(stockQ => {
+        if (!allQuizzes.some(dbQ => dbQ.id === stockQ.id)) {
+          allQuizzes.push(stockQ);
+        }
+      });
+
+      if (allQuizzes.length === 0) {
+        alert('問題がありません');
         setLoading(false);
         return;
       }
 
-      // ランダムシャッフル
-      data = data.sort(() => Math.random() - 0.5);
+      // 3. ランダムシャッフル
+      const shuffled = allQuizzes.sort(() => Math.random() - 0.5);
 
-      // モードによる出題数の違い
-      if (mode === 'QUIZ') {
-        data = data.slice(0, 10); // テストは10問限定
-      }
+      // 4. 10問抽出 (ストックが多いので毎回違う組み合わせになる)
+      const selectedQuizzes = shuffled.slice(0, 10);
       
-      setQuizzes(data);
+      setQuizzes(selectedQuizzes);
       setCurrentQuestionIndex(0);
       setFeedback(null);
       setSelectedOption(null);
       setIsLearning(true);
     } catch (e) {
       console.error(e);
-      alert('読み込みエラーが発生しました');
+      // エラー時もストックデータだけで続行させるフォールバック
+      const fallback = [...QUIZ_STOCK].sort(() => Math.random() - 0.5).slice(0, 10);
+      setQuizzes(fallback);
+      setIsLearning(true);
     } finally {
       setLoading(false);
     }
@@ -59,7 +114,7 @@ export default function AiLearningHub({ userId }: { userId: string }) {
 
   // 回答処理
   const handleAnswer = async (answer: string) => {
-    if (selectedOption) return; // 連打防止
+    if (selectedOption) return;
     setSelectedOption(answer);
 
     const currentQuiz = quizzes[currentQuestionIndex];
@@ -67,22 +122,15 @@ export default function AiLearningHub({ userId }: { userId: string }) {
 
     if (isCorrect) {
       setFeedback('correct');
-      
-      // ▼▼▼ 修正箇所 ▼▼▼
-      // ポイント数と理由を定義
       const reason = activeTab === 'TASK' ? 'HOMEWORK' : 'QUIZ';
-      const points = activeTab === 'TASK' ? 50 : 20; // 宿題なら50pt, クイズなら20pt
-
-      // addPoints(userId, amount, reason) の順で渡す
+      const points = activeTab === 'TASK' ? 50 : 20; 
       await addPoints(userId, points, reason);
-      // ▲▲▲ 修正箇所 ▲▲▲
-
     } else {
       setFeedback('wrong');
     }
 
     // 次の問題へ遷移
-    setTimeout(() => {
+    setTimeout(async () => {
       if (currentQuestionIndex < quizzes.length - 1) {
         setCurrentQuestionIndex(prev => prev + 1);
         setSelectedOption(null);
@@ -90,8 +138,20 @@ export default function AiLearningHub({ userId }: { userId: string }) {
       } else {
         // 全問終了
         setIsLearning(false);
+
+        try {
+          const today = getTodayString();
+          await setDoc(doc(db, 'users', userId), {
+            last_ai_learning_date: today 
+          }, { merge: true });
+          
+          console.log("AI学習完了を記録しました:", today);
+        } catch (e) {
+          console.error("ミッション記録エラー", e);
+        }
+
         if (activeTab === 'TASK') {
-            setProgress(prev => Math.min(100, prev + 15)); // 進捗を進める演出
+            setProgress(prev => Math.min(100, prev + 15));
             alert('タスク完了！宿題ポイントを獲得しました！');
         } else {
             alert('テスト終了！お疲れ様でした！');
@@ -100,25 +160,22 @@ export default function AiLearningHub({ userId }: { userId: string }) {
     }, 1500);
   };
 
-  // ■ 読み込み中画面
   if (loading) {
     return (
       <div className="bg-white p-12 rounded-3xl shadow-sm text-center flex flex-col items-center justify-center min-h-[400px]">
         <Loader2 className="animate-spin text-indigo-600 mb-4" size={48} />
         <p className="font-bold text-gray-600">AIが問題を準備中...</p>
+        <p className="text-xs text-gray-400 mt-2">あなたのための学習メニューを作成しています</p>
       </div>
     );
   }
 
-  // ■ 学習実行画面（クイズ中）
   if (isLearning && quizzes.length > 0) {
     const quiz = quizzes[currentQuestionIndex];
-    // 選択肢生成（正解 + 誤答 を混ぜる）
-    const options = [quiz.correct_answer, ...quiz.wrong_answers].sort();
+    const options = [quiz.correct_answer, ...quiz.wrong_answers].sort(() => Math.random() - 0.5); // 選択肢もランダム順に
 
     return (
       <div className="bg-white rounded-3xl shadow-xl overflow-hidden min-h-[400px] flex flex-col relative animate-in zoom-in-95 duration-200">
-        {/* ヘッダー */}
         <div className="bg-slate-50 p-4 flex justify-between items-center border-b">
           <span className={`text-xs font-bold px-3 py-1 rounded-full ${activeTab === 'TASK' ? 'bg-indigo-100 text-indigo-700' : 'bg-orange-100 text-orange-700'}`}>
             {activeTab === 'TASK' ? '📝 宿題タスク' : '⚔️ 実力テスト'}
@@ -128,7 +185,6 @@ export default function AiLearningHub({ userId }: { userId: string }) {
           </span>
         </div>
 
-        {/* 問題エリア */}
         <div className="p-8 flex-1 flex flex-col items-center justify-center z-10">
           <h2 className="text-xl font-bold text-gray-800 text-center mb-8 leading-relaxed">
             {quiz.question}
@@ -136,22 +192,17 @@ export default function AiLearningHub({ userId }: { userId: string }) {
 
           <div className="grid grid-cols-1 gap-3 w-full max-w-md">
             {options.map((opt: string, i: number) => {
-              // ボタンのスタイル判定
               let btnClass = "p-4 rounded-xl border-2 text-left font-bold transition-all relative overflow-hidden ";
               
               if (selectedOption) {
                 if (opt === quiz.correct_answer) {
-                  // 正解の選択肢（自分が選んでなくても光らせる）
                   btnClass += "bg-green-100 border-green-500 text-green-800 shadow-[0_0_15px_rgba(34,197,94,0.4)] scale-105 z-10";
                 } else if (opt === selectedOption) {
-                  // 間違って選んだ選択肢
                   btnClass += "bg-red-100 border-red-500 text-red-800";
                 } else {
-                  // 選ばなかった不正解
                   btnClass += "bg-gray-50 border-gray-100 text-gray-300 opacity-50";
                 }
               } else {
-                // 未回答時
                 btnClass += "bg-white border-gray-100 hover:border-indigo-300 hover:bg-indigo-50 text-gray-600 hover:shadow-md active:scale-95";
               }
 
@@ -169,7 +220,6 @@ export default function AiLearningHub({ userId }: { userId: string }) {
           </div>
         </div>
 
-        {/* フィードバック演出 */}
         {feedback && (
             <div className={`absolute inset-x-0 bottom-0 p-6 text-center font-black text-white text-xl animate-in slide-in-from-bottom duration-300 z-20 ${feedback === 'correct' ? 'bg-green-500' : 'bg-red-500'}`}>
               {feedback === 'correct' ? 'Excellent!! 🎉' : 'Don\'t mind... 💪'}
@@ -185,11 +235,8 @@ export default function AiLearningHub({ userId }: { userId: string }) {
     );
   }
 
-  // ■ ダッシュボード画面（トップ）
   return (
     <div className="space-y-6">
-      
-      {/* タブ切り替え */}
       <div className="flex bg-gray-200 p-1 rounded-2xl">
         <button 
           onClick={() => setActiveTab('TASK')}
@@ -208,7 +255,6 @@ export default function AiLearningHub({ userId }: { userId: string }) {
       </div>
 
       {activeTab === 'TASK' ? (
-        /* === 宿題タスクモード === */
         <div className="bg-white p-6 rounded-3xl shadow-sm border border-indigo-50 animate-in fade-in">
           <div className="flex justify-between items-end mb-4">
             <div>
@@ -249,7 +295,6 @@ export default function AiLearningHub({ userId }: { userId: string }) {
           </button>
         </div>
       ) : (
-        /* === 実力テストモード === */
         <div className="bg-white p-6 rounded-3xl shadow-sm border border-orange-50 animate-in fade-in">
           <div className="text-center mb-6">
             <div className="inline-block p-4 bg-orange-100 rounded-full text-orange-600 mb-3">

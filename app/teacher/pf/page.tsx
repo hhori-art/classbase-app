@@ -9,7 +9,6 @@ import {
 } from 'lucide-react';
 import Link from 'next/link';
 
-// 生徒データの型定義
 interface Student {
   id: string;
   uid: string;
@@ -18,7 +17,6 @@ interface Student {
   grade: string;
   classroom: string;
   day_of_week: string;
-  // 科目情報
   subject_1?: string;
   subject_2?: string;
   subject_3?: string;
@@ -29,13 +27,11 @@ interface Student {
   [key: string]: any;
 }
 
-// アラート解決状況の型
 interface Resolution {
-  att: boolean; // 出席アラート解決済みか
-  hw: boolean;  // 宿題アラート解決済みか
+  att: boolean; 
+  hw: boolean;  
 }
 
-// 月ごとの週範囲設定
 const MONTH_MAP: { [key: string]: number[] } = {
   '3月': [1, 2, 3],
   '4月': [4, 5, 6, 7],
@@ -53,16 +49,13 @@ const MONTH_MAP: { [key: string]: number[] } = {
 const DAYS_OF_WEEK = ['月', '火', '水', '木', '金', '土'];
 
 export default function TeacherPFPage() {
-  // 基本データ
   const [students, setStudents] = useState<Student[]>([]);
   const [records, setRecords] = useState<{ [key: string]: { [key: string]: any } }>({});
-  const [resolutions, setResolutions] = useState<{ [key: string]: Resolution }>({}); // アラート解決状況
+  const [resolutions, setResolutions] = useState<{ [key: string]: Resolution }>({}); 
   
-  // UI状態
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   
-  // 設定 & フィルター
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear().toString());
   const [currentWeek, setCurrentWeek] = useState('1'); 
   const [selectedMonth, setSelectedMonth] = useState('3月');
@@ -71,21 +64,19 @@ export default function TeacherPFPage() {
   const [filterClassroom, setFilterClassroom] = useState('all');
   const [filterDay, setFilterDay] = useState('all');
   const [filterGrade, setFilterGrade] = useState('all');
-  const [filterSubject, setFilterSubject] = useState('all'); // ★科目フィルター
+  const [filterSubject, setFilterSubject] = useState('all');
   
   const [sortBy, setSortBy] = useState<'id' | 'attendance' | 'homework'>('id');
 
   const [classrooms, setClassrooms] = useState<string[]>([]);
-  const [subjects, setSubjects] = useState<string[]>([]); // ★全科目リスト
+  const [subjects, setSubjects] = useState<string[]>([]);
 
   const visibleWeeks = useMemo(() => MONTH_MAP[selectedMonth] || MONTH_MAP['全期間'], [selectedMonth]);
 
-  // 初期データロード
   useEffect(() => {
     const init = async () => {
       setLoading(true);
       try {
-        // 設定取得
         const settingsSnap = await getDoc(doc(db, 'settings', 'global'));
         let nowWeek = '1';
         if (settingsSnap.exists()) {
@@ -99,7 +90,6 @@ export default function TeacherPFPage() {
         const foundMonth = Object.keys(MONTH_MAP).find(m => m !== '全期間' && MONTH_MAP[m].includes(wNum));
         if (foundMonth) setSelectedMonth(foundMonth);
 
-        // 生徒取得
         const qUsers = query(collection(db, 'users'), where('role', '==', 'student'));
         const snapUsers = await getDocs(qUsers);
         
@@ -109,10 +99,8 @@ export default function TeacherPFPage() {
           ...doc.data()
         } as Student));
         
-        // 校舎リスト抽出
         const cls = Array.from(new Set(list.map(s => s.classroom).filter(Boolean))).sort();
         
-        // ★科目リスト抽出
         const subSet = new Set<string>();
         list.forEach(s => {
           [s.subject_1, s.subject_2, s.subject_3, s.subject_4, s.subject_5, s.subject_science, s.subject_social]
@@ -134,14 +122,12 @@ export default function TeacherPFPage() {
     init();
   }, []);
 
-  // レコード & 解決状況 取得
   useEffect(() => {
     if (students.length === 0) return;
     
     const loadRecords = async () => {
       setLoading(true);
       try {
-        // PFレコード取得
         const qRecords = query(collection(db, 'pf_records'), where('year', '==', currentYear));
         const snapRecords = await getDocs(qRecords);
         const recordMap: { [key: string]: { [key: string]: any } } = {};
@@ -155,12 +141,10 @@ export default function TeacherPFPage() {
         });
         setRecords(recordMap);
 
-        // ★アラート解決状況取得
         const qRes = query(collection(db, 'pf_resolutions'), where('year', '==', currentYear));
         const snapRes = await getDocs(qRes);
         const resMap: { [key: string]: Resolution } = {};
         snapRes.forEach(doc => {
-          // doc.id は studentId_year
           const data = doc.data();
           resMap[data.student_id] = { att: data.att || false, hw: data.hw || false };
         });
@@ -172,7 +156,6 @@ export default function TeacherPFPage() {
     loadRecords();
   }, [currentYear, students.length]);
 
-  // ★統計情報の一括計算 (アラート判定含む)
   const statsMap = useMemo(() => {
     const map: { [key: string]: { attRate: number, hwRate: number, attAlert: string, hwAlert: string, isAttResolved: boolean, isHwResolved: boolean } } = {};
     const calcWeeks = Array.from({length: Number(currentWeek)}, (_, i) => i + 1);
@@ -198,7 +181,6 @@ export default function TeacherPFPage() {
       const attRate = totalClasses > 0 ? Math.round((attendCount / totalClasses) * 100) : 0;
       const hwRate = totalClasses > 0 ? Math.round((hwSubmittedCount / totalClasses) * 100) : 0;
 
-      // アラートロジック
       let attAlert = '';
       if (absentCount >= 3) attAlert = '要対応③';
       else if (absentCount >= 1) attAlert = '要対応①';
@@ -206,7 +188,6 @@ export default function TeacherPFPage() {
       let hwAlert = '';
       if (totalClasses > 0 && hwRate < 50) hwAlert = '要対応';
 
-      // 解決済みフラグ
       const res = resolutions[s.id] || { att: false, hw: false };
 
       map[s.id] = { 
@@ -219,11 +200,9 @@ export default function TeacherPFPage() {
     return map;
   }, [students, records, currentWeek, resolutions]);
 
-  // ★フィルタリングとソート
   const displayStudents = useMemo(() => {
     let result = students;
 
-    // フィルタ
     if (searchQuery) {
       const lower = searchQuery.toLowerCase();
       result = result.filter(s => 
@@ -236,7 +215,6 @@ export default function TeacherPFPage() {
     if (filterDay !== 'all') result = result.filter(s => s.day_of_week && s.day_of_week.includes(filterDay));
     if (filterGrade !== 'all') result = result.filter(s => s.grade === filterGrade);
     
-    // ★科目フィルター実装
     if (filterSubject !== 'all') {
       result = result.filter(s => {
         const mySubjects = [
@@ -247,7 +225,6 @@ export default function TeacherPFPage() {
       });
     }
 
-    // ソート
     result = [...result].sort((a, b) => {
       if (sortBy === 'attendance') return statsMap[a.id].attRate - statsMap[b.id].attRate;
       if (sortBy === 'homework') return statsMap[a.id].hwRate - statsMap[b.id].hwRate;
@@ -260,7 +237,6 @@ export default function TeacherPFPage() {
     return result;
   }, [students, searchQuery, filterClassroom, filterDay, filterGrade, filterSubject, sortBy, statsMap]);
 
-  // 今週の統計
   const weekStats = useMemo(() => {
     if (displayStudents.length === 0) return { att: 0, hw: 0, late: 0 };
     let totalAtt = 0, totalLate = 0, totalHw = 0, count = 0;
@@ -283,7 +259,6 @@ export default function TeacherPFPage() {
     };
   }, [displayStudents, records, currentWeek]);
 
-  // 入力ハンドラ
   const handleInputChange = (studentId: string, week: number, field: string, value: string) => {
     setRecords(prev => ({
       ...prev,
@@ -300,32 +275,26 @@ export default function TeacherPFPage() {
     }));
   };
 
-  // ★アラート解決トグル
   const toggleAlertResolution = async (studentId: string, type: 'att' | 'hw') => {
-    // 状態を反転
     const currentRes = resolutions[studentId] || { att: false, hw: false };
     const newStatus = !currentRes[type];
     
-    // ローカル更新
     setResolutions(prev => ({
       ...prev,
       [studentId]: { ...currentRes, [type]: newStatus }
     }));
 
-    // Firestore保存 (pf_resolutionsコレクション)
-    // IDは studentId_year
     const docId = `${studentId}_${currentYear}`;
     try {
       await setDoc(doc(db, 'pf_resolutions', docId), {
         student_id: studentId,
         year: currentYear,
-        [type]: newStatus, // att または hw を更新
+        [type]: newStatus,
         updated_at: new Date().toISOString()
       }, { merge: true });
     } catch (e) {
       console.error('Alert resolution save failed:', e);
       alert('保存に失敗しました');
-      // ロールバック
       setResolutions(prev => ({
         ...prev,
         [studentId]: currentRes
@@ -397,7 +366,8 @@ export default function TeacherPFPage() {
         {/* 上段 */}
         <div className="bg-gray-900 text-white px-4 py-3 rounded-t-2xl flex flex-wrap justify-between items-center gap-4">
           <div className="flex items-center gap-4">
-            <Link href="/teacher" className="p-2 hover:bg-white/20 rounded-full transition-colors"><ArrowLeft size={18}/></Link>
+            {/* ★修正: リンク先を /teacher から /teacher/work に変更 */}
+            <Link href="/teacher/work" className="p-2 hover:bg-white/20 rounded-full transition-colors"><ArrowLeft size={18}/></Link>
             <h1 className="font-black flex items-center gap-2 text-lg tracking-tight">
               <RefreshCw size={20} className="text-indigo-400"/> PF管理システム
             </h1>
@@ -495,7 +465,7 @@ export default function TeacherPFPage() {
                 <option value="中3">中3</option>
               </select>
 
-              {/* ★科目フィルター (追加) */}
+              {/* 科目 */}
               <div className="flex items-center gap-1 bg-gray-50 border border-gray-200 rounded-lg px-2 py-1.5">
                 <BookOpen size={12} className="text-gray-400"/>
                 <select className="bg-transparent text-xs font-medium outline-none cursor-pointer min-w-[60px]" value={filterSubject} onChange={e => setFilterSubject(e.target.value)}>
@@ -529,7 +499,6 @@ export default function TeacherPFPage() {
             <table className="min-w-max border-collapse text-xs w-full">
               <thead className="bg-gray-50 text-gray-500 font-bold sticky top-0 z-30 shadow-sm h-10 border-b border-gray-200">
                 <tr>
-                  {/* 固定列 (背景色を明示して透け防止) */}
                   <th className="p-2 border-r border-gray-200 w-10 text-center sticky left-0 bg-gray-50 z-40">No</th>
                   <th className="p-2 border-r border-gray-200 w-16 text-center sticky left-10 bg-gray-50 z-40">教室</th>
                   <th className="p-2 border-r border-gray-200 w-20 text-center sticky left-24 bg-gray-50 z-40">ID</th>
@@ -568,7 +537,6 @@ export default function TeacherPFPage() {
                   
                   return (
                     <tr key={student.id} className={`${rowBg} hover:bg-indigo-50 transition-colors h-9 group`}>
-                      {/* 固定列 */}
                       <td className={`p-2 border-r border-gray-100 text-center sticky left-0 z-20 font-mono text-gray-400 ${idx%2===0?'bg-white':'bg-gray-50'} group-hover:bg-indigo-50`}>{idx + 1}</td>
                       <td className={`p-2 border-r border-gray-100 text-center sticky left-10 z-20 text-[10px] font-bold text-gray-500 ${idx%2===0?'bg-white':'bg-gray-50'} group-hover:bg-indigo-50`}>{student.classroom?.substring(0,3)}</td>
                       <td className={`p-2 border-r border-gray-100 text-center sticky left-24 z-20 font-mono text-[10px] text-gray-400 ${idx%2===0?'bg-white':'bg-gray-50'} group-hover:bg-indigo-50`}>{student.lifetime_id}</td>
@@ -579,7 +547,6 @@ export default function TeacherPFPage() {
                       <td className="p-2 border-r border-gray-100 text-center">{student.grade}</td>
                       <td className="p-2 border-r border-gray-100 text-center text-[10px]">{student.day_of_week}</td>
 
-                      {/* ★アラートセル (クリックで解決切り替え) */}
                       <td className="p-1 border-r border-gray-100 text-center cursor-pointer hover:bg-gray-100 transition-colors" onClick={() => stats.attAlert && toggleAlertResolution(student.id, 'att')}>
                         {stats.isAttResolved ? (
                           <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-green-100 text-green-700 text-[9px] font-bold border border-green-200">

@@ -173,7 +173,7 @@ export default function RiskMonitorPage() {
     if (!confirm('未分析または更新が必要な生徒のデータをAI分析しますか？\n(処理に時間がかかる場合があります)')) return;
     setAnalyzing(true);
     try {
-      // ★ここを修正: 一度に50人まで処理するように変更 (API側のタイムアウトに注意)
+      // API呼び出し (実装されている前提)
       const res = await fetch('/api/teacher/analyze-risk', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -236,7 +236,8 @@ export default function RiskMonitorPage() {
         {/* ヘッダー */}
         <div className="flex items-center justify-between mb-8">
           <div className="flex items-center gap-4">
-            <Link href="/teacher" className="bg-white p-3 rounded-full shadow-sm hover:bg-gray-50 text-gray-600 transition-colors">
+            {/* ★修正: リンク先を /teacher から /teacher/work に変更 */}
+            <Link href="/teacher/work" className="bg-white p-3 rounded-full shadow-sm hover:bg-gray-50 text-gray-600 transition-colors">
               <ArrowLeft size={20} />
             </Link>
             <div>

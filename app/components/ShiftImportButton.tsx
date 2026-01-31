@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { db } from '@/lib/firebase';
 import { collection, getDocs, query, where, writeBatch, doc } from 'firebase/firestore';
-import { FileUp, Loader2, Download, Settings, Calendar, Copy, AlertTriangle, Trash2, CheckSquare } from 'lucide-react';
+import { FileUp, Loader2, Download, Settings, Calendar, Copy, AlertTriangle, Trash2 } from 'lucide-react';
 
 interface ShiftImportButtonProps {
   onSuccess?: () => void;
@@ -21,7 +21,7 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
   const [forceOverwrite, setForceOverwrite] = useState(false);
 
   const downloadTemplate = () => {
-    const csvContent = '\uFEFF日付,曜日,時限,教科,クラス,単元,場所,ミーティングID,講師,サポート,枠外(全体サポート)\n12/1,月,1,中3理科,中3理科(生物),力と運動,手柄,123 456 7890,鈴木 先生,個安 佐藤 先生,田中 先生(全体)';
+    const csvContent = '\uFEFF日付,曜日,時限,教科,クラス,単元,場所,ｻｲﾝｲﾝｱﾄﾞﾚｽ,ミーティングID,講師,サポート,枠外(全体サポート)\n12/1,月,1,中3理科,中3理科(生物),力と運動,手柄,sozo_kyoumu@example.com,123 456 7890,鈴木 先生,個安 佐藤 先生,田中 先生(全体)';
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
@@ -104,7 +104,7 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
     const modeMsg = importMode === 'date_match' ? 'CSVの日付に合わせて登録' : `CSVの曜日で期間一括登録`;
     const overwriteMsg = forceOverwrite ? '⚠️ 重複は上書き' : '・重複はスキップ';
 
-    if (!confirm(`「${file.name}」を取り込みますか？\n\n【モード】${modeMsg}\n${overwriteMsg}`)) {
+    if (!confirm(`「${file.name}」を取り込みますか？\n\n【モード】${modeMsg}\n${overwriteMsg}\n※J列までを読み込みます`)) {
       e.target.value = '';
       return;
     }
@@ -172,8 +172,6 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
   const resolveTeacherInfo = (rawName: string, map: Map<string, {id: string, name: string}>) => {
     let clean = rawName.trim();
     if (!clean || clean === '未' || clean === '―' || clean === 'Nan' || clean.toLowerCase() === 'nan') return null;
-    
-    // Zoom ID (数字とスペースのみ) を除外
     if (/^[\d\s]+$/.test(clean)) return null;
 
     if (clean.includes('⇒')) clean = clean.split('⇒').pop()!.trim();
@@ -222,7 +220,6 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
       if (data.note?.includes('2限') || data.note?.includes('２限')) period = 2;
 
       if (data.role_type === 'main') {
-        // 同じ名前に連番がついている場合も考慮してキーを作成
         const key = `${data.target_date}_${period}_${data.target_grade}_${data.target_subject}_${data.target_detail_subject}`;
         existingMainMap.set(key, d.id);
       } else if (data.role_type === 'sub') {
@@ -238,14 +235,11 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
     let currentDate = '';
     let currentPeriod = 0;
     
-    type ColInfo = { grade: string, subject: string, detail: string, unit: string, place: string, meetingId: string, mainShiftId?: string };
+    type ColInfo = { grade: string, subject: string, detail: string, unit: string, place: string, meetingId: string, signinAddress: string, mainShiftId?: string };
     let colMap: (ColInfo | null)[] = [];
     
-    // 同じ時限内での同名クラス出現回数をカウントするためのマップ
-    // Key: "Date_Period_Grade_Subject_DetailName" -> Count
     const sessionClassCounter = new Map<string, number>();
 
-    const unmatchedTeachers = new Set<string>();
     let batch = writeBatch(db);
     
     let count = 0;
@@ -269,7 +263,6 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
         currentPeriod = 0; 
       }
 
-      // 時限変更時にカウンタをリセット
       const oldPeriod = currentPeriod;
       if (col0.includes('1時間目') || col0.includes('１時間目') || col0.includes('19：20')) currentPeriod = 1;
       else if (col0.includes('2時間目') || col0.includes('２時間目') || col0.includes('20：35')) currentPeriod = 2;
@@ -283,14 +276,18 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
       const isUnitRow = col1.includes('単元');
       const isPlaceRow = col1.includes('場所'); 
       const isZoomRow = col1.includes('ﾐｰﾃｨﾝｸﾞID') || col1.includes('ミーティングID');
+      const isSigninRow = col1.includes('ｻｲﾝｲﾝｱﾄﾞﾚｽ') || col1.includes('サインインアドレス');
       const isTeacherRow = col1.includes('講師');
       const isSupportRow = col1.includes('サポート');
+
+      // ★修正: ループ条件に `&& c <= 9` を追加して J列 までに制限
 
       if (isSubjectRow) {
         colMap = new Array(row.length).fill(null);
         let lastGrade = '';
         let lastSubject = '';
-        for (let c = 2; c < row.length; c++) {
+        // ★ J列まで
+        for (let c = 2; c < row.length && c <= 9; c++) {
           const val = row[c] || '';
           const norm = val.replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0));
           if (norm) {
@@ -301,18 +298,17 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
             else if (norm.includes('社会')) lastSubject = '社会';
           }
           if (lastGrade && lastSubject) {
-            colMap[c] = { grade: lastGrade, subject: lastSubject, detail: '', unit: '', place: '', meetingId: '' };
+            colMap[c] = { grade: lastGrade, subject: lastSubject, detail: '', unit: '', place: '', meetingId: '', signinAddress: '' };
           }
         }
         continue;
       }
 
       if (isClassRow) {
-        for (let c = 2; c < row.length; c++) {
+        // ★ J列まで
+        for (let c = 2; c < row.length && c <= 9; c++) {
           if (colMap[c]) {
             const val = row[c] || '';
-            // ★修正: 単純化せず、括弧とスペースを除去した名前をそのまま使う
-            // これにより「公民①」「公民②」が区別される
             const detailName = val.replace(/[【】]/g, '').trim();
             colMap[c]!.detail = detailName;
           }
@@ -321,41 +317,58 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
       }
 
       if (isUnitRow) {
-        for (let c = 2; c < row.length; c++) {
+        // ★ J列まで
+        for (let c = 2; c < row.length && c <= 9; c++) {
           if (colMap[c]) colMap[c]!.unit = row[c] || '';
         }
         continue;
       }
 
       if (isPlaceRow) {
-        for (let c = 2; c < row.length; c++) {
+        // ★ J列まで
+        for (let c = 2; c < row.length && c <= 9; c++) {
           if (colMap[c]) colMap[c]!.place = row[c] || '';
         }
         continue;
       }
 
       if (isZoomRow) {
-        for (let c = 2; c < row.length; c++) {
+        // ★ J列まで
+        for (let c = 2; c < row.length && c <= 9; c++) {
           if (colMap[c]) colMap[c]!.meetingId = row[c] || '';
         }
         continue;
       }
 
-      // --- 講師 & サポート行 ---
-      if (isTeacherRow || isSupportRow) {
-        // 行単位で重複回避カウンタを一時コピー（サブ講師などが同じセル参照するため）
-        // ただし、講師行ごとにリセットするわけではない。時限ごとに管理。
-        
-        for (let c = 2; c < row.length; c++) {
-          const rawName = row[c];
-          if (!rawName) continue;
+      if (isSigninRow) {
+        // ★ J列まで
+        for (let c = 2; c < row.length && c <= 9; c++) {
+          if (colMap[c]) {
+            colMap[c]!.signinAddress = (row[c] || '').replace(/\s+/g, '').trim();
+          }
+        }
+        continue;
+      }
 
-          const teacherInfo = resolveTeacherInfo(rawName, teacherMap);
-          if (!teacherInfo) {
-             if (rawName !== '未' && rawName !== '―' && !rawName.includes('NaN') && !/^[\d\s]+$/.test(rawName)) {
-               unmatchedTeachers.add(rawName);
+      if (isTeacherRow || isSupportRow) {
+        // ★ J列まで
+        for (let c = 2; c < row.length && c <= 9; c++) {
+          const rawName = (row[c] || '').trim();
+          const info = colMap[c];
+
+          if (!info && !rawName) continue;
+
+          let teacherInfo = resolveTeacherInfo(rawName, teacherMap);
+          let teacherName = teacherInfo ? teacherInfo.name : rawName;
+          let userId = teacherInfo ? teacherInfo.id : '';
+
+          if (!teacherName || teacherName === '未' || teacherName === '―') {
+             if (info) {
+               teacherName = '未定';
+               userId = ''; 
+             } else {
+               continue;
              }
-             continue;
           }
 
           let targetDates = [currentDate];
@@ -368,29 +381,18 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
           for (const targetDate of targetDates) {
             if (!targetDate || !currentPeriod) continue;
 
-            if (colMap[c]) {
-              // --- 枠内 (Main / Sub) ---
-              const info = colMap[c]!;
+            if (info) {
               const roleType = isTeacherRow ? 'main' : 'sub';
               
-              // ★修正: 同名の授業が複数ある場合の重複回避（ナンバリング）
               let uniqueDetail = info.detail;
               
-              // メイン講師行のときだけカウンタをインクリメントして名前を決定
               if (roleType === 'main') {
                 const counterKey = `${targetDate}_${currentPeriod}_${info.grade}_${info.subject}_${info.detail}`;
                 const countVal = (sessionClassCounter.get(counterKey) || 0) + 1;
                 sessionClassCounter.set(counterKey, countVal);
-                
                 if (countVal > 1) {
                   uniqueDetail = `${uniqueDetail}(${countVal})`;
                 }
-              } else {
-                // サポート行は、直前のメイン行で決定された名前（またはID紐付け）を使うべきだが、
-                // 簡易的に同じロジックで名前を解決しようとするとズレる可能性がある。
-                // ただし、今回は `parent_id` (mainShiftId) を使って紐付けるため、
-                // サポートデータの `target_detail_subject` はあくまで表示用。
-                // メインIDがあればそれで紐づく。
               }
 
               let duplicateKey = '';
@@ -400,13 +402,14 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
                 duplicateKey = `${targetDate}_${currentPeriod}_${info.grade}_${info.subject}_${uniqueDetail}`;
                 existingId = existingMainMap.get(duplicateKey);
               } else {
-                duplicateKey = `${targetDate}_${currentPeriod}_${teacherInfo.id}_sub`;
+                const subKeyId = userId || teacherName;
+                duplicateKey = `${targetDate}_${currentPeriod}_${subKeyId}_sub`;
                 existingId = existingSubMap.get(duplicateKey);
               }
 
               const shiftData: any = {
-                user_id: teacherInfo.id,
-                teacher_name: teacherInfo.name,
+                user_id: userId,
+                teacher_name: teacherName,
                 target_date: targetDate,
                 role_type: roleType,
                 target_grade: info.grade,
@@ -414,6 +417,7 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
                 target_detail_subject: uniqueDetail,
                 target_place: info.place,
                 target_meeting_id: info.meetingId,
+                target_signin_address: info.signinAddress, 
                 unit: roleType === 'main' ? info.unit : null,
                 parent_id: roleType === 'sub' && targetDate === currentDate ? (info.mainShiftId || null) : null,
                 note: `【${currentPeriod}限】`,
@@ -441,15 +445,14 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
                 }
               }
 
-            } else {
-              // --- 枠外 (全体サポート) ---
+            } else if (userId) {
               const roleType = 'general';
-              const duplicateKey = `${targetDate}_${currentPeriod}_${teacherInfo.id}_general`;
+              const duplicateKey = `${targetDate}_${currentPeriod}_${userId}_general`;
               const existingId = existingGeneralMap.get(duplicateKey);
 
               const shiftData = {
-                user_id: teacherInfo.id,
-                teacher_name: teacherInfo.name,
+                user_id: userId,
+                teacher_name: teacherName,
                 target_date: targetDate,
                 role_type: roleType,
                 target_grade: null,
@@ -489,11 +492,6 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
     let msg = `完了: ${count}件 追加`;
     if (overwriteCount > 0) msg += `\n(上書き: ${overwriteCount}件)`;
     if (skipCount > 0) msg += `\n(スキップ: ${skipCount}件)`;
-    if (unmatchedTeachers.size > 0) msg += `\n\n⚠️ 未登録講師:\n${Array.from(unmatchedTeachers).join(', ')}`;
-
-    if (count === 0 && overwriteCount === 0 && skipCount === 0) {
-      throw new Error('データが見つかりませんでした。');
-    }
     alert(msg);
   };
 

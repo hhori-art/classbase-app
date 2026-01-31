@@ -3,16 +3,17 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
-import { collection, query, orderBy, getDocs, where } from 'firebase/firestore';
-import { ArrowLeft, BookOpen, Clock, CheckCircle, ChevronRight, AlertCircle, Loader2, Calendar } from 'lucide-react';
+import { collection, query, orderBy, getDocs, where, doc, getDoc } from 'firebase/firestore';
+import { ArrowLeft, BookOpen, Clock, CheckCircle, ChevronRight, AlertCircle, Loader2, Calendar, FileText } from 'lucide-react';
 import Link from 'next/link';
 
 export default function StudentHomeworkListPage() {
   const { user } = useAuth();
   const [assignments, setAssignments] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [studentInfo, setStudentInfo] = useState<{ grade: string, subjects: string[] } | null>(null);
   
-  // 自分の提出状況を管理するマップ {課題ID: true/false}
+  // 自分の提出状況 {課題ID: true/false}
   const [submissionStatus, setSubmissionStatus] = useState<{[key:string]: boolean}>({});
 
   useEffect(() => {
@@ -20,14 +21,46 @@ export default function StudentHomeworkListPage() {
       if (!user) return;
 
       try {
-        // 1. 課題一覧を取得 (締め切りが新しい順)
-        const qAssign = query(collection(db, 'assignments'), orderBy('deadline', 'desc'));
+        // 1. 生徒のプロフィール（学年・受講科目）を取得
+        const userDoc = await getDoc(doc(db, 'users', user.uid));
+        if (!userDoc.exists()) throw new Error("User data not found");
+        
+        const userData = userDoc.data();
+        const userGrade = userData.grade; // 例: "中2"
+        // 受講科目が未設定の場合は空配列 (全科目表示を防ぐため、または初期設定として全科目を入れる運用も可)
+        const userSubjects = userData.subjects || ['英語', '数学', '国語', '理科', '社会']; 
+
+        setStudentInfo({ grade: userGrade, subjects: userSubjects });
+
+        // 2. 学年に一致する課題を取得 (homework_assignmentsに変更)
+        // ※自動作成システムは、授業終了時にこのコレクションにデータを追加している前提
+        let qAssign;
+        if (userGrade) {
+          qAssign = query(
+            collection(db, 'homework_assignments'), 
+            where('target_grade', '==', userGrade), // 学年でまず絞る
+            orderBy('deadline', 'desc')
+          );
+        } else {
+          // 学年未設定の場合は全件取得（または表示なし）
+          qAssign = query(collection(db, 'homework_assignments'), orderBy('deadline', 'desc'));
+        }
+
         const assignSnap = await getDocs(qAssign);
-        const assignList = assignSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+        let assignList = assignSnap.docs.map(d => ({ id: d.id, ...d.data() } as any));
+
+        // 3. 受講科目でフィルタリング (クライアントサイド)
+        // 自動作成された宿題の科目が、生徒の受講科目リストに含まれているかチェック
+        if (userSubjects.length > 0) {
+          assignList = assignList.filter(assign => 
+            // 科目が設定されていない、または受講科目リストに含まれている場合
+            !assign.subject || userSubjects.includes(assign.subject)
+          );
+        }
 
         setAssignments(assignList);
 
-        // 2. 自分の提出済みデータを取得して、提出済みフラグを立てる
+        // 4. 自分の提出状況を取得
         const qSub = query(collection(db, 'submissions'), where('student_id', '==', user.uid));
         const subSnap = await getDocs(qSub);
         
@@ -39,7 +72,7 @@ export default function StudentHomeworkListPage() {
         setSubmissionStatus(statusMap);
 
       } catch (e) {
-        console.error(e);
+        console.error("Data fetch error:", e);
       } finally {
         setLoading(false);
       }
@@ -51,7 +84,7 @@ export default function StudentHomeworkListPage() {
   if (loading) return <div className="min-h-screen flex items-center justify-center bg-indigo-50"><Loader2 className="animate-spin text-indigo-400" size={40}/></div>;
 
   return (
-    <div className="min-h-screen bg-indigo-50/50 p-4 pb-24 font-sans sm:p-8">
+    <div className="min-h-screen bg-[#F0F4F8] p-4 pb-24 font-sans sm:p-8">
       <div className="max-w-xl mx-auto">
         
         {/* ヘッダー */}
@@ -64,9 +97,11 @@ export default function StudentHomeworkListPage() {
               <span className="bg-orange-100 text-orange-500 p-2 rounded-xl">
                 <BookOpen size={24} strokeWidth={3} />
               </span>
-              課題一覧
+              宿題クエスト
             </h1>
-            <p className="text-xs font-bold text-gray-400 mt-1 pl-1">期限を守ってスキルアップ！</p>
+            <p className="text-xs font-bold text-gray-400 mt-1 pl-1">
+              {studentInfo ? `${studentInfo.grade}の受講科目のみ表示中` : '全ての課題を表示中'}
+            </p>
           </div>
         </div>
 
@@ -74,22 +109,35 @@ export default function StudentHomeworkListPage() {
         {assignments.length === 0 ? (
           <div className="py-16 px-6 text-center bg-white rounded-[32px] border-4 border-dashed border-indigo-100 text-gray-400 flex flex-col items-center">
             <div className="bg-indigo-50 p-6 rounded-full mb-4">
-              <BookOpen size={48} className="text-indigo-200"/>
+              <FileText size={48} className="text-indigo-200"/>
             </div>
-            <p className="font-bold text-lg">現在出されている課題はありません</p>
-            <p className="text-sm mt-2 opacity-70">ゆっくり休んでね！</p>
+            <p className="font-bold text-lg">現在、取り組むべき宿題はありません</p>
+            <p className="text-sm mt-2 opacity-70">
+              授業が終わるとここに追加されます。<br/>
+              今はゆっくり休みましょう！
+            </p>
           </div>
         ) : (
           <div className="space-y-4">
             {assignments.map((assign) => {
               const isSubmitted = submissionStatus[assign.id];
-              const isLate = new Date() > new Date(assign.deadline);
+              const deadlineDate = new Date(assign.deadline);
+              const today = new Date();
+              // 期限切れ判定（当日中はOKとする場合などロジック調整可）
+              const isLate = today > deadlineDate && !isSubmitted;
               
               // 科目による色分け
-              const isScience = assign.subject?.includes('理科') || ['物理','化学','生物','地学'].some(s => assign.subject?.includes(s));
-              const isSociety = assign.subject?.includes('社会') || ['地理','歴史','公民'].some(s => assign.subject?.includes(s));
+              const subj = assign.subject || '';
+              const isScience = subj.includes('理科') || ['物理','化学','生物','地学'].some(s => subj.includes(s));
+              const isSociety = subj.includes('社会') || ['地理','歴史','公民'].some(s => subj.includes(s));
+              const isEnglish = subj.includes('英語');
+              const isMath = subj.includes('数学');
               
-              const subjectColor = isScience ? 'bg-purple-100 text-purple-600' : isSociety ? 'bg-pink-100 text-pink-600' : 'bg-blue-100 text-blue-600';
+              let subjectColor = 'bg-gray-100 text-gray-600';
+              if (isScience) subjectColor = 'bg-green-100 text-green-700';
+              else if (isSociety) subjectColor = 'bg-yellow-100 text-yellow-700';
+              else if (isEnglish) subjectColor = 'bg-orange-100 text-orange-700';
+              else if (isMath) subjectColor = 'bg-blue-100 text-blue-700';
 
               return (
                 <Link 
@@ -97,38 +145,51 @@ export default function StudentHomeworkListPage() {
                   href={`/student/homework/${assign.id}`} 
                   className="block group"
                 >
-                  <div className="bg-white p-5 sm:p-6 rounded-[32px] shadow-sm border border-gray-100 hover:border-indigo-200 hover:shadow-xl hover:shadow-indigo-100 hover:-translate-y-1 transition-all duration-300 relative overflow-hidden">
+                  <div className={`bg-white p-5 sm:p-6 rounded-[32px] shadow-sm border transition-all duration-300 relative overflow-hidden ${
+                    isSubmitted 
+                      ? 'border-green-100 opacity-80 hover:opacity-100 hover:shadow-green-100' 
+                      : 'border-indigo-50 hover:border-indigo-300 hover:shadow-xl hover:shadow-indigo-100 hover:-translate-y-1'
+                  }`}>
                     
-                    {/* ステータスバッジ (絶対配置) */}
+                    {/* ステータスバッジ */}
                     <div className="absolute top-0 right-0 p-5">
                       {isSubmitted ? (
-                        <span className="flex items-center gap-1.5 text-[11px] font-black bg-green-100 text-green-600 px-3 py-1.5 rounded-full shadow-sm">
-                          <CheckCircle size={14} strokeWidth={3}/> 提出済
+                        <span className="flex items-center gap-1.5 text-[10px] font-black bg-green-500 text-white px-3 py-1 rounded-full shadow-md shadow-green-200">
+                          <CheckCircle size={12} strokeWidth={4}/> COMPLETE
                         </span>
                       ) : isLate ? (
-                        <span className="flex items-center gap-1.5 text-[11px] font-black bg-red-100 text-red-600 px-3 py-1.5 rounded-full shadow-sm">
-                          <AlertCircle size={14} strokeWidth={3}/> 期限切
+                        <span className="flex items-center gap-1.5 text-[10px] font-black bg-red-500 text-white px-3 py-1 rounded-full shadow-md shadow-red-200 animate-pulse">
+                          <AlertCircle size={12} strokeWidth={4}/> OVERDUE
                         </span>
                       ) : (
-                        <span className="flex items-center gap-1.5 text-[11px] font-black bg-blue-100 text-blue-600 px-3 py-1.5 rounded-full shadow-sm">
-                          <Clock size={14} strokeWidth={3}/> 受付中
+                        <span className="flex items-center gap-1.5 text-[10px] font-black bg-blue-500 text-white px-3 py-1 rounded-full shadow-md shadow-blue-200">
+                          <Clock size={12} strokeWidth={4}/> OPEN
                         </span>
                       )}
                     </div>
 
-                    <div className="pr-20">
-                      {/* 科目ラベル */}
-                      <span className={`inline-block px-3 py-1 rounded-lg text-[10px] font-black mb-3 ${subjectColor}`}>
-                        {assign.subject || '課題'}
-                      </span>
+                    <div className="pr-24">
+                      {/* 科目ラベル & 自動作成のヒント */}
+                      <div className="flex items-center gap-2 mb-3">
+                        <span className={`inline-block px-3 py-1 rounded-lg text-[10px] font-black ${subjectColor}`}>
+                          {assign.subject || '一般'}
+                        </span>
+                        {assign.class_date && (
+                          <span className="text-[10px] text-gray-400 font-bold">
+                            {new Date(assign.class_date).getMonth()+1}/{new Date(assign.class_date).getDate()} 授業分
+                          </span>
+                        )}
+                      </div>
                       
-                      <h3 className="text-lg sm:text-xl font-black text-gray-800 line-clamp-2 mb-3 leading-tight group-hover:text-indigo-600 transition-colors">
+                      <h3 className="text-lg sm:text-lg font-black text-gray-800 line-clamp-2 mb-3 leading-tight group-hover:text-indigo-600 transition-colors">
                         {assign.title}
                       </h3>
                       
-                      <div className="flex items-center gap-2 text-xs font-bold text-gray-400 bg-gray-50 inline-flex px-3 py-1.5 rounded-lg">
-                        <Calendar size={14}/>
-                        <span>期限: {new Date(assign.deadline).toLocaleDateString()}</span>
+                      <div className="flex items-center gap-2 text-xs font-bold text-gray-500 bg-gray-50 inline-flex px-3 py-1.5 rounded-xl">
+                        <Calendar size={14} className={isLate ? "text-red-500" : "text-indigo-400"}/>
+                        <span className={isLate ? "text-red-500" : ""}>
+                          期限: {new Date(assign.deadline).toLocaleDateString()} まで
+                        </span>
                       </div>
                     </div>
                     

@@ -3,14 +3,13 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { db } from '@/lib/firebase';
-import { doc, onSnapshot } from 'firebase/firestore';
+import { doc, onSnapshot, collection, query, where, getDocs, orderBy, limit } from 'firebase/firestore'; 
 import { 
   Video, BookOpen, AlertTriangle, 
   ChevronRight, Calendar, Trophy, Settings,
-  Bot, Brain, Sparkles, Clock, Coffee
+  Bot, Brain, Sparkles, Clock, Coffee, CalendarCheck, ClipboardList, Timer
 } from 'lucide-react';
 
-// コンポーネントのインポート
 import BottomNav from '@/app/components/BottomNav';
 import LogoutButton from '@/app/components/LogoutButton';
 import CalendarWidget from '@/app/components/CalendarWidget';
@@ -18,10 +17,10 @@ import NewsWidget from '@/app/components/NewsWidget';
 import TrophyModal from '@/app/components/TrophyModal';
 import SmartClassButton from '@/app/components/SmartClassButton';
 import ActivityLogger from '@/app/components/ActivityLogger';
+import PendingSurveys from '@/app/components/PendingSurveys'; // ★追加
 
 import { BADGES } from '@/lib/gamification';
 
-// 授業時間定義
 const CLASS_TIMES = {
   period1: { start: '19:20', end: '20:25' },
   period2: { start: '20:35', end: '21:40' }
@@ -34,11 +33,11 @@ export default function StudentDashboard({ initialProfile }: Props) {
   const [userData, setUserData] = useState<any>(initialProfile);
   const [isTrophyOpen, setIsTrophyOpen] = useState(false);
   const [popMessage, setPopMessage] = useState<string | null>(null);
-
-  // ★追加: 現在時刻の管理（初期値はnullでハイドレーションエラー防止）
   const [now, setNow] = useState<Date | null>(null);
 
-  // 日付・挨拶
+  const [nextClassInfo, setNextClassInfo] = useState<{ date: string; status: 'open' | 'closed' | 'checking' } | null>(null);
+  const [urgentHomework, setUrgentHomework] = useState<{ title: string; deadline: string; daysLeft: number } | null>(null);
+
   const today = new Date();
   const dateStr = today.toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' });
 
@@ -49,17 +48,23 @@ export default function StudentDashboard({ initialProfile }: Props) {
     return 'こんばんは！';
   };
 
-  // リアルタイム監視 & 時計の更新
   useEffect(() => {
-    // ユーザー監視
     if (initialProfile?.uid) {
       const unsub = onSnapshot(doc(db, 'users', initialProfile.uid), (docSnap) => {
-        if (docSnap.exists()) setUserData(docSnap.data());
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          setUserData(data);
+          
+          checkNextClass(data.day_of_week);
+          checkUrgentHomework(data.grade, data.subjects); 
+        }
       });
       
-      // 時計の初期化と更新（1分ごとにチェック）
       setNow(new Date());
       const timer = setInterval(() => setNow(new Date()), 60000);
+
+      if (initialProfile.day_of_week) checkNextClass(initialProfile.day_of_week);
+      if (initialProfile.grade) checkUrgentHomework(initialProfile.grade, initialProfile.subjects);
 
       return () => {
         unsub();
@@ -68,30 +73,91 @@ export default function StudentDashboard({ initialProfile }: Props) {
     }
   }, [initialProfile]);
 
-  // ★追加: 時間内か判定する関数
+  const checkNextClass = async (dayOfWeek: string) => {
+    if (!dayOfWeek) return;
+    const targetDayIndex = ['日','月','火','水','木','金','土'].indexOf(dayOfWeek);
+    if (targetDayIndex === -1) return;
+
+    const d = new Date();
+    let daysUntil = (targetDayIndex + 7 - d.getDay()) % 7;
+    if (daysUntil === 0 && d.getHours() >= 22) daysUntil = 7;
+
+    d.setDate(d.getDate() + daysUntil);
+    const targetDateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+    setNextClassInfo({ date: targetDateStr, status: 'checking' });
+
+    try {
+      const q = query(collection(db, 'shift_assignments'), where('target_date', '==', targetDateStr), limit(1));
+      const snap = await getDocs(q);
+      
+      if (!snap.empty) setNextClassInfo({ date: targetDateStr, status: 'open' });
+      else setNextClassInfo({ date: targetDateStr, status: 'closed' });
+    } catch (e) {
+      console.error(e);
+      setNextClassInfo({ date: targetDateStr, status: 'open' });
+    }
+  };
+
+  const checkUrgentHomework = async (grade: string, subjects: string[] = []) => {
+    if (!grade) return;
+    
+    const d = new Date();
+    const todayStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+    try {
+      const q = query(
+        collection(db, 'homework_assignments'), 
+        where('target_grade', '==', grade),
+        where('deadline', '>=', todayStr),
+        orderBy('deadline', 'asc'),
+        limit(5)
+      );
+      
+      const snap = await getDocs(q);
+      
+      let foundHw = null;
+
+      for (const doc of snap.docs) {
+        const data = doc.data();
+        if (!data.subject || subjects.length === 0 || subjects.includes(data.subject)) {
+          foundHw = data;
+          break;
+        }
+      }
+      
+      if (foundHw) {
+        const deadlineDate = new Date(foundHw.deadline);
+        const now = new Date();
+        const diffTime = deadlineDate.getTime() - now.getTime();
+        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+        setUrgentHomework({
+          title: foundHw.title || '宿題',
+          deadline: foundHw.deadline,
+          daysLeft: diffDays
+        });
+      } else {
+        setUrgentHomework(null);
+      }
+    } catch (e) {
+      console.error("Homework fetch error:", e);
+    }
+  };
+
   const isClassActive = (start: string, end: string) => {
     if (!now) return false;
-
-    // 現在時刻を「分」に変換 (例: 19:30 → 1170)
     const currentMinutes = now.getHours() * 60 + now.getMinutes();
-
-    // 開始時間を「分」に変換
     const [startH, startM] = start.split(':').map(Number);
     const startTotal = startH * 60 + startM;
-
-    // 終了時間を「分」に変換
     const [endH, endM] = end.split(':').map(Number);
     const endTotal = endH * 60 + endM;
-
-    // 判定: 「開始15分前」から「終了時間」までなら表示
-    // ※ 15分前を表示させたくない場合は `- 15` を削除してください
     return currentMinutes >= (startTotal - 15) && currentMinutes <= endTotal;
   };
 
   const currentBadgeId = userData?.selected_badge;
   const currentBadge = BADGES.find(b => b.id === currentBadgeId);
 
-  // 各時限が表示対象かどうか
   const showPeriod1 = isClassActive(CLASS_TIMES.period1.start, CLASS_TIMES.period1.end);
   const showPeriod2 = isClassActive(CLASS_TIMES.period2.start, CLASS_TIMES.period2.end);
 
@@ -112,7 +178,6 @@ export default function StudentDashboard({ initialProfile }: Props) {
         userData={userData}
       />
 
-      {/* ヒーローセクション */}
       <div className="bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 pt-10 pb-24 px-6 rounded-b-[40px] shadow-lg relative overflow-hidden">
         <div className="absolute top-[-50px] right-[-50px] w-40 h-40 bg-white/10 rounded-full blur-2xl"></div>
         <div className="flex justify-between items-start text-white relative z-10">
@@ -127,7 +192,6 @@ export default function StudentDashboard({ initialProfile }: Props) {
 
       <div className="px-5 -mt-16 relative z-20 space-y-6">
         
-        {/* ステータスカード */}
         <button 
           onClick={() => setIsTrophyOpen(true)}
           className="w-full bg-white p-5 rounded-3xl shadow-xl shadow-indigo-100 flex justify-between items-center transform hover:scale-[1.02] active:scale-95 transition-all text-left group"
@@ -153,31 +217,18 @@ export default function StudentDashboard({ initialProfile }: Props) {
           </div>
         </button>
 
-        {/* 自動Zoomボタン (時間内のみ表示) */}
-        {/* どちらかの時間が有効なときだけエリアを表示、あるいは個別に出し分け */}
         <div className="space-y-4 animate-in slide-in-from-top-4">
-          
-          {/* 1限目の表示判定 */}
-          {showPeriod1 && (
-            <SmartClassButton 
-              profile={userData}
-              period={1}
-              startTime={CLASS_TIMES.period1.start}
-              endTime={CLASS_TIMES.period1.end}
-            />
-          )}
+          {/* ★追加: 未回答アンケートがある場合はここに表示 */}
+          <PendingSurveys 
+            student={{ 
+              uid: userData?.uid, 
+              student_name: userData?.student_name, 
+              grade: userData?.grade 
+            }} 
+          />
 
-          {/* 2限目の表示判定 */}
-          {showPeriod2 && (
-            <SmartClassButton 
-              profile={userData}
-              period={2}
-              startTime={CLASS_TIMES.period2.start}
-              endTime={CLASS_TIMES.period2.end}
-            />
-          )}
-
-          {/* 授業時間外のときのメッセージ（オプション） */}
+          {showPeriod1 && <SmartClassButton profile={userData} period={1} startTime={CLASS_TIMES.period1.start} endTime={CLASS_TIMES.period1.end} />}
+          {showPeriod2 && <SmartClassButton profile={userData} period={2} startTime={CLASS_TIMES.period2.start} endTime={CLASS_TIMES.period2.end} />}
           {!showPeriod1 && !showPeriod2 && now && (
             <div className="bg-white/60 p-4 rounded-3xl border border-white flex items-center justify-center gap-2 text-gray-400 text-sm font-bold">
               <Coffee size={18} />
@@ -186,7 +237,67 @@ export default function StudentDashboard({ initialProfile }: Props) {
           )}
         </div>
 
-        {/* メインメニュー */}
+        <div className="space-y-3">
+          
+          {nextClassInfo && (
+            <div className="bg-white p-4 rounded-3xl shadow-sm border border-indigo-50 flex items-center justify-between">
+              <div>
+                <p className="text-xs text-indigo-500 font-bold flex items-center gap-1 mb-1">
+                  <CalendarCheck size={14}/> 次回の授業予定
+                </p>
+                <p className="text-sm font-bold text-gray-700">
+                  {new Date(nextClassInfo.date).toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' })}
+                </p>
+              </div>
+              <div>
+                {nextClassInfo.status === 'checking' ? (
+                  <span className="text-xs text-gray-400">確認中...</span>
+                ) : nextClassInfo.status === 'open' ? (
+                  <span className="bg-indigo-100 text-indigo-700 text-xs font-bold px-3 py-1.5 rounded-full">実施予定</span>
+                ) : (
+                  <span className="bg-red-100 text-red-600 text-xs font-bold px-3 py-1.5 rounded-full">休講 / お休み</span>
+                )}
+              </div>
+            </div>
+          )}
+
+          {urgentHomework && (
+            <Link href="/student/homework" className="block no-underline">
+              <div className={`p-4 rounded-3xl shadow-sm border flex items-center justify-between transition-transform active:scale-95 ${
+                urgentHomework.daysLeft <= 1 
+                  ? 'bg-red-50 border-red-100'
+                  : urgentHomework.daysLeft <= 3 
+                    ? 'bg-orange-50 border-orange-100'
+                    : 'bg-blue-50 border-blue-100'
+              }`}>
+                <div>
+                  <div className={`text-xs font-bold flex items-center gap-1 mb-1 ${
+                    urgentHomework.daysLeft <= 1 ? 'text-red-600' : urgentHomework.daysLeft <= 3 ? 'text-orange-600' : 'text-blue-600'
+                  }`}>
+                    {urgentHomework.daysLeft <= 1 ? <Timer size={14} className="animate-pulse"/> : <ClipboardList size={14}/>}
+                    {urgentHomework.daysLeft <= 0 ? '期限切れ間近！' : `提出期限まで あと${urgentHomework.daysLeft}日`}
+                  </div>
+                  <p className="text-sm font-bold text-gray-800 line-clamp-1">
+                    {urgentHomework.title}
+                  </p>
+                </div>
+                <div>
+                  <span className={`text-xs font-black px-3 py-1.5 rounded-full ${
+                    urgentHomework.daysLeft <= 1 
+                      ? 'bg-red-500 text-white shadow-md shadow-red-200' 
+                      : urgentHomework.daysLeft <= 3 
+                        ? 'bg-orange-400 text-white'
+                        : 'bg-white text-blue-500 border border-blue-200'
+                  }`}>
+                    {urgentHomework.daysLeft === 0 ? '今日まで' : new Date(urgentHomework.deadline).getDate() + '日提出'}
+                  </span>
+                </div>
+              </div>
+            </Link>
+          )}
+
+        </div>
+
         <div className="grid grid-cols-2 gap-4">
           <Link href="/student/homework/adaptive" className="col-span-2 block group">
             <div className="bg-gradient-to-r from-teal-400 to-emerald-500 p-5 rounded-3xl shadow-lg text-white flex items-center justify-between relative overflow-hidden">
@@ -250,7 +361,7 @@ export default function StudentDashboard({ initialProfile }: Props) {
         <NewsWidget role="student" />
         
         <div className="bg-white p-2 rounded-3xl shadow-sm border border-gray-100">
-          <CalendarWidget />
+          <CalendarWidget classDay={userData?.day_of_week} grade={userData?.grade} />
         </div>
         
         <Link href="/student/change-request" className="flex items-center justify-between bg-white p-4 rounded-2xl border border-gray-100 shadow-sm hover:bg-gray-50 transition-colors no-underline mb-8">

@@ -1,146 +1,218 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import Calendar from 'react-calendar';
-import 'react-calendar/dist/Calendar.css'; 
+import { ChevronLeft, ChevronRight, Loader2, BookOpen } from 'lucide-react';
 import { db } from '@/lib/firebase';
-import { collection, query, getDocs, orderBy } from 'firebase/firestore';
-import { CalendarCheck, ChevronRight, Clock, Loader2 } from 'lucide-react';
-import Link from 'next/link';
+import { collection, query, where, getDocs } from 'firebase/firestore';
 
-type Value = Date | null | [Date | null, Date | null];
+// 曜日の数値変換マップ
+const DAY_MAP: { [key: string]: number } = { '日': 0, '月': 1, '火': 2, '水': 3, '木': 4, '金': 5, '土': 6 };
 
-export default function CalendarWidget() {
-  const [date, setDate] = useState<Value>(new Date());
-  const [assignments, setAssignments] = useState<any[]>([]);
-  const [selectedTasks, setSelectedTasks] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
+interface Props {
+  classDay?: string; // 生徒の授業曜日 (例: "月")
+  grade?: string;    // 生徒の学年 (例: "中1") ★追加
+}
 
-  // Firestoreから課題データを取得
+export default function CalendarWidget({ classDay, grade }: Props) {
+  const [currentDate, setCurrentDate] = useState(new Date());
+  const [shifts, setShifts] = useState<string[]>([]);
+  const [homeworks, setHomeworks] = useState<string[]>([]); // 宿題の期限日リスト
+  const [loading, setLoading] = useState(false);
+
+  // 表示月が変わったらデータを取得
   useEffect(() => {
     const fetchData = async () => {
+      setLoading(true);
+      const year = currentDate.getFullYear();
+      const month = currentDate.getMonth() + 1;
+      
+      const startStr = `${year}-${String(month).padStart(2, '0')}-01`;
+      const endStr = `${year}-${String(month).padStart(2, '0')}-31`;
+
       try {
-        // 全課題を取得してクライアント側でフィルタリング
-        // (データ量が増えたら where('deadline', '>=', startOfMonth) などで範囲を絞るべきですが、現状は全件でOK)
-        const q = query(collection(db, 'assignments'), orderBy('deadline', 'asc'));
-        const snapshot = await getDocs(q);
-        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        setAssignments(data);
+        // 1. 授業シフトの取得
+        const shiftQuery = query(
+          collection(db, 'shift_assignments'),
+          where('target_date', '>=', startStr),
+          where('target_date', '<=', endStr)
+        );
+        const shiftSnap = await getDocs(shiftQuery);
+        const shiftDates = shiftSnap.docs.map(d => d.data().target_date as string);
+        setShifts(shiftDates);
+
+        // 2. 宿題期限の取得 (インデックスエラー回避のため、日付で取得してからJSで学年フィルタ)
+        const hwQuery = query(
+          collection(db, 'homework_assignments'),
+          where('deadline', '>=', startStr),
+          where('deadline', '<=', endStr)
+        );
+        const hwSnap = await getDocs(hwQuery);
+        const hwDates = hwSnap.docs
+          .map(d => d.data())
+          .filter(data => !grade || data.target_grade === grade) // 学年で絞り込み
+          .map(data => data.deadline as string);
+        
+        // 重複を除去してセット
+        setHomeworks([...new Set(hwDates)]);
+
       } catch (e) {
         console.error(e);
       } finally {
         setLoading(false);
       }
     };
+
     fetchData();
-  }, []);
+  }, [currentDate, grade]);
 
-  // 日付が変わった時の処理
-  useEffect(() => {
-    if (date instanceof Date) {
-      const dateStr = date.toISOString().split('T')[0];
-      // タイムゾーンのズレを考慮し、文字列比較で簡易マッチング
-      // ※本格運用では date-fns などのライブラリ使用を推奨
-      const tasks = assignments.filter((a: any) => a.deadline && a.deadline.startsWith(dateStr));
-      setSelectedTasks(tasks);
-    }
-  }, [date, assignments]);
+  // カレンダー生成ロジック
+  const year = currentDate.getFullYear();
+  const month = currentDate.getMonth();
+  const firstDay = new Date(year, month, 1);
+  const lastDay = new Date(year, month + 1, 0);
+  const daysInMonth = lastDay.getDate();
+  const startingDay = firstDay.getDay();
 
-  const getTileContent = ({ date, view }: { date: Date; view: string }) => {
-    if (view === 'month') {
-      const dateStr = date.toISOString().split('T')[0];
-      const hasDeadline = assignments.some((a: any) => a.deadline && a.deadline.startsWith(dateStr));
-      if (hasDeadline) return <div className="dot-marker"></div>;
-    }
-    return null;
+  const prevMonthLastDay = new Date(year, month, 0).getDate();
+
+  const calendarDays = [];
+  
+  // 前月分
+  for (let i = 0; i < startingDay; i++) {
+    calendarDays.push({ day: prevMonthLastDay - startingDay + 1 + i, type: 'prev' });
+  }
+  // 今月分
+  for (let i = 1; i <= daysInMonth; i++) {
+    calendarDays.push({ day: i, type: 'current' });
+  }
+  // 翌月分
+  const totalSlots = 42; 
+  const remainingSlots = totalSlots - calendarDays.length;
+  for (let i = 1; i <= remainingSlots; i++) {
+    calendarDays.push({ day: i, type: 'next' });
+  }
+
+  const weekDays = ['日', '月', '火', '水', '木', '金', '土'];
+
+  const changeMonth = (diff: number) => {
+    setCurrentDate(new Date(year, month + diff, 1));
   };
 
-  // 今日以降の直近の予定
-  const todayStr = new Date().toISOString().split('T')[0];
-  const upcomingTasks = assignments.filter((a: any) => a.deadline >= todayStr);
-
   return (
-    <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 overflow-hidden w-full">
-      <h2 className="text-sm font-bold text-gray-700 mb-4 flex items-center gap-2">
-        <CalendarCheck className="text-orange-500" size={18} />
-        学習カレンダー
-      </h2>
+    <div className="w-full">
+      {/* ヘッダー */}
+      <div className="flex items-center justify-between mb-4 px-2 py-2">
+        <h3 className="font-extrabold text-gray-800 text-xl">
+          {year}年 <span className="text-indigo-600">{month + 1}月</span>
+        </h3>
+        <div className="flex gap-2">
+          <button onClick={() => changeMonth(-1)} className="p-2 bg-gray-100 hover:bg-white rounded-xl text-gray-500 hover:text-indigo-600 transition-all shadow-sm border border-transparent hover:border-gray-200">
+            <ChevronLeft size={20}/>
+          </button>
+          <button onClick={() => changeMonth(1)} className="p-2 bg-gray-100 hover:bg-white rounded-xl text-gray-500 hover:text-indigo-600 transition-all shadow-sm border border-transparent hover:border-gray-200">
+            <ChevronRight size={20}/>
+          </button>
+        </div>
+      </div>
 
-      {loading ? (
-        <div className="flex justify-center py-10"><Loader2 className="animate-spin text-gray-300"/></div>
-      ) : (
-        <>
-          {/* カレンダー本体: カスタムクラス calendar-custom を適用 */}
-          <div className="mb-6 w-full calendar-custom">
-            <Calendar
-              onChange={setDate}
-              value={date}
-              locale="ja-JP"
-              tileContent={getTileContent}
-              next2Label={null}
-              prev2Label={null}
-              formatDay={(locale, date) => date.getDate().toString()}
-              className="w-full border-none font-bold text-gray-700 text-sm"
-            />
+      {/* 曜日行 */}
+      <div className="grid grid-cols-7 mb-2 text-center">
+        {weekDays.map((day, i) => (
+          <div key={i} className={`text-xs font-black pb-2 ${i === 0 ? 'text-red-400' : i === 6 ? 'text-blue-400' : 'text-gray-400'}`}>
+            {day}
           </div>
+        ))}
+      </div>
 
-          {/* 選択した日のタスク */}
-          {selectedTasks.length > 0 && (
-            <div className="bg-blue-50 p-4 rounded-xl mb-4 border border-blue-100 animate-in slide-in-from-top-2">
-              <h3 className="text-xs font-bold text-blue-800 mb-2">
-                 {date instanceof Date ? `${date.getMonth() + 1}/${date.getDate()}` : ''} の提出期限
-              </h3>
-              <div className="space-y-2">
-                {selectedTasks.map((task) => (
-                  <Link href={`/student/homework/${task.id}`} key={task.id} className="block no-underline">
-                    <div className="bg-white p-3 rounded-lg border border-blue-200 flex items-center justify-between shadow-sm hover:bg-blue-50 transition-colors">
-                      <div className="flex items-center gap-2 overflow-hidden">
-                        <span className={`text-[10px] px-2 py-0.5 rounded-full text-white shrink-0 ${task.subject?.includes('理科') ? 'bg-green-500' : 'bg-orange-500'}`}>
-                          {task.subject}
-                        </span>
-                        <span className="text-sm font-bold text-gray-800 truncate">{task.title}</span>
-                      </div>
-                      <ChevronRight size={16} className="text-gray-400 shrink-0" />
-                    </div>
-                  </Link>
-                ))}
+      {/* 日付グリッド */}
+      <div className="grid grid-cols-7 gap-1.5 text-center relative">
+        {loading && (
+          <div className="absolute inset-0 bg-white/60 z-20 flex items-center justify-center rounded-2xl backdrop-blur-[1px]">
+            <Loader2 className="animate-spin text-indigo-500" size={32} />
+          </div>
+        )}
+
+        {calendarDays.map((dateObj, idx) => {
+          if (dateObj.type !== 'current') {
+            return <div key={idx} className="min-h-[70px]"></div>; 
+          }
+
+          const currentDayStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(dateObj.day).padStart(2, '0')}`;
+          const currentDayOfWeek = new Date(year, month, dateObj.day).getDay();
+          
+          const isToday = 
+            new Date().getDate() === dateObj.day && 
+            new Date().getMonth() === month && 
+            new Date().getFullYear() === year;
+
+          // 判定
+          const isMyClassDay = classDay && DAY_MAP[classDay] === currentDayOfWeek;
+          const hasShift = shifts.includes(currentDayStr);
+          const hasHomework = homeworks.includes(currentDayStr); // 宿題あり判定
+
+          let shiftStatus = 'none';
+          if (isMyClassDay) {
+            shiftStatus = hasShift ? 'class' : 'closed';
+          }
+
+          return (
+            <div key={idx} className={`min-h-[70px] flex flex-col items-center justify-start py-1.5 rounded-xl transition-all border overflow-hidden ${
+              isToday 
+                ? 'bg-indigo-50 border-indigo-200 shadow-inner' 
+                : 'bg-white border-transparent hover:border-gray-100'
+            }`}>
+              {/* 日付 */}
+              <span className={`text-sm font-bold w-6 h-6 flex items-center justify-center rounded-full mb-1 ${
+                isToday ? 'bg-indigo-600 text-white shadow-sm' : 'text-gray-700'
+              }`}>
+                {dateObj.day}
+              </span>
+
+              <div className="flex flex-col gap-1 w-full px-0.5">
+                {/* 授業マーカー */}
+                {shiftStatus === 'class' && (
+                  <div className="bg-indigo-100 text-indigo-700 text-[9px] font-black py-0.5 rounded shadow-sm border border-indigo-200 truncate">
+                    授業
+                  </div>
+                )}
+                {shiftStatus === 'closed' && (
+                  <div className="bg-gray-100 text-gray-400 text-[9px] font-bold py-0.5 rounded border border-gray-200 truncate">
+                    なし
+                  </div>
+                )}
+
+                {/* 宿題マーカー (追加) */}
+                {hasHomework && (
+                  <div className="bg-orange-100 text-orange-700 text-[9px] font-black py-0.5 rounded shadow-sm border border-orange-200 flex items-center justify-center gap-0.5 truncate">
+                    <BookOpen size={8} className="shrink-0"/> 提出
+                  </div>
+                )}
               </div>
             </div>
-          )}
-
-          {/* 直近の予定 */}
-          <div className="border-t border-gray-100 pt-4">
-            <h3 className="text-xs font-bold text-gray-400 mb-3 ml-1">今後の予定</h3>
-            <div className="space-y-2">
-              {upcomingTasks.slice(0, 3).map((task) => (
-                <Link href={`/student/homework/${task.id}`} key={task.id} className="block group no-underline">
-                  <div className="flex items-center gap-3 p-2 hover:bg-gray-50 rounded-lg transition-colors">
-                    <div className="bg-gray-100 text-gray-600 rounded-lg p-2 text-center w-12 shrink-0 group-hover:bg-white group-hover:shadow-sm transition-all">
-                      <div className="text-[10px] font-bold">{new Date(task.deadline).getMonth() + 1}月</div>
-                      <div className="text-lg font-bold leading-none">{new Date(task.deadline).getDate()}</div>
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className={`w-2 h-2 shrink-0 rounded-full ${task.subject?.includes('理科') ? 'bg-green-500' : 'bg-orange-500'}`}></span>
-                        <span className="text-sm font-bold text-gray-800 truncate">{task.title}</span>
-                      </div>
-                      <div className="text-xs text-gray-400 flex items-center gap-1">
-                        <Clock size={10} /> {new Date(task.deadline).toLocaleDateString('ja-JP', { weekday: 'short' })}曜日まで
-                      </div>
-                    </div>
-                    <ChevronRight size={16} className="text-gray-300 group-hover:text-blue-500" />
-                  </div>
-                </Link>
-              ))}
-              {upcomingTasks.length === 0 && (
-                 <div className="text-center text-xs text-gray-400 py-4 bg-gray-50 rounded-lg border border-dashed border-gray-200">
-                   予定はありません
-                 </div>
-              )}
+          );
+        })}
+      </div>
+      
+      {/* 凡例 */}
+      <div className="flex items-center justify-center gap-3 mt-6 px-2 bg-gray-50 py-3 rounded-xl border border-gray-100 flex-wrap">
+        {classDay && (
+          <>
+            <div className="flex items-center gap-1">
+              <div className="bg-indigo-100 text-indigo-700 text-[9px] font-black px-1.5 py-0.5 rounded border border-indigo-200">授業</div>
+              <span className="text-[10px] text-gray-500 font-bold">授業あり</span>
             </div>
-          </div>
-        </>
-      )}
+            <div className="flex items-center gap-1">
+              <div className="bg-gray-100 text-gray-400 text-[9px] font-bold px-1.5 py-0.5 rounded border border-gray-200">なし</div>
+              <span className="text-[10px] text-gray-500 font-bold">休み</span>
+            </div>
+          </>
+        )}
+        {/* 宿題凡例 */}
+        <div className="flex items-center gap-1">
+          <div className="bg-orange-100 text-orange-700 text-[9px] font-black px-1.5 py-0.5 rounded border border-orange-200 flex items-center gap-0.5"><BookOpen size={8}/> 提出</div>
+          <span className="text-[10px] text-gray-500 font-bold">宿題期限</span>
+        </div>
+      </div>
     </div>
   );
 }

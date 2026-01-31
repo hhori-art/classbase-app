@@ -2,9 +2,8 @@
 
 import { useState, useEffect } from 'react';
 import { auth, db } from '@/lib/firebase';
-// arrayUnion を追加
 import { doc, setDoc, updateDoc, increment, serverTimestamp, arrayUnion } from 'firebase/firestore';
-import { Video, Loader2, Coins } from 'lucide-react';
+import { Video, Loader2, Coins, Sparkles, ExternalLink, Play } from 'lucide-react';
 
 export default function ZoomButton({ 
   url, 
@@ -58,7 +57,6 @@ export default function ZoomButton({
     if (!url) return;
     if (loading) return;
 
-    // 確認ダイアログにコイン獲得のメッセージを追加
     if (!confirm(`${label}しますか？\n（出席として記録され、コインを獲得します！）`)) return;
 
     setLoading(true);
@@ -87,17 +85,14 @@ export default function ZoomButton({
         updated_at: serverTimestamp()
       }, { merge: true });
       
-      // 2. ゲーミフィケーション処理 (コイン加算 & バッジ付与)
+      // 2. ゲーミフィケーション処理
       const userRef = doc(db, 'users', user.uid);
       await updateDoc(userRef, {
-        coins: increment(30),          // 所持コイン +30
-        total_coins: increment(30),    // 累計コイン +30 (ランキング用)
-        attendance_count: increment(1), // 出席回数 +1 (クエスト用)
-        // 最初のバッジ(badge_1: 双葉)を持っていない場合は自動付与
+        coins: increment(30),
+        total_coins: increment(30),
+        attendance_count: increment(1),
         earned_badges: arrayUnion('badge_1') 
       });
-      
-      // 必要であればここで「コイン獲得！」などのトースト表示を入れるとより良いです
 
     } catch (err) { 
       console.error("出席処理エラー:", err);
@@ -109,36 +104,91 @@ export default function ZoomButton({
 
   if (!isVisible || !url) return null;
 
-  const gradientClass = color === 'blue' 
-    ? 'from-blue-500 to-blue-600 shadow-blue-200' 
-    : 'from-purple-500 to-purple-600 shadow-purple-200';
-  
-  const pulseColor = color === 'blue' ? 'bg-green-300' : 'bg-yellow-300';
+  // カラーテーマの設定
+  const theme = color === 'blue' 
+    ? {
+        bg: 'bg-gradient-to-br from-cyan-500 to-blue-600',
+        shadow: 'shadow-blue-200',
+        ring: 'group-hover:ring-cyan-300',
+        iconBg: 'bg-blue-500'
+      }
+    : {
+        bg: 'bg-gradient-to-br from-violet-500 to-fuchsia-600',
+        shadow: 'shadow-purple-200',
+        ring: 'group-hover:ring-fuchsia-300',
+        iconBg: 'bg-purple-500'
+      };
 
   return (
-    <button
-      onClick={handleJoinClass}
-      disabled={loading}
-      className={`w-full bg-gradient-to-r ${gradientClass} text-white p-5 rounded-2xl shadow-lg flex items-center justify-between group active:scale-[0.98] transition-all disabled:opacity-70 disabled:cursor-not-allowed`}
-    >
-      <div className="flex flex-col items-start">
-        <span className="text-sm opacity-90 font-bold mb-1 flex items-center gap-1">
-          <span className={`w-2 h-2 ${pulseColor} rounded-full animate-pulse`}></span>
-          {subLabel}
-        </span>
-        <span className="text-xl font-bold flex items-center gap-2">
-          {loading ? <Loader2 className="animate-spin" /> : <Video className="fill-white" />} 
-          {loading ? '処理中...' : label}
-        </span>
-      </div>
-      <div className="flex flex-col items-center gap-1">
-        <div className="bg-white/20 p-2 rounded-full group-hover:bg-white/30 transition-colors">
-          <span className="text-2xl">🚀</span>
+    <div className="w-full py-2">
+      <button
+        onClick={handleJoinClass}
+        disabled={loading}
+        className={`
+          relative w-full overflow-hidden rounded-3xl ${theme.bg} text-white shadow-xl ${theme.shadow}
+          group transition-all duration-300 hover:scale-[1.02] active:scale-[0.98]
+          disabled:opacity-70 disabled:cursor-not-allowed disabled:hover:scale-100
+        `}
+      >
+        {/* 背景の装飾効果 */}
+        <div className="absolute top-0 right-0 -mt-4 -mr-4 w-32 h-32 bg-white opacity-10 rounded-full blur-2xl group-hover:opacity-20 transition-opacity"></div>
+        <div className="absolute bottom-0 left-0 -mb-4 -ml-4 w-24 h-24 bg-black opacity-10 rounded-full blur-xl"></div>
+
+        <div className="relative p-1">
+          {/* インナーコンテナ */}
+          <div className="flex items-stretch bg-white/10 backdrop-blur-[2px] rounded-[20px] border border-white/20 p-4">
+            
+            {/* 左側：メイン情報 */}
+            <div className="flex-1 flex flex-col justify-center text-left mr-4">
+              {/* ライブバッジ */}
+              <div className="flex items-center gap-2 mb-2">
+                <span className="flex items-center gap-1.5 bg-white/20 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider backdrop-blur-md shadow-sm border border-white/10">
+                  <span className="relative flex h-2 w-2">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
+                  </span>
+                  Live Class
+                </span>
+                <span className="text-[10px] opacity-80 font-medium truncate">{subLabel}</span>
+              </div>
+
+              {/* メインラベル */}
+              <div className="flex items-center gap-2">
+                <h3 className="text-xl sm:text-2xl font-black tracking-tight drop-shadow-sm">
+                  {loading ? '準備中...' : label}
+                </h3>
+              </div>
+            </div>
+
+            {/* 右側：アクション & 報酬 */}
+            <div className="flex flex-col items-center justify-between gap-2 pl-4 border-l border-white/20">
+              
+              {/* コイン報酬バッジ */}
+              <div className="bg-yellow-400 text-yellow-950 px-3 py-1 rounded-full flex items-center gap-1.5 shadow-lg transform group-hover:-translate-y-1 transition-transform duration-300 border-2 border-white/30">
+                <Coins size={14} className="fill-yellow-600 stroke-yellow-800" />
+                <span className="text-xs font-black">+30</span>
+                <Sparkles size={12} className="text-yellow-700 animate-pulse" />
+              </div>
+
+              {/* アイコンボタン */}
+              <div className={`
+                w-10 h-10 rounded-full bg-white text-gray-800 flex items-center justify-center shadow-lg
+                group-hover:bg-white group-hover:text-${color === 'blue' ? 'blue' : 'purple'}-600 transition-colors
+              `}>
+                {loading ? (
+                  <Loader2 size={20} className="animate-spin text-gray-400" />
+                ) : (
+                  <ExternalLink size={20} className="ml-0.5" strokeWidth={2.5} />
+                )}
+              </div>
+            </div>
+
+          </div>
         </div>
-        <span className="text-[10px] font-bold bg-yellow-400 text-yellow-900 px-2 py-0.5 rounded-full flex items-center gap-1">
-          <Coins size={10} /> +30
-        </span>
-      </div>
-    </button>
+
+        {/* ホバー時の光るエフェクト（ボーダー） */}
+        <div className={`absolute inset-0 rounded-3xl border-2 border-white/0 group-hover:border-white/30 transition-colors pointer-events-none`}></div>
+      </button>
+    </div>
   );
 }

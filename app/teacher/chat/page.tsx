@@ -8,7 +8,7 @@ import {
 import { useAuth } from '@/app/context/AuthContext';
 import { 
   MessageCircle, ArrowLeft, Search, Send, User, Loader2, Bot, 
-  AlertTriangle, Users, Filter, X, CheckCircle, Calendar, BookOpen, MapPin 
+  AlertTriangle, Users, Filter, X, Calendar, BookOpen, MapPin 
 } from 'lucide-react';
 import Link from 'next/link';
 
@@ -21,6 +21,7 @@ type ChatLogMessage = {
   teacher_name?: string;
   student_name?: string;
   is_alert?: boolean;
+  is_broadcast?: boolean; // 一斉送信フラグ
   created_at: any;
   createdAtDate: Date;
 };
@@ -41,7 +42,7 @@ export default function TeacherChatPage() {
     grades: [] as string[],
     classrooms: [] as string[],
     days: [] as string[],
-    subjects: [] as string[], // 全ての科目をここに統合
+    subjects: [] as string[],
   });
 
   // 一斉送信モーダル用ステート
@@ -67,28 +68,23 @@ export default function TeacherChatPage() {
         const sSnap = await getDocs(sQ);
         const allStudents = sSnap.docs.map(d => ({ id: d.id, ...d.data() }));
 
-        // ★登録されている情報から選択肢を動的生成
         const gradeSet = new Set<string>();
         const classroomSet = new Set<string>();
         const daySet = new Set<string>();
-        const subjectSet = new Set<string>(); // 科目用セット
+        const subjectSet = new Set<string>();
 
         allStudents.forEach((s: any) => {
           if (s.grade) gradeSet.add(s.grade);
           if (s.classroom && s.classroom !== '') classroomSet.add(s.classroom);
           if (s.day_of_week && s.day_of_week !== '') daySet.add(s.day_of_week);
 
-          // ★登録科目（subject_1~5, science, social）をすべてスキャンしてリスト化
           const checkAndAdd = (val: any) => {
             if (val && typeof val === 'string' && val.trim() !== '') {
               subjectSet.add(val);
             }
           };
 
-          // 通常科目
           [s.subject_1, s.subject_2, s.subject_3, s.subject_4, s.subject_5].forEach(checkAndAdd);
-          
-          // 理科・社会（文字列として入っている場合）
           checkAndAdd(s.subject_science);
           checkAndAdd(s.subject_social);
         });
@@ -102,7 +98,7 @@ export default function TeacherChatPage() {
           grades: Array.from(gradeSet).sort(),
           classrooms: Array.from(classroomSet).sort(),
           days: Array.from(daySet).sort(sortDays),
-          subjects: Array.from(subjectSet).sort(), // 五十音順などにソート
+          subjects: Array.from(subjectSet).sort(),
         });
 
         // アラート情報の付与
@@ -175,6 +171,7 @@ export default function TeacherChatPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // 個別送信
   const handleSend = async () => {
     if (!inputText.trim() || !selectedStudent || !user) return;
     try {
@@ -182,7 +179,8 @@ export default function TeacherChatPage() {
         uid: selectedStudent.id,
         role: 'teacher',
         teacher_name: profile?.name || '担当講師',
-        student_name: selectedStudent.student_name,
+        // ★修正: 「生徒くん」等の固定値ではなく、実際の生徒名を保存
+        student_name: selectedStudent.student_name, 
         message: inputText,
         created_at: serverTimestamp()
       });
@@ -202,7 +200,6 @@ export default function TeacherChatPage() {
 
   // --- 一斉送信関連ロジック ---
 
-  // ターゲット計算 (AND条件)
   const bulkTargets = useMemo(() => {
     if (
       bulkFilters.grades.length === 0 && 
@@ -214,34 +211,23 @@ export default function TeacherChatPage() {
     }
 
     return students.filter(s => {
-      // 1. 学年フィルタ
       if (bulkFilters.grades.length > 0 && (!s.grade || !bulkFilters.grades.includes(s.grade))) return false;
-      
-      // 2. 校舎フィルタ
       if (bulkFilters.classrooms.length > 0 && (!s.classroom || !bulkFilters.classrooms.includes(s.classroom))) return false;
-
-      // 3. 曜日フィルタ
       if (bulkFilters.days.length > 0 && (!s.day_of_week || !bulkFilters.days.includes(s.day_of_week))) return false;
 
-      // 4. 受講科目フィルタ (OR条件: 指定した科目のいずれか1つでも持っていればOK)
       if (bulkFilters.subjects.length > 0) {
-        // 生徒が持っている全科目を配列化
         const mySubjects = [
           s.subject_1, s.subject_2, s.subject_3, s.subject_4, s.subject_5,
           s.subject_science,
           s.subject_social
-        ].filter(v => v && typeof v === 'string'); // null/undefined除去
-
-        // 選択されたフィルタ科目のうち、生徒が持っている科目が一つでもあるか
+        ].filter(v => v && typeof v === 'string');
         const hasSubject = bulkFilters.subjects.some(filterSub => mySubjects.includes(filterSub));
         if (!hasSubject) return false;
       }
-
       return true;
     });
   }, [bulkFilters, students]);
 
-  // フィルタ切り替えヘルパー
   const toggleFilter = (type: 'grades' | 'classrooms' | 'days' | 'subjects', value: string) => {
     setBulkFilters(prev => {
       const current = prev[type];
@@ -257,15 +243,18 @@ export default function TeacherChatPage() {
   const handleBulkSend = async () => {
     if (!bulkMessage.trim()) return alert('メッセージを入力してください');
     if (bulkTargets.length === 0) return alert('条件に一致する生徒がいません');
-    if (!confirm(`${bulkTargets.length}名のチャットにメッセージを一斉送信しますか？`)) return;
+    if (!confirm(`${bulkTargets.length}名のチャットにメッセージを一斉送信しますか？\n（生徒は通常のチャットとして返信できます）`)) return;
 
     setSendingBulk(true);
     try {
+      // ★修正: chat_logs に role: 'teacher' で保存することで、通常の先生チャットとして扱われ、
+      // 生徒はAIを介さずに直接返信できるようになります。
       const tasks = bulkTargets.map(student => 
         addDoc(collection(db, 'chat_logs'), {
           uid: student.id,
           role: 'teacher',
           teacher_name: profile?.name || '担当講師',
+          // ★修正: 生徒名を正しく反映
           student_name: student.student_name,
           message: bulkMessage,
           is_broadcast: true, 
@@ -289,7 +278,7 @@ export default function TeacherChatPage() {
   return (
     <div className="min-h-screen bg-gray-100 p-6 flex flex-col h-screen overflow-hidden font-sans">
       <div className="flex-none mb-4">
-        <Link href="/teacher" className="flex items-center text-gray-500 hover:text-gray-800"><ArrowLeft size={18}/> 管理画面へ戻る</Link>
+        <Link href="/teacher/work" className="flex items-center text-gray-500 hover:text-gray-800"><ArrowLeft size={18}/> 管理画面へ戻る</Link>
       </div>
 
       <div className="flex flex-1 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden relative">
@@ -336,7 +325,8 @@ export default function TeacherChatPage() {
                   >
                     <div className="flex justify-between items-center mb-1">
                       <div className="font-bold text-gray-800 text-sm flex items-center gap-2">
-                        {student.student_name}
+                        {/* ★修正: 生徒リストも「さん」付けで統一 */}
+                        {student.student_name} さん
                         {student.hasAlert && (
                           <span className="bg-red-100 text-red-600 text-[10px] px-1.5 py-0.5 rounded-full flex items-center gap-1 animate-pulse">
                             <AlertTriangle size={10}/> Alert
@@ -368,7 +358,8 @@ export default function TeacherChatPage() {
                 </div>
                 <div>
                   <div className="font-bold text-gray-800 text-lg flex items-center gap-2">
-                    {selectedStudent.student_name}
+                    {/* ★修正: ヘッダーも「さん」付けで統一 */}
+                    {selectedStudent.student_name} さん
                     {selectedStudent.hasAlert && <AlertTriangle size={18} className="text-red-500"/>}
                   </div>
                   <div className="flex gap-2 text-xs text-gray-500 font-mono">
@@ -391,7 +382,8 @@ export default function TeacherChatPage() {
                         <div className="flex items-center gap-1 mb-1 px-1">
                           {isAI && <span className="text-[10px] font-bold text-purple-600 flex items-center gap-1"><Bot size={10}/> AI Tutor</span>}
                           {isTeacher && <span className="text-[10px] font-bold text-blue-600">{msg.teacher_name || '講師'}</span>}
-                          {isStudent && <span className="text-[10px] font-bold text-gray-500">生徒</span>}
+                          {/* ★修正: チャットログ内の生徒名にも「さん」を付け、名前がなければ「生徒さん」とする */}
+                          {isStudent && <span className="text-[10px] font-bold text-gray-500">{msg.student_name || '生徒'} さん</span>}
                         </div>
                         <div className={`p-3.5 rounded-2xl text-sm shadow-sm relative ${
                           isTeacher 
@@ -401,6 +393,7 @@ export default function TeacherChatPage() {
                               : 'bg-green-50 text-gray-800 border border-green-100 rounded-tl-none'
                         }`}>
                           {msg.is_alert && <div className="flex items-center gap-1 text-red-500 font-bold text-xs mb-1 pb-1 border-b border-red-200"><AlertTriangle size={12}/> AI Alert: 要確認</div>}
+                          {msg.is_broadcast && <div className="text-[10px] bg-white/20 px-1 rounded inline-block mb-1 border border-white/30">📢 一斉送信</div>}
                           <div className="whitespace-pre-wrap leading-relaxed">{msg.message}</div>
                         </div>
                         <div className="text-[9px] text-gray-400 mt-1 px-1">{msg.createdAtDate.toLocaleString([], {month:'numeric', day:'numeric', hour: '2-digit', minute:'2-digit'})}</div>
@@ -481,7 +474,7 @@ export default function TeacherChatPage() {
                     </div>
                   </div>
 
-                  {/* 受講科目（全て動的） */}
+                  {/* 受講科目 */}
                   <div>
                     <p className="text-xs font-bold text-gray-400 mb-2 flex items-center gap-1"><BookOpen size={12}/> 受講科目 (いずれかを受講)</p>
                     <div className="flex flex-wrap gap-2">
