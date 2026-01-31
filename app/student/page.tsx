@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { db } from '@/lib/firebase';
 import { doc, onSnapshot, collection, query, where, getDocs, orderBy, limit } from 'firebase/firestore'; 
-import { useAuth } from '@/app/context/AuthContext'; // ★追加: useAuthをインポート
+import { useAuth } from '@/app/context/AuthContext';
 import { 
   Video, BookOpen, AlertTriangle, 
   ChevronRight, Calendar, Trophy, Settings,
@@ -29,11 +29,10 @@ const CLASS_TIMES = {
 };
 
 type Props = { 
-  initialProfile?: any; // ★修正: undefinedの可能性を考慮して ? を付与
+  initialProfile?: any; 
 };
 
 export default function StudentDashboard({ initialProfile }: Props) {
-  // ★修正: useAuthからもデータを取得（バックアップ用）
   const { user, profile: authProfile, loading: authLoading } = useAuth();
   
   // 初期データの決定 (Props優先 -> AuthContext -> null)
@@ -61,7 +60,7 @@ export default function StudentDashboard({ initialProfile }: Props) {
     return 'こんばんは！';
   };
 
-  // ★修正: userDataの同期と初期化ロジック
+  // userDataの同期と初期化ロジック
   useEffect(() => {
     // ユーザーIDの特定 (Props または AuthContext から)
     const targetUid = initialProfile?.uid || user?.uid;
@@ -94,9 +93,10 @@ export default function StudentDashboard({ initialProfile }: Props) {
         clearInterval(timer);
       };
     }
-  }, [initialProfile, user, authProfile]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialProfile, user, authProfile]); // checkNextClass, checkUrgentHomework は依存配列に含めない
 
-  // ★修正: 未回答依頼チェック (targetUidを使用)
+  // 未回答依頼チェック
   useEffect(() => {
     const targetUid = initialProfile?.uid || user?.uid;
     if (!targetUid) return;
@@ -111,9 +111,11 @@ export default function StudentDashboard({ initialProfile }: Props) {
 
         const myRegQuery = query(collection(db, 'student_registrations'), where('student_id', '==', targetUid));
         const myRegSnap = await getDocs(myRegQuery);
-        const myAnsweredIds = myRegSnap.docs.map(d => d.data().request_id);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const myAnsweredIds = myRegSnap.docs.map((d: any) => d.data().request_id);
 
-        const pending = activeRequests.filter(req => !myAnsweredIds.includes(req.id));
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const pending = activeRequests.filter((req: any) => !myAnsweredIds.includes(req.id));
         setPendingRequests(pending);
 
         if (pending.length > 0) {
@@ -217,18 +219,19 @@ export default function StudentDashboard({ initialProfile }: Props) {
   const handleRegistrationComplete = () => {
     setIsModalOpen(false);
     if (targetRequest) {
-      setPendingRequests(prev => prev.filter(req => req.id !== targetRequest.id));
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      setPendingRequests((prev: any[]) => prev.filter((req: any) => req.id !== targetRequest.id));
     }
     setTargetRequest(null);
   };
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const handleOpenRequest = (req: any) => {
     setTargetRequest(req);
     setIsModalOpen(true);
   };
 
-  // ★追加: データ読み込み中のガード
-  // プロフィール情報が全くない場合はローディングを表示し、クラッシュを防ぐ
+  // データ読み込み中のガード
   if (!userData && authLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#F0F4F8]">
@@ -237,7 +240,7 @@ export default function StudentDashboard({ initialProfile }: Props) {
     );
   }
 
-  // ★追加: ログインはしているがプロフィールがない場合 (テストアカウント作成直後など)
+  // ログインはしているがプロフィールがない場合
   if (!userData && user) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-[#F0F4F8] p-6 text-center">
