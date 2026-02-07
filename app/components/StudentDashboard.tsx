@@ -27,189 +27,204 @@ const CLASS_TIMES = {
   period2: { start: '20:35', end: '21:40' }
 };
 
+// --- エラー表示用コンポーネント（真っ白回避用） ---
+const ErrorFallback = ({ message, onRetry }: { message: string, onRetry: () => void }) => (
+  <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-slate-50 text-center">
+    <AlertTriangle className="text-red-500 mb-4" size={48} />
+    <h2 className="text-lg font-bold text-slate-800 mb-2">エラーが発生しました</h2>
+    <p className="text-xs text-slate-500 font-mono bg-slate-200 p-2 rounded mb-6 break-all max-w-full">
+      {message}
+    </p>
+    <div className="flex gap-4">
+      <button onClick={() => window.location.reload()} className="bg-slate-800 text-white px-6 py-2 rounded-lg text-sm font-bold flex items-center gap-2">
+        <RefreshCw size={16} /> 再読み込み
+      </button>
+      <button onClick={onRetry} className="bg-red-100 text-red-600 px-6 py-2 rounded-lg text-sm font-bold flex items-center gap-2">
+        <LogOut size={16} /> 強制ログアウト
+      </button>
+    </div>
+  </div>
+);
+
 type Props = { initialProfile: any; };
 
 export default function StudentDashboard({ initialProfile }: Props) {
-  // ■ 1. 初期化: 最初は絶対にデータに依存しない
-  // initialProfileが壊れていてもクラッシュしないように、初期値には使わない
+  // ■ エラー監視用ステート
+  const [globalError, setGlobalError] = useState<string | null>(null);
+
+  // ■ 状態管理
+  const [mounted, setMounted] = useState(false);
   const [userData, setUserData] = useState<any>(null);
-  const [isTrophyOpen, setIsTrophyOpen] = useState(false);
-  const [popMessage, setPopMessage] = useState<string | null>(null);
-  const [now, setNow] = useState<Date | null>(null);
+  const [isAuthChecked, setIsAuthChecked] = useState(false);
   
-  // 状態管理
-  const [status, setStatus] = useState<'loading' | 'active' | 'error'>('loading');
+  // UI用ステート
   const [dateStr, setDateStr] = useState('');
   const [greeting, setGreeting] = useState('');
-
+  const [now, setNow] = useState<Date | null>(null);
+  const [isTrophyOpen, setIsTrophyOpen] = useState(false);
+  const [popMessage, setPopMessage] = useState<string | null>(null);
   const [nextClassInfo, setNextClassInfo] = useState<{ date: string; status: 'open' | 'closed' | 'checking' } | null>(null);
   const [urgentHomework, setUrgentHomework] = useState<{ title: string; deadline: string; daysLeft: number } | null>(null);
 
-  // ■ 2. 安全なログアウト関数
-  const handleLogout = async () => {
-    if (!confirm('ログアウトしますか？')) return;
+  // ■ 1. グローバルエラーハンドリング (PWAデバッグ用)
+  useEffect(() => {
+    const errorHandler = (event: ErrorEvent) => {
+      console.error("Global Error Caught:", event.error);
+      setGlobalError(event.message || "予期せぬエラー");
+    };
+    const promiseHandler = (event: PromiseRejectionEvent) => {
+      console.error("Promise Error Caught:", event.reason);
+      setGlobalError(typeof event.reason === 'string' ? event.reason : "通信エラーなど");
+    };
+
+    window.addEventListener('error', errorHandler);
+    window.addEventListener('unhandledrejection', promiseHandler);
+
+    return () => {
+      window.removeEventListener('error', errorHandler);
+      window.removeEventListener('unhandledrejection', promiseHandler);
+    };
+  }, []);
+
+  // ■ 2. 安全なログアウト
+  const handleForceLogout = async () => {
     try {
       await signOut(auth);
-      // キャッシュを無視して強制リロード (PWA対策の決定版)
-      window.location.href = '/?t=' + new Date().getTime(); 
-    } catch (error) {
-      console.error("Logout failed", error);
+      window.location.href = '/?reset=' + Date.now();
+    } catch (e) {
       window.location.href = '/';
     }
   };
 
-  // ■ 3. アプリ起動時の処理 (マウント後にのみ実行)
+  // ■ 3. 初期化プロセス
   useEffect(() => {
-    const init = async () => {
-      // 日付設定
-      const today = new Date();
-      try {
-        setDateStr(today.toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' }));
-      } catch (e) {
-        setDateStr('日付取得中');
-      }
-
-      // 挨拶設定
-      const h = today.getHours();
-      let msg = 'こんばんは！';
-      if (h < 11) msg = 'おはよう！';
-      else if (h < 17) msg = 'こんにちは！';
-      setGreeting(msg);
-      setNow(today);
-
-      // 初期データの安全なセット
-      if (initialProfile) {
-        setUserData(initialProfile);
-      }
-
-      // 認証監視
-      const unsubscribe = onAuthStateChanged(auth, (user) => {
-        if (!user) {
-          // ログインしていない -> トップへ
-          window.location.href = '/';
-        } else {
-          // ログインOK -> 画面表示許可
-          setStatus('active');
-        }
-      });
-
-      return unsubscribe;
-    };
-
-    const unsub = init();
-    const timer = setInterval(() => setNow(new Date()), 60000);
-
-    return () => {
-      // @ts-ignore
-      if (typeof unsub === 'function') unsub();
-      clearInterval(timer);
-    };
-  }, [initialProfile]);
-
-  // ■ 4. データ同期 (画面が表示されてから実行)
-  useEffect(() => {
-    if (status !== 'active') return;
-
-    const targetUid = auth.currentUser?.uid || initialProfile?.uid;
-    if (!targetUid) return;
+    setMounted(true); // マウント完了
 
     try {
-      const unsub = onSnapshot(doc(db, 'users', targetUid), (docSnap) => {
+      // 日付セット (エラーガード付き)
+      const d = new Date();
+      setDateStr(d.toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' }));
+      
+      const h = d.getHours();
+      setGreeting(h < 11 ? 'おはよう！' : h < 17 ? 'こんにちは！' : 'こんばんは！');
+      setNow(d);
+
+      // タイマー開始
+      const timer = setInterval(() => setNow(new Date()), 60000);
+      return () => clearInterval(timer);
+    } catch (e: any) {
+      console.error("Init Error", e);
+      setGlobalError("初期化エラー: " + e.message);
+    }
+  }, []);
+
+  // ■ 4. 認証とデータ取得
+  useEffect(() => {
+    if (!mounted) return;
+
+    // 認証監視
+    const unsubAuth = onAuthStateChanged(auth, (user) => {
+      if (!user) {
+        window.location.href = '/';
+        return;
+      }
+      setIsAuthChecked(true);
+
+      // データ監視開始
+      const uid = user.uid;
+      const unsubDb = onSnapshot(doc(db, 'users', uid), (docSnap) => {
         if (docSnap.exists()) {
           const data = docSnap.data();
-          setUserData(data); // データを更新
+          setUserData(data);
           
-          // 非同期データ取得
-          if (data?.day_of_week) checkNextClass(data.day_of_week);
-          if (data?.grade) checkUrgentHomework(data.grade, data.subjects); 
+          // 非同期データ取得（エラーで止めないように個別にcatch）
+          if (data.day_of_week) checkNextClass(data.day_of_week).catch(e => console.warn(e));
+          if (data.grade) checkUrgentHomework(data.grade, data.subjects).catch(e => console.warn(e));
+        } else {
+          // ドキュメントがない場合、初期プロファイルを使うか空にする
+          if (initialProfile) setUserData(initialProfile);
         }
       }, (err) => {
-        console.error("Firebase Error:", err);
-        // エラーでも画面は落とさない
+        console.error("DB Error:", err);
+        // DBエラーは致命的ではない場合があるのでアラートせずログのみ
       });
-      return () => unsub();
-    } catch (e) {
-      console.error("Setup Error:", e);
-    }
-  }, [status, initialProfile]);
 
-  // ヘルパー関数群
+      return () => unsubDb();
+    });
+
+    return () => unsubAuth();
+  }, [mounted]);
+
+  // ヘルパー関数群 (エラーガード付き)
   const checkNextClass = async (dayOfWeek: string) => {
+    const daysMap = ['日','月','火','水','木','金','土'];
+    const targetDayIndex = daysMap.indexOf(dayOfWeek);
+    if (targetDayIndex === -1) return;
+
+    const d = new Date();
+    let daysUntil = (targetDayIndex + 7 - d.getDay()) % 7;
+    if (daysUntil === 0 && d.getHours() >= 22) daysUntil = 7;
+
+    d.setDate(d.getDate() + daysUntil);
+    const targetDateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+    setNextClassInfo({ date: targetDateStr, status: 'checking' });
+
     try {
-      const targetDayIndex = ['日','月','火','水','木','金','土'].indexOf(dayOfWeek);
-      if (targetDayIndex === -1) return;
-
-      const d = new Date();
-      let daysUntil = (targetDayIndex + 7 - d.getDay()) % 7;
-      if (daysUntil === 0 && d.getHours() >= 22) daysUntil = 7;
-
-      d.setDate(d.getDate() + daysUntil);
-      const targetDateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-
-      setNextClassInfo({ date: targetDateStr, status: 'checking' });
-
       const q = query(collection(db, 'shift_assignments'), where('target_date', '==', targetDateStr), limit(1));
       const snap = await getDocs(q);
-      
       if (!snap.empty) setNextClassInfo({ date: targetDateStr, status: 'open' });
       else setNextClassInfo({ date: targetDateStr, status: 'closed' });
     } catch (e) {
-      console.warn("Class check failed", e);
+      setNextClassInfo({ date: targetDateStr, status: 'open' });
     }
   };
 
   const checkUrgentHomework = async (grade: string, subjects: string[] = []) => {
-    try {
-      const d = new Date();
-      const todayStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const d = new Date();
+    const todayStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
-      const q = query(
-        collection(db, 'homework_assignments'), 
-        where('target_grade', '==', grade),
-        where('deadline', '>=', todayStr),
-        orderBy('deadline', 'asc'),
-        limit(5)
-      );
-      
-      const snap = await getDocs(q);
-      let foundHw = null;
+    const q = query(
+      collection(db, 'homework_assignments'), 
+      where('target_grade', '==', grade),
+      where('deadline', '>=', todayStr),
+      orderBy('deadline', 'asc'),
+      limit(5)
+    );
+    
+    const snap = await getDocs(q);
+    let foundHw = null;
 
-      for (const doc of snap.docs) {
-        const data = doc.data();
-        if (!data.deadline) continue;
-        if (!data.subject || subjects.length === 0 || subjects.includes(data.subject)) {
-          foundHw = data;
-          break;
-        }
+    for (const doc of snap.docs) {
+      const data = doc.data();
+      if (!data.deadline) continue;
+      if (!data.subject || subjects.length === 0 || subjects.includes(data.subject)) {
+        foundHw = data;
+        break;
       }
-      
-      if (foundHw?.deadline) {
-        const deadlineDate = new Date(foundHw.deadline.replace(/-/g, '/'));
-        const nowTime = new Date();
-        const diffTime = deadlineDate.getTime() - nowTime.getTime();
-        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    }
+    
+    if (foundHw?.deadline) {
+      const deadlineDate = new Date(foundHw.deadline.replace(/-/g, '/'));
+      const nowTime = new Date();
+      const diffTime = deadlineDate.getTime() - nowTime.getTime();
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
-        setUrgentHomework({
-          title: foundHw.title || '宿題',
-          deadline: foundHw.deadline,
-          daysLeft: diffDays
-        });
-      } else {
-        setUrgentHomework(null);
-      }
-    } catch (e) {
-      console.warn("Homework check failed", e);
+      setUrgentHomework({
+        title: foundHw.title || '宿題',
+        deadline: foundHw.deadline,
+        daysLeft: diffDays
+      });
     }
   };
 
+  // 表示ロジック
   const isClassActive = (start: string, end: string) => {
     if (!now) return false;
     const currentMinutes = now.getHours() * 60 + now.getMinutes();
     const [startH, startM] = start.split(':').map(Number);
     const [endH, endM] = end.split(':').map(Number);
-    const startTotal = startH * 60 + startM;
-    const endTotal = endH * 60 + endM;
-    return currentMinutes >= (startTotal - 15) && currentMinutes <= endTotal;
+    return currentMinutes >= (startH * 60 + startM - 15) && currentMinutes <= (endH * 60 + endM);
   };
 
   const safeDateString = (str: string) => {
@@ -219,35 +234,40 @@ export default function StudentDashboard({ initialProfile }: Props) {
     } catch { return str; }
   };
 
-  // ■ 5. 画面描画の分岐
-  // ローディング中は最低限のUIのみ表示
-  if (status === 'loading') {
+  // ■■■ 描画分岐 ■■■
+
+  // 1. エラー発生時 (真っ白画面の代わりにこれを表示)
+  if (globalError) {
+    return <ErrorFallback message={globalError} onRetry={handleForceLogout} />;
+  }
+
+  // 2. ローディング中 (マウント前 or 認証確認中 or ユーザーデータ取得中)
+  if (!mounted || !isAuthChecked || !userData) {
     return (
       <div className="min-h-[100dvh] bg-slate-50 flex flex-col items-center justify-center gap-4">
         <Loader2 className="animate-spin text-indigo-500" size={40} />
-        <p className="text-xs font-bold text-slate-400">読み込み中...</p>
+        <p className="text-xs font-bold text-slate-400 animate-pulse">
+          {!mounted ? '起動中...' : !isAuthChecked ? '認証中...' : 'データ読み込み中...'}
+        </p>
         
-        {/* 緊急脱出ボタン: 5秒経っても読み込まれない場合に押してもらう */}
-        <button 
-          onClick={handleLogout} 
-          className="mt-8 text-xs text-red-400 underline"
-        >
-          画面が動かない場合はこちら (ログアウト)
+        {/* 5秒経っても進まない場合の救済ボタン */}
+        <button onClick={handleForceLogout} className="mt-8 text-[10px] text-gray-400 underline">
+          画面が動かない場合はこちら (リセット)
         </button>
       </div>
     );
   }
 
-  // --- メイン描画 ---
-  const currentBadgeId = userData?.selected_badge;
-  const currentBadge = BADGES.find(b => b.id === currentBadgeId);
+  // 3. 正常描画
+  const currentBadge = BADGES.find(b => b.id === userData.selected_badge);
   const showPeriod1 = isClassActive(CLASS_TIMES.period1.start, CLASS_TIMES.period1.end);
   const showPeriod2 = isClassActive(CLASS_TIMES.period2.start, CLASS_TIMES.period2.end);
 
   return (
     <div className="min-h-[100dvh] bg-[#F0F4F8] pb-32 font-sans relative overflow-hidden">
       
-      <ActivityLogger uid={userData?.uid} />
+      {/* 複雑なコンポーネントはuserDataがある時のみレンダリング */}
+      {userData?.uid && <ActivityLogger uid={userData.uid} />}
 
       {popMessage && (
         <div className="fixed top-10 left-1/2 transform -translate-x-1/2 bg-yellow-400 text-white px-6 py-3 rounded-full shadow-lg font-black text-lg z-[150] animate-bounce border-4 border-white whitespace-nowrap">
@@ -266,14 +286,13 @@ export default function StudentDashboard({ initialProfile }: Props) {
         <div className="flex justify-between items-start text-white relative z-10">
           <div>
             <p className="text-sm font-bold opacity-90 mb-1 flex items-center gap-2"><Calendar size={14}/> {dateStr}</p>
-            <h1 className="text-2xl font-extrabold tracking-tight leading-tight">{greeting} <br/><span className="text-yellow-300 text-3xl">{userData?.student_name || '生徒'}</span> さん</h1>
-            {userData && <div className="mt-3 inline-flex items-center gap-2 bg-white/20 backdrop-blur-sm px-3 py-1 rounded-full text-xs font-bold"><Clock size={12}/> {userData?.day_of_week}曜クラス | {userData?.classroom}</div>}
+            <h1 className="text-2xl font-extrabold tracking-tight leading-tight">{greeting} <br/><span className="text-yellow-300 text-3xl">{userData.student_name || '生徒'}</span> さん</h1>
+            <div className="mt-3 inline-flex items-center gap-2 bg-white/20 backdrop-blur-sm px-3 py-1 rounded-full text-xs font-bold"><Clock size={12}/> {userData.day_of_week || '-'}曜クラス | {userData.classroom || '-'}</div>
           </div>
           
-          {/* ログアウトボタン */}
           <div className="bg-white/20 p-1.5 rounded-xl backdrop-blur-sm">
             <button 
-              onClick={handleLogout}
+              onClick={() => { if(confirm('ログアウトしますか？')) handleForceLogout(); }}
               className="p-2 text-white hover:bg-white/20 rounded-lg transition-colors flex flex-col items-center justify-center gap-0.5"
               title="ログアウト"
             >
@@ -284,7 +303,6 @@ export default function StudentDashboard({ initialProfile }: Props) {
       </div>
 
       <div className="px-5 -mt-16 relative z-20 space-y-6">
-        
         <button 
           onClick={() => setIsTrophyOpen(true)}
           className="w-full bg-white p-5 rounded-3xl shadow-xl shadow-indigo-100 flex justify-between items-center transform hover:scale-[1.02] active:scale-95 transition-all text-left group"
@@ -305,7 +323,7 @@ export default function StudentDashboard({ initialProfile }: Props) {
             <p className="text-[10px] text-gray-400 font-bold uppercase">Total Coins</p>
             <div className="flex items-center gap-1 justify-end text-yellow-500 font-black text-xl">
               <div className="bg-yellow-100 p-1 rounded-full"><Trophy size={14} className="fill-yellow-500"/></div>
-              {userData?.coins || 0}
+              {userData.coins || 0}
             </div>
           </div>
         </button>
@@ -322,7 +340,6 @@ export default function StudentDashboard({ initialProfile }: Props) {
         </div>
 
         <div className="space-y-3">
-          
           {nextClassInfo && (
             <div className="bg-white p-4 rounded-3xl shadow-sm border border-indigo-50 flex items-center justify-between">
               <div>
@@ -379,7 +396,6 @@ export default function StudentDashboard({ initialProfile }: Props) {
               </div>
             </Link>
           )}
-
         </div>
 
         <div className="grid grid-cols-2 gap-4">
@@ -445,7 +461,7 @@ export default function StudentDashboard({ initialProfile }: Props) {
         <NewsWidget role="student" />
         
         <div className="bg-white p-2 rounded-3xl shadow-sm border border-gray-100">
-          <CalendarWidget classDay={userData?.day_of_week} grade={userData?.grade} />
+          <CalendarWidget classDay={userData.day_of_week} grade={userData.grade} />
         </div>
         
         <Link href="/student/change-request" className="flex items-center justify-between bg-white p-4 rounded-2xl border border-gray-100 shadow-sm hover:bg-gray-50 transition-colors no-underline mb-8">
