@@ -3,12 +3,12 @@
 import { useState, useEffect, useMemo } from 'react';
 import { db } from '@/lib/firebase';
 import { 
-  collection, query, orderBy, limit, getDocs, addDoc, deleteDoc, doc, writeBatch, where 
+  collection, query, orderBy, limit, getDocs, doc, writeBatch, where, deleteDoc 
 } from 'firebase/firestore';
 import { 
-  Video, CheckCircle, ArrowLeft, Calendar as CalendarIcon, MonitorPlay, ExternalLink, 
+  Video, CheckCircle, ArrowLeft, Calendar as CalendarIcon, ExternalLink, 
   RefreshCw, Loader2, Link as LinkIcon, Clock, Trash2, Search, 
-  Check, List, CheckSquare, Layers, Filter, XCircle
+  Check, List, CheckSquare, Layers, XCircle
 } from 'lucide-react';
 import Link from 'next/link';
 
@@ -61,7 +61,8 @@ export default function MasterApprovalPage() {
     setLoading(true);
     try {
       // 1. 公開済みデータ
-      const pubQ = query(collection(db, 'class_recordings'), orderBy('target_date', 'desc'), limit(300));
+      // ★修正: テスト中は300件も不要。20件に減らして読み取りコスト削減
+      const pubQ = query(collection(db, 'class_recordings'), orderBy('target_date', 'desc'), limit(20));
       const pubSnap = await getDocs(pubQ);
       const pubList = pubSnap.docs.map(d => ({ id: d.id, ...d.data() } as PublishedData));
       setPublished(pubList);
@@ -69,18 +70,30 @@ export default function MasterApprovalPage() {
       const publishedShiftIds = new Set(pubList.map(p => p.original_shift_id).filter(Boolean));
 
       // 2. 承認候補
+      // ★修正: こちらも100件から30件程度に削減。テストには十分です。
       const shiftQ = query(
         collection(db, 'shift_assignments'),
         where('target_recording_url', '!=', null),
         orderBy('target_date', 'desc'),
-        limit(100)
+        limit(30)
       );
       
       const shiftSnap = await getDocs(shiftQ);
       const rawCandidates = shiftSnap.docs.map(d => ({ id: d.id, ...d.data() } as ShiftData));
 
-      // 3. フィルタリング (未公開のみ)
-      const validCandidates = rawCandidates.filter(c => !publishedShiftIds.has(c.id));
+      // 3. フィルタリング (未公開 かつ メイン講師のみ)
+      const validCandidates = rawCandidates.filter(c => {
+        const isPublished = publishedShiftIds.has(c.id);
+        
+        // サポート講師の除外ロジック
+        const isSupport = 
+          c.teacher_name.includes('サポート') || 
+          c.teacher_name.includes('チューター') ||
+          c.target_subject === '学習サポート' || 
+          c.note?.includes('サポート');
+
+        return !isPublished && !isSupport;
+      });
 
       setCandidates(validCandidates);
 
@@ -93,9 +106,13 @@ export default function MasterApprovalPage() {
       });
       setTitles(initialTitles);
       
-      if (validCandidates.length > 0 && !selectedDateFilter) {
-        setSelectedDateFilter(validCandidates[0].target_date);
-        setCurrentDate(new Date(validCandidates[0].target_date));
+      // 日付フィルターの初期選択
+      if (validCandidates.length > 0) {
+        const latestDate = validCandidates[0].target_date;
+        if (!selectedDateFilter) {
+            setSelectedDateFilter(latestDate);
+            setCurrentDate(new Date(latestDate));
+        }
       }
 
     } catch (e: any) {

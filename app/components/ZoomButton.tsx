@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { auth, db } from '@/lib/firebase';
 import { doc, setDoc, updateDoc, increment, serverTimestamp, arrayUnion } from 'firebase/firestore';
-import { Video, Loader2, Coins, Sparkles, ExternalLink, Play } from 'lucide-react';
+import { Loader2, Coins, Sparkles, ExternalLink } from 'lucide-react';
 
 export default function ZoomButton({ 
   url, 
@@ -11,36 +11,61 @@ export default function ZoomButton({
   subLabel = "現在開催中の授業",
   color = "blue",
   startTime,
-  endTime
+  endTime,
+  classDay // ★追加: 曜日 ("月", "火" など)
 }: { 
   url?: string | null, 
   label?: string,
   subLabel?: string,
   color?: "blue" | "purple",
   startTime?: string,
-  endTime?: string
+  endTime?: string,
+  classDay?: string // ★追加
 }) {
   const [isVisible, setIsVisible] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  // 時間チェック機能
+  // 時間・曜日チェック機能
   useEffect(() => {
+    // 必須情報がなければ表示しない（あるいはテスト用に常時表示ならここを調整）
     if (!startTime || !endTime) {
-      setIsVisible(true);
+      // 曜日指定がなければ常時表示、あれば曜日チェックだけする
+      if (classDay) {
+        const days = ['日', '月', '火', '水', '木', '金', '土'];
+        const todayStr = days[new Date().getDay()];
+        setIsVisible(classDay === todayStr);
+      } else {
+        setIsVisible(true);
+      }
       return;
     }
 
-    const checkTime = () => {
+    const checkTimeAndDay = () => {
       const now = new Date();
+      
+      // --- 1. 曜日チェック (新規追加) ---
+      if (classDay) {
+        const days = ['日', '月', '火', '水', '木', '金', '土'];
+        const currentDayStr = days[now.getDay()]; // 0=日, 1=月... を文字に変換
+        
+        // 設定された曜日と今日の曜日が違うなら非表示
+        if (classDay !== currentDayStr) {
+          setIsVisible(false);
+          return;
+        }
+      }
+
+      // --- 2. 時間チェック (既存ロジック) ---
       const [startH, startM] = startTime.split(':').map(Number);
       const start = new Date();
       start.setHours(startH, startM, 0, 0);
-      const visibleStart = new Date(start.getTime() - 30 * 60 * 1000); // 30分前から
+      const visibleStart = new Date(start.getTime() - 30 * 60 * 1000); // 30分前から表示
 
       const [endH, endM] = endTime.split(':').map(Number);
       const end = new Date();
       end.setHours(endH, endM, 0, 0);
 
+      // 現在時刻が 表示開始時間 ～ 終了時間 の間か
       if (now >= visibleStart && now <= end) {
         setIsVisible(true);
       } else {
@@ -48,10 +73,11 @@ export default function ZoomButton({
       }
     };
 
-    checkTime();
-    const timer = setInterval(checkTime, 60000);
+    checkTimeAndDay();
+    // 1分ごとに再チェック
+    const timer = setInterval(checkTimeAndDay, 60000);
     return () => clearInterval(timer);
-  }, [startTime, endTime]);
+  }, [startTime, endTime, classDay]);
 
   const handleJoinClass = async () => {
     if (!url) return;

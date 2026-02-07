@@ -5,36 +5,59 @@ import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
 import { collection, query, where, getDocs } from 'firebase/firestore';
 import { Loader2 } from 'lucide-react';
-
-// 表示用コンポーネント
 import TeacherDashboard from '@/app/components/TeacherDashboard';
 
 export default function TeacherPage() {
   const { user, profile, loading } = useAuth();
   
-  // Dashboard内でデータ取得するようになったため、ここでは単純に権限チェックのみでもOKですが、
-  // 必要に応じて他のデータを取得します。今回はエラー解消のため、Propsとして渡すデータを用意します。
-  const [mainShifts, setMainShifts] = useState<any[]>([]);
+  // 表示モード (日次/週次)
+  const [viewMode, setViewMode] = useState<'day' | 'week'>('day');
+  // ★追加: 拡大状態をここで管理
+  const [isExpanded, setIsExpanded] = useState(false);
+  
+  // データ
+  const [allAssignments, setAllAssignments] = useState<any[]>([]); 
   const [pendingCount, setPendingCount] = useState(0);
   const [dataLoading, setDataLoading] = useState(true);
+
+  // 基準日（デフォルトは今日）
+  const [currentDate, setCurrentDate] = useState(new Date().toISOString().split('T')[0]);
 
   useEffect(() => {
     if (!user) return;
 
     const fetchData = async () => {
+      setDataLoading(true);
       try {
-        const todayStr = new Date().toISOString().split('T')[0];
+        // 1. 取得対象の日付リストを作成
+        const targetDates = [currentDate];
+        if (viewMode === 'week') {
+          for (let i = 1; i < 7; i++) {
+            const d = new Date(currentDate);
+            d.setDate(d.getDate() + i);
+            targetDates.push(d.toISOString().split('T')[0]);
+          }
+        }
 
-        // メインシフト (Dashboard内でも取得しているが、Propsとして渡すために取得)
+        // 2. シフトデータ取得
+        // Firestoreの 'in' クエリは最大10件までなので、1週間分(7日)ならOK
         const shiftsQuery = query(
           collection(db, 'shift_assignments'),
-          where('target_date', '==', todayStr),
-          where('role_type', '==', 'main')
+          where('target_date', 'in', targetDates)
         );
+        
         const shiftsSnap = await getDocs(shiftsQuery);
-        setMainShifts(shiftsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+        const fetchedAssignments = shiftsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        
+        // ソート
+        fetchedAssignments.sort((a: any, b: any) => {
+           if (a.target_date !== b.target_date) return a.target_date.localeCompare(b.target_date);
+           return (a.note || '').localeCompare(b.note || '');
+        });
 
-        // 未チェック宿題
+        setAllAssignments(fetchedAssignments);
+
+        // 3. 未チェック宿題（全件）
         const pendingQuery = query(
           collection(db, 'submissions'),
           where('status', '==', 'pending')
@@ -50,7 +73,7 @@ export default function TeacherPage() {
     };
 
     fetchData();
-  }, [user]);
+  }, [user, profile, currentDate, viewMode]);
 
   // 権限チェック
   useEffect(() => {
@@ -60,24 +83,32 @@ export default function TeacherPage() {
     }
   }, [loading, profile]);
 
+  // ローディング中
   if (loading || dataLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <Loader2 className="animate-spin text-indigo-600" size={32} />
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <div className="flex flex-col items-center gap-4">
+          <Loader2 className="animate-spin text-indigo-600" size={40} />
+          <p className="text-slate-400 text-sm font-bold">データを読み込んでいます...</p>
+        </div>
       </div>
     );
   }
 
-  if (!user) {
-    if (typeof window !== 'undefined') window.location.href = '/';
-    return null;
-  }
+  if (!user) return null;
 
   return (
     <TeacherDashboard 
       profile={profile}
-      mainShifts={mainShifts}
+      allAssignments={allAssignments}
       pendingCount={pendingCount}
+      currentDate={currentDate}
+      onDateChange={setCurrentDate}
+      viewMode={viewMode}
+      onViewModeChange={setViewMode}
+      // ★追加: 状態と更新関数を渡す
+      isExpanded={isExpanded}
+      onExpandChange={setIsExpanded}
     />
   );
 }

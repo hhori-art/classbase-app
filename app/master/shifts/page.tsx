@@ -3,12 +3,12 @@
 import { useState, useEffect } from 'react';
 import { db } from '@/lib/firebase';
 import { collection, query, where, getDocs, addDoc, deleteDoc, doc, updateDoc, orderBy, limit, getDoc } from 'firebase/firestore';
-import { Briefcase, Trash2, ArrowLeft, Video, Save, Loader2, Link as LinkIcon, Users, MapPin, User, UserPlus, X, Settings, Monitor, MessageSquare, BarChart2, UserCheck, GripVertical, CheckCircle, HelpCircle, AlertCircle } from 'lucide-react';
+import { Briefcase, Trash2, ArrowLeft, Video, Save, Loader2, Link as LinkIcon, Users, MapPin, User, GripVertical, CheckCircle, HelpCircle, Clock, KeyRound, Zap, BarChart2, X, Settings } from 'lucide-react';
 import Link from 'next/link';
 import ShiftImportButton from '@/app/components/ShiftImportButton';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, CartesianGrid } from 'recharts';
 
-// 型定義
+// --- 型定義 ---
 type ShiftAssignment = {
   id: string;
   user_id: string;
@@ -24,6 +24,8 @@ type ShiftAssignment = {
   unit: string | null;
   note: string;
   parent_id?: string;
+  start_url?: string; 
+  target_recording_url?: string;
 };
 
 type Teacher = {
@@ -61,6 +63,7 @@ export default function MasterShiftPage() {
   const [urlMaster, setUrlMaster] = useState<{[key: string]: string}>({});
 
   const [editingShift, setEditingShift] = useState<ShiftAssignment | null>(null);
+  const [creatingZoom, setCreatingZoom] = useState(false); 
 
   // アンケート関連
   const [surveyQuestions, setSurveyQuestions] = useState<any[]>([]);
@@ -72,7 +75,6 @@ export default function MasterShiftPage() {
   // ドラッグ＆ドロップ用
   const [draggedTeacher, setDraggedTeacher] = useState<Teacher | null>(null);
   const [dragOverCardId, setDragOverCardId] = useState<string | null>(null);
-  // ★修正: zoneに 'general' を追加
   const [dragOverZone, setDragOverZone] = useState<'main' | 'sub' | 'general' | null>(null);
 
   const [form, setForm] = useState({
@@ -173,7 +175,6 @@ export default function MasterShiftPage() {
         shiftData.parent_id = targetClass.id;
         await addDoc(collection(db, 'shift_assignments'), shiftData);
       } else {
-        // general
         await addDoc(collection(db, 'shift_assignments'), shiftData);
       }
       
@@ -190,13 +191,11 @@ export default function MasterShiftPage() {
     executeAssign(form.userId, form.role as any, targetClass, form.time_slot);
   };
 
-  // DnDハンドラ
   const handleDragStart = (e: React.DragEvent, teacher: Teacher) => {
     setDraggedTeacher(teacher);
     e.dataTransfer.effectAllowed = 'copy';
   };
 
-  // ★修正: zone引数に 'general' を許可
   const handleDragOver = (e: React.DragEvent, cardId: string, zone: 'main' | 'sub' | 'general') => {
     e.preventDefault();
     setDragOverCardId(cardId);
@@ -208,7 +207,6 @@ export default function MasterShiftPage() {
     setDragOverZone(null);
   };
 
-  // ★修正: ドロップ時に全体サポート(general)も処理
   const handleDrop = async (e: React.DragEvent, targetClass: ShiftAssignment | null, zone: 'main' | 'sub' | 'general', periodStr?: string) => {
     e.preventDefault();
     setDragOverCardId(null);
@@ -225,7 +223,6 @@ export default function MasterShiftPage() {
       if (!confirm(`「${targetClass.target_subject}」に\n「${draggedTeacher.student_name || draggedTeacher.name}」先生をサポートとして追加しますか？`)) return;
       await executeAssign(draggedTeacher.id, 'sub', targetClass, actualPeriodStr);
     } else if (zone === 'general') {
-      // ★全体サポートへの追加
       if (!confirm(`「${actualPeriodStr}」の全体サポートに\n「${draggedTeacher.student_name || draggedTeacher.name}」先生を追加しますか？`)) return;
       await executeAssign(draggedTeacher.id, 'general', undefined, actualPeriodStr);
     }
@@ -247,11 +244,55 @@ export default function MasterShiftPage() {
         target_place: editingShift.target_place,
         unit: editingShift.unit,
         target_meeting_id: editingShift.target_meeting_id,
-        target_signin_address: editingShift.target_signin_address
+        target_signin_address: editingShift.target_signin_address,
+        start_url: editingShift.start_url || null,
+        target_recording_url: editingShift.target_recording_url || null 
       });
       setEditingShift(null);
       fetchData();
     } catch (e) { alert('更新エラー'); }
+  };
+
+  const handleManualZoomCreate = async () => {
+    if (!editingShift) return;
+    
+    const isFirstPeriod = editingShift.note?.includes('1限');
+    const startTimeISO = isFirstPeriod 
+      ? `${editingShift.target_date}T19:20:00` 
+      : `${editingShift.target_date}T20:35:00`;
+
+    setCreatingZoom(true);
+    try {
+      const res = await fetch('/api/create-zoom-meeting', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          topic: `${editingShift.target_grade}${editingShift.target_subject} (${editingShift.teacher_name}先生)`,
+          startTime: startTimeISO,
+          duration: 75
+        }),
+      });
+
+      if (!res.ok) throw new Error('API Error');
+      const data = await res.json();
+
+      if (data.success) {
+        setEditingShift({
+          ...editingShift,
+          target_meeting_id: String(data.meeting_id),
+          start_url: data.start_url,
+          target_recording_url: data.join_url,
+        });
+        alert('Zoomミーティングを発行しました。\n「保存」ボタンを押して確定してください。');
+      } else {
+        alert(`作成失敗: ${data.error}`);
+      }
+    } catch (e) {
+      console.error(e);
+      alert('Zoom作成中にエラーが発生しました。');
+    } finally {
+      setCreatingZoom(false);
+    }
   };
 
   const handleShowSurveyResults = async (e: React.MouseEvent, teacherId: string, teacherName: string) => {
@@ -400,7 +441,7 @@ export default function MasterShiftPage() {
           onDragStart={(e) => handleDragStart(e, t)}
           onClick={() => setForm({ ...form, userId: t.id })}
           className={`p-3 rounded-xl border mb-2 cursor-grab active:cursor-grabbing transition-all text-sm group relative flex justify-between items-center shadow-sm
-            ${form.userId === t.id ? 'ring-2 ring-indigo-500 bg-indigo-50 border-indigo-500' : 'bg-white hover:bg-gray-50 border-slate-200'}
+            ${form.userId === t.id ? 'ring-2 ring-indigo-50 bg-indigo-50 border-indigo-500' : 'bg-white hover:bg-gray-50 border-slate-200'}
             ${assignedCount > 0 ? 'opacity-70 bg-gray-50' : ''}
           `}
         >
@@ -445,9 +486,7 @@ export default function MasterShiftPage() {
         </div>
 
         <div className="flex flex-col lg:flex-row gap-6 items-start">
-          {/* 左カラム */}
           <div className="w-full lg:w-[320px] flex flex-col gap-6 shrink-0 h-[calc(100vh-200px)] overflow-y-auto custom-scrollbar pr-2">
-            
             <div className="bg-white p-4 rounded-2xl shadow-sm border border-indigo-100 shrink-0">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="font-bold text-slate-700 text-xs flex gap-2 items-center">
@@ -508,24 +547,28 @@ export default function MasterShiftPage() {
             </div>
           </div>
 
-          {/* 右カラム */}
           <div className="flex-1 space-y-8 min-w-0">
             {['1限', '2限'].map((period) => (
-              <div key={period} className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
-                <div className={`p-4 text-white font-black text-lg flex justify-between items-center shadow-sm ${period === '1限' ? 'bg-gradient-to-r from-blue-600 to-blue-500' : 'bg-gradient-to-r from-indigo-600 to-indigo-500'}`}>
-                  <div className="flex items-center gap-3">
-                    <span className="bg-white/20 px-3 py-1 rounded-lg text-sm backdrop-blur-sm">{period}</span>
-                    <span>{period === '1限' ? '19:20 - 20:25' : '20:35 - 21:40'}</span>
+              <div key={period} className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                <div className={`px-4 py-2 flex items-center justify-between shrink-0 ${period === '1限' ? 'bg-slate-800 text-white' : 'bg-slate-700 text-slate-100'}`}>
+                  <div className="flex items-center gap-2 font-bold text-sm">
+                    <Clock size={16} className={period === '1限' ? 'text-blue-400' : 'text-indigo-400'}/>
+                    {period} <span className="opacity-60 font-mono text-xs font-normal ml-1">{period === '1限' ? '19:20 - 20:25' : '20:35 - 21:40'}</span>
+                  </div>
+                  <div className="flex gap-2 text-[10px] font-bold">
+                    <span className="bg-emerald-500/20 px-2 py-0.5 rounded text-emerald-100">理 {getAllClassesForSubject(period, '理科').length}</span>
+                    <span className="bg-orange-500/20 px-2 py-0.5 rounded text-orange-100">社 {getAllClassesForSubject(period, '社会').length}</span>
                   </div>
                 </div>
 
-                <div className="overflow-x-auto custom-scrollbar pb-4">
-                  <div className="flex gap-0 min-w-max divide-x divide-slate-100">
-                    <div className="flex flex-col p-4 gap-3">
-                      <div className="flex items-center gap-2 mb-2">
-                        <span className="bg-emerald-100 text-emerald-800 text-xs font-black px-3 py-1 rounded-full whitespace-nowrap">理科グループ</span>
+                <div className="overflow-x-auto custom-scrollbar p-3 bg-slate-50/50">
+                  <div className="flex gap-4 min-w-max items-start">
+                    
+                    <div className="flex flex-col gap-2 min-w-[220px] shrink-0">
+                      <div className="flex items-center gap-1 text-[10px] font-bold text-emerald-700 border-b border-emerald-100 pb-1 mb-1">
+                        <Users size={12}/> 理科グループ
                       </div>
-                      <div className="flex gap-4">
+                      <div className="flex gap-2">
                         {getAllClassesForSubject(period, '理科').map(info => (
                            <ClassCard 
                              key={info.id} 
@@ -544,11 +587,13 @@ export default function MasterShiftPage() {
                       </div>
                     </div>
 
-                    <div className="flex flex-col p-4 gap-3">
-                      <div className="flex items-center gap-2 mb-2">
-                        <span className="bg-orange-100 text-orange-800 text-xs font-black px-3 py-1 rounded-full whitespace-nowrap">社会グループ</span>
+                    <div className="w-px bg-slate-200 self-stretch my-2"></div>
+
+                    <div className="flex flex-col gap-2 min-w-[220px] shrink-0">
+                      <div className="flex items-center gap-1 text-[10px] font-bold text-orange-700 border-b border-orange-100 pb-1 mb-1">
+                        <Users size={12}/> 社会グループ
                       </div>
-                      <div className="flex gap-4">
+                      <div className="flex gap-2">
                         {getAllClassesForSubject(period, '社会').map(info => (
                            <ClassCard 
                              key={info.id} 
@@ -567,35 +612,39 @@ export default function MasterShiftPage() {
                       </div>
                     </div>
 
-                    {/* ★修正: 全体サポート欄にドラッグ＆ドロップ用ハンドラを追加 */}
-                    <div 
-                      className={`flex flex-col p-4 gap-3 w-[200px] shrink-0 transition-colors ${
-                        dragOverCardId === `general-${period}` ? 'bg-indigo-50 border-2 border-dashed border-indigo-300 rounded-xl' : 'bg-slate-50/50'
-                      }`}
-                      onDragOver={(e) => handleDragOver(e, `general-${period}`, 'general')}
-                      onDragLeave={handleDragLeave}
-                      onDrop={(e) => handleDrop(e, null, 'general', period)}
-                    >
-                      <div className="flex items-center gap-2 mb-2">
-                        <span className="bg-slate-200 text-slate-600 text-xs font-black px-3 py-1 rounded-full whitespace-nowrap">全体サポート</span>
-                      </div>
-                      <div className="flex flex-col gap-2">
-                        {getGeneralSupport(period).map(a => (
-                          <div key={a.id} className="w-full bg-white border border-slate-200 rounded-xl p-3 flex items-center justify-between shadow-sm">
-                            <div className="flex items-center gap-3 min-w-0">
-                              <div className="w-8 h-8 rounded-full bg-slate-200 flex items-center justify-center text-slate-500 shrink-0"><User size={16}/></div>
-                              <div className="min-w-0">
-                                <button onClick={(e) => handleShowSurveyResults(e, a.user_id, a.teacher_name)} className="font-bold text-slate-700 text-sm hover:underline">{a.teacher_name}</button>
+                    <div className="w-px bg-slate-200 self-stretch my-2"></div>
+
+                    <div className="flex flex-col gap-1 ml-1 shrink-0">
+                      <div 
+                        className={`bg-slate-100 rounded-xl p-2 border border-slate-200 w-[200px] min-h-[140px] flex flex-col transition-all duration-200
+                          ${dragOverCardId === `general-${period}` ? 'bg-indigo-50 border-indigo-300 ring-2 ring-indigo-100 shadow-md' : ''}
+                        `}
+                        onDragOver={(e) => handleDragOver(e, `general-${period}`, 'general')}
+                        onDragLeave={handleDragLeave}
+                        onDrop={(e) => handleDrop(e, null, 'general', period)}
+                      >
+                        <div className="text-[10px] font-bold text-slate-400 mb-2 flex items-center gap-1 uppercase tracking-wider shrink-0">
+                          <User size={12}/> General Support
+                        </div>
+                        
+                        <div className="flex flex-col gap-2 flex-1 overflow-y-auto custom-scrollbar">
+                          {getGeneralSupport(period).map(a => (
+                            <div key={a.id} className="w-full bg-white border border-slate-200 rounded-lg p-2 flex items-center justify-between shadow-sm">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <div className="w-6 h-6 rounded-full bg-slate-100 flex items-center justify-center text-slate-400 shrink-0"><User size={12}/></div>
+                                <div className="min-w-0">
+                                  <button onClick={(e) => handleShowSurveyResults(e, a.user_id, a.teacher_name)} className="font-bold text-slate-700 text-xs hover:underline truncate block">{a.teacher_name}</button>
+                                </div>
                               </div>
+                              <button onClick={() => handleDelete(a.id)} className="text-slate-300 hover:text-red-500"><Trash2 size={12}/></button>
                             </div>
-                            <button onClick={() => handleDelete(a.id)} className="text-slate-300 hover:text-red-500"><Trash2 size={14}/></button>
-                          </div>
-                        ))}
-                        {getGeneralSupport(period).length === 0 && (
-                          <div className="text-[10px] text-slate-400 text-center py-4 border border-dashed border-slate-300 rounded-lg">
-                            ここにドラッグ
-                          </div>
-                        )}
+                          ))}
+                          {getGeneralSupport(period).length === 0 && (
+                            <div className="flex-1 flex items-center justify-center text-[10px] text-slate-300 font-bold border-2 border-dashed border-slate-200 rounded-lg">
+                              ドラッグして追加
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
 
@@ -607,10 +656,9 @@ export default function MasterShiftPage() {
         </div>
       </div>
 
-      {/* 編集モーダル */}
       {editingShift && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl w-full max-w-lg shadow-xl overflow-hidden">
+          <div className="bg-white rounded-2xl w-full max-w-lg shadow-xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
             <div className="bg-slate-800 text-white p-4 flex justify-between items-center">
               <h2 className="font-bold flex items-center gap-2">シフト編集</h2>
               <button onClick={() => setEditingShift(null)}><X size={20}/></button>
@@ -628,17 +676,33 @@ export default function MasterShiftPage() {
                 <label className="text-xs font-bold text-gray-500">Zoomサインインアドレス</label>
                 <input className="w-full p-2 border rounded mt-1 font-mono" value={editingShift.target_signin_address || ''} onChange={e => setEditingShift({...editingShift, target_signin_address: e.target.value})} placeholder="abc@sozogakuen.co.jp"/>
               </div>
+              
               <div>
-                <label className="text-xs font-bold text-gray-500">Zoom ID (ミーティングID)</label>
+                <label className="text-xs font-bold text-gray-500 flex justify-between items-center">
+                  <span>Zoom ID (ミーティングID)</span>
+                  <button 
+                    onClick={handleManualZoomCreate} 
+                    disabled={creatingZoom || !!editingShift.target_meeting_id}
+                    className={`text-[10px] flex items-center gap-1 px-2 py-1 rounded transition-colors ${editingShift.target_meeting_id ? 'bg-green-100 text-green-700 cursor-default' : 'bg-blue-100 text-blue-700 hover:bg-blue-200'}`}
+                  >
+                    {creatingZoom ? <Loader2 size={10} className="animate-spin"/> : <Zap size={10}/>}
+                    {editingShift.target_meeting_id ? '発行済み' : 'Zoom URLを自動発行'}
+                  </button>
+                </label>
                 <input className="w-full p-2 border rounded mt-1 font-mono" value={editingShift.target_meeting_id || ''} onChange={e => setEditingShift({...editingShift, target_meeting_id: e.target.value})} placeholder="123 456 7890"/>
+                {editingShift.start_url && (
+                  <p className="text-[10px] text-green-600 mt-1 flex items-center gap-1">
+                    <CheckCircle size={10}/> ホストURL発行済み
+                  </p>
+                )}
               </div>
+
               <button onClick={handleUpdate} className="w-full bg-blue-600 text-white py-3 rounded-lg font-bold hover:bg-blue-700 shadow mt-4 flex justify-center items-center gap-2"><Save size={18}/> 保存</button>
             </div>
           </div>
         </div>
       )}
 
-      {/* アンケート結果モーダル */}
       {isSurveyModalOpen && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
           <div className="bg-white rounded-3xl w-full max-w-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
@@ -724,100 +788,227 @@ export default function MasterShiftPage() {
   );
 }
 
-// ClassCard (DnD対応)
+// ClassCard (DnD対応・管理者向け・デザイン統一)
 function ClassCard({ info, allTeachers, onDelete, onEdit, onShowResults, onDragOver, onDragLeave, onDrop, dragOverCardId, dragOverZone }: any) {
+  const [loading, setLoading] = useState(false);
   const isTarget = dragOverCardId === info.id;
+  const isEmerald = info.subject === '理科';
+
+  const loginEmail = info.main?.target_signin_address?.trim();
+  const hasHostPermission = !!loginEmail && loginEmail.length > 0;
+  const displayLoginId = loginEmail ? loginEmail.split('@')[0] : '';
+
+  // 管理者画面なので、名前の指定はそのクラスの担当講師名を使う
+  const teacherName = info.main?.teacher_name || '';
+  const surname = teacherName.split(/[\s　]+/)[0];
+
+  const theme = isEmerald ? {
+    border: 'border-emerald-100',
+    headerBg: 'bg-emerald-600',
+    headerText: 'text-white',
+    badge: 'bg-white/20 text-white',
+    iconBg: 'bg-emerald-500',
+    activeRing: 'ring-2 ring-emerald-400',
+    // 先生画面と合わせる (ホスト可なら赤、不可なら緑)
+    btn: hasHostPermission ? 'bg-rose-600 hover:bg-rose-700 text-white shadow-rose-200' : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-200',
+  } : {
+    border: 'border-orange-100',
+    headerBg: 'bg-orange-500',
+    headerText: 'text-white',
+    badge: 'bg-white/20 text-white',
+    iconBg: 'bg-orange-500',
+    activeRing: 'ring-2 ring-orange-400',
+    btn: hasHostPermission ? 'bg-rose-600 hover:bg-rose-700 text-white shadow-rose-200' : 'bg-orange-500 hover:bg-orange-600 text-white shadow-orange-200',
+  };
+
+  const confno = info.main?.target_meeting_id?.replace(/\s/g, '') || (info.main?.start_url ? info.main.start_url.split('/').pop()?.split('?')[0] : '');
+
+  const launchWebUrl = (url: string) => {
+    window.open(url, '_blank');
+  };
+
+  // 管理者用ホスト開始ロジック (先生画面と同じ)
+  const handleEnterZoom = async (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (!confno) {
+      alert("ミーティングIDが設定されていません。");
+      return;
+    }
+
+    if (hasHostPermission) {
+      if(!confirm(`「${teacherName}」先生としてホストを開始しますか？\n(ログインID: ${loginEmail})`)) return;
+
+      setLoading(true);
+      try {
+        console.log(`🚀 ホスト開始試行(Admin): Email=${loginEmail}, Name=${surname}`);
+        
+        const res = await fetch('/api/get-zoom-zak', { 
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            email: loginEmail,
+            name: surname // 担当講師の苗字で名前書き換え
+          }) 
+        });
+        const data = await res.json();
+        
+        if (data.success && data.zak && data.pmi) {
+          const targetUrl = `https://zoom.us/s/${data.pmi}?zak=${data.zak}`;
+          console.log("✅ Webランチャー起動:", targetUrl);
+          launchWebUrl(targetUrl);
+        } else {
+          console.error("API Error:", data);
+          alert(`ホスト権限の取得に失敗しました。\n\n理由: ${data.error}`);
+          if(confirm("通常参加で開きますか？")) {
+             launchWebUrl(info.url || `https://zoom.us/j/${confno}`);
+          }
+        }
+      } catch (err) {
+        console.error(err);
+        alert('通信エラーが発生しました。');
+      } finally {
+        setLoading(false);
+      }
+    } else {
+      // 通常参加
+      let targetUrl = info.url || `zoommtg://zoom.us/join?confno=${confno}`;
+      if (info.url) {
+        try {
+          const urlObj = new URL(info.url);
+          const pwd = urlObj.searchParams.get('pwd');
+          // 通常参加でも名前を指定してあげる
+          const zoomDisplayName = surname ? `講師：${surname}` : '講師';
+          targetUrl = `https://zoom.us/j/${confno}?pwd=${pwd || ''}&uname=${encodeURIComponent(zoomDisplayName)}`;
+        } catch (e) {}
+      }
+      console.log("🚶 通常参加:", targetUrl);
+      launchWebUrl(targetUrl);
+    }
+  };
   
   return (
     <div 
-      className={`w-[240px] bg-white border-2 rounded-xl shadow-sm flex flex-col overflow-hidden relative group hover:shadow-md transition-all shrink-0
-        ${info.subject === '理科' ? 'border-emerald-100' : 'border-orange-100'}
-        ${isTarget ? 'ring-2 ring-indigo-500 scale-[1.02]' : ''}
+      className={`w-[180px] bg-white border ${theme.border} rounded-xl shadow-sm flex flex-col overflow-hidden relative group hover:shadow-md transition-all shrink-0
+        ${isTarget ? `${theme.activeRing} scale-[1.02] z-10` : ''}
       `}
     >
-      <div className={`p-3 border-b relative ${info.subject === '理科' ? 'bg-emerald-50/50 border-emerald-50' : 'bg-orange-50/50 border-orange-50'}`}>
-        <div className="flex justify-between items-start mb-2">
-          <span className={`text-xs font-black px-2 py-0.5 rounded shadow-sm whitespace-nowrap ${info.subject === '理科' ? 'text-emerald-600 bg-emerald-100' : 'text-orange-600 bg-orange-100'}`}>
-            {info.grade} / {info.place}
+      {/* ヘッダー (先生画面に合わせてデザイン統一) */}
+      <div className={`${theme.headerBg} px-3 py-2 relative`}>
+        <div className="flex justify-between items-start mb-1">
+          <span className={`text-[10px] font-black px-2 py-0.5 rounded-md ${theme.badge} whitespace-nowrap`}>
+            {info.grade}/{info.place}
           </span>
+          {/* 編集・削除ボタンは管理者のみ */}
           {info.main && (
-            <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-              <button onClick={() => onEdit(info.main)} className="text-slate-400 hover:text-blue-500"><Settings size={14}/></button>
-              <button onClick={() => onDelete(info.main!.id)} className="text-slate-400 hover:text-red-500"><Trash2 size={14}/></button>
+            <div className="flex gap-1">
+              <button onClick={() => onEdit(info.main)} className="text-white/70 hover:text-white transition-colors"><Settings size={12}/></button>
+              <button onClick={() => onDelete(info.main!.id)} className="text-white/70 hover:text-white transition-colors"><Trash2 size={12}/></button>
             </div>
           )}
         </div>
-        <div className="text-sm font-bold text-slate-800 line-clamp-2 min-h-[1.25em]">
-          {info.unit || <span className="text-slate-300 font-normal text-xs">単元未設定</span>}
+        <div className={`text-xs font-bold ${theme.headerText} line-clamp-1`}>
+          {info.unit || <span className="opacity-60 font-normal">単元未設定</span>}
         </div>
+        
+        {/* スタジオ名表示 */}
         {info.studio && (
-          <div className={`flex items-center gap-1 text-[10px] font-bold mt-1 ${info.subject === '理科' ? 'text-emerald-600' : 'text-orange-600'}`}>
-            <MapPin size={10}/> {info.studio}
+          <div className="flex items-center gap-0.5 text-[9px] bg-black/20 px-1.5 py-0.5 rounded text-white/90 font-bold whitespace-nowrap mt-1 w-max">
+            <MapPin size={9}/> {info.studio}
           </div>
         )}
       </div>
 
-      <div className="flex-1 flex flex-col relative">
+      <div className="flex-1 flex flex-col">
+        {/* メイン講師エリア */}
         <div 
-          className={`p-3 flex-1 transition-colors ${isTarget && dragOverZone === 'main' ? 'bg-indigo-100' : ''}`}
+          className={`p-2 transition-colors ${isTarget && dragOverZone === 'main' ? 'bg-indigo-50' : 'bg-white'}`}
           onDragOver={(e) => onDragOver(e, info.id, 'main')}
           onDragLeave={onDragLeave}
           onDrop={(e) => onDrop(e, info.main, 'main')}
         >
-          <div className="flex items-start gap-3">
-            <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-1 ${info.subject === '理科' ? 'bg-emerald-100 text-emerald-600' : 'bg-orange-100 text-orange-600'}`}>
-              <User size={16}/>
+          <div className="flex items-start gap-2">
+            <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 ${theme.iconBg} text-white shadow-sm`}>
+              <User size={14}/>
             </div>
-            <div className="min-w-0">
-              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mb-0.5">Teacher (Main)</span>
+            <div className="min-w-0 flex-1">
+              <div className="text-[8px] text-gray-400 font-bold uppercase tracking-wider mb-0.5">Main</div>
               <button 
                 onClick={(e) => info.main?.user_id && onShowResults(e, info.main.user_id, info.main.teacher_name)}
-                className="font-bold text-slate-800 text-sm hover:text-indigo-600 hover:underline decoration-indigo-300 text-left flex items-center gap-1 group/link"
+                className="font-bold text-slate-800 text-xs hover:text-indigo-600 hover:underline decoration-indigo-300 text-left flex items-center gap-1 group/link w-full"
               >
-                {info.main?.teacher_name || '未定'}
-                <BarChart2 size={12} className="text-slate-400 group-hover/link:text-indigo-500"/>
+                <span className="truncate">{info.main?.teacher_name || '未定'}</span>
+                {info.main?.teacher_name && <BarChart2 size={10} className="text-slate-300 group-hover/link:text-indigo-500 shrink-0"/>}
               </button>
-              <span className="text-[10px] text-indigo-500 block truncate font-mono bg-indigo-50 px-1 py-0.5 rounded w-fit mt-0.5" title={info.main?.target_signin_address || '未設定'}>
-                 <Monitor size={8} className="inline mr-1"/>
-                 {info.main?.target_signin_address || <span className="text-slate-300">-</span>}
-              </span>
+              
+              {/* ログインID表示 & ボタン (先生画面のロジックを移植) */}
+              {displayLoginId ? (
+                <button 
+                  type="button"
+                  onClick={handleEnterZoom}
+                  disabled={loading}
+                  className={`flex items-center gap-1 text-[8px] font-mono mt-0.5 border rounded px-1 transition-all cursor-pointer group w-full justify-between h-[18px] ${
+                    hasHostPermission 
+                      ? 'bg-rose-50 border-rose-200 text-rose-700 hover:bg-rose-100' 
+                      : 'bg-slate-50 border-slate-100 text-slate-500 hover:bg-slate-100'
+                  }`}
+                  title={`ログインID: ${loginEmail}`}
+                >
+                  <div className="flex items-center gap-1 min-w-0">
+                    <KeyRound size={8} className="shrink-0 opacity-70"/>
+                    <span className="truncate">{displayLoginId}</span>
+                  </div>
+                  {loading ? <Loader2 size={6} className="animate-spin"/> : <Zap size={6} className={hasHostPermission ? "text-rose-500" : "text-slate-400"}/>}
+                </button>
+              ) : (
+                <div className="h-[18px] text-[8px] text-slate-300 flex items-center pl-1 border border-transparent">ID未登録</div> 
+              )}
             </div>
           </div>
         </div>
 
+        {/* サポート講師エリア */}
         <div 
-          className={`p-2 border-t border-slate-100 min-h-[60px] transition-colors ${isTarget && dragOverZone === 'sub' ? 'bg-yellow-50' : 'bg-slate-50'}`}
+          className={`px-2 py-1.5 border-t border-slate-100 min-h-[50px] transition-colors ${isTarget && dragOverZone === 'sub' ? 'bg-indigo-50' : 'bg-slate-50/50'}`}
           onDragOver={(e) => onDragOver(e, info.id, 'sub')}
           onDragLeave={onDragLeave}
           onDrop={(e) => onDrop(e, info.main, 'sub')}
         >
-          <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mb-1">Support (Drop here)</span>
+          <span className="text-[8px] text-slate-400 font-bold uppercase tracking-wider block mb-1">Sub (Drop)</span>
           <div className="space-y-1">
             {info.subs.map((sub: any) => (
-              <div key={sub.id} className="flex justify-between items-center text-xs">
+              <div key={sub.id} className="flex justify-between items-center text-[10px]">
                 <div className="min-w-0 flex flex-col">
                   <button
                     onClick={(e) => onShowResults(e, sub.user_id, sub.teacher_name)} 
                     className="text-slate-600 font-medium flex items-center gap-1 hover:text-indigo-600 hover:underline"
                   >
-                    <div className="w-1.5 h-1.5 rounded-full bg-slate-300 shrink-0"></div> {sub.teacher_name}
+                    <div className="w-1 h-1 rounded-full bg-slate-300 shrink-0"></div> {sub.teacher_name}
                   </button>
                 </div>
-                <button onClick={() => onDelete(sub.id)} className="text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 shrink-0 ml-1"><Trash2 size={10}/></button>
+                <button onClick={() => onDelete(sub.id)} className="text-slate-300 hover:text-red-500 shrink-0 ml-1"><Trash2 size={10}/></button>
               </div>
             ))}
-            {info.subs.length === 0 && <div className="text-[10px] text-slate-300 text-center py-2">No Support</div>}
+            {info.subs.length === 0 && <div className="text-[9px] text-slate-300 pl-1">-</div>}
           </div>
         </div>
 
+        {/* Zoomボタン */}
         <div className="mt-auto p-2 bg-white border-t border-slate-100">
-          {info.url ? (
-            <a href={info.url} target="_blank" rel="noreferrer" className={`w-full text-white text-xs font-bold py-2 rounded-lg flex items-center justify-center gap-2 transition-all active:scale-95 shadow-sm ${info.subject === '理科' ? 'bg-emerald-500 hover:bg-emerald-600 shadow-emerald-200' : 'bg-orange-500 hover:bg-orange-600 shadow-orange-200'}`}>
-              <Video size={14}/> 授業に参加
-            </a>
+          {confno ? (
+            <button 
+              type="button" 
+              onClick={handleEnterZoom}
+              disabled={loading}
+              className={`w-full ${theme.btn} shadow-sm text-[10px] font-bold py-1.5 rounded-lg flex items-center justify-center gap-1 transition-transform active:scale-95`}
+            >
+              {loading ? <Loader2 size={10} className="animate-spin"/> : hasHostPermission ? <Zap size={10}/> : <Video size={10}/>}
+              {loading ? '準備中...' : (hasHostPermission ? 'ホスト開始' : '入室')}
+            </button>
           ) : (
-            <div className="w-full bg-slate-100 text-slate-400 text-xs font-bold py-2 rounded-lg flex items-center justify-center gap-2 cursor-not-allowed">
-              <Video size={14}/> URL未設定
+            <div className="w-full bg-slate-100 text-slate-400 text-[10px] font-bold py-1.5 rounded-lg flex items-center justify-center gap-1 cursor-not-allowed">
+              <Video size={12}/> -
             </div>
           )}
         </div>

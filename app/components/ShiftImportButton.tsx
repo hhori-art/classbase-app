@@ -3,11 +3,41 @@
 import { useState } from 'react';
 import { db } from '@/lib/firebase';
 import { collection, getDocs, query, where, writeBatch, doc } from 'firebase/firestore';
-import { FileUp, Loader2, Download, Settings, Calendar, Copy, AlertTriangle, Trash2 } from 'lucide-react';
+import { FileUp, Loader2, Settings, Calendar, Copy, AlertTriangle, Trash2 } from 'lucide-react';
 
 interface ShiftImportButtonProps {
   onSuccess?: () => void;
 }
+
+// Zoom API呼び出し関数
+const createZoomMeeting = async (topic: string, startTime: string, duration: number = 75) => {
+  try {
+    const res = await fetch('/api/create-zoom-meeting', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ topic, startTime, duration }),
+    });
+    
+    if (!res.ok) {
+      console.error("❌ APIエラー Status:", res.status);
+      return null;
+    }
+
+    const data = await res.json();
+    if (data.success) {
+      return { 
+        meetingId: data.meeting_id, 
+        startUrl: data.start_url,
+        joinUrl: data.join_url
+      };
+    }
+    console.error("❌ Zoom作成失敗:", data.error);
+    return null;
+  } catch (e) {
+    console.error("❌ 通信エラー:", e);
+    return null;
+  }
+};
 
 export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps) {
   const [uploading, setUploading] = useState(false);
@@ -20,8 +50,9 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
   const [endDate, setEndDate] = useState('');
   const [forceOverwrite, setForceOverwrite] = useState(false);
 
+  // テンプレートDL
   const downloadTemplate = () => {
-    const csvContent = '\uFEFF日付,曜日,時限,教科,クラス,単元,場所,ｻｲﾝｲﾝｱﾄﾞﾚｽ,ミーティングID,講師,サポート,枠外(全体サポート)\n12/1,月,1,中3理科,中3理科(生物),力と運動,手柄,sozo_kyoumu@example.com,123 456 7890,鈴木 先生,個安 佐藤 先生,田中 先生(全体)';
+    const csvContent = '\uFEFF日付,曜日,時限,教科,クラス,単元,場所,ｻｲﾝｲﾝｱﾄﾞﾚｽ,ミーティングID,講師,サポート,枠外(全体サポート)\n12/1,月,1,中3理科,中3理科(生物),力と運動,手柄,sozo_kyoumu@example.com,,鈴木 先生,個安 佐藤 先生,田中 先生(全体)';
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
@@ -29,6 +60,7 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
     link.click();
   };
 
+  // 一括削除
   const handleBulkDelete = async () => {
     if (!startDate || !endDate) {
       alert('削除する期間（開始日・終了日）を指定してください。');
@@ -91,6 +123,7 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
     }
   };
 
+  // ファイル選択時
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -101,10 +134,7 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
       return;
     }
 
-    const modeMsg = importMode === 'date_match' ? 'CSVの日付に合わせて登録' : `CSVの曜日で期間一括登録`;
-    const overwriteMsg = forceOverwrite ? '⚠️ 重複は上書き' : '・重複はスキップ';
-
-    if (!confirm(`「${file.name}」を取り込みますか？\n\n【モード】${modeMsg}\n${overwriteMsg}\n※J列までを読み込みます`)) {
+    if (!confirm(`「${file.name}」を取り込みますか？`)) {
       e.target.value = '';
       return;
     }
@@ -118,7 +148,6 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
       try {
         const text = event.target?.result as string;
         await processGridCSV(text);
-        alert('インポート処理が完了しました！');
         if (onSuccess) onSuccess();
       } catch (err: any) {
         console.error(err);
@@ -171,27 +200,21 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
 
   const resolveTeacherInfo = (rawName: string, map: Map<string, {id: string, name: string}>) => {
     let clean = rawName.trim();
-    if (!clean || clean === '未' || clean === '―' || clean === 'Nan' || clean.toLowerCase() === 'nan') return null;
-    if (/^[\d\s]+$/.test(clean)) return null;
-
+    if (!clean || ['未', '―', 'Nan', 'nan'].includes(clean) || /^[\d\s]+$/.test(clean)) return null;
     if (clean.includes('⇒')) clean = clean.split('⇒').pop()!.trim();
-
     if (map.has(clean)) return map.get(clean);
-
-    for (const [registeredName, teacherData] of Array.from(map.entries())) {
-      if (registeredName.length >= 2 && clean.includes(registeredName)) {
-        return teacherData;
-      }
-      const noSpaceRegistered = registeredName.replace(/\s+/g, '');
-      const noSpaceClean = clean.replace(/\s+/g, '');
-      if (noSpaceClean.endsWith(noSpaceRegistered) || noSpaceClean === noSpaceRegistered) {
-        return teacherData;
-      }
+    for (const [regName, data] of Array.from(map.entries())) {
+      if (regName.length >= 2 && clean.includes(regName)) return data;
+      if (clean.replace(/\s+/g, '') === regName.replace(/\s+/g, '')) return data;
     }
     return null; 
   };
 
   const processGridCSV = async (csvText: string) => {
+    console.clear();
+    console.log("🚀 インポート処理開始");
+    
+    // 1. 講師マスタの取得
     setProgress('講師データ照合中...');
     const teacherMap = new Map<string, {id: string, name: string}>();
     const snapUser = await getDocs(query(collection(db, 'users'), where('role', '==', 'teacher')));
@@ -199,14 +222,15 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
       const data = d.data();
       const name = data.student_name || data.name || '';
       if (name) {
-        const val = { id: d.id, name };
-        teacherMap.set(name, val);
-        teacherMap.set(name.replace(/\s+/g, ''), val);
+        teacherMap.set(name, { id: d.id, name });
+        teacherMap.set(name.replace(/\s+/g, ''), { id: d.id, name });
       }
     });
 
+    // 2. CSVパース
     const rows = parseCSVRows(csvText);
     
+    // 3. 既存データの確認（重複チェック用）
     setProgress('既存データの確認中...');
     const existingMainMap = new Map<string, string>(); 
     const existingSubMap = new Map<string, string>(); 
@@ -242,10 +266,15 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
 
     let batch = writeBatch(db);
     
+    // ★ カウンター変数の宣言（エラー修正箇所）
     let count = 0;
     let skipCount = 0;
     let overwriteCount = 0;
     let batchCount = 0;
+    
+    let zoomSuccessCount = 0;
+    let zoomFailCount = 0;
+    let missingTeacherCount = 0;
 
     for (let r = 0; r < rows.length; r++) {
       const row = rows[r];
@@ -254,6 +283,7 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
       const col0 = row[0] || '';
       const col1 = (row[1] || '').trim();
 
+      // 日付・時限判定
       const dateMatch = col0.match(/(\d{1,2})[\/月](\d{1,2})/);
       if (dateMatch) {
         const month = parseInt(dateMatch[1]);
@@ -271,6 +301,7 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
         sessionClassCounter.clear();
       }
 
+      // ヘッダー判定
       const isSubjectRow = col1.includes('教科');
       const isClassRow = col1.includes('クラス');
       const isUnitRow = col1.includes('単元');
@@ -280,14 +311,14 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
       const isTeacherRow = col1.includes('講師');
       const isSupportRow = col1.includes('サポート');
 
-      // ★修正: ループ条件に `&& c <= 9` を追加して J列 までに制限
+      const maxCol = Math.min(row.length, 10); 
 
+      // メタ情報収集
       if (isSubjectRow) {
         colMap = new Array(row.length).fill(null);
         let lastGrade = '';
         let lastSubject = '';
-        // ★ J列まで
-        for (let c = 2; c < row.length && c <= 9; c++) {
+        for (let c = 2; c < maxCol; c++) {
           const val = row[c] || '';
           const norm = val.replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0));
           if (norm) {
@@ -304,55 +335,26 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
         continue;
       }
 
-      if (isClassRow) {
-        // ★ J列まで
-        for (let c = 2; c < row.length && c <= 9; c++) {
+      if (isClassRow) { for (let c = 2; c < maxCol; c++) if (colMap[c]) colMap[c]!.detail = (row[c] || '').replace(/[【】]/g, '').trim(); continue; }
+      if (isUnitRow) { for (let c = 2; c < maxCol; c++) if (colMap[c]) colMap[c]!.unit = row[c] || ''; continue; }
+      if (isPlaceRow) { for (let c = 2; c < maxCol; c++) if (colMap[c]) colMap[c]!.place = row[c] || ''; continue; }
+      
+      // Zoom ID読み込み
+      if (isZoomRow) { 
+        for (let c = 2; c < maxCol; c++) {
           if (colMap[c]) {
-            const val = row[c] || '';
-            const detailName = val.replace(/[【】]/g, '').trim();
-            colMap[c]!.detail = detailName;
+            const val = (row[c] || '').trim();
+            colMap[c]!.meetingId = val;
+            if (val) console.log(`ℹ️ 既存ID検出 [${c}列]: ${val}`);
           }
         }
-        continue;
+        continue; 
       }
+      if (isSigninRow) { for (let c = 2; c < maxCol; c++) if (colMap[c]) colMap[c]!.signinAddress = (row[c] || '').replace(/\s+/g, '').trim(); continue; }
 
-      if (isUnitRow) {
-        // ★ J列まで
-        for (let c = 2; c < row.length && c <= 9; c++) {
-          if (colMap[c]) colMap[c]!.unit = row[c] || '';
-        }
-        continue;
-      }
-
-      if (isPlaceRow) {
-        // ★ J列まで
-        for (let c = 2; c < row.length && c <= 9; c++) {
-          if (colMap[c]) colMap[c]!.place = row[c] || '';
-        }
-        continue;
-      }
-
-      if (isZoomRow) {
-        // ★ J列まで
-        for (let c = 2; c < row.length && c <= 9; c++) {
-          if (colMap[c]) colMap[c]!.meetingId = row[c] || '';
-        }
-        continue;
-      }
-
-      if (isSigninRow) {
-        // ★ J列まで
-        for (let c = 2; c < row.length && c <= 9; c++) {
-          if (colMap[c]) {
-            colMap[c]!.signinAddress = (row[c] || '').replace(/\s+/g, '').trim();
-          }
-        }
-        continue;
-      }
-
+      // 講師行の処理
       if (isTeacherRow || isSupportRow) {
-        // ★ J列まで
-        for (let c = 2; c < row.length && c <= 9; c++) {
+        for (let c = 2; c < maxCol; c++) {
           const rawName = (row[c] || '').trim();
           const info = colMap[c];
 
@@ -362,7 +364,11 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
           let teacherName = teacherInfo ? teacherInfo.name : rawName;
           let userId = teacherInfo ? teacherInfo.id : '';
 
-          if (!teacherName || teacherName === '未' || teacherName === '―') {
+          if (isTeacherRow && rawName && !userId && !['未', '―'].includes(rawName)) {
+             missingTeacherCount++;
+          }
+
+          if (!teacherName || ['未', '―'].includes(teacherName)) {
              if (info) {
                teacherName = '未定';
                userId = ''; 
@@ -383,7 +389,6 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
 
             if (info) {
               const roleType = isTeacherRow ? 'main' : 'sub';
-              
               let uniqueDetail = info.detail;
               
               if (roleType === 'main') {
@@ -407,6 +412,43 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
                 existingId = existingSubMap.get(duplicateKey);
               }
 
+              // ==========================================
+              // Zoom作成ロジック
+              // ==========================================
+              let zoomInfo = { startUrl: '', joinUrl: '' };
+              if (roleType === 'main' && userId) {
+                if (!info.meetingId) {
+                  console.log(`✨ Zoom作成試行: ${teacherName} (${targetDate})`);
+                  
+                  const startTimeISO = currentPeriod === 1 
+                    ? `${targetDate}T19:20:00` 
+                    : `${targetDate}T20:35:00`;
+                  
+                  setProgress(`Zoom作成中... ${teacherName} @ ${targetDate}`);
+                  
+                  const created = await createZoomMeeting(
+                    `${info.grade}${info.subject} (${teacherName}先生)`, 
+                    startTimeISO
+                  );
+                  
+                  if (created) {
+                    info.meetingId = String(created.meetingId);
+                    zoomInfo.startUrl = created.startUrl;
+                    zoomInfo.joinUrl = created.joinUrl;
+                    zoomSuccessCount++;
+                    console.log(`✅ 作成成功: ID=${created.meetingId}`);
+                  } else {
+                    zoomFailCount++;
+                    console.error(`❌ 作成失敗: APIエラー`);
+                  }
+                } else {
+                  console.log(`⏭ スキップ: CSVにIDあり (${info.meetingId}) - ${teacherName}`);
+                }
+              } else if (roleType === 'main' && !userId) {
+                console.log(`⏭ スキップ: ユーザーID特定不可 (CSV名: ${rawName})`);
+              }
+              // ==========================================
+
               const shiftData: any = {
                 user_id: userId,
                 teacher_name: teacherName,
@@ -418,6 +460,8 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
                 target_place: info.place,
                 target_meeting_id: info.meetingId,
                 target_signin_address: info.signinAddress, 
+                start_url: zoomInfo.startUrl || null,
+                target_recording_url: zoomInfo.joinUrl || null,
                 unit: roleType === 'main' ? info.unit : null,
                 parent_id: roleType === 'sub' && targetDate === currentDate ? (info.mainShiftId || null) : null,
                 note: `【${currentPeriod}限】`,
@@ -446,6 +490,7 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
               }
 
             } else if (userId) {
+              // General support (全体サポート)
               const roleType = 'general';
               const duplicateKey = `${targetDate}_${currentPeriod}_${userId}_general`;
               const existingId = existingGeneralMap.get(duplicateKey);
@@ -489,9 +534,16 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
 
     if (batchCount > 0) await batch.commit();
 
+    console.log(`🏁 処理完了: ${count}件追加, Zoom作成: ${zoomSuccessCount}件`);
+    
     let msg = `完了: ${count}件 追加`;
     if (overwriteCount > 0) msg += `\n(上書き: ${overwriteCount}件)`;
     if (skipCount > 0) msg += `\n(スキップ: ${skipCount}件)`;
+    
+    if (zoomSuccessCount > 0) msg += `\n\n🎉 Zoom作成成功: ${zoomSuccessCount}件`;
+    if (zoomFailCount > 0) msg += `\n⚠️ Zoom作成失敗: ${zoomFailCount}件\n(詳細はコンソールを確認)`;
+    if (missingTeacherCount > 0) msg += `\n⚠️ 講師名不一致でZoom作成スキップ: ${missingTeacherCount}件\n(マスタの登録名とCSVを確認してください)`;
+
     alert(msg);
   };
 

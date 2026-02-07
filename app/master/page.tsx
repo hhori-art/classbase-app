@@ -521,7 +521,7 @@ export default function MasterDashboard() {
 
               {/* 3. 録画承認待ち (Zoom連携があるもの) */}
               {recordingCheckCount > 0 && (
-                <Link href="/master/approval" className="block p-4 hover:bg-blue-50/50 transition-colors group">
+                <Link href="/master/recordings" className="block p-4 hover:bg-blue-50/50 transition-colors group">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <div className="bg-blue-100 text-blue-500 p-2 rounded-lg"><Video size={18}/></div>

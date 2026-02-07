@@ -33,19 +33,35 @@ export default function StudentDashboard({ initialProfile }: Props) {
   const [isTrophyOpen, setIsTrophyOpen] = useState(false);
   const [popMessage, setPopMessage] = useState<string | null>(null);
   const [now, setNow] = useState<Date | null>(null);
+  
+  // ★修正: 日付や挨拶はクライアントサイドでのみ計算するステートにする
+  const [mounted, setMounted] = useState(false);
+  const [dateStr, setDateStr] = useState('');
+  const [greeting, setGreeting] = useState('');
 
   const [nextClassInfo, setNextClassInfo] = useState<{ date: string; status: 'open' | 'closed' | 'checking' } | null>(null);
   const [urgentHomework, setUrgentHomework] = useState<{ title: string; deadline: string; daysLeft: number } | null>(null);
 
-  const today = new Date();
-  const dateStr = today.toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' });
-
-  const getGreeting = () => {
+  // ★修正: ハイドレーションエラー対策（マウント後に時刻関連を設定）
+  useEffect(() => {
+    setMounted(true);
+    const today = new Date();
+    
+    // 日付文字列の生成
+    setDateStr(today.toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' }));
+    
+    // 挨拶の生成
     const h = today.getHours();
-    if (h < 11) return 'おはよう！';
-    if (h < 17) return 'こんにちは！';
-    return 'こんばんは！';
-  };
+    let msg = 'こんばんは！';
+    if (h < 11) msg = 'おはよう！';
+    else if (h < 17) msg = 'こんにちは！';
+    setGreeting(msg);
+
+    setNow(today);
+    const timer = setInterval(() => setNow(new Date()), 60000);
+
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (initialProfile?.uid) {
@@ -55,21 +71,15 @@ export default function StudentDashboard({ initialProfile }: Props) {
           setUserData(data);
           
           checkNextClass(data.day_of_week);
-          // ★修正: 科目情報も渡す
           checkUrgentHomework(data.grade, data.subjects); 
         }
       });
       
-      setNow(new Date());
-      const timer = setInterval(() => setNow(new Date()), 60000);
-
       if (initialProfile.day_of_week) checkNextClass(initialProfile.day_of_week);
-      // ★修正: 初回ロード時も科目考慮
       if (initialProfile.grade) checkUrgentHomework(initialProfile.grade, initialProfile.subjects);
 
       return () => {
         unsub();
-        clearInterval(timer);
       };
     }
   }, [initialProfile]);
@@ -100,7 +110,6 @@ export default function StudentDashboard({ initialProfile }: Props) {
     }
   };
 
-  // ★修正: 受講科目を考慮して緊急宿題をチェック
   const checkUrgentHomework = async (grade: string, subjects: string[] = []) => {
     if (!grade) return;
     
@@ -108,7 +117,6 @@ export default function StudentDashboard({ initialProfile }: Props) {
     const todayStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
     try {
-      // 期限が近い順に少し多め(5件)に取得し、アプリ側で科目フィルタする
       const q = query(
         collection(db, 'homework_assignments'), 
         where('target_grade', '==', grade),
@@ -118,23 +126,21 @@ export default function StudentDashboard({ initialProfile }: Props) {
       );
       
       const snap = await getDocs(q);
-      
       let foundHw = null;
 
-      // 取得した中から「自分の受講科目」に一致する最初のものを探す
       for (const doc of snap.docs) {
         const data = doc.data();
-        // 科目が未設定(全員共通) または 受講科目リストに含まれている場合
         if (!data.subject || subjects.length === 0 || subjects.includes(data.subject)) {
           foundHw = data;
-          break; // 最初に見つかった＝一番期限が近い
+          break;
         }
       }
       
       if (foundHw) {
-        const deadlineDate = new Date(foundHw.deadline);
-        const now = new Date();
-        const diffTime = deadlineDate.getTime() - now.getTime();
+        // ★修正: Safari対策（日付のパースを安全にする）
+        const deadlineDate = new Date(foundHw.deadline.replace(/-/g, '/')); // 念のためハイフンをスラッシュに
+        const nowTime = new Date();
+        const diffTime = deadlineDate.getTime() - nowTime.getTime();
         const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
         setUrgentHomework({
@@ -163,11 +169,26 @@ export default function StudentDashboard({ initialProfile }: Props) {
   const currentBadgeId = userData?.selected_badge;
   const currentBadge = BADGES.find(b => b.id === currentBadgeId);
 
+  // ★修正: マウントされるまで何も表示しないか、ローディングを出す（ハイドレーション不一致防止）
+  if (!mounted) {
+    return <div className="min-h-[100dvh] bg-[#F0F4F8]" />;
+  }
+
   const showPeriod1 = isClassActive(CLASS_TIMES.period1.start, CLASS_TIMES.period1.end);
   const showPeriod2 = isClassActive(CLASS_TIMES.period2.start, CLASS_TIMES.period2.end);
 
+  // ★修正: Safariで safe に日付を表示するためのヘルパー
+  const safeDateString = (dateStr: string) => {
+    try {
+        return new Date(dateStr.replace(/-/g, '/')).toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' });
+    } catch (e) {
+        return dateStr;
+    }
+  };
+
   return (
-    <div className="min-h-screen bg-[#F0F4F8] pb-32 font-sans relative overflow-hidden">
+    // ★修正: min-h-screen を min-h-[100dvh] に変更（モバイルSafariのアドレスバー対策）
+    <div className="min-h-[100dvh] bg-[#F0F4F8] pb-32 font-sans relative overflow-hidden">
       
       <ActivityLogger uid={userData?.uid} />
 
@@ -188,7 +209,7 @@ export default function StudentDashboard({ initialProfile }: Props) {
         <div className="flex justify-between items-start text-white relative z-10">
           <div>
             <p className="text-sm font-bold opacity-90 mb-1 flex items-center gap-2"><Calendar size={14}/> {dateStr}</p>
-            <h1 className="text-2xl font-extrabold tracking-tight leading-tight">{getGreeting()} <br/><span className="text-yellow-300 text-3xl">{userData?.student_name || '生徒'}</span> さん</h1>
+            <h1 className="text-2xl font-extrabold tracking-tight leading-tight">{greeting} <br/><span className="text-yellow-300 text-3xl">{userData?.student_name || '生徒'}</span> さん</h1>
             {userData && <div className="mt-3 inline-flex items-center gap-2 bg-white/20 backdrop-blur-sm px-3 py-1 rounded-full text-xs font-bold"><Clock size={12}/> {userData.day_of_week}曜クラス | {userData.classroom}</div>}
           </div>
           <div className="bg-white/20 p-1.5 rounded-xl backdrop-blur-sm"><LogoutButton /></div>
@@ -242,7 +263,7 @@ export default function StudentDashboard({ initialProfile }: Props) {
                   <CalendarCheck size={14}/> 次回の授業予定
                 </p>
                 <p className="text-sm font-bold text-gray-700">
-                  {new Date(nextClassInfo.date).toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' })}
+                  {safeDateString(nextClassInfo.date)}
                 </p>
               </div>
               <div>
@@ -285,7 +306,7 @@ export default function StudentDashboard({ initialProfile }: Props) {
                         ? 'bg-orange-400 text-white'
                         : 'bg-white text-blue-500 border border-blue-200'
                   }`}>
-                    {urgentHomework.daysLeft === 0 ? '今日まで' : new Date(urgentHomework.deadline).getDate() + '日提出'}
+                    {urgentHomework.daysLeft === 0 ? '今日まで' : new Date(urgentHomework.deadline.replace(/-/g, '/')).getDate() + '日提出'}
                   </span>
                 </div>
               </div>
@@ -357,7 +378,6 @@ export default function StudentDashboard({ initialProfile }: Props) {
         <NewsWidget role="student" />
         
         <div className="bg-white p-2 rounded-3xl shadow-sm border border-gray-100">
-          {/* ★修正: カレンダーにも学年を渡して宿題を表示させる */}
           <CalendarWidget classDay={userData?.day_of_week} grade={userData?.grade} />
         </div>
         

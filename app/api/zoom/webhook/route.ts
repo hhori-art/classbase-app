@@ -1,85 +1,101 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs, writeBatch } from 'firebase/firestore';
+// app/api/webhook/zoom/route.ts
+import { NextResponse } from 'next/server';
+import { db } from '@/lib/firebase'; // firebase設定のパスに合わせてください
+import { collection, query, where, getDocs, updateDoc, doc } from 'firebase/firestore';
 import crypto from 'crypto';
 
-export async function POST(req: NextRequest) {
+export async function POST(request: Request) {
   try {
-    const body = await req.json();
+    const body = await request.json();
+    
+    // --- 1. Zoomの認証 (Secret Tokenの検証) ---
+    // 本番環境では必須ですが、テスト時は一旦スキップも可能です
+    // const signature = request.headers.get('x-zm-signature');
+    // ...検証ロジック...
 
-    // 1. Zoomの認証 (URL Validation)
-    // Zoomが「このURLは生きてるか？」を確認しに来るイベントです
+    // --- 2. URL確認イベントへの応答 (Zoomの仕様) ---
     if (body.event === 'endpoint.url_validation') {
-      const plainToken = body.payload.plainToken;
-      const secret = process.env.ZOOM_SECRET_TOKEN || ''; // .envに設定します
-      
-      const hash = crypto.createHmac('sha256', secret)
-                         .update(plainToken)
-                         .digest('hex');
-
+      const hashForValidate = crypto
+        .createHmac('sha256', process.env.ZOOM_WEBHOOK_SECRET || '')
+        .update(body.payload.plainToken)
+        .digest('hex');
       return NextResponse.json({
-        plainToken: plainToken,
-        encryptedToken: hash
-      }, { status: 200 });
+        plainToken: body.payload.plainToken,
+        encryptedToken: hashForValidate
+      });
     }
 
-    // 2. 録画完了イベントの処理
+    // --- 3. 録画完了イベントの処理 ---
     if (body.event === 'recording.completed') {
       const payload = body.payload.object;
-      const meetingIdRaw = String(payload.id); // Zoom上のミーティングID (数字のみ)
-      const recordingUrl = payload.share_url;  // 視聴用URL
-      const startTime = new Date(payload.start_time); 
-
-      // 日本時間に変換して日付を取得 (例: 2025-12-01)
-      // サーバー時刻がUTCの場合を考慮して9時間足す
-      const jstDate = new Date(startTime.getTime() + 9 * 60 * 60 * 1000);
-      const targetDate = jstDate.toISOString().split('T')[0];
-
-      console.log(`[Zoom Webhook] 録画検知: ID=${meetingIdRaw}, Date=${targetDate}`);
-
-      // Firestoreから授業を検索
-      // CSV取り込みデータは "123 456 7890" のようにスペースが入っている可能性があるため
-      // いくつかのパターンで検索をかけます。
-      const possibleIds = [
-        meetingIdRaw, // 12345678901
-        meetingIdRaw.replace(/(\d{3})(\d{4})(\d{4})/, '$1 $2 $3'), // 123 4567 8901 (11桁)
-        meetingIdRaw.replace(/(\d{3})(\d{3})(\d{4})/, '$1 $2 $3'), // 123 456 7890 (10桁)
-      ];
-
-      const shiftsRef = collection(db, 'shift_assignments');
-      const q = query(
-        shiftsRef,
-        where('target_date', '==', targetDate),
-        where('target_meeting_id', 'in', possibleIds)
-      );
+      const meetingId = String(payload.id); // ZoomのミーティングID
+      const shareUrl = payload.share_url;   // 視聴用URL
+      const startTime = new Date(payload.start_time);
       
-      const snap = await getDocs(q);
+      // JSTに変換して日付文字列を取得 (YYYY-MM-DD)
+      // 授業日がずれないように日本時間で判定
+      const jstDate = new Date(startTime.getTime() + 9 * 60 * 60 * 1000);
+      const targetDateStr = jstDate.toISOString().split('T')[0];
 
-      if (snap.empty) {
-        console.log('[Zoom Webhook] 該当する授業データが見つかりませんでした。');
-        return NextResponse.json({ message: 'No matching shift found' }, { status: 200 });
+      console.log(`🎥 録画受信: ID=${meetingId}, Date=${targetDateStr}`);
+
+      // --- 4. Firestoreから該当するシフトを検索 ---
+      // 条件:
+      // A. ミーティングIDが一致
+      // B. 日付が一致 (定期ミーティング等でのID使い回し対策)
+      // C. 役割が 'main' (メイン講師のみ)
+      const q = query(
+        collection(db, 'shift_assignments'),
+        where('target_meeting_id', '==', meetingId),
+        where('target_date', '==', targetDateStr),
+        where('role_type', '==', 'main') // ★重要: メイン講師のみに限定
+      );
+
+      const snapshot = await getDocs(q);
+
+      if (snapshot.empty) {
+        console.log('⚠️ 該当するメイン講師のシフトが見つかりません。');
+        return NextResponse.json({ message: 'No matching shift found' });
       }
 
-      // 該当するすべての授業データに録画URLを書き込む
-      const batch = writeBatch(db);
-      snap.forEach((doc) => {
-        batch.update(doc.ref, { 
-          target_recording_url: recordingUrl,
-          updated_at: new Date().toISOString()
-        });
-      });
-      await batch.commit();
+      // --- 5. 重複チェック (1時間に1つ / 1授業に1つ) ---
+      // 複数のシフト(例えば1限と2限で同じID)がヒットする可能性があるので、
+      // 時間で絞り込むか、最初に見つかった「URL未登録」のものを採用する
+      
+      let targetDoc = null;
 
-      console.log(`[Zoom Webhook] ${snap.size}件の授業に録画URLを登録しました。`);
+      for (const docSnap of snapshot.docs) {
+        const data = docSnap.data();
+        
+        // 既にURLが入っている場合はスキップ (＝同一IDでの重複登録を防ぐ)
+        if (data.target_recording_url) {
+          console.log(`⏭ 既に録画URLが存在するためスキップします: ${docSnap.id}`);
+          continue;
+        }
+
+        // 授業時間帯の判定 (簡易的)
+        // 録画開始時間が、その授業の想定時間に近いかを判定しても良いですが、
+        // 「URLが空」かつ「IDと日付が一致」していれば、それが対象の授業である可能性が高いです。
+        targetDoc = docSnap;
+        break; // 1つ見つかったらループ終了 (＝1つだけ作成)
+      }
+
+      if (targetDoc) {
+        // --- 6. URL保存 ---
+        await updateDoc(doc(db, 'shift_assignments', targetDoc.id), {
+          target_recording_url: shareUrl,
+          recording_updated_at: new Date().toISOString()
+        });
+        console.log(`✅ 録画URLを保存しました: ${targetDoc.id}`);
+      } else {
+        console.log('⏭ 全ての該当シフトに既にURLが登録済みです。');
+      }
     }
 
-    return NextResponse.json({ status: 'ok' }, { status: 200 });
+    return NextResponse.json({ success: true });
 
-  } catch (error) {
-    console.error('[Zoom Webhook Error]', error);
-    return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
+  } catch (error: any) {
+    console.error('Webhook Error:', error);
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
-// ... コードの末尾など ...
-
-// Vercel再デプロイ用コメント: Zoomログ確認
