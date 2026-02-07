@@ -2,16 +2,20 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { db } from '@/lib/firebase';
+import { useRouter } from 'next/navigation'; // 追加
+import { db, auth } from '@/lib/firebase'; // authを追加
 import { doc, onSnapshot, collection, query, where, getDocs, orderBy, limit } from 'firebase/firestore'; 
+import { onAuthStateChanged, signOut } from 'firebase/auth'; // 追加
 import { 
   Video, BookOpen, AlertTriangle, 
   ChevronRight, Calendar, Trophy, Settings,
-  Bot, Brain, Sparkles, Clock, Coffee, CalendarCheck, ClipboardList, Timer
+  Bot, Brain, Sparkles, Clock, Coffee, CalendarCheck, ClipboardList, Timer,
+  LogOut, Loader2 // アイコン追加
 } from 'lucide-react';
 
 import BottomNav from '@/app/components/BottomNav';
-import LogoutButton from '@/app/components/LogoutButton';
+// LogoutButtonは内部実装に置き換えるため削除、もしくはコメントアウト
+// import LogoutButton from '@/app/components/LogoutButton';
 import CalendarWidget from '@/app/components/CalendarWidget';
 import NewsWidget from '@/app/components/NewsWidget';
 import TrophyModal from '@/app/components/TrophyModal';
@@ -28,29 +32,44 @@ const CLASS_TIMES = {
 type Props = { initialProfile: any; };
 
 export default function StudentDashboard({ initialProfile }: Props) {
+  const router = useRouter();
   
   const [userData, setUserData] = useState<any>(initialProfile);
   const [isTrophyOpen, setIsTrophyOpen] = useState(false);
   const [popMessage, setPopMessage] = useState<string | null>(null);
   const [now, setNow] = useState<Date | null>(null);
   
-  // ★修正: 日付や挨拶はクライアントサイドでのみ計算するステートにする
+  // PWA対策: 認証チェック完了フラグ
+  const [isAuthChecked, setIsAuthChecked] = useState(false);
   const [mounted, setMounted] = useState(false);
+  
   const [dateStr, setDateStr] = useState('');
   const [greeting, setGreeting] = useState('');
 
   const [nextClassInfo, setNextClassInfo] = useState<{ date: string; status: 'open' | 'closed' | 'checking' } | null>(null);
   const [urgentHomework, setUrgentHomework] = useState<{ title: string; deadline: string; daysLeft: number } | null>(null);
 
-  // ★修正: ハイドレーションエラー対策（マウント後に時刻関連を設定）
+  // ★修正: 認証状態の監視 (PWAでの白屏/セッション切れ対策)
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (!user) {
+        // ログインしていない場合、トップページへ強制リダイレクト
+        window.location.href = '/';
+      } else {
+        // ログイン確認OK
+        setIsAuthChecked(true);
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // ★修正: マウント時の初期設定
   useEffect(() => {
     setMounted(true);
     const today = new Date();
     
-    // 日付文字列の生成
     setDateStr(today.toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' }));
     
-    // 挨拶の生成
     const h = today.getHours();
     let msg = 'こんばんは！';
     if (h < 11) msg = 'おはよう！';
@@ -63,9 +82,13 @@ export default function StudentDashboard({ initialProfile }: Props) {
     return () => clearInterval(timer);
   }, []);
 
+  // ユーザーデータのリアルタイム同期
   useEffect(() => {
-    if (initialProfile?.uid) {
-      const unsub = onSnapshot(doc(db, 'users', initialProfile.uid), (docSnap) => {
+    // Authチェックが完了し、かつユーザーIDがある場合のみ実行
+    if (isAuthChecked && (userData?.uid || initialProfile?.uid)) {
+      const targetUid = userData?.uid || initialProfile?.uid;
+      
+      const unsub = onSnapshot(doc(db, 'users', targetUid), (docSnap) => {
         if (docSnap.exists()) {
           const data = docSnap.data();
           setUserData(data);
@@ -75,14 +98,29 @@ export default function StudentDashboard({ initialProfile }: Props) {
         }
       });
       
-      if (initialProfile.day_of_week) checkNextClass(initialProfile.day_of_week);
-      if (initialProfile.grade) checkUrgentHomework(initialProfile.grade, initialProfile.subjects);
+      // 初期データでのチェック
+      if (initialProfile?.day_of_week) checkNextClass(initialProfile.day_of_week);
+      if (initialProfile?.grade) checkUrgentHomework(initialProfile.grade, initialProfile.subjects);
 
       return () => {
         unsub();
       };
     }
-  }, [initialProfile]);
+  }, [isAuthChecked, initialProfile, userData?.uid]); // 依存配列に isAuthChecked を追加
+
+  // ★追加: 確実なログアウト処理
+  const handleLogout = async () => {
+    if (confirm('ログアウトしますか？')) {
+      try {
+        await signOut(auth);
+        // PWAのキャッシュ問題を回避するため window.location.href で強制遷移
+        window.location.href = '/';
+      } catch (error) {
+        console.error("Logout failed", error);
+        window.location.href = '/';
+      }
+    }
+  };
 
   const checkNextClass = async (dayOfWeek: string) => {
     if (!dayOfWeek) return;
@@ -137,8 +175,7 @@ export default function StudentDashboard({ initialProfile }: Props) {
       }
       
       if (foundHw) {
-        // ★修正: Safari対策（日付のパースを安全にする）
-        const deadlineDate = new Date(foundHw.deadline.replace(/-/g, '/')); // 念のためハイフンをスラッシュに
+        const deadlineDate = new Date(foundHw.deadline.replace(/-/g, '/'));
         const nowTime = new Date();
         const diffTime = deadlineDate.getTime() - nowTime.getTime();
         const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
@@ -169,15 +206,21 @@ export default function StudentDashboard({ initialProfile }: Props) {
   const currentBadgeId = userData?.selected_badge;
   const currentBadge = BADGES.find(b => b.id === currentBadgeId);
 
-  // ★修正: マウントされるまで何も表示しないか、ローディングを出す（ハイドレーション不一致防止）
-  if (!mounted) {
-    return <div className="min-h-[100dvh] bg-[#F0F4F8]" />;
+  // ★修正: マウント前 または 認証チェック中はローディング画面を表示 (真っ白画面防止)
+  if (!mounted || !isAuthChecked) {
+    return (
+      <div className="min-h-[100dvh] bg-[#F0F4F8] flex items-center justify-center">
+        <div className="flex flex-col items-center gap-2">
+          <Loader2 className="animate-spin text-indigo-400" size={32} />
+          <p className="text-xs text-gray-400 font-bold">読み込み中...</p>
+        </div>
+      </div>
+    );
   }
 
   const showPeriod1 = isClassActive(CLASS_TIMES.period1.start, CLASS_TIMES.period1.end);
   const showPeriod2 = isClassActive(CLASS_TIMES.period2.start, CLASS_TIMES.period2.end);
 
-  // ★修正: Safariで safe に日付を表示するためのヘルパー
   const safeDateString = (dateStr: string) => {
     try {
         return new Date(dateStr.replace(/-/g, '/')).toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' });
@@ -187,7 +230,6 @@ export default function StudentDashboard({ initialProfile }: Props) {
   };
 
   return (
-    // ★修正: min-h-screen を min-h-[100dvh] に変更（モバイルSafariのアドレスバー対策）
     <div className="min-h-[100dvh] bg-[#F0F4F8] pb-32 font-sans relative overflow-hidden">
       
       <ActivityLogger uid={userData?.uid} />
@@ -212,7 +254,17 @@ export default function StudentDashboard({ initialProfile }: Props) {
             <h1 className="text-2xl font-extrabold tracking-tight leading-tight">{greeting} <br/><span className="text-yellow-300 text-3xl">{userData?.student_name || '生徒'}</span> さん</h1>
             {userData && <div className="mt-3 inline-flex items-center gap-2 bg-white/20 backdrop-blur-sm px-3 py-1 rounded-full text-xs font-bold"><Clock size={12}/> {userData.day_of_week}曜クラス | {userData.classroom}</div>}
           </div>
-          <div className="bg-white/20 p-1.5 rounded-xl backdrop-blur-sm"><LogoutButton /></div>
+          
+          {/* ログアウトボタン (直接実装) */}
+          <div className="bg-white/20 p-1.5 rounded-xl backdrop-blur-sm">
+            <button 
+              onClick={handleLogout}
+              className="p-2 text-white hover:bg-white/20 rounded-lg transition-colors flex flex-col items-center justify-center gap-0.5"
+              title="ログアウト"
+            >
+              <LogOut size={20} />
+            </button>
+          </div>
         </div>
       </div>
 
