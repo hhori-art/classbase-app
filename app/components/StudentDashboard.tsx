@@ -2,20 +2,18 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation'; // 追加
-import { db, auth } from '@/lib/firebase'; // authを追加
+import { useRouter } from 'next/navigation';
+import { db, auth } from '@/lib/firebase';
 import { doc, onSnapshot, collection, query, where, getDocs, orderBy, limit } from 'firebase/firestore'; 
-import { onAuthStateChanged, signOut } from 'firebase/auth'; // 追加
+import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { 
   Video, BookOpen, AlertTriangle, 
   ChevronRight, Calendar, Trophy, Settings,
   Bot, Brain, Sparkles, Clock, Coffee, CalendarCheck, ClipboardList, Timer,
-  LogOut, Loader2 // アイコン追加
+  LogOut, Loader2
 } from 'lucide-react';
 
 import BottomNav from '@/app/components/BottomNav';
-// LogoutButtonは内部実装に置き換えるため削除、もしくはコメントアウト
-// import LogoutButton from '@/app/components/LogoutButton';
 import CalendarWidget from '@/app/components/CalendarWidget';
 import NewsWidget from '@/app/components/NewsWidget';
 import TrophyModal from '@/app/components/TrophyModal';
@@ -34,14 +32,16 @@ type Props = { initialProfile: any; };
 export default function StudentDashboard({ initialProfile }: Props) {
   const router = useRouter();
   
-  const [userData, setUserData] = useState<any>(initialProfile);
+  // 初期値をnullにして、データが来るまで待機させる
+  const [userData, setUserData] = useState<any>(null);
   const [isTrophyOpen, setIsTrophyOpen] = useState(false);
   const [popMessage, setPopMessage] = useState<string | null>(null);
   const [now, setNow] = useState<Date | null>(null);
   
-  // PWA対策: 認証チェック完了フラグ
+  // PWA対策ステート
   const [isAuthChecked, setIsAuthChecked] = useState(false);
   const [mounted, setMounted] = useState(false);
+  const [isLoggingOut, setIsLoggingOut] = useState(false); // ログアウト処理中フラグ
   
   const [dateStr, setDateStr] = useState('');
   const [greeting, setGreeting] = useState('');
@@ -49,11 +49,11 @@ export default function StudentDashboard({ initialProfile }: Props) {
   const [nextClassInfo, setNextClassInfo] = useState<{ date: string; status: 'open' | 'closed' | 'checking' } | null>(null);
   const [urgentHomework, setUrgentHomework] = useState<{ title: string; deadline: string; daysLeft: number } | null>(null);
 
-  // ★修正: 認証状態の監視 (PWAでの白屏/セッション切れ対策)
+  // ■ 1. 認証監視 (PWAでのセッション切れ対策)
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       if (!user) {
-        // ログインしていない場合、トップページへ強制リダイレクト
+        // ログインしていなければ強制リダイレクト
         window.location.href = '/';
       } else {
         // ログイン確認OK
@@ -63,12 +63,21 @@ export default function StudentDashboard({ initialProfile }: Props) {
     return () => unsubscribe();
   }, []);
 
-  // ★修正: マウント時の初期設定
+  // ■ 2. マウント時の初期設定 (時計・挨拶)
   useEffect(() => {
     setMounted(true);
-    const today = new Date();
     
-    setDateStr(today.toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' }));
+    // データがあれば初期セット (ちらつき防止)
+    if (initialProfile) {
+      setUserData(initialProfile);
+    }
+
+    const today = new Date();
+    try {
+      setDateStr(today.toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' }));
+    } catch (e) {
+      setDateStr('日付取得中');
+    }
     
     const h = today.getHours();
     let msg = 'こんばんは！';
@@ -80,45 +89,45 @@ export default function StudentDashboard({ initialProfile }: Props) {
     const timer = setInterval(() => setNow(new Date()), 60000);
 
     return () => clearInterval(timer);
-  }, []);
+  }, [initialProfile]);
 
-  // ユーザーデータのリアルタイム同期
+  // ■ 3. ユーザーデータのリアルタイム同期
   useEffect(() => {
-    // Authチェックが完了し、かつユーザーIDがある場合のみ実行
-    if (isAuthChecked && (userData?.uid || initialProfile?.uid)) {
-      const targetUid = userData?.uid || initialProfile?.uid;
-      
+    // 認証OK かつ ユーザーIDがある場合のみ実行
+    const targetUid = auth.currentUser?.uid || initialProfile?.uid;
+
+    if (isAuthChecked && targetUid) {
       const unsub = onSnapshot(doc(db, 'users', targetUid), (docSnap) => {
         if (docSnap.exists()) {
           const data = docSnap.data();
           setUserData(data);
           
-          checkNextClass(data.day_of_week);
-          checkUrgentHomework(data.grade, data.subjects); 
+          // データが取れたら非同期で情報をチェック
+          if (data.day_of_week) checkNextClass(data.day_of_week);
+          if (data.grade) checkUrgentHomework(data.grade, data.subjects); 
         }
+      }, (error) => {
+        console.error("Snapshot error:", error);
       });
       
-      // 初期データでのチェック
-      if (initialProfile?.day_of_week) checkNextClass(initialProfile.day_of_week);
-      if (initialProfile?.grade) checkUrgentHomework(initialProfile.grade, initialProfile.subjects);
-
-      return () => {
-        unsub();
-      };
+      return () => unsub();
     }
-  }, [isAuthChecked, initialProfile, userData?.uid]); // 依存配列に isAuthChecked を追加
+  }, [isAuthChecked, initialProfile]);
 
-  // ★追加: 確実なログアウト処理
+  // ■ 4. 強力なログアウト処理 (修正版)
   const handleLogout = async () => {
-    if (confirm('ログアウトしますか？')) {
-      try {
-        await signOut(auth);
-        // PWAのキャッシュ問題を回避するため window.location.href で強制遷移
-        window.location.href = '/';
-      } catch (error) {
-        console.error("Logout failed", error);
-        window.location.href = '/';
-      }
+    if (!confirm('ログアウトしますか？')) return;
+    
+    setIsLoggingOut(true); // ローディング表示に切り替え
+    try {
+      await signOut(auth);
+      // PWAのキャッシュを無視して強制的にトップページへリロード
+      // これにより「ログアウトできない」不具合を解消
+      window.location.href = '/'; 
+    } catch (error) {
+      console.error("Logout failed", error);
+      // 失敗しても強制リロード
+      window.location.href = '/';
     }
   };
 
@@ -143,8 +152,7 @@ export default function StudentDashboard({ initialProfile }: Props) {
       if (!snap.empty) setNextClassInfo({ date: targetDateStr, status: 'open' });
       else setNextClassInfo({ date: targetDateStr, status: 'closed' });
     } catch (e) {
-      console.error(e);
-      setNextClassInfo({ date: targetDateStr, status: 'open' });
+      setNextClassInfo({ date: targetDateStr, status: 'open' }); // エラー時はとりあえず表示
     }
   };
 
@@ -168,13 +176,17 @@ export default function StudentDashboard({ initialProfile }: Props) {
 
       for (const doc of snap.docs) {
         const data = doc.data();
+        // データチェック: deadlineがない場合はスキップ (白画面回避)
+        if (!data.deadline) continue;
+
         if (!data.subject || subjects.length === 0 || subjects.includes(data.subject)) {
           foundHw = data;
           break;
         }
       }
       
-      if (foundHw) {
+      if (foundHw && foundHw.deadline) {
+        // iPhone/Safari対策: 日付のパースを安全に行う
         const deadlineDate = new Date(foundHw.deadline.replace(/-/g, '/'));
         const nowTime = new Date();
         const diffTime = deadlineDate.getTime() - nowTime.getTime();
@@ -203,25 +215,30 @@ export default function StudentDashboard({ initialProfile }: Props) {
     return currentMinutes >= (startTotal - 15) && currentMinutes <= endTotal;
   };
 
-  const currentBadgeId = userData?.selected_badge;
-  const currentBadge = BADGES.find(b => b.id === currentBadgeId);
-
-  // ★修正: マウント前 または 認証チェック中はローディング画面を表示 (真っ白画面防止)
-  if (!mounted || !isAuthChecked) {
+  // ■ 5. 表示の安全化 (userDataがない、またはログアウト中はローディング)
+  // これにより「userData.student_name」参照エラーによる白画面を防ぐ
+  if (!mounted || !isAuthChecked || !userData || isLoggingOut) {
     return (
       <div className="min-h-[100dvh] bg-[#F0F4F8] flex items-center justify-center">
-        <div className="flex flex-col items-center gap-2">
-          <Loader2 className="animate-spin text-indigo-400" size={32} />
-          <p className="text-xs text-gray-400 font-bold">読み込み中...</p>
+        <div className="flex flex-col items-center gap-4">
+          <Loader2 className="animate-spin text-indigo-500" size={40} />
+          <p className="text-sm text-slate-500 font-bold">
+            {isLoggingOut ? 'ログアウト中...' : '読み込み中...'}
+          </p>
         </div>
       </div>
     );
   }
 
+  const currentBadgeId = userData?.selected_badge;
+  const currentBadge = BADGES.find(b => b.id === currentBadgeId);
+
   const showPeriod1 = isClassActive(CLASS_TIMES.period1.start, CLASS_TIMES.period1.end);
   const showPeriod2 = isClassActive(CLASS_TIMES.period2.start, CLASS_TIMES.period2.end);
 
+  // 安全な日付表示ヘルパー
   const safeDateString = (dateStr: string) => {
+    if (!dateStr) return '';
     try {
         return new Date(dateStr.replace(/-/g, '/')).toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' });
     } catch (e) {
@@ -230,6 +247,7 @@ export default function StudentDashboard({ initialProfile }: Props) {
   };
 
   return (
+    // iOSでのアドレスバー対策: min-h-[100dvh]
     <div className="min-h-[100dvh] bg-[#F0F4F8] pb-32 font-sans relative overflow-hidden">
       
       <ActivityLogger uid={userData?.uid} />
@@ -255,7 +273,7 @@ export default function StudentDashboard({ initialProfile }: Props) {
             {userData && <div className="mt-3 inline-flex items-center gap-2 bg-white/20 backdrop-blur-sm px-3 py-1 rounded-full text-xs font-bold"><Clock size={12}/> {userData.day_of_week}曜クラス | {userData.classroom}</div>}
           </div>
           
-          {/* ログアウトボタン (直接実装) */}
+          {/* ヘッダーのログアウトボタン */}
           <div className="bg-white/20 p-1.5 rounded-xl backdrop-blur-sm">
             <button 
               onClick={handleLogout}
@@ -307,7 +325,6 @@ export default function StudentDashboard({ initialProfile }: Props) {
         </div>
 
         <div className="space-y-3">
-          
           {nextClassInfo && (
             <div className="bg-white p-4 rounded-3xl shadow-sm border border-indigo-50 flex items-center justify-between">
               <div>
@@ -364,7 +381,6 @@ export default function StudentDashboard({ initialProfile }: Props) {
               </div>
             </Link>
           )}
-
         </div>
 
         <div className="grid grid-cols-2 gap-4">
@@ -442,6 +458,8 @@ export default function StudentDashboard({ initialProfile }: Props) {
         </Link>
       </div>
 
+      {/* ■ 重要: もしBottomNavの中にあるログアウトボタンを押している場合、
+          そのボタンも window.location.href = '/' を使うように修正が必要です。 */}
       <BottomNav />
       
     </div>
