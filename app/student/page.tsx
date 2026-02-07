@@ -2,18 +2,20 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { db } from '@/lib/firebase';
+import { db, auth } from '@/lib/firebase'; // authを追加
 import { doc, onSnapshot, collection, query, where, getDocs, orderBy, limit } from 'firebase/firestore'; 
 import { useAuth } from '@/app/context/AuthContext';
+import { signOut } from 'firebase/auth'; // 追加
 import { 
   Video, BookOpen, AlertTriangle, 
   ChevronRight, Calendar, Trophy, Settings,
-  Bot, Brain, Sparkles, Clock, Coffee, CalendarCheck, ClipboardList, Timer, Loader2 
+  Bot, Brain, Sparkles, Clock, Coffee, CalendarCheck, ClipboardList, Timer, Loader2, LogOut 
 } from 'lucide-react';
 
 // コンポーネントのインポート
 import BottomNav from '@/app/components/BottomNav';
-import LogoutButton from '@/app/components/LogoutButton';
+// LogoutButtonは不具合の原因になる可能性があるため削除し、直接実装します
+// import LogoutButton from '@/app/components/LogoutButton'; 
 import CalendarWidget from '@/app/components/CalendarWidget';
 import NewsWidget from '@/app/components/NewsWidget';
 import TrophyModal from '@/app/components/TrophyModal';
@@ -28,16 +30,22 @@ const CLASS_TIMES = {
   period2: { start: '20:35', end: '21:40' }
 };
 
-// ★修正: 引数（Props）を削除しました。
 export default function StudentDashboard() {
   const { user, profile: authProfile, loading: authLoading } = useAuth();
   
+  // PWA対策: マウント判定フラグ
+  const [mounted, setMounted] = useState(false);
+
   // 初期データは AuthContext から取得、または null
   const [userData, setUserData] = useState<any>(authProfile || null);
   
   const [isTrophyOpen, setIsTrophyOpen] = useState(false);
   const [popMessage, setPopMessage] = useState<string | null>(null);
   const [now, setNow] = useState<Date | null>(null);
+
+  // 日付・挨拶用ステート (ハイドレーションエラー対策)
+  const [dateStr, setDateStr] = useState('');
+  const [greeting, setGreeting] = useState('');
 
   const [nextClassInfo, setNextClassInfo] = useState<{ date: string; status: 'open' | 'closed' | 'checking' } | null>(null);
   const [urgentHomework, setUrgentHomework] = useState<{ title: string; deadline: string; daysLeft: number } | null>(null);
@@ -47,48 +55,66 @@ export default function StudentDashboard() {
   const [targetRequest, setTargetRequest] = useState<any>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
 
-  const today = new Date();
-  const dateStr = today.toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' });
-
-  const getGreeting = () => {
-    const h = today.getHours();
-    if (h < 11) return 'おはよう！';
-    if (h < 17) return 'こんにちは！';
-    return 'こんばんは！';
-  };
-
-  // userDataの同期と初期化ロジック
+  // ★修正: 初期化ロジック (マウント後に実行)
   useEffect(() => {
-    // userが存在する場合のみ実行
+    setMounted(true);
+    const d = new Date();
+    
+    // 日付文字列生成
+    try {
+      setDateStr(d.toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' }));
+    } catch (e) {
+      setDateStr('');
+    }
+
+    // 挨拶生成
+    const h = d.getHours();
+    if (h < 11) setGreeting('おはよう！');
+    else if (h < 17) setGreeting('こんにちは！');
+    else setGreeting('こんばんは！');
+
+    setNow(d);
+    const timer = setInterval(() => setNow(new Date()), 60000);
+
+    return () => clearInterval(timer);
+  }, []);
+
+  // userDataの同期
+  useEffect(() => {
     if (user?.uid) {
-      // リアルタイムリスナーの設定
       const unsub = onSnapshot(doc(db, 'users', user.uid), (docSnap) => {
         if (docSnap.exists()) {
           const data = docSnap.data();
           setUserData(data);
           
-          // データ取得後にチェック関数を実行
           if (data.day_of_week) checkNextClass(data.day_of_week);
           if (data.grade) checkUrgentHomework(data.grade, data.subjects); 
         }
       });
       
-      setNow(new Date());
-      const timer = setInterval(() => setNow(new Date()), 60000);
-
-      // 初期データ(AuthContext由来)がある場合の一回目実行
+      // 初期データでのチェック
       if (authProfile) {
         if (authProfile.day_of_week) checkNextClass(authProfile.day_of_week);
         if (authProfile.grade) checkUrgentHomework(authProfile.grade, authProfile.subjects);
       }
 
-      return () => {
-        unsub();
-        clearInterval(timer);
-      };
+      return () => unsub();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, authProfile]); 
+
+  // ★追加: 強制ログアウト関数
+  const handleLogout = async () => {
+    if (confirm('ログアウトしますか？')) {
+      try {
+        await signOut(auth);
+        // PWAのキャッシュを無視して強制的にトップページへリロード
+        window.location.href = '/'; 
+      } catch (error) {
+        console.error("Logout failed", error);
+        window.location.href = '/';
+      }
+    }
+  };
 
   // 未回答依頼チェック
   useEffect(() => {
@@ -174,10 +200,11 @@ export default function StudentDashboard() {
         }
       }
       
-      if (foundHw) {
-        const deadlineDate = new Date(foundHw.deadline);
-        const now = new Date();
-        const diffTime = deadlineDate.getTime() - now.getTime();
+      if (foundHw && foundHw.deadline) {
+        // ★修正: iPhone(Safari)対策: 日付パースを安全にする
+        const deadlineDate = new Date(foundHw.deadline.replace(/-/g, '/'));
+        const nowTime = new Date();
+        const diffTime = deadlineDate.getTime() - nowTime.getTime();
         const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
         setUrgentHomework({
@@ -203,6 +230,15 @@ export default function StudentDashboard() {
     return currentMinutes >= (startTotal - 15) && currentMinutes <= endTotal;
   };
 
+  const safeDateString = (dateStr: string) => {
+    if (!dateStr) return '';
+    try {
+      return new Date(dateStr.replace(/-/g, '/')).toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' });
+    } catch (e) {
+      return dateStr;
+    }
+  };
+
   const currentBadgeId = userData?.selected_badge;
   const currentBadge = BADGES.find(b => b.id === currentBadgeId);
 
@@ -212,20 +248,18 @@ export default function StudentDashboard() {
   const handleRegistrationComplete = () => {
     setIsModalOpen(false);
     if (targetRequest) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       setPendingRequests((prev: any[]) => prev.filter((req: any) => req.id !== targetRequest.id));
     }
     setTargetRequest(null);
   };
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const handleOpenRequest = (req: any) => {
     setTargetRequest(req);
     setIsModalOpen(true);
   };
 
-  // データ読み込み中のガード
-  if (!userData && authLoading) {
+  // ★修正: マウント前はローディングを表示 (ハイドレーションエラー防止)
+  if (!mounted) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#F0F4F8]">
         <Loader2 className="animate-spin text-indigo-500" size={32} />
@@ -233,8 +267,24 @@ export default function StudentDashboard() {
     );
   }
 
-  // ログインはしているがプロフィールがない場合
-  if (!userData && user) {
+  // 認証確認中
+  if (authLoading && !userData) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#F0F4F8]">
+        <Loader2 className="animate-spin text-indigo-500" size={32} />
+      </div>
+    );
+  }
+
+  // ログインしていない場合
+  if (!user) {
+    // 強制的にトップへリダイレクト (PWAでログイン画面に戻れない対策)
+    if (typeof window !== 'undefined') window.location.href = '/';
+    return null;
+  }
+
+  // ログインしているがプロフィールがない場合
+  if (!userData) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-[#F0F4F8] p-6 text-center">
         <AlertTriangle className="text-yellow-500 mb-4" size={48} />
@@ -242,18 +292,19 @@ export default function StudentDashboard() {
         <p className="text-gray-500 text-sm mb-6">
           生徒データの登録が完了していません。<br/>管理者に連絡するか、しばらくお待ちください。
         </p>
-        <LogoutButton />
+        <button 
+          onClick={handleLogout}
+          className="bg-indigo-600 text-white px-6 py-2 rounded-full font-bold shadow hover:bg-indigo-700 transition-colors"
+        >
+          ログアウト
+        </button>
       </div>
     );
   }
 
-  // 未ログインの場合は AuthContext 側で処理されるか、何も表示しない
-  if (!user) return null;
-
   return (
     <div className="min-h-screen bg-[#F0F4F8] pb-32 font-sans relative overflow-hidden">
       
-      {/* userDataが存在する場合のみuidを渡す */}
       <ActivityLogger uid={userData?.uid} />
 
       {popMessage && (
@@ -282,10 +333,19 @@ export default function StudentDashboard() {
         <div className="flex justify-between items-start text-white relative z-10">
           <div>
             <p className="text-sm font-bold opacity-90 mb-1 flex items-center gap-2"><Calendar size={14}/> {dateStr}</p>
-            <h1 className="text-2xl font-extrabold tracking-tight leading-tight">{getGreeting()} <br/><span className="text-yellow-300 text-3xl">{userData?.student_name || '生徒'}</span> さん</h1>
+            <h1 className="text-2xl font-extrabold tracking-tight leading-tight">{greeting} <br/><span className="text-yellow-300 text-3xl">{userData?.student_name || '生徒'}</span> さん</h1>
             {userData && <div className="mt-3 inline-flex items-center gap-2 bg-white/20 backdrop-blur-sm px-3 py-1 rounded-full text-xs font-bold"><Clock size={12}/> {userData.day_of_week}曜クラス | {userData.classroom}</div>}
           </div>
-          <div className="bg-white/20 p-1.5 rounded-xl backdrop-blur-sm"><LogoutButton /></div>
+          <div className="bg-white/20 p-1.5 rounded-xl backdrop-blur-sm">
+            {/* ログアウトボタン (内製化) */}
+            <button 
+              onClick={handleLogout}
+              className="p-2 text-white hover:bg-white/20 rounded-lg transition-colors flex flex-col items-center justify-center gap-0.5"
+              title="ログアウト"
+            >
+              <LogOut size={20} />
+            </button>
+          </div>
         </div>
       </div>
 
@@ -336,7 +396,7 @@ export default function StudentDashboard() {
                   <CalendarCheck size={14}/> 次回の授業予定
                 </p>
                 <p className="text-sm font-bold text-gray-700">
-                  {new Date(nextClassInfo.date).toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' })}
+                  {safeDateString(nextClassInfo.date)}
                 </p>
               </div>
               <div>
@@ -379,7 +439,7 @@ export default function StudentDashboard() {
                         ? 'bg-orange-400 text-white'
                         : 'bg-white text-blue-500 border border-blue-200'
                   }`}>
-                    {urgentHomework.daysLeft === 0 ? '今日まで' : new Date(urgentHomework.deadline).getDate() + '日提出'}
+                    {urgentHomework.daysLeft === 0 ? '今日まで' : new Date(urgentHomework.deadline.replace(/-/g, '/')).getDate() + '日提出'}
                   </span>
                 </div>
               </div>
