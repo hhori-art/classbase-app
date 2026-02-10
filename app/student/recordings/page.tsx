@@ -1,4 +1,3 @@
-import { logActivity } from '@/lib/logActivity';
 'use client';
 
 import { useState, useEffect } from 'react';

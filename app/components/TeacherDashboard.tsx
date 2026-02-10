@@ -11,7 +11,6 @@ import {
 import { signOut } from 'firebase/auth';
 import { auth } from '@/lib/firebase';
 import NewsWidget from '@/app/components/NewsWidget';
-// ★監視ボタン
 import ShiftMonitorButton from '@/app/components/ShiftMonitorButton';
 
 // --- 型定義 ---
@@ -26,7 +25,7 @@ type ShiftAssignment = {
   target_detail_subject: string | null;
   target_place?: string | null;
   target_meeting_id?: string | null; 
-  target_password?: string | null; // 追加
+  target_password?: string | null;
   target_signin_address?: string | null;
   unit: string | null;
   note: string;
@@ -69,13 +68,14 @@ const EmptyState = ({ text }: { text: string }) => (
   </div>
 );
 
-// --- クラスカード ---
+// --- クラスカード (ここを修正: API経由でZAKを取得するように変更) ---
 const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { info: ClassGroup, color: 'emerald' | 'orange', currentUserProfile: any, isExpanded: boolean }) => {
   const [loading, setLoading] = useState(false);
   
   const currentUserId = currentUserProfile?.id || currentUserProfile?.uid || '';
   const isMyClass = (info.main?.user_id === currentUserId) || info.subs.some(s => s.user_id === currentUserId);
 
+  // 講師のメールアドレス (API用)
   const loginEmail = info.signin_address?.trim();
   const hasHostPermission = !!loginEmail && loginEmail.length > 0;
   
@@ -99,27 +99,62 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
   };
 
   const myName = currentUserProfile?.student_name || currentUserProfile?.name || '講師';
-  const confno = info.meeting_id?.replace(/\s/g, '') || (info.url ? info.url.split('/').pop()?.split('?')[0] : '');
+  // 全角数字除去などの正規化
+  const rawConfno = info.meeting_id || (info.url ? info.url.split('/').pop()?.split('?')[0] : '');
+  const confno = rawConfno?.replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0)).replace(/[^\d]/g, '');
 
   const handleEnterZoom = async (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
 
-    if (!confno) {
-      alert("ミーティングIDが設定されていません。");
+    if (!confno || confno.length < 9) {
+      alert("有効なミーティングIDが設定されていません。");
       return;
     }
+    
     setLoading(true);
+
     try {
+      // ■ ホスト権限がある場合: APIでZAKを取得してアプリ起動
       if (hasHostPermission) {
+        let zakToken = "";
+        
+        // 1. API呼び出し
+        try {
+          const res = await fetch('/api/get-zoom-zak', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email: loginEmail })
+          });
+          const data = await res.json();
+          if (data.success && data.zak) {
+            zakToken = data.zak;
+          } else {
+            console.warn("ZAK取得失敗:", data.error);
+          }
+        } catch (err) {
+          console.error("API通信エラー:", err);
+        }
+
+        // 2. Zoomアプリ用URL生成 (ZAKがあれば付与)
+        // zoommtg://zoom.us/start?confno=ID&zak=TOKEN
         let targetUrl = `zoommtg://zoom.us/start?confno=${confno}`;
+        if (zakToken) {
+          targetUrl += `&zak=${zakToken}`;
+        }
+        
+        // パスワードがあれば付与
         if (info.url) {
            const urlObj = new URL(info.url);
            const pwd = urlObj.searchParams.get('pwd');
            if (pwd) targetUrl += `&pwd=${pwd}`;
         }
+        
+        // 3. 起動
         window.location.href = targetUrl;
+        
       } else {
+        // ■ 通常参加の場合
         let targetUrl = `zoommtg://zoom.us/join?confno=${confno}`;
         if (info.url) {
           try {
@@ -140,7 +175,7 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
 
   const widthClass = isExpanded ? 'w-full' : 'w-[140px] shrink-0';
   let buttonLabel = hasHostPermission ? 'ホスト開始' : '入室';
-  if (loading) buttonLabel = '準備中...';
+  if (loading) buttonLabel = '起動中...';
 
   return (
     <div className={`${widthClass} bg-white border ${theme.border} rounded-xl shadow-sm flex flex-col overflow-hidden transition-all duration-200 ${isMyClass ? 'shadow-md transform -translate-y-0.5 z-10' : 'hover:shadow-md'}`}>
@@ -330,7 +365,7 @@ export default function TeacherDashboard({ profile, allAssignments, pendingCount
               </h3>
               
               {/* ★ここに追加: データをpropsで渡す */}
-              <ShiftMonitorButton assignments={allAssignments} currentDate={currentDate} />
+              <ShiftMonitorButton currentDate={currentDate} />
 
               {!isExpanded && (
                 <div className="flex bg-slate-200 p-1 rounded-lg">
