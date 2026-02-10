@@ -2,15 +2,16 @@
 
 import { useState } from 'react';
 import { 
-  Calendar as CalendarIcon, MonitorPlay, MapPin, User,
+  Calendar as CalendarIcon, MonitorPlay, MapPin, User, Star,
   ChevronLeft, ChevronRight, LayoutList, Layout, Maximize2, Minimize2,
-  Briefcase, Clock, KeyRound, 
+  Briefcase, Clock, KeyRound, ExternalLink,
   Video, Loader2, Zap,
   LogOut
 } from 'lucide-react';
 import { signOut } from 'firebase/auth';
 import { auth } from '@/lib/firebase';
 import NewsWidget from '@/app/components/NewsWidget';
+// ★追加: 監視ボタンのインポート
 import ShiftMonitorButton from '@/app/components/ShiftMonitorButton';
 
 // --- 型定義 ---
@@ -25,7 +26,6 @@ type ShiftAssignment = {
   target_detail_subject: string | null;
   target_place?: string | null;
   target_meeting_id?: string | null; 
-  target_password?: string | null;
   target_signin_address?: string | null;
   unit: string | null;
   note: string;
@@ -68,17 +68,17 @@ const EmptyState = ({ text }: { text: string }) => (
   </div>
 );
 
-// --- クラスカード (ここを修正: API経由でZAKを取得するように変更) ---
+// --- クラスカード (ご提示のコードをそのまま維持) ---
 const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { info: ClassGroup, color: 'emerald' | 'orange', currentUserProfile: any, isExpanded: boolean }) => {
   const [loading, setLoading] = useState(false);
   
   const currentUserId = currentUserProfile?.id || currentUserProfile?.uid || '';
   const isMyClass = (info.main?.user_id === currentUserId) || info.subs.some(s => s.user_id === currentUserId);
 
-  // 講師のメールアドレス (API用)
   const loginEmail = info.signin_address?.trim();
   const hasHostPermission = !!loginEmail && loginEmail.length > 0;
   
+  // 表示用ID (@以下をカット)
   const displayLoginId = loginEmail ? loginEmail.split('@')[0] : '';
 
   const isEmerald = color === 'emerald';
@@ -99,91 +99,84 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
   };
 
   const myName = currentUserProfile?.student_name || currentUserProfile?.name || '講師';
-  // 全角数字除去などの正規化
-  const rawConfno = info.meeting_id || (info.url ? info.url.split('/').pop()?.split('?')[0] : '');
-  const confno = rawConfno?.replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0)).replace(/[^\d]/g, '');
+  const confno = info.meeting_id?.replace(/\s/g, '') || (info.url ? info.url.split('/').pop()?.split('?')[0] : '');
 
+  const launchWebUrl = (url: string) => {
+    window.open(url, '_blank');
+  };
+
+  // ■■■ Zoom入室ハンドラ (元の正常動作するコード) ■■■
   const handleEnterZoom = async (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
 
-    if (!confno || confno.length < 9) {
-      alert("有効なミーティングIDが設定されていません。");
+    if (!confno) {
+      alert("ミーティングIDが設定されていません。");
       return;
     }
-    
-    setLoading(true);
 
-    try {
-      // ■ ホスト権限がある場合: APIでZAKを取得してアプリ起動
-      if (hasHostPermission) {
-        let zakToken = "";
+    if (hasHostPermission) {
+      setLoading(true);
+      try {
+        console.log(`🚀 ホスト開始試行: Email=${loginEmail}`);
         
-        // 1. API呼び出し
-        try {
-          const res = await fetch('/api/get-zoom-zak', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email: loginEmail })
-          });
-          const data = await res.json();
-          if (data.success && data.zak) {
-            zakToken = data.zak;
-          } else {
-            console.warn("ZAK取得失敗:", data.error);
+        // API呼び出し (名前変更ロジックは削除済み)
+        const res = await fetch('/api/get-zoom-zak', { 
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: loginEmail }) 
+        });
+        const data = await res.json();
+        
+        if (data.success && data.zak && data.pmi) {
+          // WebランチャーURLで起動 (ホスト権限)
+          // https://zoom.us/s/ID?zak=TOKEN 形式は最も強力にホスト権限を渡せます
+          const targetUrl = `https://zoom.us/s/${data.pmi}?zak=${data.zak}`;
+          console.log("✅ Webランチャー起動:", targetUrl);
+          launchWebUrl(targetUrl);
+        } else {
+          console.error("API Error:", data);
+          alert(`ホスト権限の取得に失敗しました。\n\n理由: ${data.error}`);
+          if(confirm("通常参加で開きますか？")) {
+             launchWebUrl(info.url || `https://zoom.us/j/${confno}`);
           }
-        } catch (err) {
-          console.error("API通信エラー:", err);
         }
-
-        // 2. Zoomアプリ用URL生成 (ZAKがあれば付与)
-        // zoommtg://zoom.us/start?confno=ID&zak=TOKEN
-        let targetUrl = `zoommtg://zoom.us/start?confno=${confno}`;
-        if (zakToken) {
-          targetUrl += `&zak=${zakToken}`;
-        }
-        
-        // パスワードがあれば付与
-        if (info.url) {
-           const urlObj = new URL(info.url);
-           const pwd = urlObj.searchParams.get('pwd');
-           if (pwd) targetUrl += `&pwd=${pwd}`;
-        }
-        
-        // 3. 起動
-        window.location.href = targetUrl;
-        
-      } else {
-        // ■ 通常参加の場合
-        let targetUrl = `zoommtg://zoom.us/join?confno=${confno}`;
-        if (info.url) {
-          try {
-            const urlObj = new URL(info.url);
-            const pwd = urlObj.searchParams.get('pwd');
-            targetUrl += `&pwd=${pwd || ''}&uname=${encodeURIComponent(myName)}`;
-          } catch (e) {}
-        }
-        window.location.href = targetUrl;
+      } catch (err) {
+        console.error(err);
+        alert('通信エラーが発生しました。');
+      } finally {
+        setLoading(false);
       }
-    } catch (e) {
-      console.error(e);
-      alert("Zoomアプリの起動に失敗しました。");
-    } finally {
-      setTimeout(() => setLoading(false), 2000);
+    } else {
+      // 通常参加
+      let targetUrl = info.url || `zoommtg://zoom.us/join?confno=${confno}`;
+      if (info.url) {
+        try {
+          const urlObj = new URL(info.url);
+          const pwd = urlObj.searchParams.get('pwd');
+          targetUrl = `https://zoom.us/j/${confno}?pwd=${pwd || ''}&uname=${encodeURIComponent(myName)}`;
+        } catch (e) {}
+      }
+      console.log("🚶 通常参加:", targetUrl);
+      launchWebUrl(targetUrl);
     }
   };
 
   const widthClass = isExpanded ? 'w-full' : 'w-[140px] shrink-0';
   let buttonLabel = hasHostPermission ? 'ホスト開始' : '入室';
-  if (loading) buttonLabel = '起動中...';
+  if (loading) buttonLabel = '準備中...';
 
   return (
     <div className={`${widthClass} bg-white border ${theme.border} rounded-xl shadow-sm flex flex-col overflow-hidden transition-all duration-200 ${isMyClass ? 'shadow-md transform -translate-y-0.5 z-10' : 'hover:shadow-md'}`}>
+      
+      {/* ヘッダー */}
       <div className={`${theme.headerBg} px-2 py-1.5 transition-colors relative h-[38px]`}>
         <div className="flex justify-between items-start mb-0.5">
           <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-md ${theme.badge} whitespace-nowrap truncate max-w-[85%]`}>
             {info.grade}/{info.place}
           </span>
+          
+          {/* スタジオ名表示 */}
           {info.studio && (
             <div className="flex items-center gap-0.5 text-[8px] bg-black/20 px-1.5 py-0.5 rounded text-white/90 font-bold whitespace-nowrap ml-1 max-w-[60px] truncate" title={info.studio}>
               <MapPin size={8}/> {info.studio}
@@ -194,7 +187,10 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
           {info.unit || <span className="opacity-60 font-normal">未設定</span>}
         </div>
       </div>
+      
       <div className="p-1.5 flex-1 flex flex-col gap-1.5 bg-white">
+        
+        {/* メイン講師情報 */}
         <div className="flex flex-col gap-0.5">
            <div className="flex items-center gap-1.5">
               <div className={`w-5 h-5 rounded-full flex items-center justify-center text-white text-[8px] font-bold shadow-sm shrink-0 ${theme.iconBg}`}>
@@ -204,31 +200,63 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
                 {info.main?.teacher_name || '未定'}
               </div>
            </div>
+
+           {/* ログインID表示 (@以下カット) */}
            {displayLoginId ? (
-              <button type="button" onClick={handleEnterZoom} disabled={loading} className={`flex items-center gap-1 text-[8px] font-mono mt-0.5 border rounded px-1 transition-all cursor-pointer group w-full justify-between h-[18px] ${hasHostPermission ? 'bg-rose-50 border-rose-200 text-rose-700 hover:bg-rose-100' : 'bg-slate-50 border-slate-100 text-slate-500 hover:bg-slate-100'}`} title={`ログインID: ${loginEmail}`}>
-                <div className="flex items-center gap-1 min-w-0"><KeyRound size={8} className="shrink-0 opacity-70"/><span className="truncate">{displayLoginId}</span></div>
+              <button 
+                type="button"
+                onClick={handleEnterZoom}
+                disabled={loading}
+                className={`flex items-center gap-1 text-[8px] font-mono mt-0.5 border rounded px-1 transition-all cursor-pointer group w-full justify-between h-[18px] ${
+                  hasHostPermission 
+                    ? 'bg-rose-50 border-rose-200 text-rose-700 hover:bg-rose-100' 
+                    : 'bg-slate-50 border-slate-100 text-slate-500 hover:bg-slate-100'
+                }`}
+                title={`ログインID: ${loginEmail}`}
+              >
+                <div className="flex items-center gap-1 min-w-0">
+                  <KeyRound size={8} className="shrink-0 opacity-70"/>
+                  <span className="truncate">{displayLoginId}</span>
+                </div>
                 {loading ? <Loader2 size={6} className="animate-spin"/> : <Zap size={6} className={hasHostPermission ? "text-rose-500" : "text-slate-400"}/>}
               </button>
-            ) : (<div className="h-[18px] text-[8px] text-slate-300 flex items-center pl-1 border border-transparent">ID未登録</div>)}
+            ) : (
+              <div className="h-[18px] text-[8px] text-slate-300 flex items-center pl-1 border border-transparent">ID未登録</div> 
+            )}
         </div>
+
         <div className="border-t border-slate-100 pt-1 mt-0.5">
           <div className="space-y-0.5">
             {info.subs.length > 0 ? info.subs.map((s) => {
               const isMe = s.user_id === currentUserId;
               return (
                 <div key={s.id} className={`text-[8px] flex items-center gap-1 p-0.5 rounded ${isMe ? 'font-bold text-indigo-700 bg-indigo-50 border border-indigo-100' : 'text-slate-400'}`}>
-                  <div className={`w-1 h-1 rounded-full ${isMe ? 'bg-indigo-500' : 'bg-slate-300'} shrink-0`}></div><span className="truncate">{s.teacher_name}</span>
+                  <div className={`w-1 h-1 rounded-full ${isMe ? 'bg-indigo-500' : 'bg-slate-300'} shrink-0`}></div> 
+                  <span className="truncate">{s.teacher_name}</span>
                 </div>
               );
-            }) : (<div className="text-[8px] text-slate-300 pl-1">-</div>)}
+            }) : (
+              <div className="text-[8px] text-slate-300 pl-1">-</div>
+            )}
           </div>
         </div>
+
         <div className="mt-auto pt-0.5">
           {confno ? (
-            <button type="button" onClick={handleEnterZoom} disabled={loading} className={`w-full ${theme.btn} shadow-sm text-[9px] font-bold py-1.5 rounded-md flex items-center justify-center gap-1 transition-transform active:scale-95`}>
-              {loading ? <Loader2 size={10} className="animate-spin"/> : hasHostPermission ? <Zap size={10}/> : <Video size={10}/>} {buttonLabel}
+            <button 
+              type="button" 
+              onClick={handleEnterZoom}
+              disabled={loading}
+              className={`w-full ${theme.btn} shadow-sm text-[9px] font-bold py-1.5 rounded-md flex items-center justify-center gap-1 transition-transform active:scale-95`}
+            >
+              {loading ? <Loader2 size={10} className="animate-spin"/> : hasHostPermission ? <Zap size={10}/> : <Video size={10}/>}
+              {buttonLabel}
             </button>
-          ) : (<div className="w-full bg-slate-100 text-slate-400 text-[9px] font-bold py-1.5 rounded-md flex items-center justify-center gap-1 cursor-not-allowed border border-slate-200"><Video size={10}/> -</div>)}
+          ) : (
+            <div className="w-full bg-slate-100 text-slate-400 text-[9px] font-bold py-1.5 rounded-md flex items-center justify-center gap-1 cursor-not-allowed border border-slate-200">
+              <Video size={10}/> -
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -359,13 +387,10 @@ export default function TeacherDashboard({ profile, allAssignments, pendingCount
         {!isExpanded && <NewsWidget role="teacher" />}
         <div className={`space-y-4 ${isExpanded ? 'h-full flex flex-col' : ''}`}>
           <div className="flex items-center justify-between px-1 shrink-0">
-            <div className="flex items-center gap-3">
-              <h3 className={`font-black text-slate-700 flex items-center gap-2 ${isExpanded ? 'hidden' : 'text-lg'}`}>
-                <CalendarIcon className="text-indigo-600"/> 講師配置
-              </h3>
+            <div className="flex items-center gap-3"><h3 className={`font-black text-slate-700 flex items-center gap-2 ${isExpanded ? 'hidden' : 'text-lg'}`}><CalendarIcon className="text-indigo-600"/> 講師配置</h3>
               
-              {/* ★ここに追加: データをpropsで渡す */}
-              <ShiftMonitorButton currentDate={currentDate} />
+              {/* ★追加: 監視ボタン */}
+              <ShiftMonitorButton assignments={allAssignments} currentDate={currentDate} />
 
               {!isExpanded && (
                 <div className="flex bg-slate-200 p-1 rounded-lg">
