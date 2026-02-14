@@ -5,17 +5,15 @@ import { db } from '@/lib/firebase';
 import { collection, query, orderBy, getDocs, doc, updateDoc, where, deleteDoc, limit } from 'firebase/firestore';
 import { 
   Briefcase, ArrowLeft, CheckCircle, Edit, Trash2, Search, Filter, Save, X, Plus, Train, Download, 
-  Loader2, Clock, Layout, Copy, AlertCircle, ChevronRight, Calendar, User, DollarSign, CheckSquare, Coffee, FileText
+  Loader2, Clock, Layout, Copy, AlertCircle, ChevronRight, Calendar, User, DollarSign, CheckSquare, FileText, Coffee, LayoutTemplate, MapPin
 } from 'lucide-react';
 import Link from 'next/link';
-// ★ ZIP圧縮用ライブラリのインポート (npm install jszip が必要)
-import JSZip from 'jszip';
 
 // 型定義
 interface WorkSegment {
   start: string;
   end: string;
-  type: 'lesson' | 'office' | 'break'; 
+  type: 'lesson' | 'office' | 'support' | 'break'; 
   note: string;
   isAuto?: boolean;
 }
@@ -26,14 +24,20 @@ interface Transportation {
   cost: number | string;
 }
 
+interface UserInfo {
+  name: string;
+  school_code: string;
+  staff_id: string;
+}
+
 export default function MasterAttendancePage() {
   const [records, setRecords] = useState<any[]>([]);
-  const [usersMap, setUsersMap] = useState<{[key:string]: string}>({}); 
+  const [usersMap, setUsersMap] = useState<{[key:string]: UserInfo}>({}); 
   const [loading, setLoading] = useState(true);
   const [filterMonth, setFilterMonth] = useState(new Date().toISOString().slice(0, 7));
   const [filterName, setFilterName] = useState('');
   const [showOnlyPending, setShowOnlyPending] = useState(false);
-  const [isZipping, setIsZipping] = useState(false); // CSV生成中のローディング
+  const [isCsvGenerating, setIsCsvGenerating] = useState(false);
 
   const [editingRecord, setEditingRecord] = useState<any>(null);
   const [segments, setSegments] = useState<WorkSegment[]>([]);
@@ -52,10 +56,15 @@ export default function MasterAttendancePage() {
     try {
       const q = query(collection(db, 'users'));
       const snap = await getDocs(q);
-      const map: {[key:string]: string} = {};
+      const map: {[key:string]: UserInfo} = {};
+      
       snap.forEach(doc => {
         const d = doc.data();
-        map[doc.id] = d.name || d.student_name || d.displayName || '名称未設定';
+        map[doc.id] = {
+          name: d.student_name || d.name || d.displayName || '名称未設定',
+          school_code: d.school_code || d.schoolCode || d.school_id || d.school_number || '999',
+          staff_id: d.lifetime_id || d.staff_id || d.employee_id || '9999'
+        };
       });
       setUsersMap(map);
     } catch (e) { console.error("Users fetch error:", e); }
@@ -79,10 +88,10 @@ export default function MasterAttendancePage() {
       const snap = await getDocs(q);
       setRecords(snap.docs.map(d => ({ id: d.id, ...d.data() })));
     } catch (e) {
-      console.error(e);
+      console.error("Fetch fallback:", e);
       const q2 = query(collection(db, 'work_records'), orderBy('created_at', 'desc'));
       const snap2 = await getDocs(q2);
-      setRecords(snap2.docs.map(d => ({ id: d.id, ...d.data() })).filter((r: any) => r.date.startsWith(filterMonth)));
+      setRecords(snap2.docs.map(d => ({ id: d.id, ...d.data() })).filter((r: any) => r.date && r.date.startsWith(filterMonth)));
     } finally {
       setLoading(false);
     }
@@ -106,19 +115,45 @@ export default function MasterAttendancePage() {
 
   const openEditor = (rec: any) => {
     setEditingRecord(rec);
-    const fmt = (iso: string) => iso ? new Date(iso).toLocaleString('sv').slice(0, 16).replace(' ', 'T') : '';
-    setMainTime({ start: fmt(rec.start_time), end: fmt(rec.end_time) });
-    setSegments(rec.work_segments && rec.work_segments.length > 0 ? rec.work_segments : []);
+    const toLocalISO = (iso: string) => {
+      if (!iso) return '';
+      const d = new Date(iso);
+      const pad = (n: number) => n.toString().padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    };
+
+    setMainTime({ 
+      start: toLocalISO(rec.start_time), 
+      end: toLocalISO(rec.end_time) 
+    });
+    
+    const sortedSegments = (rec.work_segments || []).sort((a: WorkSegment, b: WorkSegment) => a.start.localeCompare(b.start));
+    setSegments(sortedSegments);
     setExpenses(rec.transportation || []);
   };
 
   const updateSegment = (index: number, field: keyof WorkSegment, value: string) => {
     const newSegs = [...segments];
-    // @ts-ignore
-    newSegs[index] = { ...newSegs[index], [field]: value };
+    const current = { ...newSegs[index] };
+    
+    if (field === 'type') {
+      const prevType = current.type;
+      current.type = value as any;
+      if (prevType === 'break' && (current.note === '休憩' || current.note.includes('自動'))) current.note = '';
+      if (value === 'break' && !current.note) current.note = '休憩';
+    } else {
+      // @ts-ignore
+      current[field] = value;
+    }
+    newSegs[index] = current;
     setSegments(newSegs);
   };
-  const addSegment = () => setSegments([...segments, { start: '', end: '', type: 'lesson', note: '' }]);
+
+  const addSegment = () => {
+    let nextStart = '';
+    if (segments.length > 0) nextStart = segments[segments.length - 1].end;
+    setSegments([...segments, { start: nextStart, end: '', type: 'office', note: '' }]);
+  };
   const removeSegment = (index: number) => setSegments(segments.filter((_, i) => i !== index));
 
   const updateExpense = (index: number, field: keyof Transportation, value: string | number) => {
@@ -142,11 +177,9 @@ export default function MasterAttendancePage() {
         .map(d => d.data())
         .find((d: any) => d.transportation && d.transportation.length > 0 && d.id !== editingRecord.id);
 
-      if (lastRecord) {
-        if(confirm(`この講師の ${lastRecord.date} の交通費情報をコピーしますか？`)) {
-          setExpenses(lastRecord.transportation);
-        }
-      } else { alert('過去の交通費データが見つかりませんでした'); }
+      if (lastRecord && confirm(`この講師の ${lastRecord.date} の交通費情報をコピーしますか？`)) {
+        setExpenses(lastRecord.transportation);
+      } else if(!lastRecord) { alert('過去の交通費データが見つかりませんでした'); }
     } catch (e) { console.error(e); }
   };
 
@@ -210,6 +243,7 @@ export default function MasterAttendancePage() {
       const ref = doc(db, 'work_records', editingRecord.id);
       const newStart = mainTime.start ? new Date(mainTime.start).toISOString() : editingRecord.start_time;
       const newEnd = mainTime.end ? new Date(mainTime.end).toISOString() : null;
+      
       const filledSegments = fillGaps(segments, newStart, newEnd);
       const formattedExpenses = expenses.map(e => ({ ...e, cost: Number(e.cost) }));
 
@@ -245,23 +279,27 @@ export default function MasterAttendancePage() {
   };
 
   const calcTotalCost = (exps: Transportation[]) => exps ? exps.reduce((sum, item) => sum + Number(item.cost), 0) : 0;
+  
+  const calcSegmentTotal = (segs: WorkSegment[], type: string) => {
+    return segs.filter(s => s.type === type).reduce((acc, s) => {
+      const start = new Date(`2000/01/01 ${s.start}`);
+      const end = new Date(`2000/01/01 ${s.end}`);
+      const diff = (end.getTime() - start.getTime()) / (1000 * 60);
+      return acc + (isNaN(diff) ? 0 : diff);
+    }, 0);
+  };
 
-  // 22時またぎ計算用
   const splitTimeBy22 = (startTime: string, endTime: string) => {
     if (!startTime || !endTime) return { before22: 0, after22: 0 };
-    
     const start = new Date(startTime);
     const end = new Date(endTime);
     const startM = start.getHours() * 60 + start.getMinutes();
     const endM = end.getHours() * 60 + end.getMinutes();
-    
-    // 22:00 = 1320分
     const border = 22 * 60; 
     
     let before22 = 0;
     let after22 = 0;
 
-    // 日付またぎは今回考慮しない（同日前提）
     if (endM <= border) {
       before22 = endM - startM;
     } else if (startM >= border) {
@@ -270,40 +308,35 @@ export default function MasterAttendancePage() {
       before22 = border - startM;
       after22 = endM - border;
     }
-    
     return { before22, after22 };
   };
 
   // --- フィルタリング ---
   const filteredRecords = useMemo(() => {
     return records.filter(r => {
-      const name = usersMap[r.teacher_id] || r.teacher_name;
+      const userInfo = usersMap[r.teacher_id];
+      const name = userInfo?.name || r.teacher_name || '';
       const nameMatch = name.includes(filterName);
       const statusMatch = showOnlyPending ? r.status !== 'approved' : true;
       return nameMatch && statusMatch;
     });
   }, [records, usersMap, filterName, showOnlyPending]);
 
-  // ★サマリー計算 (表示用)
+  // ★サマリー計算
   const summary = useMemo(() => {
     const pending = records.filter(r => r.status !== 'approved').length;
-    
     let totalLessonMinutes = 0;
     let totalOfficeMinutes = 0;
 
     records.forEach(rec => {
-      // 日付からISO文字列のベースを作る
-      const baseDate = rec.date; 
-      
       rec.work_segments?.forEach((seg: WorkSegment) => {
         if (!seg.start || !seg.end) return;
-        // 時間文字列(HH:MM)から分を計算
         const [sh, sm] = seg.start.split(':').map(Number);
         const [eh, em] = seg.end.split(':').map(Number);
         const duration = (eh * 60 + em) - (sh * 60 + sm);
 
         if (seg.type === 'lesson') totalLessonMinutes += duration;
-        else if (seg.type === 'office') totalOfficeMinutes += duration;
+        else if (seg.type === 'office' || seg.type === 'support') totalOfficeMinutes += duration;
       });
     });
 
@@ -314,119 +347,210 @@ export default function MasterAttendancePage() {
     };
   }, [records]);
 
-  // ★CSV個別出力 & ZIP圧縮機能
+  // ★CSV一括出力 (修正済み: 講師ごとに合計をリセット)
   const handleBulkDownload = async () => {
     if (filteredRecords.length === 0) return alert('出力するデータがありません');
-    if (!confirm('表示中の講師データを個別のCSVファイルとしてZIPで出力しますか？')) return;
+    if (!confirm('表示中の全データを校舎・職員番号順にソートし、講師ごとの合計行を含めてCSV出力しますか？')) return;
 
-    setIsZipping(true);
-    const zip = new JSZip();
+    setIsCsvGenerating(true);
 
-    // 講師ごとにデータをグルーピング
-    const groupedData: { [key: string]: any[] } = {};
-    filteredRecords.forEach(rec => {
-      const teacherName = usersMap[rec.teacher_id] || rec.teacher_name || '不明な講師';
-      if (!groupedData[teacherName]) groupedData[teacherName] = [];
-      groupedData[teacherName].push(rec);
-    });
+    try {
+      // 1. ソート
+      const sortedRecords = [...filteredRecords].sort((a, b) => {
+        const userA = usersMap[a.teacher_id] || { school_code: '999', staff_id: '9999', name: '' };
+        const userB = usersMap[b.teacher_id] || { school_code: '999', staff_id: '9999', name: '' };
 
-    // 添付PDFの形式に合わせたCSVヘッダー
-    // 休憩開始・終了はPDFにはないが、データ整合性のため含めるか、あるいは「事務」に含めるか。
-    // ここではPDFの項目を優先しつつ、内部データを網羅する。
-    const header = [
-      '日付', '曜日',
-      'オンライン授業(開始)', 'オンライン授業(終了)',
-      '事務・サポート(開始)', '事務・サポート(終了)',
-      'オンライン授業時間(~22時)', 'オンライン授業時間(22時~)',
-      '事務・研修時間(~22時)', '事務・研修時間(22時~)',
-      'オンラインサポート時間(~22時)', 'オンラインサポート時間(22時~)', // サポートは事務と分ける実装が必要だが、今回は事務に統合またはtypeで判断
-      '交通費(区間)', '交通費(金額)'
-    ].join(',');
-
-    // 各講師ごとにCSV生成
-    Object.keys(groupedData).forEach(teacherName => {
-      const teacherRecords = groupedData[teacherName].sort((a, b) => a.date.localeCompare(b.date));
-      
-      const rows = teacherRecords.map(rec => {
-        const dateObj = new Date(rec.date);
-        const dayOfWeek = ['日', '月', '火', '水', '木', '金', '土'][dateObj.getDay()];
-
-        // セグメント処理
-        let lessonStart = '', lessonEnd = '';
-        let officeStart = '', officeEnd = '';
-        
-        let lessonTimeNormal = 0, lessonTimeLate = 0;
-        let officeTimeNormal = 0, officeTimeLate = 0;
-        let supportTimeNormal = 0, supportTimeLate = 0; // 今回はofficeに統合
-
-        rec.work_segments?.forEach((seg: WorkSegment) => {
-          // 開始・終了時刻の文字列確保（最初のものを採用、あるいは連結）
-          if (seg.type === 'lesson') {
-            if (!lessonStart) lessonStart = seg.start;
-            lessonEnd = seg.end; // 最後を終了とする
-            
-            // 時間計算
-            const startISO = `${rec.date}T${seg.start}:00`;
-            const endISO = `${rec.date}T${seg.end}:00`;
-            const { before22, after22 } = splitTimeBy22(startISO, endISO);
-            lessonTimeNormal += before22;
-            lessonTimeLate += after22;
-
-          } else if (seg.type === 'office') {
-            if (!officeStart) officeStart = seg.start;
-            officeEnd = seg.end;
-
-            const startISO = `${rec.date}T${seg.start}:00`;
-            const endISO = `${rec.date}T${seg.end}:00`;
-            const { before22, after22 } = splitTimeBy22(startISO, endISO);
-            officeTimeNormal += before22;
-            officeTimeLate += after22;
-          }
-        });
-
-        // 交通費
-        const transportText = rec.transportation?.map((t: any) => `${t.from}-${t.to}`).join(' / ') || '';
-        const transportCost = calcTotalCost(rec.transportation);
-
-        // 分を "H:MM" 形式に変換するヘルパー
-        const minToHm = (m: number) => {
-          if (m <= 0) return '';
-          const h = Math.floor(m / 60);
-          const min = m % 60;
-          return `${h}:${String(min).padStart(2, '0')}`;
-        };
-
-        return [
-          rec.date, dayOfWeek,
-          lessonStart, lessonEnd,
-          officeStart, officeEnd,
-          minToHm(lessonTimeNormal), minToHm(lessonTimeLate),
-          minToHm(officeTimeNormal), minToHm(officeTimeLate),
-          minToHm(supportTimeNormal), minToHm(supportTimeLate),
-          `"${transportText}"`, transportCost
-        ].join(',');
+        if (userA.school_code !== userB.school_code) {
+          return userA.school_code.localeCompare(userB.school_code, undefined, { numeric: true });
+        }
+        if (userA.staff_id !== userB.staff_id) {
+          return userA.staff_id.localeCompare(userB.staff_id, undefined, { numeric: true });
+        }
+        return a.date.localeCompare(b.date);
       });
 
-      // CSVデータ作成 (BOM付きUTF-8)
-      const csvContent = "\uFEFF" + [header, ...rows].join('\n');
-      zip.file(`${filterMonth}_${teacherName}.csv`, csvContent);
-    });
+      // 2. グループ化
+      const groupedData: { [key: string]: any[] } = {};
+      const teacherOrder: string[] = [];
 
-    // ZIPダウンロード実行
-    try {
-      const content = await zip.generateAsync({ type: 'blob' });
+      sortedRecords.forEach(rec => {
+        const tid = rec.teacher_id;
+        if (!groupedData[tid]) {
+          groupedData[tid] = [];
+          teacherOrder.push(tid);
+        }
+        groupedData[tid].push(rec);
+      });
+
+      // 3. 行生成
+      const header = [
+        '校舎番号', '職員番号', '氏名',
+        '日付', '曜日',
+        '出勤時刻', '退勤時刻',
+        'オンライン授業(開始)', 'オンライン授業(終了)',
+        '事務・サポート(開始)', '事務・サポート(終了)',
+        'オンライン授業時間(~22時)', 'オンライン授業時間(22時~)',
+        '事務・研修時間(~22時)', '事務・研修時間(22時~)',
+        '交通費(区間)', '交通費(金額)'
+      ].join(',');
+
+      const csvRows: string[] = [];
+
+      const minToHm = (m: number) => {
+        if (m <= 0) return '';
+        const h = Math.floor(m / 60);
+        const min = m % 60;
+        return `${h}:${String(min).padStart(2, '0')}`;
+      };
+
+      // 各講師ごとに処理 (ここでループごとに変数を初期化することで合計混同を防ぐ)
+      teacherOrder.forEach(tid => {
+        const teacherRecords = groupedData[tid];
+        const userInfo = usersMap[tid] || { name: teacherRecords[0].teacher_name || '不明', school_code: '', staff_id: '' };
+        
+        // ★修正: 講師ごとの合計変数をここで宣言・初期化
+        let totalLessonNormal = 0;
+        let totalLessonLate = 0;
+        let totalOfficeNormal = 0;
+        let totalOfficeLate = 0;
+        let totalTransportCost = 0;
+
+        teacherRecords.forEach(rec => {
+          const dateObj = new Date(rec.date);
+          const dayOfWeek = ['日', '月', '火', '水', '木', '金', '土'][dateObj.getDay()];
+
+          let lessonStart = '', lessonEnd = '';
+          let officeStart = '', officeEnd = '';
+          let lessonTimeNormal = 0, lessonTimeLate = 0;
+          let officeTimeNormal = 0, officeTimeLate = 0;
+
+          rec.work_segments?.forEach((seg: WorkSegment) => {
+            const startISO = `${rec.date}T${seg.start}:00`;
+            const endISO = `${rec.date}T${seg.end}:00`;
+            const { before22, after22 } = splitTimeBy22(startISO, endISO);
+
+            if (seg.type === 'lesson') {
+              if (!lessonStart || seg.start < lessonStart) lessonStart = seg.start;
+              if (!lessonEnd || seg.end > lessonEnd) lessonEnd = seg.end;
+              lessonTimeNormal += before22;
+              lessonTimeLate += after22;
+            } else if (seg.type === 'office' || seg.type === 'support') {
+              if (!officeStart || seg.start < officeStart) officeStart = seg.start;
+              if (!officeEnd || seg.end > officeEnd) officeEnd = seg.end;
+              officeTimeNormal += before22;
+              officeTimeLate += after22;
+            }
+          });
+
+          const transportText = rec.transportation?.map((t: any) => `${t.from}-${t.to}`).join(' / ') || '';
+          const transportCost = calcTotalCost(rec.transportation);
+
+          // 合計に加算
+          totalLessonNormal += lessonTimeNormal;
+          totalLessonLate += lessonTimeLate;
+          totalOfficeNormal += officeTimeNormal;
+          totalOfficeLate += officeTimeLate;
+          totalTransportCost += transportCost;
+
+          const startTimeStr = rec.start_time ? new Date(rec.start_time).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
+          const endTimeStr = rec.end_time ? new Date(rec.end_time).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
+
+          csvRows.push([
+            `"${userInfo.school_code !== '999' ? userInfo.school_code : ''}"`, 
+            `"${userInfo.staff_id !== '9999' ? userInfo.staff_id : ''}"`,
+            `"${userInfo.name}"`,
+            rec.date, dayOfWeek,
+            startTimeStr, endTimeStr,
+            lessonStart, lessonEnd,
+            officeStart, officeEnd,
+            minToHm(lessonTimeNormal), minToHm(lessonTimeLate),
+            minToHm(officeTimeNormal), minToHm(officeTimeLate),
+            `"${transportText}"`, transportCost
+          ].join(','));
+        });
+
+        // ★講師ごとの合計行を追加
+        csvRows.push([
+          `"${userInfo.school_code !== '999' ? userInfo.school_code : ''}"`, 
+          `"${userInfo.staff_id !== '9999' ? userInfo.staff_id : ''}"`,
+          `"${userInfo.name} 合計"`,
+          '', '', '', '', '', '', '', '', // 空白列(日付〜開始終了)
+          minToHm(totalLessonNormal), minToHm(totalLessonLate),
+          minToHm(totalOfficeNormal), minToHm(totalOfficeLate),
+          '', totalTransportCost
+        ].join(','));
+      });
+
+      // 4. ダウンロード
+      const csvContent = "\uFEFF" + [header, ...csvRows].join('\n');
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
       const link = document.createElement('a');
-      link.href = URL.createObjectURL(content);
-      link.download = `勤怠データ一括_${filterMonth}.zip`;
+      link.href = URL.createObjectURL(blob);
+      link.download = `勤怠一覧_${filterMonth}.csv`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
+
     } catch (e) {
       console.error(e);
-      alert('ZIP圧縮に失敗しました');
+      alert('CSV生成に失敗しました');
     } finally {
-      setIsZipping(false);
+      setIsCsvGenerating(false);
     }
+  };
+
+  const TimelineVisual = ({ record, currentSegments }: { record: any, currentSegments: WorkSegment[] }) => {
+    if (!record.start_time || !record.end_time) return null;
+    
+    const startTime = new Date(record.start_time);
+    const endTime = new Date(record.end_time);
+    const displayStart = new Date(startTime);
+    displayStart.setMinutes(displayStart.getMinutes() - 30);
+    const displayEnd = new Date(endTime);
+    displayEnd.setMinutes(displayEnd.getMinutes() + 30);
+    const totalDuration = (displayEnd.getTime() - displayStart.getTime());
+
+    const getPosition = (dateStr: string) => { 
+      const d = new Date(record.start_time); 
+      const [h, m] = dateStr.split(':').map(Number);
+      d.setHours(h, m, 0);
+      return ((d.getTime() - displayStart.getTime()) / totalDuration) * 100;
+    };
+
+    const getWidth = (startStr: string, endStr: string) => {
+      const s = new Date(record.start_time);
+      const [sh, sm] = startStr.split(':').map(Number);
+      s.setHours(sh, sm, 0);
+      const e = new Date(record.start_time);
+      const [eh, em] = endStr.split(':').map(Number);
+      e.setHours(eh, em, 0);
+      return ((e.getTime() - s.getTime()) / totalDuration) * 100;
+    };
+
+    const workStartPos = ((startTime.getTime() - displayStart.getTime()) / totalDuration) * 100;
+    const workWidth = ((endTime.getTime() - startTime.getTime()) / totalDuration) * 100;
+
+    return (
+      <div className="relative w-full h-12 bg-gray-100 rounded-lg overflow-hidden mb-4 border border-gray-200">
+        <div className="absolute top-0 bottom-0 bg-gray-200/50 border-x-2 border-gray-300" style={{ left: `${workStartPos}%`, width: `${workWidth}%` }} />
+        {currentSegments.map((seg, i) => {
+          if (!seg.start || !seg.end) return null;
+          const left = getPosition(seg.start);
+          const width = getWidth(seg.start, seg.end);
+          let colorClass = 'bg-gray-400';
+          if (seg.type === 'lesson') colorClass = 'bg-blue-500';
+          else if (seg.type === 'support') colorClass = 'bg-green-500';
+          else if (seg.type === 'office') colorClass = 'bg-orange-500';
+          else if (seg.type === 'break') colorClass = 'bg-slate-400';
+
+          return (
+            <div key={i} className={`absolute top-1 bottom-1 rounded-md shadow-sm ${colorClass} opacity-90 hover:opacity-100 transition-opacity flex items-center justify-center text-[10px] text-white font-bold truncate px-1`} style={{ left: `${left}%`, width: `${width}%` }} title={`${seg.start}-${seg.end} ${seg.note}`}>
+              {width > 10 ? (seg.type === 'lesson' ? '授業' : seg.type === 'support' ? 'サポ' : seg.type === 'office' ? '事務' : '休憩') : ''}
+            </div>
+          );
+        })}
+      </div>
+    );
   };
 
   return (
@@ -447,7 +571,6 @@ export default function MasterAttendancePage() {
             </div>
           </div>
 
-          {/* ★修正: サマリー表示 (授業時間・事務時間・承認待ち) */}
           <div className="flex gap-4 flex-wrap">
             <div className="bg-white px-5 py-3 rounded-xl border border-gray-200 shadow-sm flex flex-col items-center min-w-[100px]">
               <span className="text-[10px] text-gray-400 font-bold uppercase flex items-center gap-1"><FileText size={12}/> 授業時間</span>
@@ -496,14 +619,13 @@ export default function MasterAttendancePage() {
             </button>
           </div>
 
-          {/* ★修正: ZIP一括ダウンロードボタン */}
           <button 
             onClick={handleBulkDownload} 
-            disabled={isZipping || filteredRecords.length === 0}
+            disabled={isCsvGenerating || filteredRecords.length === 0}
             className="w-full md:w-auto bg-emerald-600 text-white px-5 py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 hover:bg-emerald-700 transition-all shadow-md active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {isZipping ? <Loader2 className="animate-spin" size={18}/> : <Download size={18}/>}
-            {isZipping ? '圧縮中...' : 'CSV一括出力 (ZIP)'}
+            {isCsvGenerating ? <Loader2 className="animate-spin" size={18}/> : <Download size={18}/>}
+            {isCsvGenerating ? '生成中...' : 'CSV一括出力'}
           </button>
         </div>
 
@@ -517,8 +639,8 @@ export default function MasterAttendancePage() {
         ) : (
           <div className="grid gap-4">
             {filteredRecords.map(rec => {
-              const displayName = usersMap[rec.teacher_id] || rec.teacher_name;
-              // 開始時間順にソート
+              const userInfo = usersMap[rec.teacher_id];
+              const displayName = userInfo?.name || rec.teacher_name;
               const displaySegments = rec.work_segments?.slice().sort((a: WorkSegment, b: WorkSegment) => a.start.localeCompare(b.start));
               const isApproved = rec.status === 'approved';
 
@@ -527,14 +649,20 @@ export default function MasterAttendancePage() {
                   <div className="flex flex-col md:flex-row gap-6">
                     
                     {/* 左側: 基本情報 */}
-                    <div className="md:w-48 shrink-0 flex flex-col justify-center border-b md:border-b-0 md:border-r border-gray-100 pb-4 md:pb-0 md:pr-6">
+                    <div className="md:w-56 shrink-0 flex flex-col justify-center border-b md:border-b-0 md:border-r border-gray-100 pb-4 md:pb-0 md:pr-6">
                       <div className="flex items-center gap-2 text-gray-500 text-xs font-bold mb-1">
                         <Calendar size={12}/> {rec.date}
                       </div>
-                      <h3 className="text-lg font-bold text-gray-800 mb-2 flex items-center gap-2">
+                      <h3 className="text-lg font-bold text-gray-800 mb-1 flex items-center gap-2">
                         <User size={18} className="text-gray-400"/>
                         {displayName}
                       </h3>
+                      {/* 校舎・職員番号表示 */}
+                      <div className="flex items-center gap-2 text-[10px] text-gray-400 mb-2">
+                        <span className="bg-gray-100 px-1.5 py-0.5 rounded">校:{userInfo?.school_code !== '999' ? userInfo?.school_code : '-'}</span>
+                        <span className="bg-gray-100 px-1.5 py-0.5 rounded">員:{userInfo?.staff_id !== '9999' ? userInfo?.staff_id : '-'}</span>
+                      </div>
+
                       <div className="bg-gray-50 rounded-lg p-2 text-center">
                         <div className="text-xs text-gray-400 font-bold mb-1">拘束時間</div>
                         <div className="text-xl font-black text-gray-700 font-mono">
@@ -562,13 +690,14 @@ export default function MasterAttendancePage() {
                           {displaySegments.map((seg: any, i: number) => (
                             <div key={i} className={`flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg border ${
                               seg.type === 'lesson' ? 'bg-blue-50 border-blue-100 text-blue-800' :
+                              seg.type === 'support' ? 'bg-green-50 border-green-100 text-green-800' :
                               seg.type === 'office' ? 'bg-orange-50 border-orange-100 text-orange-800' :
                               'bg-gray-50 border-gray-200 text-gray-500' // break
                             }`}>
                               <span className="font-mono font-bold">{seg.start}-{seg.end}</span>
                               <span className="font-bold opacity-70">|</span>
                               <span className="font-bold">
-                                {seg.type === 'lesson' ? '授業' : seg.type === 'office' ? '事務' : '休憩'}
+                                {seg.type === 'lesson' ? '授業' : seg.type === 'support' ? 'サポ' : seg.type === 'office' ? '事務' : '休憩'}
                               </span>
                               {seg.note && !seg.isAuto && <span className="opacity-70 truncate max-w-[100px]">({seg.note})</span>}
                             </div>
@@ -620,7 +749,7 @@ export default function MasterAttendancePage() {
             <div className="bg-slate-900 text-white px-6 py-4 flex justify-between items-center shrink-0">
               <div>
                 <h3 className="font-bold flex items-center gap-2 text-lg"><Briefcase size={20}/> 勤怠データ編集</h3>
-                <p className="text-xs text-slate-400 mt-0.5">{editingRecord.date} - {usersMap[editingRecord.teacher_id] || editingRecord.teacher_name}</p>
+                <p className="text-xs text-slate-400 mt-0.5">{editingRecord.date} - {usersMap[editingRecord.teacher_id]?.name || editingRecord.teacher_name}</p>
               </div>
               <button onClick={() => setEditingRecord(null)} className="hover:bg-white/20 p-2 rounded-full transition-colors"><X size={24}/></button>
             </div>
@@ -643,46 +772,81 @@ export default function MasterAttendancePage() {
               </div>
 
               {/* 時間割・内訳 */}
-              <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-200">
+              <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
                 <div className="flex justify-between items-center mb-4 border-b pb-2">
                   <h4 className="text-sm font-bold text-gray-700 flex items-center gap-2"><Layout size={18} className="text-orange-500"/> 業務内訳</h4>
                   <div className="text-[10px] text-gray-500 bg-gray-100 px-2 py-1 rounded font-bold flex items-center gap-1"><AlertCircle size={12}/> 隙間は自動で「休憩」になります</div>
                 </div>
+
+                <div className="mb-6">
+                   <div className="flex justify-between items-center mb-2 px-1">
+                     <h4 className="text-xs font-bold text-gray-500">1日の流れ</h4>
+                     <div className="flex gap-2 text-[10px] font-bold">
+                       <span className="flex items-center gap-1 text-blue-600"><span className="w-2 h-2 bg-blue-500 rounded-full"></span>授業</span>
+                       <span className="flex items-center gap-1 text-green-600"><span className="w-2 h-2 bg-green-500 rounded-full"></span>サポ</span>
+                       <span className="flex items-center gap-1 text-orange-600"><span className="w-2 h-2 bg-orange-500 rounded-full"></span>事務</span>
+                       <span className="flex items-center gap-1 text-gray-400"><span className="w-2 h-2 bg-slate-400 rounded-full"></span>休憩</span>
+                     </div>
+                   </div>
+                   <TimelineVisual record={editingRecord} currentSegments={segments} />
+                </div>
                 
-                <div className="space-y-3">
-                  {segments.map((seg, i) => (
-                    <div key={i} className={`flex flex-col sm:flex-row gap-3 items-start sm:items-center p-3 rounded-xl border transition-all group ${
-                      seg.type === 'lesson' ? 'bg-blue-50/50 border-blue-100' :
-                      seg.type === 'office' ? 'bg-orange-50/50 border-orange-100' :
-                      'bg-gray-50/50 border-gray-200'
-                    }`}>
-                      <div className="flex items-center gap-2 w-full sm:w-auto">
-                        <input type="time" className="bg-white border border-gray-200 rounded-lg p-2 text-xs font-mono font-bold w-24 text-center" value={seg.start} onChange={(e) => updateSegment(i, 'start', e.target.value)} />
-                        <span className="text-gray-300">➜</span>
-                        <input type="time" className="bg-white border border-gray-200 rounded-lg p-2 text-xs font-mono font-bold w-24 text-center" value={seg.end} onChange={(e) => updateSegment(i, 'end', e.target.value)} />
-                      </div>
-                      
-                      <div className="flex gap-2 flex-1 w-full sm:w-auto">
-                        <div className="flex bg-white rounded-lg border border-gray-200 p-1 shrink-0">
-                          <button onClick={() => updateSegment(i, 'type', 'lesson')} className={`px-3 py-1 rounded-md text-[10px] font-bold transition-colors ${seg.type === 'lesson' ? 'bg-blue-500 text-white' : 'text-gray-400 hover:bg-gray-100'}`}>授業</button>
-                          <div className="w-px bg-gray-200"></div>
-                          <button onClick={() => updateSegment(i, 'type', 'office')} className={`px-3 py-1 rounded-md text-[10px] font-bold transition-colors ${seg.type === 'office' ? 'bg-orange-500 text-white' : 'text-gray-400 hover:bg-gray-100'}`}>事務</button>
-                          <div className="w-px bg-gray-200"></div>
-                          <button onClick={() => updateSegment(i, 'type', 'break')} className={`px-3 py-1 rounded-md text-[10px] font-bold transition-colors ${seg.type === 'break' ? 'bg-gray-500 text-white' : 'text-gray-400 hover:bg-gray-100'}`}>休憩</button>
-                        </div>
-                        <input type="text" className="flex-1 bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-xs focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="内容メモ" value={seg.note} onChange={(e) => updateSegment(i, 'note', e.target.value)} />
-                      </div>
-                      
-                      <button onClick={() => removeSegment(i)} className="text-gray-300 hover:text-red-500 p-2 hover:bg-red-50 rounded-lg transition-colors ml-auto sm:ml-0"><Trash2 size={16}/></button>
-                    </div>
-                  ))}
-                  <button onClick={addSegment} className="w-full py-3 text-xs font-bold text-gray-500 hover:text-indigo-600 hover:bg-indigo-50 border border-dashed border-gray-300 hover:border-indigo-300 rounded-xl flex items-center justify-center gap-2 transition-all">
-                    <Plus size={16}/> 行を追加する
-                  </button>
+                <div className="overflow-x-auto pb-2">
+                  <table className="w-full text-sm border-collapse min-w-[600px] sm:min-w-0">
+                    <thead className="bg-gray-100 text-gray-500 text-xs font-bold border-b border-gray-200">
+                      <tr>
+                        <th className="px-2 py-2 text-left w-16">開始</th>
+                        <th className="px-2 py-2 text-left w-16">終了</th>
+                        <th className="px-2 py-2 text-left w-32">区分</th>
+                        <th className="px-2 py-2 text-left hidden sm:table-cell">詳細</th>
+                        <th className="w-10"></th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {segments.map((seg, i) => (
+                        <tr key={i} className={`transition-colors ${
+                          seg.type === 'lesson' ? 'bg-blue-50/30' : 
+                          seg.type === 'support' ? 'bg-green-50/30' : 
+                          seg.type === 'office' ? 'bg-orange-50/30' : 
+                          'bg-gray-100'
+                        }`}>
+                          <td className="p-2"><input type="time" className="w-full bg-white rounded border border-gray-300 font-mono text-xs font-bold p-1" value={seg.start} onChange={(e) => updateSegment(i, 'start', e.target.value)} /></td>
+                          <td className="p-2"><input type="time" className="w-full bg-white rounded border border-gray-300 font-mono text-xs font-bold p-1" value={seg.end} onChange={(e) => updateSegment(i, 'end', e.target.value)} /></td>
+                          <td className="p-2">
+                            <div className="flex flex-col sm:flex-row gap-1">
+                              <select 
+                                className={`w-full text-xs font-bold p-1 rounded border outline-none ${
+                                  seg.type === 'lesson' ? 'text-blue-600 border-blue-200 bg-blue-50' : 
+                                  seg.type === 'support' ? 'text-green-600 border-green-200 bg-green-50' : 
+                                  seg.type === 'office' ? 'text-orange-600 border-orange-200 bg-orange-50' :
+                                  'text-gray-500 border-gray-300 bg-white'
+                                }`}
+                                value={seg.type}
+                                onChange={(e) => updateSegment(i, 'type', e.target.value as any)}
+                              >
+                                <option value="lesson">授業</option>
+                                <option value="support">サポート</option>
+                                <option value="office">事務</option>
+                                <option value="break">休憩</option>
+                              </select>
+                              <input type="text" className="sm:hidden w-full bg-transparent border-b border-gray-300 text-xs p-1 mt-1 min-w-0" placeholder="詳細..." value={seg.note} onChange={(e) => updateSegment(i, 'note', e.target.value)} />
+                            </div>
+                          </td>
+                          <td className="p-2 hidden sm:table-cell"><input type="text" className="w-full bg-transparent border-b border-gray-300 focus:border-indigo-500 outline-none text-xs p-1 min-w-0" placeholder="詳細..." value={seg.note} onChange={(e) => updateSegment(i, 'note', e.target.value)} /></td>
+                          <td className="p-2 text-center w-10 whitespace-nowrap"><button onClick={() => removeSegment(i)} className="text-gray-300 hover:text-red-500 p-2 hover:bg-red-50 rounded-lg transition-colors shrink-0"><Trash2 size={16}/></button></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                
+                <div className="px-4 py-2 bg-gray-50 border-t border-gray-100 text-[10px] text-gray-400 flex items-center justify-between">
+                  <span className="flex items-center gap-1"><Coffee size={12}/> 入力のない時間は自動的に「休憩」となります</span>
+                  <button onClick={addSegment} className="text-blue-600 font-bold hover:underline flex items-center gap-1"><Plus size={12}/> 行を追加</button>
                 </div>
               </div>
 
-              {/* 交通費 */}
+              {/* 交通費セクション */}
               <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-200">
                 <div className="flex justify-between items-center mb-4 border-b pb-2">
                   <h4 className="text-sm font-bold text-gray-700 flex items-center gap-2"><Train size={18} className="text-emerald-500"/> 交通費申請</h4>

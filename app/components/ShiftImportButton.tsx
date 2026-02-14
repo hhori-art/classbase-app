@@ -48,6 +48,8 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
   const [importMode, setImportMode] = useState<'date_match' | 'weekly_repeat'>('date_match');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
+  // ★追加: ターゲット年度の選択
+  const [targetYear, setTargetYear] = useState<number>(new Date().getFullYear());
   const [forceOverwrite, setForceOverwrite] = useState(false);
 
   // テンプレートDL
@@ -134,7 +136,7 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
       return;
     }
 
-    if (!confirm(`「${file.name}」を取り込みますか？`)) {
+    if (!confirm(`「${file.name}」を取り込みますか？\n対象年度: ${targetYear}年`)) {
       e.target.value = '';
       return;
     }
@@ -214,7 +216,6 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
     console.clear();
     console.log("🚀 インポート処理開始");
     
-    // 1. 講師マスタの取得
     setProgress('講師データ照合中...');
     const teacherMap = new Map<string, {id: string, name: string}>();
     const snapUser = await getDocs(query(collection(db, 'users'), where('role', '==', 'teacher')));
@@ -227,10 +228,8 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
       }
     });
 
-    // 2. CSVパース
     const rows = parseCSVRows(csvText);
     
-    // 3. 既存データの確認（重複チェック用）
     setProgress('既存データの確認中...');
     const existingMainMap = new Map<string, string>(); 
     const existingSubMap = new Map<string, string>(); 
@@ -265,13 +264,10 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
     const sessionClassCounter = new Map<string, number>();
 
     let batch = writeBatch(db);
-    
-    // ★ カウンター変数の宣言（エラー修正箇所）
     let count = 0;
     let skipCount = 0;
     let overwriteCount = 0;
     let batchCount = 0;
-    
     let zoomSuccessCount = 0;
     let zoomFailCount = 0;
     let missingTeacherCount = 0;
@@ -288,7 +284,18 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
       if (dateMatch) {
         const month = parseInt(dateMatch[1]);
         const day = parseInt(dateMatch[2]);
-        const year = month >= 3 ? 2025 : 2026; 
+        // ★修正: 選択された targetYear を使用。ただし月が小さくなったタイミングで年を越したとみなす簡易ロジックを入れるか、単純に選択年を使うか。
+        // ここでは「選択された年」を基準とし、もし3月までの予定なら翌年扱いにする等のロジックも考えられるが、
+        // 単純に「選択された年」を使うのが最も確実（例: 2026年を選べばすべて2026年になる）
+        // ただし、年度跨ぎ(3月->4月)のファイルの場合に困るため、
+        // 「ファイル内の月が4月以上なら選択年(2025)、3月以下なら選択年+1(2026)」のような年度ロジックを採用
+        
+        let year = targetYear;
+        // 例: ターゲットが2025年度の場合、1~3月は2026年とする
+        if (month <= 3) {
+           year = targetYear + 1;
+        }
+
         currentDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
         currentPeriod = 0; 
       }
@@ -301,7 +308,6 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
         sessionClassCounter.clear();
       }
 
-      // ヘッダー判定
       const isSubjectRow = col1.includes('教科');
       const isClassRow = col1.includes('クラス');
       const isUnitRow = col1.includes('単元');
@@ -321,10 +327,12 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
         for (let c = 2; c < maxCol; c++) {
           const val = row[c] || '';
           const norm = val.replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0));
+          
           if (norm) {
-            if (norm.includes('中1')) lastGrade = '中1';
-            else if (norm.includes('中2')) lastGrade = '中2';
-            else if (norm.includes('中3')) lastGrade = '中3';
+            if (norm.startsWith('中1') || norm.startsWith('中１')) lastGrade = '中1';
+            else if (norm.startsWith('中2') || norm.startsWith('中２')) lastGrade = '中2';
+            else if (norm.startsWith('中3') || norm.startsWith('中３')) lastGrade = '中3';
+            
             if (norm.includes('理科')) lastSubject = '理科';
             else if (norm.includes('社会')) lastSubject = '社会';
           }
@@ -339,20 +347,17 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
       if (isUnitRow) { for (let c = 2; c < maxCol; c++) if (colMap[c]) colMap[c]!.unit = row[c] || ''; continue; }
       if (isPlaceRow) { for (let c = 2; c < maxCol; c++) if (colMap[c]) colMap[c]!.place = row[c] || ''; continue; }
       
-      // Zoom ID読み込み
       if (isZoomRow) { 
         for (let c = 2; c < maxCol; c++) {
           if (colMap[c]) {
             const val = (row[c] || '').trim();
             colMap[c]!.meetingId = val;
-            if (val) console.log(`ℹ️ 既存ID検出 [${c}列]: ${val}`);
           }
         }
         continue; 
       }
       if (isSigninRow) { for (let c = 2; c < maxCol; c++) if (colMap[c]) colMap[c]!.signinAddress = (row[c] || '').replace(/\s+/g, '').trim(); continue; }
 
-      // 講師行の処理
       if (isTeacherRow || isSupportRow) {
         for (let c = 2; c < maxCol; c++) {
           const rawName = (row[c] || '').trim();
@@ -412,14 +417,9 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
                 existingId = existingSubMap.get(duplicateKey);
               }
 
-              // ==========================================
-              // Zoom作成ロジック
-              // ==========================================
               let zoomInfo = { startUrl: '', joinUrl: '' };
               if (roleType === 'main' && userId) {
                 if (!info.meetingId) {
-                  console.log(`✨ Zoom作成試行: ${teacherName} (${targetDate})`);
-                  
                   const startTimeISO = currentPeriod === 1 
                     ? `${targetDate}T19:20:00` 
                     : `${targetDate}T20:35:00`;
@@ -436,18 +436,11 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
                     zoomInfo.startUrl = created.startUrl;
                     zoomInfo.joinUrl = created.joinUrl;
                     zoomSuccessCount++;
-                    console.log(`✅ 作成成功: ID=${created.meetingId}`);
                   } else {
                     zoomFailCount++;
-                    console.error(`❌ 作成失敗: APIエラー`);
                   }
-                } else {
-                  console.log(`⏭ スキップ: CSVにIDあり (${info.meetingId}) - ${teacherName}`);
                 }
-              } else if (roleType === 'main' && !userId) {
-                console.log(`⏭ スキップ: ユーザーID特定不可 (CSV名: ${rawName})`);
               }
-              // ==========================================
 
               const shiftData: any = {
                 user_id: userId,
@@ -490,7 +483,6 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
               }
 
             } else if (userId) {
-              // General support (全体サポート)
               const roleType = 'general';
               const duplicateKey = `${targetDate}_${currentPeriod}_${userId}_general`;
               const existingId = existingGeneralMap.get(duplicateKey);
@@ -534,15 +526,15 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
 
     if (batchCount > 0) await batch.commit();
 
-    console.log(`🏁 処理完了: ${count}件追加, Zoom作成: ${zoomSuccessCount}件`);
+    console.log(`🏁 処理完了: ${count}件追加`);
     
     let msg = `完了: ${count}件 追加`;
     if (overwriteCount > 0) msg += `\n(上書き: ${overwriteCount}件)`;
     if (skipCount > 0) msg += `\n(スキップ: ${skipCount}件)`;
     
     if (zoomSuccessCount > 0) msg += `\n\n🎉 Zoom作成成功: ${zoomSuccessCount}件`;
-    if (zoomFailCount > 0) msg += `\n⚠️ Zoom作成失敗: ${zoomFailCount}件\n(詳細はコンソールを確認)`;
-    if (missingTeacherCount > 0) msg += `\n⚠️ 講師名不一致でZoom作成スキップ: ${missingTeacherCount}件\n(マスタの登録名とCSVを確認してください)`;
+    if (zoomFailCount > 0) msg += `\n⚠️ Zoom作成失敗: ${zoomFailCount}件`;
+    if (missingTeacherCount > 0) msg += `\n⚠️ 講師名不一致: ${missingTeacherCount}件`;
 
     alert(msg);
   };
@@ -551,6 +543,21 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
     <div className="flex flex-col gap-4 p-4 bg-white border border-gray-200 rounded-xl shadow-sm">
       <div className="flex flex-col gap-2 border-b border-gray-100 pb-3">
         <label className="text-xs font-bold text-gray-500">インポート設定</label>
+        
+        {/* ★追加: 年度選択 */}
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-xs font-bold text-gray-700">対象年度:</span>
+          <select 
+            value={targetYear} 
+            onChange={(e) => setTargetYear(Number(e.target.value))}
+            className="bg-gray-50 border border-gray-200 rounded px-2 py-1 text-xs font-bold"
+          >
+            <option value={2024}>2024年度 (～2025/3)</option>
+            <option value={2025}>2025年度 (～2026/3)</option>
+            <option value={2026}>2026年度 (～2027/3)</option>
+          </select>
+        </div>
+
         <div className="flex gap-4">
           <label className="flex items-center gap-2 cursor-pointer">
             <input type="radio" name="mode" checked={importMode === 'date_match'} onChange={() => setImportMode('date_match')} className="text-purple-600"/>

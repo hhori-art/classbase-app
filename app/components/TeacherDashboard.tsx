@@ -6,13 +6,15 @@ import {
   ChevronLeft, ChevronRight, LayoutList, Layout, Maximize2, Minimize2,
   Briefcase, Clock, KeyRound, ExternalLink,
   Video, Loader2, Zap,
-  LogOut
+  LogOut, Sparkles
 } from 'lucide-react';
 import { signOut } from 'firebase/auth';
 import { auth } from '@/lib/firebase';
+import Link from 'next/link';
 import NewsWidget from '@/app/components/NewsWidget';
-// ★追加: 監視ボタンのインポート
 import ShiftMonitorButton from '@/app/components/ShiftMonitorButton';
+import NextClassWidget from '@/app/components/NextClassWidget';
+import FutureClassesModal from '@/app/components/FutureClassesModal'; // ★カレンダーモーダル
 
 // --- 型定義 ---
 type ShiftAssignment = {
@@ -68,7 +70,7 @@ const EmptyState = ({ text }: { text: string }) => (
   </div>
 );
 
-// --- クラスカード (ご提示のコードをそのまま維持) ---
+// --- クラスカード ---
 const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { info: ClassGroup, color: 'emerald' | 'orange', currentUserProfile: any, isExpanded: boolean }) => {
   const [loading, setLoading] = useState(false);
   
@@ -78,7 +80,6 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
   const loginEmail = info.signin_address?.trim();
   const hasHostPermission = !!loginEmail && loginEmail.length > 0;
   
-  // 表示用ID (@以下をカット)
   const displayLoginId = loginEmail ? loginEmail.split('@')[0] : '';
 
   const isEmerald = color === 'emerald';
@@ -105,7 +106,6 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
     window.open(url, '_blank');
   };
 
-  // ■■■ Zoom入室ハンドラ (元の正常動作するコード) ■■■
   const handleEnterZoom = async (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -119,8 +119,6 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
       setLoading(true);
       try {
         console.log(`🚀 ホスト開始試行: Email=${loginEmail}`);
-        
-        // API呼び出し (名前変更ロジックは削除済み)
         const res = await fetch('/api/get-zoom-zak', { 
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -129,8 +127,6 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
         const data = await res.json();
         
         if (data.success && data.zak && data.pmi) {
-          // WebランチャーURLで起動 (ホスト権限)
-          // https://zoom.us/s/ID?zak=TOKEN 形式は最も強力にホスト権限を渡せます
           const targetUrl = `https://zoom.us/s/${data.pmi}?zak=${data.zak}`;
           console.log("✅ Webランチャー起動:", targetUrl);
           launchWebUrl(targetUrl);
@@ -148,7 +144,6 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
         setLoading(false);
       }
     } else {
-      // 通常参加
       let targetUrl = info.url || `zoommtg://zoom.us/join?confno=${confno}`;
       if (info.url) {
         try {
@@ -168,15 +163,11 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
 
   return (
     <div className={`${widthClass} bg-white border ${theme.border} rounded-xl shadow-sm flex flex-col overflow-hidden transition-all duration-200 ${isMyClass ? 'shadow-md transform -translate-y-0.5 z-10' : 'hover:shadow-md'}`}>
-      
-      {/* ヘッダー */}
       <div className={`${theme.headerBg} px-2 py-1.5 transition-colors relative h-[38px]`}>
         <div className="flex justify-between items-start mb-0.5">
           <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-md ${theme.badge} whitespace-nowrap truncate max-w-[85%]`}>
             {info.grade}/{info.place}
           </span>
-          
-          {/* スタジオ名表示 */}
           {info.studio && (
             <div className="flex items-center gap-0.5 text-[8px] bg-black/20 px-1.5 py-0.5 rounded text-white/90 font-bold whitespace-nowrap ml-1 max-w-[60px] truncate" title={info.studio}>
               <MapPin size={8}/> {info.studio}
@@ -187,10 +178,7 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
           {info.unit || <span className="opacity-60 font-normal">未設定</span>}
         </div>
       </div>
-      
       <div className="p-1.5 flex-1 flex flex-col gap-1.5 bg-white">
-        
-        {/* メイン講師情報 */}
         <div className="flex flex-col gap-0.5">
            <div className="flex items-center gap-1.5">
               <div className={`w-5 h-5 rounded-full flex items-center justify-center text-white text-[8px] font-bold shadow-sm shrink-0 ${theme.iconBg}`}>
@@ -200,8 +188,6 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
                 {info.main?.teacher_name || '未定'}
               </div>
            </div>
-
-           {/* ログインID表示 (@以下カット) */}
            {displayLoginId ? (
               <button 
                 type="button"
@@ -224,7 +210,6 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
               <div className="h-[18px] text-[8px] text-slate-300 flex items-center pl-1 border border-transparent">ID未登録</div> 
             )}
         </div>
-
         <div className="border-t border-slate-100 pt-1 mt-0.5">
           <div className="space-y-0.5">
             {info.subs.length > 0 ? info.subs.map((s) => {
@@ -240,7 +225,6 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
             )}
           </div>
         </div>
-
         <div className="mt-auto pt-0.5">
           {confno ? (
             <button 
@@ -339,6 +323,11 @@ const DailyShiftViewer = ({ assignments, currentUserProfile, isExpanded, date }:
 export default function TeacherDashboard({ profile, allAssignments, pendingCount, currentDate, onDateChange, viewMode, onViewModeChange, isExpanded, onExpandChange }: Props) {
   const days = ['日', '月', '火', '水', '木', '金', '土'];
   const dayOfWeek = days[new Date(currentDate).getDay()];
+  const teacherName = profile?.student_name || profile?.name || '講師';
+  
+  // ★追加: カレンダーモーダル用ステート
+  const [isCalendarModalOpen, setIsCalendarModalOpen] = useState(false);
+
   const handleLogout = async () => { if (confirm('ログアウトしますか？')) { await signOut(auth); window.location.href = '/'; } };
   const handleDateChange = (direction: number) => { const d = new Date(currentDate); const increment = viewMode === 'week' ? 7 : 1; d.setDate(d.getDate() + (direction * increment)); onDateChange(d.toISOString().split('T')[0]); };
   const targetDates = [currentDate];
@@ -352,10 +341,23 @@ export default function TeacherDashboard({ profile, allAssignments, pendingCount
         <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm/50 backdrop-blur-md bg-white/90">
           <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
             <div className="flex items-center gap-2"><div className="bg-slate-900 p-2 rounded-xl text-white shadow-lg shadow-indigo-500/20"><Briefcase size={20} /></div><span className="font-black text-lg tracking-tight text-slate-800 hidden md:inline">講師ポータル</span></div>
-            <div className="flex items-center gap-4"><div className="hidden sm:flex items-center gap-2 px-3 py-1.5 bg-slate-50 rounded-full border border-slate-100"><div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></div><span className="text-xs font-bold text-slate-600">{profile?.student_name || '講師'}</span></div><button onClick={handleLogout} className="p-2 hover:bg-red-50 rounded-full text-slate-400 hover:text-red-500 transition-colors"><LogOut size={20} /></button></div>
+            <div className="flex items-center gap-4">
+              {/* ★追加: 勤怠打刻ページへのリンク */}
+              <Link href="/teacher/work" className="p-2 bg-indigo-50 hover:bg-indigo-100 rounded-full text-indigo-600 transition-colors shadow-sm" title="勤怠打刻">
+                <Clock size={20} />
+              </Link>
+
+              <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 bg-slate-50 rounded-full border border-slate-100">
+                <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></div>
+                <span className="text-xs font-bold text-slate-600">{teacherName}</span>
+              </div>
+              <button onClick={handleLogout} className="p-2 hover:bg-red-50 rounded-full text-slate-400 hover:text-red-500 transition-colors"><LogOut size={20} /></button>
+            </div>
           </div>
         </header>
       )}
+      
+      {/* 拡大モード用ヘッダー */}
       {isExpanded && (
         <div className="bg-slate-900 text-white p-2 flex justify-between items-center shadow-md z-20 shrink-0">
           <div className="flex items-center gap-3">
@@ -367,29 +369,71 @@ export default function TeacherDashboard({ profile, allAssignments, pendingCount
           </div>
           <div className="flex items-center gap-2 bg-white/10 p-1 rounded-lg border border-white/10">
              <button onClick={() => handleDateChange(-1)} className="p-1 hover:bg-white/20 rounded-md transition text-white/70 hover:text-white"><ChevronLeft size={16}/></button>
-             <span className="px-2 text-xs font-bold font-mono">{currentDate.replace(/-/g, '/')} {viewMode === 'week' ? '～' : `(${days[new Date(currentDate).getDay()]})`}</span>
+             
+             {/* ★修正: 拡大時の日付をクリック可能に */}
+             <button 
+               onClick={() => setIsCalendarModalOpen(true)}
+               className="px-2 text-xs font-bold font-mono hover:text-indigo-300 transition-colors"
+             >
+               {currentDate.replace(/-/g, '/')} {viewMode === 'week' ? '～' : `(${days[new Date(currentDate).getDay()]})`}
+             </button>
+
              <button onClick={() => handleDateChange(1)} className="p-1 hover:bg-white/20 rounded-md transition text-white/70 hover:text-white"><ChevronRight size={16}/></button>
           </div>
         </div>
       )}
+
       <div className={contentClasses}>
+        
+        {/* ホーム上部: 挨拶と日付操作 */}
         {!isExpanded && (
-          <div className="flex flex-col md:flex-row items-center justify-between gap-4 bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
-            <div className="flex items-center gap-3 w-full md:w-auto">
-              <div className="flex items-center bg-slate-50 rounded-xl p-1 border border-slate-100">
-                 <button onClick={() => handleDateChange(-1)} className="p-2 hover:bg-white rounded-lg transition text-slate-400 hover:text-indigo-600 shadow-sm"><ChevronLeft size={18}/></button>
-                 <div className="px-4 text-center w-32"><span className="block text-[10px] font-bold text-slate-400">TARGET DATE</span><div className="text-sm font-black text-slate-700 flex items-center justify-center gap-1">{currentDate} <span className="text-xs font-normal text-slate-400">({dayOfWeek})</span></div></div>
-                 <button onClick={() => handleDateChange(1)} className="p-2 hover:bg-white rounded-lg transition text-slate-400 hover:text-indigo-600 shadow-sm"><ChevronRight size={18}/></button>
-              </div>
+          <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 flex flex-col md:flex-row items-center justify-between gap-4">
+            <div className="w-full md:w-auto text-center md:text-left">
+               <div className="flex items-center justify-center md:justify-start gap-2 text-indigo-600 mb-1">
+                 <Sparkles size={14} className="animate-pulse"/>
+                 <span className="text-xs font-bold uppercase tracking-wider opacity-80">Welcome Back</span>
+               </div>
+               <h2 className="text-xl font-black text-slate-700">
+                 こんにちは、<span className="text-indigo-600">{teacherName}</span>先生
+               </h2>
+            </div>
+
+            <div className="flex items-center bg-slate-50 rounded-xl p-1.5 border border-slate-100 shadow-inner w-full md:w-auto justify-between md:justify-start">
+               <button onClick={() => handleDateChange(-1)} className="p-3 hover:bg-white rounded-lg transition text-slate-400 hover:text-indigo-600 shadow-sm active:scale-95"><ChevronLeft size={20}/></button>
+               
+               {/* ★修正: 日付エリアをクリック可能に */}
+               <div 
+                 className="px-6 text-center min-w-[140px] cursor-pointer hover:bg-slate-100/50 rounded-lg transition-colors py-1"
+                 onClick={() => setIsCalendarModalOpen(true)}
+               >
+                 <span className="block text-[10px] font-bold text-slate-400 mb-0.5">TARGET DATE</span>
+                 <div className="text-lg font-black text-slate-700 flex items-center justify-center gap-1">
+                   {currentDate} <span className="text-sm font-normal text-slate-400">({dayOfWeek})</span>
+                 </div>
+               </div>
+
+               <button onClick={() => handleDateChange(1)} className="p-3 hover:bg-white rounded-lg transition text-slate-400 hover:text-indigo-600 shadow-sm active:scale-95"><ChevronRight size={20}/></button>
             </div>
           </div>
         )}
+        
         {!isExpanded && <NewsWidget role="teacher" />}
+        {!isExpanded && <NextClassWidget profile={profile} />}
+
         <div className={`space-y-4 ${isExpanded ? 'h-full flex flex-col' : ''}`}>
           <div className="flex items-center justify-between px-1 shrink-0">
-            <div className="flex items-center gap-3"><h3 className={`font-black text-slate-700 flex items-center gap-2 ${isExpanded ? 'hidden' : 'text-lg'}`}><CalendarIcon className="text-indigo-600"/> 講師配置</h3>
+            <div className="flex items-center gap-3">
+              {/* ★修正: カレンダーアイコンをクリック可能に */}
+              <button 
+                onClick={() => setIsCalendarModalOpen(true)}
+                className={`font-black text-slate-700 flex items-center gap-2 hover:text-indigo-600 transition-colors group ${isExpanded ? 'hidden' : 'text-lg'}`}
+              >
+                <div className="p-1.5 bg-indigo-50 rounded-lg group-hover:bg-indigo-100 transition-colors">
+                  <CalendarIcon className="text-indigo-600" size={20}/>
+                </div>
+                講師配置
+              </button>
               
-              {/* ★追加: 監視ボタン */}
               <ShiftMonitorButton assignments={allAssignments} currentDate={currentDate} />
 
               {!isExpanded && (
@@ -423,6 +467,13 @@ export default function TeacherDashboard({ profile, allAssignments, pendingCount
           </div>
         </div>
       </div>
+
+      {/* ★追加: カレンダーモーダル */}
+      <FutureClassesModal 
+        isOpen={isCalendarModalOpen} 
+        onClose={() => setIsCalendarModalOpen(false)} 
+        profile={profile} 
+      />
     </div>
   );
 }

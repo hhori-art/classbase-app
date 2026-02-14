@@ -74,9 +74,17 @@ export default function ImportCenterPage() {
             </div>
             <div className="p-6">
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
-                <div className="text-sm text-gray-600 space-y-1 flex-1">
-                  <p><strong>必須項目:</strong> 氏名, ID(生涯番号), パスワード</p>
-                  <p className="text-xs text-gray-400 mt-1">※ IDが一致する講師は情報が上書きされます。</p>
+                <div className="text-sm text-gray-600 space-y-2 flex-1">
+                  <div>
+                    <span className="font-bold text-gray-700">CSV形式:</span><br/>
+                    <span className="font-mono text-xs bg-gray-100 px-2 py-1 rounded">校舎番号, 職員番号, 所属校, 契約書種別, 氏名</span>
+                  </div>
+                  <ul className="list-disc list-inside pl-1 space-y-0.5">
+                    <li><strong>ログインID:</strong> 「職員番号」が使用されます。</li>
+                    <li><strong>初期パスワード:</strong> 「職員番号」と同じ値が設定されます。</li>
+                    <li><strong>所属校:</strong> 「校舎番号」と「所属校」の両方が登録されます。</li>
+                  </ul>
+                  <p className="text-xs text-gray-400 mt-1">※ 職員番号が一致する講師は情報が上書きされます。</p>
                 </div>
                 <div className="shrink-0">
                   <AccountImportButton role="teacher" onSuccess={() => {}} />
@@ -133,7 +141,7 @@ export default function ImportCenterPage() {
             </div>
           </section>
 
-          {/* 5. スライド・教材データ管理 (旧6から繰り上げ) */}
+          {/* 5. スライド・教材データ管理 */}
           <section className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
             <div className="bg-teal-50 p-5 border-b border-teal-100 flex items-center gap-4">
               <div className="bg-white p-3 rounded-xl text-teal-600 shadow-sm">

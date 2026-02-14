@@ -408,6 +408,7 @@ export default function MasterShiftPage() {
     return assignments.filter(a => a.role_type === 'general' && a.note.includes(`【${time}】`));
   };
 
+  // ★修正: 講師リストのグループ分けロジックを緩和して確実に表示
   const groupedTeachers = {
     available: [] as Teacher[],
     maybe: [] as Teacher[],
@@ -416,16 +417,20 @@ export default function MasterShiftPage() {
 
   allTeachers.forEach(t => {
     const avail = availabilities.find(a => a.user_id === t.id);
-    if (avail && avail.status === 'possible') {
-      if (avail.note?.includes('〇') || avail.note?.includes('可')) {
-        groupedTeachers.available.push(t);
-      } else if (avail.note?.includes('△')) {
+    
+    if (!avail) {
+      // 完全未提出
+      groupedTeachers.others.push(t);
+    } else if (avail.status === 'impossible') {
+      // 提出済みだが「不可」
+      groupedTeachers.others.push(t);
+    } else {
+      // それ以外（possible, またはステータス不明でもレコードがあれば提出済みとみなす）
+      if (avail.note?.includes('△')) {
         groupedTeachers.maybe.push(t);
       } else {
-        groupedTeachers.others.push(t);
+        groupedTeachers.available.push(t);
       }
-    } else {
-      groupedTeachers.others.push(t);
     }
   });
 
@@ -434,26 +439,48 @@ export default function MasterShiftPage() {
     
     return list.map(t => {
       const assignedCount = assignments.filter(a => a.user_id === t.id).length;
+      const avail = availabilities.find(a => a.user_id === t.id); 
+
+      // ★修正: 提出内容（時間など）の表示用テキスト
+      const shiftNote = avail?.note || (avail?.status === 'possible' ? '〇' : null);
+      // 不可で提出されている場合
+      const isImpossible = avail?.status === 'impossible';
+
       return (
         <div 
           key={t.id}
           draggable 
           onDragStart={(e) => handleDragStart(e, t)}
           onClick={() => setForm({ ...form, userId: t.id })}
-          className={`p-3 rounded-xl border mb-2 cursor-grab active:cursor-grabbing transition-all text-sm group relative flex justify-between items-center shadow-sm
+          className={`p-3 rounded-xl border mb-2 cursor-grab active:cursor-grabbing transition-all text-sm group relative flex flex-col shadow-sm
             ${form.userId === t.id ? 'ring-2 ring-indigo-50 bg-indigo-50 border-indigo-500' : 'bg-white hover:bg-gray-50 border-slate-200'}
             ${assignedCount > 0 ? 'opacity-70 bg-gray-50' : ''}
           `}
         >
-          <div className="flex items-center gap-2">
-            <GripVertical size={14} className="text-gray-300" />
-            <div>
-              <span className="font-bold text-slate-700 block">{t.student_name || t.name}</span>
-              {assignedCount > 0 && <span className="text-[9px] text-white bg-green-500 px-1.5 py-0.5 rounded-full inline-block mt-0.5">配置済: {assignedCount}</span>}
+          <div className="flex justify-between items-center w-full">
+            <div className="flex items-center gap-2">
+              <GripVertical size={14} className="text-gray-300" />
+              <div>
+                <span className="font-bold text-slate-700 block">{t.student_name || t.name}</span>
+              </div>
             </div>
+            {type === 'available' && <CheckCircle size={16} className="text-green-500" />}
+            {type === 'maybe' && <HelpCircle size={16} className="text-yellow-500" />}
+            {isImpossible && <span className="text-[10px] font-bold text-red-500 bg-red-50 px-2 py-0.5 rounded">不可</span>}
           </div>
-          {type === 'available' && <CheckCircle size={16} className="text-green-500" />}
-          {type === 'maybe' && <HelpCircle size={16} className="text-yellow-500" />}
+          
+          {/* ★修正: 提出された時間やメモを目立つように表示 */}
+          <div className="pl-6 mt-1.5 flex flex-wrap gap-2 items-center w-full">
+             {shiftNote && (
+               <div className="text-[11px] font-bold text-indigo-600 bg-indigo-50 px-2 py-1 rounded border border-indigo-100 w-full truncate">
+                 <span className="text-indigo-400 mr-1 text-[9px] uppercase">SHIFT:</span>
+                 {shiftNote}
+               </div>
+             )}
+             {assignedCount > 0 && (
+               <span className="text-[9px] text-white bg-green-500 px-1.5 py-0.5 rounded-full">配置済: {assignedCount}</span>
+             )}
+          </div>
         </div>
       );
     });
@@ -809,7 +836,6 @@ function ClassCard({ info, allTeachers, onDelete, onEdit, onShowResults, onDragO
     badge: 'bg-white/20 text-white',
     iconBg: 'bg-emerald-500',
     activeRing: 'ring-2 ring-emerald-400',
-    // 先生画面と合わせる (ホスト可なら赤、不可なら緑)
     btn: hasHostPermission ? 'bg-rose-600 hover:bg-rose-700 text-white shadow-rose-200' : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-200',
   } : {
     border: 'border-orange-100',
