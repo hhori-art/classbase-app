@@ -63,7 +63,7 @@ export default function MasterAttendancePage() {
         map[doc.id] = {
           name: d.student_name || d.name || d.displayName || '名称未設定',
           school_code: d.school_code || d.schoolCode || d.school_id || d.school_number || '999',
-          staff_id: d.lifetime_id || d.staff_id || d.employee_id || '9999'
+          staff_id: d.lifetime_id || d.staff_id || d.staffId || d.employee_id || d.employeeId || d.teacher_code || '9999'
         };
       });
       setUsersMap(map);
@@ -347,7 +347,7 @@ export default function MasterAttendancePage() {
     };
   }, [records]);
 
-  // ★CSV一括出力 (修正済み: 講師ごとに合計をリセット)
+  // ★CSV一括出力
   const handleBulkDownload = async () => {
     if (filteredRecords.length === 0) return alert('出力するデータがありません');
     if (!confirm('表示中の全データを校舎・職員番号順にソートし、講師ごとの合計行を含めてCSV出力しますか？')) return;
@@ -403,12 +403,11 @@ export default function MasterAttendancePage() {
         return `${h}:${String(min).padStart(2, '0')}`;
       };
 
-      // 各講師ごとに処理 (ここでループごとに変数を初期化することで合計混同を防ぐ)
+      // 各講師ごとに処理
       teacherOrder.forEach(tid => {
         const teacherRecords = groupedData[tid];
         const userInfo = usersMap[tid] || { name: teacherRecords[0].teacher_name || '不明', school_code: '', staff_id: '' };
         
-        // ★修正: 講師ごとの合計変数をここで宣言・初期化
         let totalLessonNormal = 0;
         let totalLessonLate = 0;
         let totalOfficeNormal = 0;
@@ -469,7 +468,7 @@ export default function MasterAttendancePage() {
           ].join(','));
         });
 
-        // ★講師ごとの合計行を追加
+        // 合計行を追加
         csvRows.push([
           `"${userInfo.school_code !== '999' ? userInfo.school_code : ''}"`, 
           `"${userInfo.staff_id !== '9999' ? userInfo.staff_id : ''}"`,

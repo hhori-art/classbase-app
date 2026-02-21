@@ -11,23 +11,18 @@ import { doc, getDoc } from 'firebase/firestore';
 import { auth, db } from '@/lib/firebase';
 import { useRouter } from 'next/navigation';
 
-// ★ここで型定義を拡張します
 export interface UserProfile {
   uid: string;
   role: 'student' | 'teacher' | 'master';
-  name?: string;          // 講師名など
+  name?: string;          
   email?: string;
-  
-  // 生徒用に追加
-  student_name?: string;  // 生徒名
-  lifetime_id?: string;   // 生涯番号
-  grade?: string;         // 学年
-  classroom?: string;     // 教室
-  phone_number?: string;  // 電話番号
-  
-  // その他
+  student_name?: string;  
+  lifetime_id?: string;   
+  grade?: string;         
+  classroom?: string;     
+  phone_number?: string;  
   initial_password?: string;
-  [key: string]: any;     // その他のフィールドも許容
+  [key: string]: any;     
 }
 
 interface AuthContextType {
@@ -56,21 +51,28 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-      setUser(currentUser);
       if (currentUser) {
         try {
           const docRef = doc(db, 'users', currentUser.uid);
           const docSnap = await getDoc(docRef);
+          
           if (docSnap.exists()) {
+            setUser(currentUser);
             setProfile(docSnap.data() as UserProfile);
           } else {
+            // ★追加：Firestoreにデータがない（＝削除されたゴーストアカウント）場合は強制ログアウトする
+            console.warn("ユーザーデータが見つかりません。強制ログアウトします。");
+            await firebaseSignOut(auth);
+            setUser(null);
             setProfile(null);
           }
         } catch (error) {
           console.error('Profile fetch error:', error);
+          setUser(null);
           setProfile(null);
         }
       } else {
+        setUser(null);
         setProfile(null);
       }
       setLoading(false);
@@ -84,12 +86,21 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
   const logout = async () => {
     await firebaseSignOut(auth);
+    setUser(null);
+    setProfile(null);
     router.push('/');
   };
 
   return (
     <AuthContext.Provider value={{ user, profile, loading, login, logout }}>
-      {children}
+      {/* ★追加：ローディング中は画面を描画せず、スピナーを表示する */}
+      {loading ? (
+        <div className="min-h-screen flex items-center justify-center bg-gray-50">
+          <div className="animate-spin h-10 w-10 border-4 border-indigo-500 rounded-full border-t-transparent"></div>
+        </div>
+      ) : (
+        children
+      )}
     </AuthContext.Provider>
   );
 };
