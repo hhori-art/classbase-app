@@ -1,4 +1,3 @@
-// app/print/page.tsx
 'use client';
 
 import { useEffect, useState } from 'react';
@@ -13,11 +12,13 @@ export default function PrintPage() {
   
   const [users, setUsers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [qrBaseUrl, setQrBaseUrl] = useState('');
+  const [qrUrl, setQrUrl] = useState('');
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      setQrBaseUrl(window.location.origin);
+      // ★ アクセスされたURL（ドメイン）を元にQRコードのURLを生成
+      const baseUrl = window.location.origin;
+      setQrUrl(`https://chart.googleapis.com/chart?chs=150x150&cht=qr&chl=${encodeURIComponent(baseUrl)}`);
     }
   }, []);
 
@@ -46,11 +47,12 @@ export default function PrintPage() {
       setUsers(fetchedUsers);
       setLoading(false);
       
-      // ★ データ取得後、0.5秒待ってから自動で印刷ダイアログを開く
+      // ★ 修正ポイント: 印刷ダイアログの起動を 0.5秒 → 2.0秒 に遅らせる
+      // （QRコード画像が完全にダウンロードされて画面に表示されるのを待つため）
       if (fetchedUsers.length > 0) {
         setTimeout(() => {
           window.print();
-        }, 500);
+        }, 2000);
       }
     };
 
@@ -58,7 +60,12 @@ export default function PrintPage() {
   }, [idsParam]);
 
   if (loading) {
-    return <div className="min-h-screen flex flex-col items-center justify-center bg-gray-100"><Loader2 className="animate-spin text-blue-500 mb-4" size={40}/><p className="font-bold text-gray-500">印刷データを準備中...</p></div>;
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-gray-100">
+        <Loader2 className="animate-spin text-blue-500 mb-4" size={40}/>
+        <p className="font-bold text-gray-500">印刷データを準備中...</p>
+      </div>
+    );
   }
 
   if (users.length === 0) {
@@ -67,7 +74,6 @@ export default function PrintPage() {
 
   return (
     <div className="bg-gray-200 min-h-screen pb-10 print:bg-white print:p-0">
-      {/* 印刷用の最強CSS */}
       <style dangerouslySetInnerHTML={{__html: `
         @media print {
           @page { size: A4 portrait; margin: 0; }
@@ -102,15 +108,13 @@ export default function PrintPage() {
       `}} />
 
       <div className="no-print bg-indigo-600 text-white p-4 shadow-md mb-8 text-center font-bold">
-        🖨️ 印刷ダイアログが自動で開きます。<br/>
+        🖨️ まもなく印刷ダイアログが自動で開きます...<br/>
         <span className="text-sm font-normal opacity-80">もし開かない場合は、ブラウザの印刷機能（Ctrl+P または Cmd+P）を使用してください。</span>
       </div>
 
       <div className="flex flex-col items-center gap-8 print:block print:gap-0 font-sans">
         {users.map((user) => {
           const loginId = user.lifetime_id || user.email || '';
-          const safeBaseUrl = qrBaseUrl || 'https://www.edic.jp'; 
-          const qrUrl = `https://chart.googleapis.com/chart?chs=150x150&cht=qr&chl=${encodeURIComponent(safeBaseUrl)}`;
           
           const isStudent = user.role === 'student';
           const isTeacher = user.role === 'teacher';
@@ -166,8 +170,15 @@ export default function PrintPage() {
                   
                   <div className="text-center ml-2 flex flex-col items-center justify-center bg-blue-50 p-3 rounded-2xl border-2 border-blue-100 w-40 shrink-0">
                     <p className="text-[11px] font-bold text-blue-800 mb-1.5 bg-white px-3 py-1 rounded-full shadow-sm">ここからログイン！</p>
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={qrUrl} alt="Login QR Code" className="w-20 h-20 mb-1" />
+                    
+                    {/* QRコード画像 */}
+                    {qrUrl ? (
+                      /* eslint-disable-next-line @next/next/no-img-element */
+                      <img src={qrUrl} alt="Login QR Code" className="w-20 h-20 mb-1" />
+                    ) : (
+                      <div className="w-20 h-20 mb-1 bg-gray-200 flex items-center justify-center text-xs text-gray-400">Loading...</div>
+                    )}
+                    
                     <p className="text-[9px] font-bold text-gray-500 leading-tight">カメラで読み取れます</p>
                   </div>
                 </div>
