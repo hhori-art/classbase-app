@@ -10,7 +10,7 @@ import {
   Megaphone, Calendar, ClipboardList, MonitorPlay, BookOpen,
   BarChart2, CheckSquare, Sparkles, Clock, Filter,
   Settings, FileSpreadsheet, Briefcase, Video, ShoppingBag, 
-  Database, Trash2, Edit3, X, Check, LogOut, MessageCircle
+  Database, Trash2, Edit3, X, Check, LogOut, MessageCircle, Send // ★ Send を追加
 } from 'lucide-react';
 import Link from 'next/link';
 
@@ -41,8 +41,9 @@ const AVAILABLE_ACTIONS = [
   { id: '/master/announcements', title: 'お知らせ配信', icon: Megaphone },
   { id: '/master/shifts', title: 'シフト確認', icon: Calendar },
   { id: '/master/registration-tasks', title: '登録依頼作成', icon: ClipboardList },
-  { id: '/master/approval', title: '録画承認', icon: Video }, // recordings -> approval に変更（承認作業用）
-  { id: '/master/community', title: 'コミュニティ管理', icon: MessageCircle }, // 追加
+  { id: '/master/approval', title: '録画承認', icon: Video }, 
+  { id: '/master/community', title: 'コミュニティ管理', icon: MessageCircle },
+  { id: '/master/line', title: 'LINE一斉送信', icon: Send }, // ★ 追加
   { id: '/master/users', title: '生徒・講師管理', icon: FileSpreadsheet },
   { id: '/master/attendance', title: '勤怠管理', icon: Briefcase },
   { id: '/master/rewards', title: '景品管理', icon: ShoppingBag },

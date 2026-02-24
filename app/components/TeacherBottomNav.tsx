@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Home, Briefcase, Settings } from 'lucide-react';
+import { Home, Briefcase, Settings, MessageCircle } from 'lucide-react'; // ★ MessageCircleを追加
 
 export default function TeacherBottomNav() {
   const pathname = usePathname();
@@ -21,6 +21,14 @@ export default function TeacherBottomNav() {
       icon: <Briefcase size={24} />, 
       activeColor: 'text-orange-500', 
       bgColor: 'bg-orange-50' 
+    },
+    // ★ コミュニティリンクを追加
+    { 
+      label: 'コミュニティ', 
+      path: '/teacher/community', 
+      icon: <MessageCircle size={24} />, 
+      activeColor: 'text-blue-500', 
+      bgColor: 'bg-blue-50' 
     },
     { 
       label: '設定', 
@@ -62,7 +70,7 @@ export default function TeacherBottomNav() {
 
             {/* ラベル部分 */}
             <span className={`
-              text-[10px] font-bold transition-all duration-300
+              text-[10px] font-bold transition-all duration-300 whitespace-nowrap
               ${active ? `${item.activeColor} scale-105` : 'text-gray-400'}
             `}>
               {item.label}

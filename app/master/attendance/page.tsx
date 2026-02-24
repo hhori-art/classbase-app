@@ -2,10 +2,10 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { db } from '@/lib/firebase';
-import { collection, query, orderBy, getDocs, doc, updateDoc, where, deleteDoc, limit } from 'firebase/firestore';
+import { collection, query, orderBy, getDocs, doc, updateDoc, where, deleteDoc, limit, writeBatch } from 'firebase/firestore';
 import { 
   Briefcase, ArrowLeft, CheckCircle, Edit, Trash2, Search, Filter, Save, X, Plus, Train, Download, 
-  Loader2, Clock, Layout, Copy, AlertCircle, ChevronRight, Calendar, User, DollarSign, CheckSquare, FileText, Coffee, LayoutTemplate, MapPin
+  Loader2, Clock, Layout, Copy, AlertCircle, ChevronRight, Calendar, User, DollarSign, CheckSquare, FileText, Coffee, Database
 } from 'lucide-react';
 import Link from 'next/link';
 
@@ -44,12 +44,17 @@ export default function MasterAttendancePage() {
   const [expenses, setExpenses] = useState<Transportation[]>([]);
   const [mainTime, setMainTime] = useState({ start: '', end: '' });
 
+  // ★ 一括操作用のステート
+  const [selectedRecordIds, setSelectedRecordIds] = useState<Set<string>>(new Set());
+  const [isBulkProcessing, setIsBulkProcessing] = useState(false);
+
   useEffect(() => {
     fetchUsers();
   }, []);
 
   useEffect(() => {
     fetchRecords();
+    setSelectedRecordIds(new Set()); // 月が切り替わったら選択をリセット
   }, [filterMonth]);
 
   const fetchUsers = async () => {
@@ -97,6 +102,63 @@ export default function MasterAttendancePage() {
     }
   };
 
+  // --- 一括操作関数 ---
+  const handleSelectAll = (checked: boolean) => {
+    if (checked) {
+      setSelectedRecordIds(new Set(filteredRecords.map(r => r.id)));
+    } else {
+      setSelectedRecordIds(new Set());
+    }
+  };
+
+  const handleSelectOne = (id: string, checked: boolean) => {
+    const next = new Set(selectedRecordIds);
+    if (checked) next.add(id);
+    else next.delete(id);
+    setSelectedRecordIds(next);
+  };
+
+  const handleBulkApprove = async () => {
+    if (selectedRecordIds.size === 0) return;
+    if (!confirm(`${selectedRecordIds.size}件の記録を一括承認しますか？`)) return;
+    
+    setIsBulkProcessing(true);
+    try {
+      const batch = writeBatch(db);
+      selectedRecordIds.forEach(id => {
+        batch.update(doc(db, 'work_records', id), { status: 'approved' });
+      });
+      await batch.commit();
+      setRecords(prev => prev.map(r => selectedRecordIds.has(r.id) ? { ...r, status: 'approved' } : r));
+      setSelectedRecordIds(new Set());
+    } catch (e: any) {
+      alert('承認エラー: ' + e.message);
+    } finally {
+      setIsBulkProcessing(false);
+    }
+  };
+
+  const handleBulkDelete = async () => {
+    if (selectedRecordIds.size === 0) return;
+    if (!confirm(`${selectedRecordIds.size}件の記録を本当に削除しますか？\nこの操作は取り消せません。`)) return;
+    
+    setIsBulkProcessing(true);
+    try {
+      const batch = writeBatch(db);
+      selectedRecordIds.forEach(id => {
+        batch.delete(doc(db, 'work_records', id));
+      });
+      await batch.commit();
+      setRecords(prev => prev.filter(r => !selectedRecordIds.has(r.id)));
+      setSelectedRecordIds(new Set());
+    } catch (e: any) {
+      alert('削除エラー: ' + e.message);
+    } finally {
+      setIsBulkProcessing(false);
+    }
+  };
+
+  // --- 単体操作関数 ---
   const handleApprove = async (id: string) => {
     if (!confirm('承認しますか？')) return;
     try {
@@ -110,6 +172,7 @@ export default function MasterAttendancePage() {
     try {
       await deleteDoc(doc(db, 'work_records', id));
       setRecords(prev => prev.filter(r => r.id !== id));
+      setSelectedRecordIds(prev => { const n = new Set(prev); n.delete(id); return n; });
     } catch (e) { alert('削除エラー'); }
   };
 
@@ -241,26 +304,155 @@ export default function MasterAttendancePage() {
     if (!editingRecord) return;
     try {
       const ref = doc(db, 'work_records', editingRecord.id);
-      const newStart = mainTime.start ? new Date(mainTime.start).toISOString() : editingRecord.start_time;
-      const newEnd = mainTime.end ? new Date(mainTime.end).toISOString() : null;
+      const newStartISO = mainTime.start ? new Date(mainTime.start).toISOString() : editingRecord.start_time;
+      const newEndISO = mainTime.end ? new Date(mainTime.end).toISOString() : null;
+
+      // 出勤直後の休憩を禁止するバリデーション
+      if (segments.length > 0 && newStartISO) {
+        const toMinutes = (s: string) => {
+          if(!s) return -1;
+          const [h, m] = s.split(':').map(Number);
+          return h * 60 + m;
+        };
+        const sortedSegments = [...segments].filter(s => s.start && s.end).sort((a, b) => toMinutes(a.start) - toMinutes(b.start));
+        if (sortedSegments.length > 0) {
+          const shiftStart = new Date(newStartISO);
+          const startMin = shiftStart.getHours() * 60 + shiftStart.getMinutes();
+          const firstSegMin = toMinutes(sortedSegments[0].start);
+          if (firstSegMin > startMin) return alert('【エラー】出勤直後に空白時間を作ることはできません（自動補完で休憩になってしまうため）。\n出勤時刻と「最初の業務の開始時刻」を一致させてください。');
+          if (sortedSegments[0].type === 'break') return alert('【エラー】出勤直後の最初の業務区分に「休憩」を登録することはできません。');
+        }
+      }
       
-      const filledSegments = fillGaps(segments, newStart, newEnd);
+      const filledSegments = fillGaps(segments, newStartISO, newEndISO);
       const formattedExpenses = expenses.map(e => ({ ...e, cost: Number(e.cost) }));
 
       await updateDoc(ref, { 
-        start_time: newStart,
-        end_time: newEnd,
+        start_time: newStartISO,
+        end_time: newEndISO,
         work_segments: filledSegments,
         transportation: formattedExpenses
       });
 
       setRecords(prev => prev.map(r => r.id === editingRecord.id ? { 
-        ...r, start_time: newStart, end_time: newEnd, work_segments: filledSegments, transportation: formattedExpenses 
+        ...r, start_time: newStartISO, end_time: newEndISO, work_segments: filledSegments, transportation: formattedExpenses 
       } : r));
       
       setEditingRecord(null);
       alert('保存しました。');
     } catch (e: any) { alert('保存エラー: ' + e.message); }
+  };
+
+  // ★ 5人分のテストデータ一括生成機能
+  const generateDummyData = async () => {
+    if (!confirm(`現在の表示月（${filterMonth}）に、5人のダミー講師の1ヶ月分の勤怠データ（約100件）を一括生成しますか？\n※CSV出力や手当計算のテストに最適です。`)) return;
+    
+    setIsCsvGenerating(true); 
+    try {
+      const [yearStr, monthStr] = filterMonth.split('-');
+      const year = parseInt(yearStr);
+      const month = parseInt(monthStr);
+      
+      // 5人のダミー講師
+      const dummyTeachers = [
+        { id: 'dummy_teacher_1', name: 'テスト講師 山田', school: '101', staff_id: '9001' },
+        { id: 'dummy_teacher_2', name: 'テスト講師 佐藤', school: '102', staff_id: '9002' },
+        { id: 'dummy_teacher_3', name: 'テスト講師 鈴木', school: '101', staff_id: '9003' },
+        { id: 'dummy_teacher_4', name: 'テスト講師 高橋', school: '103', staff_id: '9004' },
+        { id: 'dummy_teacher_5', name: 'テスト講師 田中', school: '102', staff_id: '9005' }
+      ];
+
+      // ① 講師データをマスタ（users）に登録
+      const batch1 = writeBatch(db);
+      dummyTeachers.forEach(t => {
+        const ref = doc(db, 'users', t.id);
+        batch1.set(ref, {
+          uid: t.id,
+          role: 'teacher',
+          name: t.name,
+          school_code: t.school,
+          staff_id: t.staff_id,
+          lifetime_id: t.staff_id,
+          created_at: new Date().toISOString()
+        }, { merge: true });
+      });
+      await batch1.commit();
+
+      // ② 1ヶ月分の日付をループして勤怠データを作成
+      const batch2 = writeBatch(db);
+      let count = 0;
+      const lastDay = new Date(year, month, 0).getDate();
+
+      for (let day = 1; day <= lastDay; day++) {
+        const dateStr = `${yearStr}-${monthStr}-${String(day).padStart(2, '0')}`;
+        const dateObj = new Date(year, month - 1, day);
+        const dayOfWeek = dateObj.getDay();
+        
+        // 日曜(0)は塾が休みとしてデータを作らない
+        if (dayOfWeek === 0) continue; 
+        
+        dummyTeachers.forEach((t, index) => {
+          // 講師ごとに週の休みをランダムに作るため間引く
+          if ((day + index) % 3 === 0) return; 
+
+          const docRef = doc(collection(db, 'work_records'));
+          
+          let segments = [];
+          let startTime = '';
+          let endTime = '';
+
+          // ★ 授業なし・サポートのみの勤務パターンを混ぜる
+          if ((day + index) % 4 === 0) {
+            // パターンB：サポートのみ（授業なし）
+            startTime = `${dateStr}T17:00:00+09:00`;
+            endTime = `${dateStr}T22:00:00+09:00`;
+            segments = [
+              { start: '17:00', end: '18:30', type: 'office', note: '事務・プリント印刷', isAuto: false },
+              { start: '18:30', end: '19:15', type: 'break', note: '休憩', isAuto: false },
+              { start: '19:15', end: '21:30', type: 'support', note: '自習室監督・質問対応', isAuto: false },
+              { start: '21:30', end: '22:00', type: 'office', note: '見回り・片付け', isAuto: false }
+            ];
+          } else {
+            // パターンA：通常（授業あり）
+            startTime = `${dateStr}T16:00:00+09:00`;
+            endTime = `${dateStr}T22:30:00+09:00`;
+            segments = [
+              { start: '16:00', end: '18:30', type: 'office', note: '授業準備', isAuto: false },
+              { start: '18:30', end: '19:20', type: 'break', note: '休憩', isAuto: false },
+              { start: '19:20', end: '20:25', type: 'lesson', note: '1限 中2理科', isAuto: false },
+              { start: '20:25', end: '20:35', type: 'break', note: '休憩', isAuto: false },
+              { start: '20:35', end: '21:40', type: 'lesson', note: '2限 中2社会', isAuto: false },
+              { start: '21:40', end: '22:30', type: 'support', note: '質問対応・片付け', isAuto: false }
+            ];
+          }
+          
+          batch2.set(docRef, {
+            teacher_id: t.id,
+            teacher_name: t.name,
+            date: dateStr,
+            start_time: startTime,
+            end_time: endTime,
+            status: count % 5 === 0 ? 'approved' : 'pending',
+            work_segments: segments,
+            transportation: [
+              { from: '三宮', to: '学園都市', cost: 310 }
+            ],
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          });
+          count++;
+        });
+      }
+
+      await batch2.commit();
+      await fetchUsers();
+      await fetchRecords();
+      alert(`テスト用データを ${count} 件作成しました！\n「CSV一括出力」などをテストしてみてください。`);
+    } catch (e: any) {
+      alert('データ生成エラー: ' + e.message);
+    } finally {
+      setIsCsvGenerating(false);
+    }
   };
 
   // --- 計算関数 ---
@@ -280,15 +472,6 @@ export default function MasterAttendancePage() {
 
   const calcTotalCost = (exps: Transportation[]) => exps ? exps.reduce((sum, item) => sum + Number(item.cost), 0) : 0;
   
-  const calcSegmentTotal = (segs: WorkSegment[], type: string) => {
-    return segs.filter(s => s.type === type).reduce((acc, s) => {
-      const start = new Date(`2000/01/01 ${s.start}`);
-      const end = new Date(`2000/01/01 ${s.end}`);
-      const diff = (end.getTime() - start.getTime()) / (1000 * 60);
-      return acc + (isNaN(diff) ? 0 : diff);
-    }, 0);
-  };
-
   const splitTimeBy22 = (startTime: string, endTime: string) => {
     if (!startTime || !endTime) return { before22: 0, after22: 0 };
     const start = new Date(startTime);
@@ -336,6 +519,7 @@ export default function MasterAttendancePage() {
         const duration = (eh * 60 + em) - (sh * 60 + sm);
 
         if (seg.type === 'lesson') totalLessonMinutes += duration;
+        // 画面上は事務とサポートをまとめて表示
         else if (seg.type === 'office' || seg.type === 'support') totalOfficeMinutes += duration;
       });
     });
@@ -382,15 +566,18 @@ export default function MasterAttendancePage() {
         groupedData[tid].push(rec);
       });
 
-      // 3. 行生成
+      // 3. 行生成 (ヘッダー修正：H列に休憩、サポートを分離、手当判定を追加)
       const header = [
         '校舎番号', '職員番号', '氏名',
         '日付', '曜日',
-        '出勤時刻', '退勤時刻',
-        'オンライン授業(開始)', 'オンライン授業(終了)',
-        '事務・サポート(開始)', '事務・サポート(終了)',
-        'オンライン授業時間(~22時)', 'オンライン授業時間(22時~)',
-        '事務・研修時間(~22時)', '事務・研修時間(22時~)',
+        '出勤時刻', '退勤時刻', '休憩時間',
+        '授業(開始)', '授業(終了)',
+        '事務(開始)', '事務(終了)',
+        'サポート(開始)', 'サポート(終了)',
+        '授業時間(~22時)', '授業時間(22時~)',
+        '事務時間(~22時)', '事務時間(22時~)',
+        'サポート時間(~22時)', 'サポート時間(22時~)',
+        '手当判定',
         '交通費(区間)', '交通費(金額)'
       ].join(',');
 
@@ -408,11 +595,14 @@ export default function MasterAttendancePage() {
         const teacherRecords = groupedData[tid];
         const userInfo = usersMap[tid] || { name: teacherRecords[0].teacher_name || '不明', school_code: '', staff_id: '' };
         
-        let totalLessonNormal = 0;
-        let totalLessonLate = 0;
-        let totalOfficeNormal = 0;
-        let totalOfficeLate = 0;
-        let totalTransportCost = 0;
+        let totalLessonNormalSum = 0;
+        let totalLessonLateSum = 0;
+        let totalOfficeNormalSum = 0;
+        let totalOfficeLateSum = 0;
+        let totalSupportNormalSum = 0;
+        let totalSupportLateSum = 0;
+        let totalBreakSum = 0;
+        let totalTransportCostSum = 0;
 
         teacherRecords.forEach(rec => {
           const dateObj = new Date(rec.date);
@@ -420,8 +610,12 @@ export default function MasterAttendancePage() {
 
           let lessonStart = '', lessonEnd = '';
           let officeStart = '', officeEnd = '';
+          let supportStart = '', supportEnd = '';
+          
           let lessonTimeNormal = 0, lessonTimeLate = 0;
           let officeTimeNormal = 0, officeTimeLate = 0;
+          let supportTimeNormal = 0, supportTimeLate = 0;
+          let breakTime = 0;
 
           rec.work_segments?.forEach((seg: WorkSegment) => {
             const startISO = `${rec.date}T${seg.start}:00`;
@@ -433,23 +627,41 @@ export default function MasterAttendancePage() {
               if (!lessonEnd || seg.end > lessonEnd) lessonEnd = seg.end;
               lessonTimeNormal += before22;
               lessonTimeLate += after22;
-            } else if (seg.type === 'office' || seg.type === 'support') {
+            } else if (seg.type === 'office') {
               if (!officeStart || seg.start < officeStart) officeStart = seg.start;
               if (!officeEnd || seg.end > officeEnd) officeEnd = seg.end;
               officeTimeNormal += before22;
               officeTimeLate += after22;
+            } else if (seg.type === 'support') {
+              if (!supportStart || seg.start < supportStart) supportStart = seg.start;
+              if (!supportEnd || seg.end > supportEnd) supportEnd = seg.end;
+              supportTimeNormal += before22;
+              supportTimeLate += after22;
+            } else if (seg.type === 'break') {
+              breakTime += before22 + after22;
             }
           });
+
+          // 授業またはサポートの手当判定（金額表記なし）
+          let allowance = '';
+          if ((lessonTimeNormal + lessonTimeLate) > 0) {
+            allowance = '授業';
+          } else if ((supportTimeNormal + supportTimeLate) > 0) {
+            allowance = 'サポート';
+          }
 
           const transportText = rec.transportation?.map((t: any) => `${t.from}-${t.to}`).join(' / ') || '';
           const transportCost = calcTotalCost(rec.transportation);
 
           // 合計に加算
-          totalLessonNormal += lessonTimeNormal;
-          totalLessonLate += lessonTimeLate;
-          totalOfficeNormal += officeTimeNormal;
-          totalOfficeLate += officeTimeLate;
-          totalTransportCost += transportCost;
+          totalLessonNormalSum += lessonTimeNormal;
+          totalLessonLateSum += lessonTimeLate;
+          totalOfficeNormalSum += officeTimeNormal;
+          totalOfficeLateSum += officeTimeLate;
+          totalSupportNormalSum += supportTimeNormal;
+          totalSupportLateSum += supportTimeLate;
+          totalBreakSum += breakTime;
+          totalTransportCostSum += transportCost;
 
           const startTimeStr = rec.start_time ? new Date(rec.start_time).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
           const endTimeStr = rec.end_time ? new Date(rec.end_time).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
@@ -459,11 +671,14 @@ export default function MasterAttendancePage() {
             `"${userInfo.staff_id !== '9999' ? userInfo.staff_id : ''}"`,
             `"${userInfo.name}"`,
             rec.date, dayOfWeek,
-            startTimeStr, endTimeStr,
+            startTimeStr, endTimeStr, minToHm(breakTime),
             lessonStart, lessonEnd,
             officeStart, officeEnd,
+            supportStart, supportEnd,
             minToHm(lessonTimeNormal), minToHm(lessonTimeLate),
             minToHm(officeTimeNormal), minToHm(officeTimeLate),
+            minToHm(supportTimeNormal), minToHm(supportTimeLate),
+            `"${allowance}"`,
             `"${transportText}"`, transportCost
           ].join(','));
         });
@@ -473,10 +688,12 @@ export default function MasterAttendancePage() {
           `"${userInfo.school_code !== '999' ? userInfo.school_code : ''}"`, 
           `"${userInfo.staff_id !== '9999' ? userInfo.staff_id : ''}"`,
           `"${userInfo.name} 合計"`,
-          '', '', '', '', '', '', '', '', // 空白列(日付〜開始終了)
-          minToHm(totalLessonNormal), minToHm(totalLessonLate),
-          minToHm(totalOfficeNormal), minToHm(totalOfficeLate),
-          '', totalTransportCost
+          '', '', '', '', minToHm(totalBreakSum), 
+          '', '', '', '', '', '',
+          minToHm(totalLessonNormalSum), minToHm(totalLessonLateSum),
+          minToHm(totalOfficeNormalSum), minToHm(totalOfficeLateSum),
+          minToHm(totalSupportNormalSum), minToHm(totalSupportLateSum),
+          '', '', totalTransportCostSum
         ].join(','));
       });
 
@@ -576,7 +793,7 @@ export default function MasterAttendancePage() {
               <span className="text-xl font-black text-blue-600 font-mono">{summary.lessonTime}</span>
             </div>
             <div className="bg-white px-5 py-3 rounded-xl border border-gray-200 shadow-sm flex flex-col items-center min-w-[100px]">
-              <span className="text-[10px] text-gray-400 font-bold uppercase flex items-center gap-1"><Coffee size={12}/> 事務時間</span>
+              <span className="text-[10px] text-gray-400 font-bold uppercase flex items-center gap-1"><Coffee size={12}/> 事務/サポ</span>
               <span className="text-xl font-black text-orange-500 font-mono">{summary.officeTime}</span>
             </div>
             <div className="bg-white px-5 py-3 rounded-xl border border-gray-200 shadow-sm flex flex-col items-center min-w-[100px]">
@@ -587,7 +804,7 @@ export default function MasterAttendancePage() {
         </div>
 
         {/* フィルター & 操作バー */}
-        <div className="bg-white p-4 rounded-2xl shadow-sm border border-gray-200 mb-6 flex flex-col md:flex-row gap-4 items-center justify-between sticky top-4 z-20">
+        <div className="bg-white p-4 rounded-2xl shadow-sm border border-gray-200 mb-4 flex flex-col md:flex-row gap-4 items-center justify-between sticky top-4 z-20">
           <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
             <div className="flex items-center gap-2 bg-gray-50 px-3 py-2 rounded-xl border border-gray-200">
               <Calendar size={16} className="text-gray-400"/>
@@ -618,14 +835,23 @@ export default function MasterAttendancePage() {
             </button>
           </div>
 
-          <button 
-            onClick={handleBulkDownload} 
-            disabled={isCsvGenerating || filteredRecords.length === 0}
-            className="w-full md:w-auto bg-emerald-600 text-white px-5 py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 hover:bg-emerald-700 transition-all shadow-md active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {isCsvGenerating ? <Loader2 className="animate-spin" size={18}/> : <Download size={18}/>}
-            {isCsvGenerating ? '生成中...' : 'CSV一括出力'}
-          </button>
+          <div className="flex gap-2 w-full md:w-auto">
+            <button 
+              onClick={generateDummyData} 
+              disabled={isCsvGenerating}
+              className="w-full md:w-auto bg-slate-100 text-slate-600 px-4 py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 hover:bg-slate-200 transition-all shadow-sm active:scale-95 disabled:opacity-50"
+            >
+              <Database size={16}/> テストデータ生成
+            </button>
+            <button 
+              onClick={handleBulkDownload} 
+              disabled={isCsvGenerating || filteredRecords.length === 0}
+              className="w-full md:w-auto bg-emerald-600 text-white px-5 py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 hover:bg-emerald-700 transition-all shadow-md active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isCsvGenerating ? <Loader2 className="animate-spin" size={18}/> : <Download size={18}/>}
+              {isCsvGenerating ? '生成中...' : 'CSV一括出力'}
+            </button>
+          </div>
         </div>
 
         {/* リスト表示 */}
@@ -636,106 +862,154 @@ export default function MasterAttendancePage() {
             データが見つかりません
           </div>
         ) : (
-          <div className="grid gap-4">
-            {filteredRecords.map(rec => {
-              const userInfo = usersMap[rec.teacher_id];
-              const displayName = userInfo?.name || rec.teacher_name;
-              const displaySegments = rec.work_segments?.slice().sort((a: WorkSegment, b: WorkSegment) => a.start.localeCompare(b.start));
-              const isApproved = rec.status === 'approved';
-
-              return (
-                <div key={rec.id} className={`bg-white p-5 rounded-2xl shadow-sm border transition-all hover:shadow-md ${isApproved ? 'border-gray-200 opacity-80' : 'border-orange-200 ring-1 ring-orange-100'}`}>
-                  <div className="flex flex-col md:flex-row gap-6">
-                    
-                    {/* 左側: 基本情報 */}
-                    <div className="md:w-56 shrink-0 flex flex-col justify-center border-b md:border-b-0 md:border-r border-gray-100 pb-4 md:pb-0 md:pr-6">
-                      <div className="flex items-center gap-2 text-gray-500 text-xs font-bold mb-1">
-                        <Calendar size={12}/> {rec.date}
-                      </div>
-                      <h3 className="text-lg font-bold text-gray-800 mb-1 flex items-center gap-2">
-                        <User size={18} className="text-gray-400"/>
-                        {displayName}
-                      </h3>
-                      {/* 校舎・職員番号表示 */}
-                      <div className="flex items-center gap-2 text-[10px] text-gray-400 mb-2">
-                        <span className="bg-gray-100 px-1.5 py-0.5 rounded">校:{userInfo?.school_code !== '999' ? userInfo?.school_code : '-'}</span>
-                        <span className="bg-gray-100 px-1.5 py-0.5 rounded">員:{userInfo?.staff_id !== '9999' ? userInfo?.staff_id : '-'}</span>
-                      </div>
-
-                      <div className="bg-gray-50 rounded-lg p-2 text-center">
-                        <div className="text-xs text-gray-400 font-bold mb-1">拘束時間</div>
-                        <div className="text-xl font-black text-gray-700 font-mono">
-                          {calcDurationMinutes(rec.start_time, rec.end_time) > 0 ? calcDurationStr(calcDurationMinutes(rec.start_time, rec.end_time)) : '--'}
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* 中央: 詳細情報 */}
-                    <div className="flex-1 space-y-3">
-                      <div className="flex items-center gap-3 text-sm">
-                        <span className="px-2 py-1 bg-gray-100 text-gray-600 rounded text-xs font-bold">出勤</span>
-                        <span className="font-mono font-bold text-lg">
-                          {rec.start_time ? new Date(rec.start_time).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '--:--'}
-                        </span>
-                        <span className="text-gray-300">➜</span>
-                        <span className="px-2 py-1 bg-gray-100 text-gray-600 rounded text-xs font-bold">退勤</span>
-                        <span className="font-mono font-bold text-lg">
-                          {rec.end_time ? new Date(rec.end_time).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '--:--'}
-                        </span>
-                      </div>
-
-                      {displaySegments?.length > 0 ? (
-                        <div className="flex flex-wrap gap-2">
-                          {displaySegments.map((seg: any, i: number) => (
-                            <div key={i} className={`flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg border ${
-                              seg.type === 'lesson' ? 'bg-blue-50 border-blue-100 text-blue-800' :
-                              seg.type === 'support' ? 'bg-green-50 border-green-100 text-green-800' :
-                              seg.type === 'office' ? 'bg-orange-50 border-orange-100 text-orange-800' :
-                              'bg-gray-50 border-gray-200 text-gray-500' // break
-                            }`}>
-                              <span className="font-mono font-bold">{seg.start}-{seg.end}</span>
-                              <span className="font-bold opacity-70">|</span>
-                              <span className="font-bold">
-                                {seg.type === 'lesson' ? '授業' : seg.type === 'support' ? 'サポ' : seg.type === 'office' ? '事務' : '休憩'}
-                              </span>
-                              {seg.note && !seg.isAuto && <span className="opacity-70 truncate max-w-[100px]">({seg.note})</span>}
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <span className="text-xs text-gray-400 italic">詳細なし</span>
-                      )}
-
-                      {rec.transportation?.length > 0 && (
-                        <div className="flex items-center gap-2 text-xs font-bold text-emerald-600 bg-emerald-50 px-3 py-1.5 rounded-lg w-fit">
-                          <Train size={14}/> 交通費: ¥{calcTotalCost(rec.transportation).toLocaleString()}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* 右側: アクション */}
-                    <div className="flex flex-row md:flex-col justify-center gap-2 border-t md:border-t-0 md:border-l border-gray-100 pt-4 md:pt-0 md:pl-6">
-                      {isApproved ? (
-                        <button disabled className="w-full bg-gray-100 text-gray-400 px-4 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-2 cursor-not-allowed">
-                          <CheckCircle size={16}/> 承認済
-                        </button>
-                      ) : (
-                        <button onClick={() => handleApprove(rec.id)} className="w-full bg-indigo-600 text-white px-4 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-2 hover:bg-indigo-700 shadow-sm transition-all active:scale-95">
-                          <CheckCircle size={16}/> 承認する
-                        </button>
-                      )}
-                      <button onClick={() => openEditor(rec)} className="w-full bg-white border border-gray-200 text-gray-600 px-4 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-2 hover:bg-gray-50 transition-colors">
-                        <Edit size={14}/> 編集
-                      </button>
-                      <button onClick={() => handleDelete(rec.id)} className="w-full bg-white border border-red-100 text-red-500 px-4 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-2 hover:bg-red-50 transition-colors">
-                        <Trash2 size={14}/> 削除
-                      </button>
-                    </div>
-
-                  </div>
+          <div className="space-y-4">
+            
+            {/* ★一括操作バー（データがある時のみ表示） */}
+            <div className="bg-white p-4 rounded-2xl shadow-sm border border-gray-200 flex flex-col sm:flex-row items-center justify-between gap-4">
+              <div className="flex items-center gap-3 pl-2">
+                <input 
+                  type="checkbox" 
+                  className="w-5 h-5 cursor-pointer rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                  checked={filteredRecords.length > 0 && selectedRecordIds.size === filteredRecords.length}
+                  onChange={(e) => handleSelectAll(e.target.checked)}
+                />
+                <span className="text-sm font-bold text-gray-600">すべて選択 ({selectedRecordIds.size}件選択中)</span>
+              </div>
+              
+              {selectedRecordIds.size > 0 && (
+                <div className="flex items-center gap-2">
+                  <button 
+                    onClick={handleBulkApprove}
+                    disabled={isBulkProcessing}
+                    className="bg-indigo-50 text-indigo-600 px-5 py-2 rounded-xl text-xs font-bold hover:bg-indigo-100 flex items-center gap-2 transition-colors disabled:opacity-50"
+                  >
+                    {isBulkProcessing ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle size={14}/>}
+                    選択した項目を承認
+                  </button>
+                  <button 
+                    onClick={handleBulkDelete}
+                    disabled={isBulkProcessing}
+                    className="bg-red-50 text-red-600 px-5 py-2 rounded-xl text-xs font-bold hover:bg-red-100 flex items-center gap-2 transition-colors disabled:opacity-50"
+                  >
+                    {isBulkProcessing ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14}/>}
+                    一括削除
+                  </button>
                 </div>
-              );
-            })}
+              )}
+            </div>
+
+            <div className="grid gap-4">
+              {filteredRecords.map(rec => {
+                const userInfo = usersMap[rec.teacher_id];
+                const displayName = userInfo?.name || rec.teacher_name;
+                const displaySegments = rec.work_segments?.slice().sort((a: WorkSegment, b: WorkSegment) => a.start.localeCompare(b.start));
+                const isApproved = rec.status === 'approved';
+                const isSelected = selectedRecordIds.has(rec.id);
+
+                return (
+                  <div key={rec.id} className={`relative bg-white p-5 rounded-2xl shadow-sm border transition-all hover:shadow-md ${isApproved ? 'border-gray-200 opacity-80' : 'border-orange-200 ring-1 ring-orange-100'} ${isSelected ? 'bg-indigo-50/30 border-indigo-300' : ''}`}>
+                    
+                    {/* ★ 各行のチェックボックス */}
+                    <div className="absolute top-5 left-4 z-10">
+                      <input 
+                        type="checkbox" 
+                        className="w-5 h-5 cursor-pointer rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                        checked={isSelected}
+                        onChange={(e) => handleSelectOne(rec.id, e.target.checked)}
+                      />
+                    </div>
+
+                    <div className="flex flex-col md:flex-row gap-6 pl-8">
+                      {/* 左側: 基本情報 */}
+                      <div className="md:w-56 shrink-0 flex flex-col justify-center border-b md:border-b-0 md:border-r border-gray-100 pb-4 md:pb-0 md:pr-6">
+                        <div className="flex items-center gap-2 text-gray-500 text-xs font-bold mb-1">
+                          <Calendar size={12}/> {rec.date}
+                        </div>
+                        <h3 className="text-lg font-bold text-gray-800 mb-1 flex items-center gap-2">
+                          <User size={18} className="text-gray-400"/>
+                          {displayName}
+                        </h3>
+                        {/* 校舎・職員番号表示 */}
+                        <div className="flex items-center gap-2 text-[10px] text-gray-400 mb-2">
+                          <span className="bg-gray-100 px-1.5 py-0.5 rounded">校:{userInfo?.school_code !== '999' ? userInfo?.school_code : '-'}</span>
+                          <span className="bg-gray-100 px-1.5 py-0.5 rounded">員:{userInfo?.staff_id !== '9999' ? userInfo?.staff_id : '-'}</span>
+                        </div>
+
+                        <div className="bg-gray-50 rounded-lg p-2 text-center">
+                          <div className="text-xs text-gray-400 font-bold mb-1">拘束時間</div>
+                          <div className="text-xl font-black text-gray-700 font-mono">
+                            {calcDurationMinutes(rec.start_time, rec.end_time) > 0 ? calcDurationStr(calcDurationMinutes(rec.start_time, rec.end_time)) : '--'}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* 中央: 詳細情報 */}
+                      <div className="flex-1 space-y-3">
+                        <div className="flex items-center gap-3 text-sm">
+                          <span className="px-2 py-1 bg-gray-100 text-gray-600 rounded text-xs font-bold">出勤</span>
+                          <span className="font-mono font-bold text-lg">
+                            {rec.start_time ? new Date(rec.start_time).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '--:--'}
+                          </span>
+                          <span className="text-gray-300">➜</span>
+                          <span className="px-2 py-1 bg-gray-100 text-gray-600 rounded text-xs font-bold">退勤</span>
+                          <span className="font-mono font-bold text-lg">
+                            {rec.end_time ? new Date(rec.end_time).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '--:--'}
+                          </span>
+                        </div>
+
+                        {displaySegments?.length > 0 ? (
+                          <div className="flex flex-wrap gap-2">
+                            {displaySegments.map((seg: any, i: number) => (
+                              <div key={i} className={`flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg border ${
+                                seg.type === 'lesson' ? 'bg-blue-50 border-blue-100 text-blue-800' :
+                                seg.type === 'support' ? 'bg-green-50 border-green-100 text-green-800' :
+                                seg.type === 'office' ? 'bg-orange-50 border-orange-100 text-orange-800' :
+                                'bg-gray-50 border-gray-200 text-gray-500' // break
+                              }`}>
+                                <span className="font-mono font-bold">{seg.start}-{seg.end}</span>
+                                <span className="font-bold opacity-70">|</span>
+                                <span className="font-bold">
+                                  {seg.type === 'lesson' ? '授業' : seg.type === 'support' ? 'サポ' : seg.type === 'office' ? '事務' : '休憩'}
+                                </span>
+                                {seg.note && !seg.isAuto && <span className="opacity-70 truncate max-w-[100px]">({seg.note})</span>}
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <span className="text-xs text-gray-400 italic">詳細なし</span>
+                        )}
+
+                        {rec.transportation?.length > 0 && (
+                          <div className="flex items-center gap-2 text-xs font-bold text-emerald-600 bg-emerald-50 px-3 py-1.5 rounded-lg w-fit">
+                            <Train size={14}/> 交通費: ¥{calcTotalCost(rec.transportation).toLocaleString()}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* 右側: アクション */}
+                      <div className="flex flex-row md:flex-col justify-center gap-2 border-t md:border-t-0 md:border-l border-gray-100 pt-4 md:pt-0 md:pl-6">
+                        {isApproved ? (
+                          <button disabled className="w-full bg-gray-100 text-gray-400 px-4 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-2 cursor-not-allowed">
+                            <CheckCircle size={16}/> 承認済
+                          </button>
+                        ) : (
+                          <button onClick={() => handleApprove(rec.id)} className="w-full bg-indigo-600 text-white px-4 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-2 hover:bg-indigo-700 shadow-sm transition-all active:scale-95">
+                            <CheckCircle size={16}/> 承認する
+                          </button>
+                        )}
+                        <button onClick={() => openEditor(rec)} className="w-full bg-white border border-gray-200 text-gray-600 px-4 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-2 hover:bg-gray-50 transition-colors">
+                          <Edit size={14}/> 編集
+                        </button>
+                        <button onClick={() => handleDelete(rec.id)} className="w-full bg-white border border-red-100 text-red-500 px-4 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-2 hover:bg-red-50 transition-colors">
+                          <Trash2 size={14}/> 削除
+                        </button>
+                      </div>
+
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
       </div>
@@ -772,9 +1046,12 @@ export default function MasterAttendancePage() {
 
               {/* 時間割・内訳 */}
               <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
-                <div className="flex justify-between items-center mb-4 border-b pb-2">
-                  <h4 className="text-sm font-bold text-gray-700 flex items-center gap-2"><Layout size={18} className="text-orange-500"/> 業務内訳</h4>
-                  <div className="text-[10px] text-gray-500 bg-gray-100 px-2 py-1 rounded font-bold flex items-center gap-1"><AlertCircle size={12}/> 隙間は自動で「休憩」になります</div>
+                <div className="flex flex-col sm:flex-row justify-between items-start mb-4 border-b pb-3 gap-2">
+                  <h4 className="text-sm font-bold text-gray-700 flex items-center gap-2 shrink-0"><Layout size={18} className="text-orange-500"/> 業務内訳</h4>
+                  <div className="text-[10px] text-gray-600 bg-gray-100 px-3 py-2 rounded-lg font-bold flex flex-col gap-1 w-full sm:w-auto">
+                    <div className="flex items-center gap-1 text-gray-500"><AlertCircle size={12} className="shrink-0"/> 始まりと終わりの隙間は自動で「休憩」になり、空白時間を埋めます。</div>
+                    <div className="flex items-center gap-1 text-red-500"><AlertCircle size={12} className="shrink-0"/> ※勤務時間が6時間を超える場合は45分以上、8時間を超える場合は1時間以上の休憩が必要です。</div>
+                  </div>
                 </div>
 
                 <div className="mb-6">
@@ -847,9 +1124,12 @@ export default function MasterAttendancePage() {
 
               {/* 交通費セクション */}
               <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-200">
-                <div className="flex justify-between items-center mb-4 border-b pb-2">
-                  <h4 className="text-sm font-bold text-gray-700 flex items-center gap-2"><Train size={18} className="text-emerald-500"/> 交通費申請</h4>
-                  <button onClick={handleCopyLastTransport} className="text-[10px] bg-indigo-50 text-indigo-600 px-3 py-1.5 rounded-full font-bold hover:bg-indigo-100 flex items-center gap-1 transition-colors"><Copy size={12}/> 前回をコピー</button>
+                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end mb-4 border-b pb-3 gap-2">
+                  <div>
+                    <h4 className="text-sm font-bold text-gray-700 flex items-center gap-2"><Train size={18} className="text-emerald-500"/> 交通費申請</h4>
+                    <p className="text-[10px] text-red-500 font-bold mt-1">※必ず駅名を入力してください。定期券区間は除外して申請してください。</p>
+                  </div>
+                  <button onClick={handleCopyLastTransport} className="text-[10px] bg-indigo-50 text-indigo-600 px-3 py-1.5 rounded-full font-bold hover:bg-indigo-100 flex items-center gap-1 transition-colors shrink-0"><Copy size={12}/> 前回をコピー</button>
                 </div>
                 
                 <div className="space-y-3">

@@ -1,9 +1,10 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { db } from '@/lib/firebase';
 import { collection, getDocs, doc, setDoc, deleteDoc, query, orderBy, writeBatch } from 'firebase/firestore';
-import { Users, Search, Plus, Edit, Trash2, ArrowLeft, GraduationCap, UserCheck, Save, X, Loader2, FileUp, AlertTriangle, Shield, Mail } from 'lucide-react';
+import { Users, Search, Plus, Edit, Trash2, ArrowLeft, GraduationCap, UserCheck, Save, X, Loader2, FileUp, AlertTriangle, Shield, Printer, CheckCircle } from 'lucide-react';
 import Link from 'next/link';
 
 // ユーザー型定義
@@ -14,7 +15,7 @@ interface UserData {
   student_name?: string; 
   name?: string;         
   lifetime_id: string;   // ログインID
-  email?: string;        // ★追加: 既存データ対応（メールアドレス）
+  email?: string;        // 既存データ対応（メールアドレス）
   grade?: string;
   classroom?: string;
   subject_science?: string;
@@ -28,6 +29,7 @@ export default function UserManagementPage() {
   const [users, setUsers] = useState<UserData[]>([]);
   const [filteredUsers, setFilteredUsers] = useState<UserData[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isMounted, setIsMounted] = useState(false);
   
   const [activeTab, setActiveTab] = useState<'student' | 'teacher' | 'master'>('student');
   const [searchQuery, setSearchQuery] = useState('');
@@ -38,6 +40,10 @@ export default function UserManagementPage() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingUser, setEditingUser] = useState<UserData | null>(null);
   
+  // ★書面印刷用のState
+  const [isPrintModalOpen, setIsPrintModalOpen] = useState(false);
+  const [qrBaseUrl, setQrBaseUrl] = useState('');
+
   const [formData, setFormData] = useState<Partial<UserData> & { displayName: string }>({
     role: 'student',
     displayName: '',
@@ -49,6 +55,14 @@ export default function UserManagementPage() {
     subject_social: '',
     day_of_week: ''
   });
+
+  // URLの取得 (QRコード用) と マウント確認
+  useEffect(() => {
+    setIsMounted(true);
+    if (typeof window !== 'undefined') {
+      setQrBaseUrl(window.location.origin);
+    }
+  }, []);
 
   // データ取得
   const fetchUsers = async () => {
@@ -145,7 +159,6 @@ export default function UserManagementPage() {
         const batch = writeBatch(db);
         let count = 0;
 
-        // ID重複チェック用マップ (lifetime_id または email)
         const existingUserMap = new Map(users.map(u => [u.lifetime_id || u.email, u.id]));
 
         for (let i = 1; i < rows.length; i++) {
@@ -160,7 +173,6 @@ export default function UserManagementPage() {
 
           if (!name || !loginId) continue;
 
-          // 既存IDがあれば更新、なければ新規ID発行
           const docId = existingUserMap.get(loginId) || doc(collection(db, 'users')).id;
           const docRef = doc(db, 'users', docId);
 
@@ -168,7 +180,7 @@ export default function UserManagementPage() {
           
           const data: any = {
             role: activeTab,
-            lifetime_id: loginId, // ここにID（メールアドレス）を保存
+            lifetime_id: loginId, 
             initial_password: pass,
             uid: docId,
             updated_at: new Date().toISOString()
@@ -261,7 +273,7 @@ export default function UserManagementPage() {
       setFormData({ 
         ...user, 
         displayName: user.student_name || user.name || '',
-        lifetime_id: user.lifetime_id || user.email || '', // emailも考慮してセット
+        lifetime_id: user.lifetime_id || user.email || '', 
         subject_science: user.subject_science || '',
         subject_social: user.subject_social || ''
       });
@@ -283,6 +295,7 @@ export default function UserManagementPage() {
   };
   const handleSelectAll = (c: boolean) => setSelectedIds(c ? new Set(filteredUsers.map(u => u.id)) : new Set());
   const handleSelectOne = (id: string, c: boolean) => { const n = new Set(selectedIds); c ? n.add(id) : n.delete(id); setSelectedIds(n); };
+  
   const handleBulkDelete = async () => {
     if (!confirm(`${selectedIds.size}件削除しますか？`)) return;
     setIsBulkDeleting(true);
@@ -295,150 +308,394 @@ export default function UserManagementPage() {
   };
   const handleDelete = async (id: string) => { if(confirm('削除しますか？')) { await deleteDoc(doc(db, 'users', id)); setUsers(prev => prev.filter(u => u.id !== id)); }};
 
-  return (
-    <div className="min-h-screen bg-gray-50 p-6 pb-20">
-      <div className="max-w-6xl mx-auto">
+  // ★ 印刷対象のユーザーリスト
+  const printUsers = users.filter(u => selectedIds.has(u.id));
+
+  // =========================================================================
+  // ★ 印刷用のコンポーネント (React Portalでbody直下にレンダリングさせます)
+  // =========================================================================
+  const PrintModal = () => {
+    if (!isMounted || typeof document === 'undefined') return null;
+
+    return createPortal(
+      <div id="print-root" className="fixed inset-0 z-[9999] bg-gray-200 overflow-y-auto print:static print:bg-white print:overflow-visible">
         
-        {/* ヘッダー */}
-        <div className="flex flex-col md:flex-row items-center justify-between mb-8 gap-4">
-          <div className="flex items-center gap-4 w-full md:w-auto">
-            <Link href="/master" className="bg-white p-2 rounded-full shadow hover:bg-gray-100 text-gray-600 transition-colors">
-              <ArrowLeft size={20} />
-            </Link>
-            <div>
-              <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
-                <Users className="text-blue-600" /> ユーザー管理
-              </h1>
-              <p className="text-xs text-gray-500">生徒・講師・管理者のID発行と編集</p>
+        {/* === 印刷の時だけ適用される最強のCSS === */}
+        <style dangerouslySetInnerHTML={{__html: `
+          @media print {
+            @page { size: A4 portrait; margin: 0; }
+            body > *:not(#print-root) { display: none !important; }
+            #print-root {
+              position: static !important;
+              display: block !important;
+              width: 100% !important;
+              height: auto !important;
+              overflow: visible !important;
+              background-color: white !important;
+            }
+            .print-hide { display: none !important; }
+            .print-page {
+              display: block !important;
+              position: relative !important;
+              page-break-after: always !important;
+              break-after: page !important;
+              page-break-inside: avoid !important;
+              width: 210mm !important;
+              height: 297mm !important;
+              padding: 12mm 18mm !important; 
+              margin: 0 !important;
+              box-sizing: border-box !important;
+              box-shadow: none !important;
+              border: none !important;
+              background-color: white !important;
+            }
+            .print-page:last-child {
+              page-break-after: auto !important;
+              break-after: auto !important;
+            }
+            .print-footer {
+              position: absolute !important;
+              bottom: 12mm !important;
+              left: 18mm !important;
+              right: 18mm !important;
+            }
+            * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+          }
+        `}} />
+
+        {/* コントロールバー (印刷時は非表示) */}
+        <div className="print-hide sticky top-0 z-50 bg-white border-b border-gray-300 p-4 shadow-sm flex justify-between items-center">
+          <h2 className="font-bold text-gray-800 text-lg flex items-center gap-2">
+            <Printer size={20} className="text-indigo-600"/> 印刷プレビュー ({printUsers.length}名分)
+          </h2>
+          <div className="flex gap-3">
+            <button onClick={() => window.print()} className="bg-indigo-600 text-white px-6 py-2 rounded-xl font-bold hover:bg-indigo-700 flex items-center gap-2 shadow-sm transition-transform active:scale-95">
+              <Printer size={18}/> 印刷する
+            </button>
+            <button onClick={() => setIsPrintModalOpen(false)} className="bg-white text-gray-600 border border-gray-300 px-5 py-2 rounded-xl font-bold hover:bg-gray-50 flex items-center gap-2 transition-colors">
+              <X size={18}/> 閉じる
+            </button>
+          </div>
+        </div>
+        
+        {/* 用紙のコンテナ */}
+        <div className="py-8 flex flex-col items-center gap-8 print:block print:p-0 print:gap-0 font-sans">
+          {printUsers.map((user) => {
+            // ★ログインIDを再定義（ここで消えていました）
+            const loginId = user.lifetime_id || user.email || '';
+            
+            // ★ 万が一qrBaseUrlが空でもエラーにならないようフォールバックを設定
+            const safeBaseUrl = qrBaseUrl || 'https://www.edic.jp'; 
+            const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(safeBaseUrl)}`;
+            
+            // ★権限ごとの表示判定
+            const isStudent = user.role === 'student';
+            const isTeacher = user.role === 'teacher';
+            const displayName = user.student_name || user.name || '名称未設定';
+            const nameSuffix = isStudent ? 'さん' : isTeacher ? '先生' : '様';
+
+            const today = new Date();
+            const formattedDate = `${today.getFullYear()}年${today.getMonth() + 1}月${today.getDate()}日`;
+            
+            return (
+              <div 
+                key={user.id} 
+                className="print-page bg-white shadow-lg relative block"
+                style={{ width: '210mm', height: '297mm', padding: '12mm 18mm' }} 
+              >
+                {/* --- 印刷コンテンツ上部 --- */}
+                <div className="block">
+                  
+                  {/* 発行日 */}
+                  <div className="text-right text-sm text-gray-500 font-medium mb-3">
+                    発行日: {formattedDate}
+                  </div>
+
+                  {/* ポップなタイトルバー (アイコン＋システム名) */}
+                  <div className="bg-blue-50 border-2 border-blue-100 rounded-2xl py-3 px-4 mb-5 flex items-center justify-center gap-4 shadow-sm">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src="/icon.png" alt="App Icon" className="w-10 h-10 rounded-xl shadow-sm border border-white" />
+                    <h1 className="text-xl font-black text-blue-800 tracking-wider">
+                      理社講座新システム 初回ログインのご案内
+                    </h1>
+                  </div>
+
+                  {/* 宛名と柔らかい挨拶文 (生徒用と講師用で出し分け) */}
+                  <div className="mb-5 px-2">
+                    {isStudent ? (
+                      <>
+                        <p className="text-lg mb-2 text-gray-800 font-bold">
+                          保護者 様<br/>
+                          <span className="text-2xl tracking-wide ml-4 text-blue-900">{displayName}</span> {nameSuffix}
+                        </p>
+                        <p className="text-[13px] text-gray-700 leading-relaxed mt-2">
+                          いつも当塾の教育活動にご理解とご協力をいただき、ありがとうございます。<br/>
+                          この度、ご家庭と塾をつなぐ「理社講座新システム」のアカウントをご用意いたしました。<br/>
+                          お手持ちのスマートフォンやパソコンから簡単にアクセスできますので、<br/>
+                          下記のアカウント情報を使って、ぜひ最初のログインをお試しくださいませ！
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-lg mb-2 text-gray-800 font-bold">
+                          <span className="text-2xl tracking-wide text-blue-900">{displayName}</span> {nameSuffix}
+                        </p>
+                        <p className="text-[13px] text-gray-700 leading-relaxed mt-2">
+                          平素は当塾の指導業務にご尽力いただき、誠にありがとうございます。<br/>
+                          この度、業務で使用する「理社講座新システム」の{isTeacher ? '講師' : '管理者'}用アカウントを発行いたしました。<br/>
+                          お手持ちのスマートフォンやパソコンからアクセスできますので、<br/>
+                          下記のアカウント情報を使って、初回ログインを行ってください。
+                        </p>
+                      </>
+                    )}
+                  </div>
+                  
+                  {/* アカウント情報エリア (パスワード変更メモ欄追加) */}
+                  <div className="bg-white border-4 border-blue-50 rounded-3xl p-4 mb-6 flex justify-between items-center shadow-sm">
+                    <div className="flex-1 pl-2 pr-4">
+                      <h2 className="text-md font-black text-blue-800 mb-4 flex items-center gap-2 border-b-2 border-blue-50 pb-1.5 inline-flex">
+                        <Shield size={18} className="text-blue-500"/> あなたの専用アカウント情報
+                      </h2>
+                      <div className="space-y-4">
+                        <div>
+                          <p className="text-[11px] font-bold text-gray-500 mb-1">① ログインID (生涯番号)</p>
+                          <p className="text-xl font-mono font-black tracking-widest text-gray-800 bg-blue-50 px-3 py-1.5 rounded-xl inline-block border border-blue-100">{loginId}</p>
+                        </div>
+                        <div className="flex gap-4 items-end">
+                          <div>
+                            <p className="text-[11px] font-bold text-gray-500 mb-1">② 初期パスワード</p>
+                            <p className="text-lg font-mono font-bold tracking-widest text-gray-800 bg-blue-50 px-3 py-1.5 rounded-xl inline-block border border-blue-100">{user.initial_password || '********'}</p>
+                          </div>
+                          {/* ★新パスワード メモ欄 */}
+                          <div className="flex-1 border-b-2 border-dashed border-gray-300 pb-1 mb-1">
+                            <span className="text-[10px] font-bold text-red-500 mr-2">変更後の新パスワード メモ :</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    {/* QRコードエリア */}
+                    <div className="text-center ml-2 flex flex-col items-center justify-center bg-blue-50 p-3 rounded-2xl border-2 border-blue-100 w-40 shrink-0">
+                      <p className="text-[11px] font-bold text-blue-800 mb-1.5 bg-white px-3 py-1 rounded-full shadow-sm">ここからログイン！</p>
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={qrUrl} alt="Login QR Code" className="w-20 h-20 mb-1" crossOrigin="anonymous"/>
+                      <p className="text-[9px] font-bold text-gray-500 leading-tight">カメラで読み取れます</p>
+                    </div>
+                  </div>
+                  
+                  {/* 注意事項 */}
+                  <div className="bg-yellow-50/50 border-2 border-yellow-100 rounded-2xl p-4">
+                    <h3 className="font-bold text-yellow-800 mb-2 flex items-center gap-2 text-[14px]">
+                      <AlertTriangle size={16} className="text-yellow-600"/> ご利用にあたってのお願い
+                    </h3>
+                    <ul className="space-y-2 text-[12px] text-gray-700 leading-relaxed font-medium">
+                      <li className="flex gap-2 items-start">
+                        <CheckCircle size={14} className="text-yellow-500 shrink-0 mt-0.5"/>
+                        <div>
+                          <strong>パスワードの変更について：</strong><br/>
+                          セキュリティ保護のため、初回ログイン後に必ずメニューの「設定」画面から、<span className="text-red-500 font-bold bg-red-50 px-1 rounded">ご自身しか分からない新しいパスワードに変更</span>をお願いいたします。
+                        </div>
+                      </li>
+                      <li className="flex gap-2 items-start">
+                        <CheckCircle size={14} className="text-yellow-500 shrink-0 mt-0.5"/>
+                        <div>
+                          <strong>アカウントの管理について：</strong><br/>
+                          この用紙に記載されているIDとパスワードは、第三者に知られないよう大切に保管してください。
+                        </div>
+                      </li>
+                      <li className="flex gap-2 items-start">
+                        <CheckCircle size={14} className="text-yellow-500 shrink-0 mt-0.5"/>
+                        <div>
+                          <strong>アプリの追加方法：</strong><br/>
+                          SafariやChrome等のブラウザでログイン後、画面の案内に従って「ホーム画面に追加」を行っていただくと、次回以降スマホアプリのように便利にご利用いただけます。
+                        </div>
+                      </li>
+                      <li className="flex gap-2 items-start">
+                        <CheckCircle size={14} className="text-yellow-500 shrink-0 mt-0.5"/>
+                        <div>
+                          <strong>ログインでお困りの場合：</strong><br/>
+                          パスワードを忘れてしまった場合や、ログインができない場合は、当塾の{isStudent ? '担当講師' : 'システム管理者'}までお気軽にお声がけください{isStudent ? '！' : '。'}
+                        </div>
+                      </li>
+                    </ul>
+                  </div>
+                </div>
+
+                {/* === ★フッター (絶対配置で用紙下部に固定) === */}
+                <div className="print-footer flex justify-between items-end border-t-2 border-blue-100 pt-2">
+                  <div className="text-[10px] text-gray-400 font-medium pb-1">※本用紙は大切に保管してください。</div>
+                  <div className="text-xl font-black text-blue-900 tracking-widest">
+                    創造学園エディック
+                  </div>
+                </div>
+
+              </div>
+            );
+          })}
+        </div>
+      </div>,
+      document.body // ★ Portalを使ってbodyの直下にレンダリング
+    );
+  };
+
+  return (
+    <>
+      {/* 印刷モーダル (Portal) の呼び出し */}
+      {isPrintModalOpen && <PrintModal />}
+
+      {/* --- メイン画面 (プレビュー時・印刷時は画面上から消す) --- */}
+      <div className={`min-h-screen bg-gray-50 p-6 pb-20 ${isPrintModalOpen ? 'hidden' : 'block'}`}>
+        <div className="max-w-6xl mx-auto">
+          
+          {/* ヘッダー */}
+          <div className="flex flex-col md:flex-row items-center justify-between mb-8 gap-4">
+            <div className="flex items-center gap-4 w-full md:w-auto">
+              <Link href="/master" className="bg-white p-2 rounded-full shadow hover:bg-gray-100 text-gray-600 transition-colors">
+                <ArrowLeft size={20} />
+              </Link>
+              <div>
+                <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
+                  <Users className="text-blue-600" /> ユーザー管理
+                </h1>
+                <p className="text-xs text-gray-500">生徒・講師・管理者のID発行と編集</p>
+              </div>
+            </div>
+
+            <div className="flex gap-2 w-full md:w-auto items-center">
+               <div className="relative">
+                 <input type="file" accept=".csv" onChange={handleCSVImport} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" disabled={isImporting}/>
+                 <button disabled={isImporting} className="bg-green-600 text-white px-4 py-2 rounded-full font-bold hover:bg-green-700 shadow flex items-center gap-2 text-sm whitespace-nowrap">
+                   {isImporting ? <Loader2 className="animate-spin" size={16}/> : <FileUp size={16}/>} CSV一括登録
+                 </button>
+               </div>
+
+               <div className="relative flex-1 md:w-64">
+                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={16}/>
+                 <input 
+                   type="text" 
+                   placeholder="名前・ID・科目で検索" 
+                   className="w-full pl-9 pr-4 py-2 border rounded-full focus:ring-2 focus:ring-blue-500 outline-none"
+                   value={searchQuery}
+                   onChange={e => setSearchQuery(e.target.value)}
+                 />
+               </div>
+               <button 
+                 onClick={() => handleOpenModal()} 
+                 className="bg-blue-600 text-white px-4 py-2 rounded-full font-bold hover:bg-blue-700 shadow flex items-center gap-2 whitespace-nowrap"
+               >
+                 <Plus size={18}/> 新規
+               </button>
             </div>
           </div>
 
-          <div className="flex gap-2 w-full md:w-auto items-center">
-             <div className="relative">
-               <input type="file" accept=".csv" onChange={handleCSVImport} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" disabled={isImporting}/>
-               <button disabled={isImporting} className="bg-green-600 text-white px-4 py-2 rounded-full font-bold hover:bg-green-700 shadow flex items-center gap-2 text-sm whitespace-nowrap">
-                 {isImporting ? <Loader2 className="animate-spin" size={16}/> : <FileUp size={16}/>} CSV一括登録
-               </button>
-             </div>
-
-             <div className="relative flex-1 md:w-64">
-               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={16}/>
-               <input 
-                 type="text" 
-                 placeholder="名前・ID・科目で検索" 
-                 className="w-full pl-9 pr-4 py-2 border rounded-full focus:ring-2 focus:ring-blue-500 outline-none"
-                 value={searchQuery}
-                 onChange={e => setSearchQuery(e.target.value)}
-               />
-             </div>
-             <button 
-               onClick={() => handleOpenModal()} 
-               className="bg-blue-600 text-white px-4 py-2 rounded-full font-bold hover:bg-blue-700 shadow flex items-center gap-2 whitespace-nowrap"
-             >
-               <Plus size={18}/> 新規
-             </button>
-          </div>
-        </div>
-
-        {/* タブ切り替え */}
-        <div className="flex flex-col sm:flex-row justify-between items-end sm:items-center mb-4 gap-4 border-b border-gray-200 pb-2">
-          <div className="flex gap-2">
-            <button onClick={() => setActiveTab('student')} className={`px-6 py-3 font-bold text-sm flex items-center gap-2 border-b-2 -mb-2.5 transition-colors ${activeTab === 'student' ? 'border-blue-600 text-blue-600 bg-blue-50/50' : 'border-transparent text-gray-500'}`}>
-              <GraduationCap size={18}/> 生徒 ({users.filter(u => u.role === 'student').length})
-            </button>
-            <button onClick={() => setActiveTab('teacher')} className={`px-6 py-3 font-bold text-sm flex items-center gap-2 border-b-2 -mb-2.5 transition-colors ${activeTab === 'teacher' ? 'border-purple-600 text-purple-600 bg-purple-50/50' : 'border-transparent text-gray-500'}`}>
-              <UserCheck size={18}/> 講師 ({users.filter(u => u.role === 'teacher').length})
-            </button>
-            <button onClick={() => setActiveTab('master')} className={`px-6 py-3 font-bold text-sm flex items-center gap-2 border-b-2 -mb-2.5 transition-colors ${activeTab === 'master' ? 'border-gray-800 text-gray-800 bg-gray-100' : 'border-transparent text-gray-500'}`}>
-              <Shield size={18}/> 管理者 ({users.filter(u => u.role === 'master').length})
-            </button>
-          </div>
-          
-          <div className="flex gap-2">
-            <button onClick={handleDeduplicate} className="text-orange-600 hover:bg-orange-50 px-3 py-1 rounded text-xs font-bold flex items-center gap-1 border border-orange-200">
-              <AlertTriangle size={14}/> 重複チェック・削除
-            </button>
-            {selectedIds.size > 0 && (
-              <button onClick={handleBulkDelete} disabled={isBulkDeleting} className="bg-red-50 text-red-600 border border-red-200 px-4 py-1 rounded-full font-bold text-sm hover:bg-red-100 flex items-center gap-2">
-                {isBulkDeleting ? <Loader2 className="animate-spin" size={16}/> : <Trash2 size={16}/>} {selectedIds.size}件削除
+          {/* タブ切り替えと操作ボタン */}
+          <div className="flex flex-col sm:flex-row justify-between items-end sm:items-center mb-4 gap-4 border-b border-gray-200 pb-2">
+            <div className="flex gap-2">
+              <button onClick={() => setActiveTab('student')} className={`px-6 py-3 font-bold text-sm flex items-center gap-2 border-b-2 -mb-2.5 transition-colors ${activeTab === 'student' ? 'border-blue-600 text-blue-600 bg-blue-50/50' : 'border-transparent text-gray-500'}`}>
+                <GraduationCap size={18}/> 生徒 ({users.filter(u => u.role === 'student').length})
               </button>
-            )}
+              <button onClick={() => setActiveTab('teacher')} className={`px-6 py-3 font-bold text-sm flex items-center gap-2 border-b-2 -mb-2.5 transition-colors ${activeTab === 'teacher' ? 'border-purple-600 text-purple-600 bg-purple-50/50' : 'border-transparent text-gray-500'}`}>
+                <UserCheck size={18}/> 講師 ({users.filter(u => u.role === 'teacher').length})
+              </button>
+              <button onClick={() => setActiveTab('master')} className={`px-6 py-3 font-bold text-sm flex items-center gap-2 border-b-2 -mb-2.5 transition-colors ${activeTab === 'master' ? 'border-gray-800 text-gray-800 bg-gray-100' : 'border-transparent text-gray-500'}`}>
+                <Shield size={18}/> 管理者 ({users.filter(u => u.role === 'master').length})
+              </button>
+            </div>
+            
+            <div className="flex gap-2 flex-wrap justify-end">
+              <button onClick={handleDeduplicate} className="text-orange-600 hover:bg-orange-50 px-3 py-1 rounded text-xs font-bold flex items-center gap-1 border border-orange-200">
+                <AlertTriangle size={14}/> 重複チェック・削除
+              </button>
+              
+              {selectedIds.size > 0 && (
+                <>
+                  <button 
+                    onClick={() => setIsPrintModalOpen(true)} 
+                    className="bg-indigo-50 text-indigo-600 border border-indigo-200 px-4 py-1 rounded-full font-bold text-sm hover:bg-indigo-100 flex items-center gap-2 transition-colors"
+                  >
+                    <Printer size={16}/> {selectedIds.size}件の書面印刷
+                  </button>
+                  <button onClick={handleBulkDelete} disabled={isBulkDeleting} className="bg-red-50 text-red-600 border border-red-200 px-4 py-1 rounded-full font-bold text-sm hover:bg-red-100 flex items-center gap-2 transition-colors">
+                    {isBulkDeleting ? <Loader2 className="animate-spin" size={16}/> : <Trash2 size={16}/>} {selectedIds.size}件削除
+                  </button>
+                </>
+              )}
+            </div>
           </div>
-        </div>
 
-        {/* リスト表示 */}
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-          {loading ? (
-            <div className="p-20 flex justify-center"><Loader2 className="animate-spin text-gray-400"/></div>
-          ) : filteredUsers.length === 0 ? (
-            <div className="p-10 text-center text-gray-400">データが見つかりません</div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm text-left">
-                <thead className="bg-gray-50 text-gray-600 font-bold border-b border-gray-200">
-                  <tr>
-                    <th className="p-4 w-10"><input type="checkbox" className="w-4 h-4" onChange={(e) => handleSelectAll(e.target.checked)} checked={filteredUsers.length > 0 && selectedIds.size === filteredUsers.length}/></th>
-                    <th className="p-4 w-40">氏名</th>
-                    <th className="p-4 w-64">ログインID</th>
-                    <th className="p-4">パスワード</th>
-                    
-                    {activeTab === 'student' && (
-                      <>
-                        <th className="p-4">学年</th>
-                        <th className="p-4">教室</th>
-                        <th className="p-4">理科</th>
-                        <th className="p-4">社会</th>
-                      </>
-                    )}
-                    
-                    <th className="p-4 text-center">操作</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {filteredUsers.map((user) => (
-                    <tr key={user.id} className={`hover:bg-gray-50 transition-colors ${selectedIds.has(user.id) ? 'bg-blue-50/30' : ''}`}>
-                      <td className="p-4"><input type="checkbox" className="w-4 h-4 cursor-pointer" checked={selectedIds.has(user.id)} onChange={(e) => handleSelectOne(user.id, e.target.checked)}/></td>
-                      
-                      <td className="p-4 font-bold text-gray-800 flex items-center gap-2">
-                        <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold ${
-                          user.role === 'student' ? 'bg-blue-400' : 
-                          user.role === 'teacher' ? 'bg-purple-400' : 'bg-gray-700'
-                        }`}>
-                          {(user.student_name || user.name || '?')[0]}
-                        </div>
-                        <span className="truncate max-w-[120px]">{user.student_name || user.name || <span className="text-gray-400">未設定</span>}</span>
-                      </td>
-
-                      {/* ★修正: lifetime_id が無ければ email を表示するフォールバック追加 */}
-                      <td className="p-4 font-mono text-gray-700 font-medium break-all">
-                        {user.lifetime_id || user.email || <span className="text-gray-300">-</span>}
-                      </td>
-
-                      <td className="p-4 text-gray-400 text-xs font-mono">{user.initial_password || '********'}</td>
+          {/* リスト表示 */}
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+            {loading ? (
+              <div className="p-20 flex justify-center"><Loader2 className="animate-spin text-gray-400"/></div>
+            ) : filteredUsers.length === 0 ? (
+              <div className="p-10 text-center text-gray-400">データが見つかりません</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm text-left">
+                  <thead className="bg-gray-50 text-gray-600 font-bold border-b border-gray-200">
+                    <tr>
+                      <th className="p-4 w-10"><input type="checkbox" className="w-4 h-4" onChange={(e) => handleSelectAll(e.target.checked)} checked={filteredUsers.length > 0 && selectedIds.size === filteredUsers.length}/></th>
+                      <th className="p-4 w-40">氏名</th>
+                      <th className="p-4 w-64">ログインID</th>
+                      <th className="p-4">パスワード</th>
                       
                       {activeTab === 'student' && (
                         <>
-                          <td className="p-4"><span className="px-2 py-1 rounded bg-gray-100 text-xs font-bold text-gray-600">{user.grade || '-'}</span></td>
-                          <td className="p-4 text-gray-600">{user.classroom || '-'}</td>
-                          <td className="p-4 text-gray-600 font-bold">{user.subject_science || '-'}</td>
-                          <td className="p-4 text-gray-600 font-bold">{user.subject_social || '-'}</td>
+                          <th className="p-4">学年</th>
+                          <th className="p-4">教室</th>
+                          <th className="p-4">理科</th>
+                          <th className="p-4">社会</th>
                         </>
                       )}
                       
-                      <td className="p-4 flex justify-center gap-2">
-                        <button onClick={() => handleOpenModal(user)} className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded"><Edit size={16}/></button>
-                        <button onClick={() => handleDelete(user.id)} className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded"><Trash2 size={16}/></button>
-                      </td>
+                      <th className="p-4 text-center">操作</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {filteredUsers.map((user) => (
+                      <tr key={user.id} className={`hover:bg-gray-50 transition-colors ${selectedIds.has(user.id) ? 'bg-blue-50/30' : ''}`}>
+                        <td className="p-4"><input type="checkbox" className="w-4 h-4 cursor-pointer" checked={selectedIds.has(user.id)} onChange={(e) => handleSelectOne(user.id, e.target.checked)}/></td>
+                        
+                        <td className="p-4 font-bold text-gray-800 flex items-center gap-2">
+                          <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold ${
+                            user.role === 'student' ? 'bg-blue-400' : 
+                            user.role === 'teacher' ? 'bg-purple-400' : 'bg-gray-700'
+                          }`}>
+                            {(user.student_name || user.name || '?')[0]}
+                          </div>
+                          <span className="truncate max-w-[120px]">{user.student_name || user.name || <span className="text-gray-400">未設定</span>}</span>
+                        </td>
+
+                        <td className="p-4 font-mono text-gray-700 font-medium break-all">
+                          {user.lifetime_id || user.email || <span className="text-gray-300">-</span>}
+                        </td>
+
+                        <td className="p-4 text-gray-400 text-xs font-mono">{user.initial_password || '********'}</td>
+                        
+                        {activeTab === 'student' && (
+                          <>
+                            <td className="p-4"><span className="px-2 py-1 rounded bg-gray-100 text-xs font-bold text-gray-600">{user.grade || '-'}</span></td>
+                            <td className="p-4 text-gray-600">{user.classroom || '-'}</td>
+                            <td className="p-4 text-gray-600 font-bold">{user.subject_science || '-'}</td>
+                            <td className="p-4 text-gray-600 font-bold">{user.subject_social || '-'}</td>
+                          </>
+                        )}
+                        
+                        <td className="p-4 flex justify-center gap-2">
+                          <button onClick={() => handleOpenModal(user)} className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded"><Edit size={16}/></button>
+                          <button onClick={() => handleDelete(user.id)} className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded"><Trash2 size={16}/></button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
-      {/* モーダル */}
+      {/* 編集モーダル */}
       {isModalOpen && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl w-full max-w-lg shadow-xl overflow-hidden">
@@ -522,6 +779,6 @@ export default function UserManagementPage() {
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 }

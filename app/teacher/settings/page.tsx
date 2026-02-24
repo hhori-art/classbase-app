@@ -2,20 +2,18 @@
 
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
-// import { useSettings } from '@/app/context/SettingsContext'; 
 import { db, auth } from '@/lib/firebase';
 import { doc, updateDoc } from 'firebase/firestore';
 import { updatePassword, signOut } from 'firebase/auth';
 import { 
   User, Lock, LogOut, ChevronRight, 
   Save, Loader2, Shield, Bell, Type, 
-  Smartphone, Download, Share, PlusSquare, HelpCircle, Check, Briefcase
+  Smartphone, Download, Share, PlusSquare, HelpCircle, Check, Briefcase, MessageCircle
 } from 'lucide-react';
 
 export default function TeacherSettingsPage() {
   const { user, profile } = useAuth();
   
-  // const { textSize, setTextSize } = useSettings();
   const [textSize, setTextSize] = useState('normal'); 
 
   // --- State ---
@@ -42,14 +40,53 @@ export default function TeacherSettingsPage() {
   const [isStandalone, setIsStandalone] = useState(false);
   const [showManual, setShowManual] = useState(false);
 
+  // --- LINE連携状態 ---
+  const [lineUserId, setLineUserId] = useState<string | null>(null);
+  const [lineLinking, setLineLinking] = useState(false);
+
   useEffect(() => {
+    // 1. プロフィールの読み込み
     if (profile) {
       setName(profile.name || user?.displayName || '');
-      if (profile.settings) {
-        setSettings(prev => ({ ...prev, ...profile.settings }));
+      if (profile.line_user_id) setLineUserId(profile.line_user_id);
+      if (profile.settings) setSettings(prev => ({ ...prev, ...profile.settings }));
+    }
+
+    // 2. LINE連携からの戻り時の処理 (URLパラメータのチェック)
+    if (typeof window !== 'undefined') {
+      const searchParams = new URLSearchParams(window.location.search);
+      const newLineId = searchParams.get('line_id');
+      const error = searchParams.get('error');
+
+      // 連携成功時
+      if (newLineId && user && profile && !profile.line_user_id) {
+        const saveLineId = async () => {
+          setLoading(true);
+          try {
+            const userRef = doc(db, 'users', user.uid);
+            await updateDoc(userRef, { line_user_id: newLineId });
+            setLineUserId(newLineId);
+            showMessage('success', 'LINE連携が完了しました！');
+            // パラメータを消してURLを綺麗にする
+            window.history.replaceState(null, '', window.location.pathname);
+          } catch (e) {
+            console.error(e);
+            showMessage('error', 'LINE連携の保存に失敗しました');
+          } finally {
+            setLoading(false);
+          }
+        };
+        saveLineId();
+      }
+
+      // 連携失敗時・キャンセル時
+      if (error) {
+        showMessage('error', 'LINE連携に失敗したか、キャンセルされました');
+        window.history.replaceState(null, '', window.location.pathname);
       }
     }
 
+    // 3. PWAインストールの準備
     const handleBeforeInstallPrompt = (e: any) => {
       e.preventDefault();
       setDeferredPrompt(e);
@@ -78,14 +115,13 @@ export default function TeacherSettingsPage() {
     document.documentElement.style.fontSize = size === 'large' ? '110%' : '100%';
   };
 
-  // 保存処理 (名前の更新を削除)
+  // 保存処理
   const handleSaveSettings = async () => {
     if (!user) return;
     setLoading(true);
     try {
       const userRef = doc(db, 'users', user.uid);
       await updateDoc(userRef, { 
-        // name: name, // 名前変更は無効化
         settings: settings,
         updated_at: new Date().toISOString()
       });
@@ -95,6 +131,41 @@ export default function TeacherSettingsPage() {
     } catch (e: any) {
       console.error(e);
       showMessage('error', '保存に失敗しました');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // LINE連携ボタンの処理
+  const handleLineLink = async () => {
+    if (!user) return;
+    setLineLinking(true);
+    try {
+      // 連携用APIへリダイレクト
+      const currentUrl = encodeURIComponent(window.location.href);
+      window.location.href = `/api/line/auth?uid=${user.uid}&redirect=${currentUrl}`;
+    } catch (e) {
+      console.error(e);
+      showMessage('error', 'LINE連携画面への移動に失敗しました');
+      setLineLinking(false);
+    }
+  };
+
+  // LINE連携解除の処理
+  const handleLineUnlink = async () => {
+    if (!user || !confirm('LINE連携を解除しますか？\n授業のお知らせなどが届かなくなります。')) return;
+    setLoading(true);
+    try {
+      const userRef = doc(db, 'users', user.uid);
+      await updateDoc(userRef, { 
+        line_user_id: null,
+        updated_at: new Date().toISOString()
+      });
+      setLineUserId(null);
+      showMessage('success', 'LINE連携を解除しました');
+    } catch (e) {
+      console.error(e);
+      showMessage('error', '解除に失敗しました');
     } finally {
       setLoading(false);
     }
@@ -259,7 +330,6 @@ export default function TeacherSettingsPage() {
               </div>
             </div>
             
-            {/* ★修正: @sozogakuen.co.jp を削除して表示 */}
             <div>
               <label className="block text-xs font-bold text-gray-400 mb-2">ログインID</label>
               <div className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold text-gray-700 text-sm font-mono tracking-wide">
@@ -269,10 +339,43 @@ export default function TeacherSettingsPage() {
           </div>
         </section>
 
+        {/* --- LINE連携セクション --- */}
+        <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
+          <h2 className="text-sm font-extrabold text-gray-500 uppercase tracking-wider mb-2 flex items-center gap-2">
+            <MessageCircle size={18} className="text-[#06C755]"/> LINE連携
+          </h2>
+          <p className="text-xs text-gray-500 mb-4 font-medium leading-relaxed">
+            連携すると、授業当日のリマインドやシフト提出のお願いなどをLINEで受け取ることができます。
+          </p>
+
+          {lineUserId ? (
+            <div className="bg-[#06C755]/10 border border-[#06C755]/20 p-4 rounded-2xl flex flex-col gap-3">
+              <div className="flex items-center gap-2 text-[#06C755] font-bold text-sm">
+                <Check size={18}/> 連携済み
+              </div>
+              <button 
+                onClick={handleLineUnlink}
+                className="w-full py-2.5 bg-white text-gray-500 text-xs font-bold rounded-xl border border-gray-200 hover:bg-gray-50 transition-colors"
+              >
+                連携を解除する
+              </button>
+            </div>
+          ) : (
+            <button 
+              onClick={handleLineLink}
+              disabled={lineLinking}
+              className="w-full bg-[#06C755] hover:bg-[#05b34c] text-white py-3.5 rounded-2xl font-bold text-sm flex items-center justify-center gap-2 transition-all active:scale-95 shadow-md shadow-[#06C755]/20"
+            >
+              {lineLinking ? <Loader2 className="animate-spin" size={18}/> : <MessageCircle size={18} fill="currentColor"/>}
+              LINEと連携する
+            </button>
+          )}
+        </section>
+
         {/* --- 3. 通知設定 --- */}
         <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
           <h2 className="text-sm font-extrabold text-gray-500 uppercase tracking-wider mb-4 flex items-center gap-2">
-            <Bell size={18}/> 通知・サウンド
+            <Bell size={18}/> アプリ内通知設定
           </h2>
           <div className="space-y-4">
             {[

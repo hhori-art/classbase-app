@@ -315,15 +315,103 @@ export default function TeacherAttendancePage() {
     } catch (e) { console.error(e); }
   };
 
+  const fillGaps = (currentSegments: WorkSegment[], startTime: string, endTime: string | null) => {
+    if (!startTime || !endTime) return currentSegments;
+    const toMinutes = (s: string) => {
+      if(!s) return -1;
+      const [h, m] = s.split(':').map(Number);
+      return h * 60 + m;
+    };
+    const toTimeStr = (m: number) => {
+      const h = Math.floor(m / 60);
+      const min = m % 60;
+      return `${String(h).padStart(2,'0')}:${String(min).padStart(2,'0')}`;
+    };
+
+    const shiftStart = new Date(startTime);
+    const shiftEnd = new Date(endTime);
+    const startMin = shiftStart.getHours() * 60 + shiftStart.getMinutes();
+    const endMin = shiftEnd.getHours() * 60 + shiftEnd.getMinutes();
+
+    const sorted = [...currentSegments]
+      .filter(s => s.start && s.end)
+      .sort((a, b) => toMinutes(a.start) - toMinutes(b.start));
+
+    const result: WorkSegment[] = [];
+    let cursor = startMin;
+
+    for (const seg of sorted) {
+      const segStart = toMinutes(seg.start);
+      const segEnd = toMinutes(seg.end);
+
+      if (cursor < segStart) {
+        result.push({ 
+          start: toTimeStr(cursor), 
+          end: toTimeStr(segStart), 
+          type: 'break',
+          note: '休憩(自動補完)', 
+          isAuto: true 
+        });
+      }
+      result.push(seg);
+      cursor = Math.max(cursor, segEnd);
+    }
+
+    if (cursor < endMin) {
+      result.push({ 
+        start: toTimeStr(cursor), 
+        end: toTimeStr(endMin), 
+        type: 'break',
+        note: '休憩(自動補完)', 
+        isAuto: true 
+      });
+    }
+    return result;
+  };
+
   const saveData = async () => {
     if (!editingRecord) return;
+    
+    // ★ 追加：出勤直後の休憩を禁止するバリデーション
+    const newStartISO = editingRecord.start_time;
+    if (segments.length > 0 && newStartISO) {
+      const toMinutes = (s: string) => {
+        if(!s) return -1;
+        const [h, m] = s.split(':').map(Number);
+        return h * 60 + m;
+      };
+      
+      const sortedSegments = [...segments]
+        .filter(s => s.start && s.end)
+        .sort((a, b) => toMinutes(a.start) - toMinutes(b.start));
+
+      if (sortedSegments.length > 0) {
+        const shiftStart = new Date(newStartISO);
+        const startMin = shiftStart.getHours() * 60 + shiftStart.getMinutes();
+        const firstSegMin = toMinutes(sortedSegments[0].start);
+
+        // 1. 出勤時刻と最初の業務開始時刻の間に隙間がある（自動で休憩になる）場合
+        if (firstSegMin > startMin) {
+          alert('【エラー】出勤直後に空白時間を作ることはできません（自動補完で休憩になってしまうため）。\n打刻された出勤時刻と「最初の業務の開始時刻」を一致させてください。');
+          return;
+        }
+
+        // 2. 最初のセグメントが手動で「休憩」に設定されている場合
+        if (sortedSegments[0].type === 'break') {
+          alert('【エラー】出勤直後の最初の業務区分に「休憩」を登録することはできません。');
+          return;
+        }
+      }
+    }
+
     try {
       const validSegments = segments.filter(s => s.start && s.end);
       validSegments.sort((a, b) => a.start.localeCompare(b.start));
+      const filledSegments = fillGaps(validSegments, editingRecord.start_time, editingRecord.end_time);
       const formattedExpenses = expenses.map(e => ({ ...e, cost: Number(e.cost) }));
       
       await updateDoc(doc(db, 'work_records', editingRecord.id), {
-        work_segments: validSegments,
+        work_segments: filledSegments,
         transportation: formattedExpenses,
         updated_at: new Date().toISOString()
       });
@@ -371,7 +459,6 @@ export default function TeacherAttendancePage() {
     <div className="min-h-screen bg-gray-50 p-4 pb-48 font-sans md:p-8">
       <div className="max-w-xl mx-auto">
         <div className="flex items-center gap-4 mb-6">
-          {/* ★修正: リンク先を /teacher/work に変更 */}
           <Link href="/teacher/work" className="bg-white p-3 rounded-full shadow-sm hover:bg-gray-50 text-gray-600 transition-colors"><ArrowLeft size={20} /></Link>
           <h1 className="text-2xl font-black text-gray-800 flex items-center gap-2"><Briefcase className="text-blue-600" /> 勤怠打刻</h1>
         </div>
@@ -495,7 +582,7 @@ export default function TeacherAttendancePage() {
               
               {/* ビジュアルタイムライン */}
               <section>
-                <div className="flex justify-between items-center mb-2 px-1">
+                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-2 px-1 gap-2">
                   <h4 className="text-xs font-bold text-gray-500">1日の流れ</h4>
                   <div className="flex gap-2 text-[10px] font-bold">
                     <span className="flex items-center gap-1 text-blue-600"><span className="w-2 h-2 bg-blue-500 rounded-full"></span>授業</span>
@@ -509,6 +596,11 @@ export default function TeacherAttendancePage() {
 
               {/* 編集テーブル */}
               <section>
+                <div className="flex flex-col gap-2 mb-3 px-1 text-[10px] text-gray-600 font-bold bg-gray-100 p-3 rounded-xl border border-gray-200">
+                  <div className="flex items-center gap-1"><AlertCircle size={12} className="shrink-0 text-gray-500"/> 始まりと終わりの隙間は自動で「休憩」になり、空白時間を埋めます（出勤直後は不可）。</div>
+                  <div className="flex items-center gap-1 text-red-500"><AlertCircle size={12} className="shrink-0"/> ※勤務時間が6時間を超える場合は45分以上、8時間を超える場合は1時間以上の休憩が必要です。</div>
+                </div>
+
                 <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden overflow-x-auto">
                   <table className="w-full text-sm border-collapse min-w-[500px] sm:min-w-0">
                     <thead className="bg-gray-100 text-gray-500 text-xs font-bold border-b border-gray-200">
@@ -566,15 +658,18 @@ export default function TeacherAttendancePage() {
 
               {/* 交通費セクション */}
               <section className="pt-4 border-t border-gray-200">
-                <div className="flex justify-between items-center mb-3">
-                  <h4 className="text-sm font-bold text-gray-700 flex items-center gap-2">
-                    <Train size={16}/> 交通費申請
-                  </h4>
+                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end mb-3 gap-2">
+                  <div>
+                    <h4 className="text-sm font-bold text-gray-700 flex items-center gap-2">
+                      <Train size={16}/> 交通費申請
+                    </h4>
+                    <p className="text-[10px] text-red-500 font-bold mt-1">※必ず駅名を入力してください。定期券区間は除外して申請してください。</p>
+                  </div>
                   <div className="flex gap-2">
-                    <button onClick={handleCopyLastTransport} className="text-xs bg-blue-50 text-blue-600 px-3 py-1.5 rounded-full font-bold hover:bg-blue-100 flex items-center gap-1">
+                    <button onClick={handleCopyLastTransport} className="text-[10px] sm:text-xs bg-blue-50 text-blue-600 px-3 py-1.5 rounded-full font-bold hover:bg-blue-100 flex items-center gap-1 shrink-0">
                       <Copy size={12}/> 前回をコピー
                     </button>
-                    <button onClick={addExpense} className="text-xs bg-green-100 text-green-700 px-3 py-1.5 rounded-full font-bold hover:bg-green-200 flex items-center gap-1">
+                    <button onClick={addExpense} className="text-[10px] sm:text-xs bg-green-100 text-green-700 px-3 py-1.5 rounded-full font-bold hover:bg-green-200 flex items-center gap-1 shrink-0">
                       <Plus size={12}/> 追加
                     </button>
                   </div>
