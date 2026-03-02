@@ -3,9 +3,11 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { db, auth } from '@/lib/firebase';
-import { doc, onSnapshot, collection, query, where, getDocs, orderBy, limit } from 'firebase/firestore'; 
-import { onAuthStateChanged, signOut } from 'firebase/auth';
+import { db } from '@/lib/firebase';
+import { doc, getDoc, collection, query, where, getDocs, orderBy, limit } from 'firebase/firestore'; 
+import { useAuth } from '@/app/context/AuthContext'; 
+import { signOut } from 'firebase/auth';
+import { auth } from '@/lib/firebase';
 import { 
   Video, BookOpen, AlertTriangle, 
   ChevronRight, Calendar, Trophy, Settings,
@@ -27,7 +29,6 @@ const CLASS_TIMES = {
   period2: { start: '20:35', end: '21:40' }
 };
 
-// --- エラー表示用コンポーネント ---
 const ErrorFallback = ({ message, onRetry }: { message: string, onRetry: () => void }) => (
   <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-slate-50 text-center">
     <AlertTriangle className="text-red-500 mb-4" size={48} />
@@ -46,13 +47,12 @@ const ErrorFallback = ({ message, onRetry }: { message: string, onRetry: () => v
   </div>
 );
 
-type Props = { initialProfile?: any; };
-
-export default function StudentDashboard({ initialProfile }: Props) {
+export default function StudentDashboard() {
+  const { user, profile, loading: authLoading } = useAuth();
+  
   const [globalError, setGlobalError] = useState<string | null>(null);
   const [mounted, setMounted] = useState(false);
   const [userData, setUserData] = useState<any>(null);
-  const [isAuthChecked, setIsAuthChecked] = useState(false);
   
   const [dateStr, setDateStr] = useState('');
   const [greeting, setGreeting] = useState('');
@@ -64,7 +64,13 @@ export default function StudentDashboard({ initialProfile }: Props) {
 
   const router = useRouter();
 
-  // エラーハンドリング
+  // ★追加：Cookie（サーバーの記憶）を強制的に消去する強力な関数
+  const clearAllCookies = () => {
+    document.cookie.split(";").forEach((c) => {
+      document.cookie = c.replace(/^ +/, "").replace(/=.*/, "=;expires=" + new Date().toUTCString() + ";path=/");
+    });
+  };
+
   useEffect(() => {
     const errorHandler = (event: ErrorEvent) => setGlobalError(event.message || "予期せぬエラー");
     const promiseHandler = (event: PromiseRejectionEvent) => setGlobalError(typeof event.reason === 'string' ? event.reason : "通信エラー");
@@ -76,17 +82,17 @@ export default function StudentDashboard({ initialProfile }: Props) {
     };
   }, []);
 
-  // 強制ログアウト
   const handleForceLogout = async () => {
     try {
       await signOut(auth);
-      window.location.href = '/login?reset=' + Date.now();
+      clearAllCookies(); // ★ログアウト時にCookieも確実に破壊する
+      window.location.href = '/?logout=true'; 
     } catch (e) {
-      window.location.href = '/login';
+      clearAllCookies();
+      window.location.href = '/';
     }
   };
 
-  // 初期化
   useEffect(() => {
     setMounted(true);
     try {
@@ -102,38 +108,25 @@ export default function StudentDashboard({ initialProfile }: Props) {
     }
   }, []);
 
-  // 認証・データ取得
   useEffect(() => {
-    if (!mounted) return;
-    const unsubAuth = onAuthStateChanged(auth, (user) => {
-      if (!user) {
-        router.push('/login'); 
-        return;
-      }
-      setIsAuthChecked(true);
-      const unsubDb = onSnapshot(doc(db, 'users', user.uid), (docSnap) => {
-        if (docSnap.exists()) {
-          const data = docSnap.data();
-          setUserData(data);
-          if (data.day_of_week) checkNextClass(data.day_of_week).catch(console.warn);
-          if (data.grade) checkUrgentHomework(data.grade, data.subjects).catch(console.warn);
-        } else {
-          setUserData(initialProfile || { student_name: 'ゲスト', uid: user.uid, coins: 0 });
-        }
-      }, (err) => {
-        console.error("DB Error:", err);
-        setUserData(initialProfile || { student_name: '読み込みエラー' });
-      });
-      return () => unsubDb();
-    });
-    return () => unsubAuth();
-  }, [mounted, initialProfile, router]);
+    if (!mounted || authLoading) return;
+    
+    // ★無限ループを断ち切る最重要ポイント！
+    if (!user || !profile) {
+      // Firebaseにログイン情報がないのにこの画面にいる = ミドルウェアのCookieが原因の無限ループ！
+      // サーバー側の勘違いを解くため、Cookieを粉砕してからフルリロードでログイン画面に戻す。
+      clearAllCookies();
+      window.location.href = '/'; 
+      return;
+    }
+    
+    setUserData(profile);
+    if (profile.day_of_week) checkNextClass(profile.day_of_week).catch(console.warn);
+    if (profile.grade) checkUrgentHomework(profile.grade, profile.subjects || []).catch(console.warn);
+    
+  }, [mounted, authLoading, user, profile]);
 
-  // ヘルパー関数
   const checkNextClass = async (dayOfWeek: string) => {
-    // (省略: 前回と同じロジック)
-    // 実際の実装では前回のコード同様に記述してください
-    // ここでは長くなるため省略しませんが、そのまま使ってください
     const daysMap = ['日','月','火','水','木','金','土'];
     const targetDayIndex = daysMap.indexOf(dayOfWeek);
     if (targetDayIndex === -1) return;
@@ -151,8 +144,6 @@ export default function StudentDashboard({ initialProfile }: Props) {
   };
 
   const checkUrgentHomework = async (grade: string, subjects: string[] = []) => {
-    // (省略: 前回と同じロジック)
-    // そのまま使用してください
     try {
       const d = new Date();
       const todayStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -174,18 +165,13 @@ export default function StudentDashboard({ initialProfile }: Props) {
     } catch (e) { console.warn(e); }
   };
 
-  // ★修正箇所: 授業表示判定ロジック
   const isClassActive = (start: string, end: string) => {
     if (!now) return false;
     const currentMinutes = now.getHours() * 60 + now.getMinutes();
     const [startH, startM] = start.split(':').map(Number);
     const [endH, endM] = end.split(':').map(Number);
-    
-    // ★ここを修正: 開始の「45分前」から表示するように変更 (以前は15分前)
-    // 19:20開始の場合、18:35から表示されるようになります
     const showStartMinutes = (startH * 60 + startM) - 45; 
     const endMinutes = (endH * 60 + endM);
-
     return currentMinutes >= showStartMinutes && currentMinutes <= endMinutes;
   };
 
@@ -196,12 +182,12 @@ export default function StudentDashboard({ initialProfile }: Props) {
 
   if (globalError) return <ErrorFallback message={globalError} onRetry={handleForceLogout} />;
 
-  if (!mounted || !isAuthChecked || !userData) {
+  if (!mounted || authLoading || !userData) {
     return (
       <div className="min-h-[100dvh] bg-slate-50 flex flex-col items-center justify-center gap-4">
         <Loader2 className="animate-spin text-indigo-500" size={40} />
-        <p className="text-xs font-bold text-slate-400 animate-pulse">{!mounted ? '起動中...' : !isAuthChecked ? '認証中...' : 'データ読み込み中...'}</p>
-        <button onClick={handleForceLogout} className="mt-8 text-[10px] text-gray-400 underline cursor-pointer">画面が動かない場合はこちら (リセット)</button>
+        <p className="text-xs font-bold text-slate-400 animate-pulse">{!mounted ? '起動中...' : authLoading ? '認証中...' : 'データ読み込み中...'}</p>
+        <button onClick={handleForceLogout} className="mt-8 text-[10px] text-gray-400 underline cursor-pointer">画面が動かない場合はこちら（リセット）</button>
       </div>
     );
   }
@@ -221,8 +207,8 @@ export default function StudentDashboard({ initialProfile }: Props) {
         <div className="flex justify-between items-start text-white relative z-10">
           <div>
             <p className="text-sm font-bold opacity-90 mb-1 flex items-center gap-2"><Calendar size={14}/> {dateStr}</p>
-            <h1 className="text-2xl font-extrabold tracking-tight leading-tight">{greeting} <br/><span className="text-yellow-300 text-3xl">{userData?.student_name || '生徒'}</span> さん</h1>
-            <div className="mt-3 inline-flex items-center gap-2 bg-white/20 backdrop-blur-sm px-3 py-1 rounded-full text-xs font-bold"><Clock size={12}/> {userData?.day_of_week || '-'}曜クラス | {userData?.classroom || '-'}</div>
+            <h1 className="text-2xl font-extrabold tracking-tight leading-tight">{greeting} <br/><span className="text-yellow-300 text-3xl">{userData.student_name}</span> さん</h1>
+            <div className="mt-3 inline-flex items-center gap-2 bg-white/20 backdrop-blur-sm px-3 py-1 rounded-full text-xs font-bold"><Clock size={12}/> {userData.day_of_week || '-'}曜クラス | {userData.classroom || '-'}</div>
           </div>
           <div className="bg-white/20 p-1.5 rounded-xl backdrop-blur-sm">
             <button onClick={() => { if(confirm('ログアウトしますか？')) handleForceLogout(); }} className="p-2 text-white hover:bg-white/20 rounded-lg transition-colors flex flex-col items-center justify-center gap-0.5"><LogOut size={20} /></button>
@@ -241,16 +227,14 @@ export default function StudentDashboard({ initialProfile }: Props) {
           </div>
           <div className="text-right">
             <p className="text-[10px] text-gray-400 font-bold uppercase">Total Coins</p>
-            <div className="flex items-center gap-1 justify-end text-yellow-500 font-black text-xl"><div className="bg-yellow-100 p-1 rounded-full"><Trophy size={14} className="fill-yellow-500"/></div>{userData?.coins || 0}</div>
+            <div className="flex items-center gap-1 justify-end text-yellow-500 font-black text-xl"><div className="bg-yellow-100 p-1 rounded-full"><Trophy size={14} className="fill-yellow-500"/></div>{userData.coins || 0}</div>
           </div>
         </button>
 
         <div className="space-y-4 animate-in slide-in-from-top-4">
-          {/* 授業ボタン表示エリア */}
           {showPeriod1 && <SmartClassButton profile={userData} period={1} startTime={CLASS_TIMES.period1.start} endTime={CLASS_TIMES.period1.end} />}
           {showPeriod2 && <SmartClassButton profile={userData} period={2} startTime={CLASS_TIMES.period2.start} endTime={CLASS_TIMES.period2.end} />}
           
-          {/* 時間外の表示 */}
           {!showPeriod1 && !showPeriod2 && now && (
             <div className="bg-white/60 p-4 rounded-3xl border border-white flex items-center justify-center gap-2 text-gray-400 text-sm font-bold">
               <Coffee size={18} />
@@ -259,7 +243,6 @@ export default function StudentDashboard({ initialProfile }: Props) {
           )}
         </div>
 
-        {/* --- (以下、通知・メニュー・ウィジェット等は変更なし) --- */}
         <div className="space-y-3">
           {nextClassInfo && (
             <div className="bg-white p-4 rounded-3xl shadow-sm border border-indigo-50 flex items-center justify-between">
@@ -271,9 +254,8 @@ export default function StudentDashboard({ initialProfile }: Props) {
             <Link href="/student/homework" className="block no-underline"><div className={`p-4 rounded-3xl shadow-sm border flex items-center justify-between transition-transform active:scale-95 ${urgentHomework.daysLeft <= 1 ? 'bg-red-50 border-red-100' : urgentHomework.daysLeft <= 3 ? 'bg-orange-50 border-orange-100' : 'bg-blue-50 border-blue-100'}`}><div><div className={`text-xs font-bold flex items-center gap-1 mb-1 ${urgentHomework.daysLeft <= 1 ? 'text-red-600' : urgentHomework.daysLeft <= 3 ? 'text-orange-600' : 'text-blue-600'}`}>{urgentHomework.daysLeft <= 1 ? <Timer size={14} className="animate-pulse"/> : <ClipboardList size={14}/>}{urgentHomework.daysLeft <= 0 ? '期限切れ間近！' : `提出期限まで あと${urgentHomework.daysLeft}日`}</div><p className="text-sm font-bold text-gray-800 line-clamp-1">{urgentHomework.title}</p></div><div><span className={`text-xs font-black px-3 py-1.5 rounded-full ${urgentHomework.daysLeft <= 1 ? 'bg-red-500 text-white shadow-md shadow-red-200' : urgentHomework.daysLeft <= 3 ? 'bg-orange-400 text-white' : 'bg-white text-blue-500 border border-blue-200'}`}>{urgentHomework.daysLeft <= 0 ? '今日まで' : new Date(urgentHomework.deadline.replace(/-/g, '/')).getDate() + '日提出'}</span></div></div></Link>
           )}
         </div>
-        {/* メニューグリッド等 (変更なし) */}
+
         <div className="grid grid-cols-2 gap-4">
-           {/* (省略: リンク類は元のコードと同じ) */}
            <Link href="/student/homework/adaptive" className="col-span-2 block group"><div className="bg-gradient-to-r from-teal-400 to-emerald-500 p-5 rounded-3xl shadow-lg text-white flex items-center justify-between relative overflow-hidden"><div className="flex items-center gap-4 relative z-10"><div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center"><Brain size={28}/></div><div><div className="flex items-center gap-2 mb-1"><span className="text-lg font-bold">AI学習クエスト</span><span className="bg-yellow-400 text-yellow-900 text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 animate-pulse"><Sparkles size={10} fill="currentColor"/> NEW</span></div><p className="text-xs opacity-90">キミに最適な問題をAIが出題！</p></div></div><ChevronRight size={24} className="opacity-70 group-hover:translate-x-1 transition-transform"/></div></Link>
            <Link href="/student/chat" className="block group"><div className="bg-white p-5 rounded-3xl shadow-sm border border-indigo-100 hover:border-indigo-300 transition-all flex flex-col items-center text-center h-full"><div className="w-12 h-12 bg-indigo-100 text-indigo-600 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><Bot size={24}/></div><h2 className="font-bold text-gray-800">AIチューター</h2><p className="text-[10px] text-gray-400 mt-1">24時間 質問OK!</p></div></Link>
            <Link href="/student/homework" className="block group"><div className="bg-white p-5 rounded-3xl shadow-sm border border-gray-100 hover:border-orange-200 transition-all flex flex-col items-center text-center h-full"><div className="w-12 h-12 bg-orange-100 text-orange-500 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><BookOpen size={24}/></div><h2 className="font-bold text-gray-800">宿題提出</h2><p className="text-[10px] text-gray-400 mt-1">写真を送信</p></div></Link>

@@ -158,7 +158,7 @@ export default function LoginPage() {
         {/* ヘッダー部分 */}
         <div className="text-center mb-10">
           <div className="relative w-24 h-24 mx-auto mb-6 shadow-xl rounded-2xl overflow-hidden transform -rotate-3 bg-white p-2 flex items-center justify-center">
-            {/* ★修正箇所: パスを /icon.png に変更しました */}
+            {/* eslint-disable-next-line @next/next/no-img-element */}
             <img 
               src="/icon.png" 
               alt="理社講座ロゴ" 

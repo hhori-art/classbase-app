@@ -343,7 +343,7 @@ export default function MasterAttendancePage() {
     } catch (e: any) { alert('保存エラー: ' + e.message); }
   };
 
-  // ★ 5人分のテストデータ一括生成機能
+  // ★ テストデータ一括生成機能
   const generateDummyData = async () => {
     if (!confirm(`現在の表示月（${filterMonth}）に、5人のダミー講師の1ヶ月分の勤怠データ（約100件）を一括生成しますか？\n※CSV出力や手当計算のテストに最適です。`)) return;
     
@@ -401,7 +401,7 @@ export default function MasterAttendancePage() {
           let startTime = '';
           let endTime = '';
 
-          // ★ 授業なし・サポートのみの勤務パターンを混ぜる
+          // ★ 勤務パターンを3種類に分けて混ぜる
           if ((day + index) % 4 === 0) {
             // パターンB：サポートのみ（授業なし）
             startTime = `${dateStr}T17:00:00+09:00`;
@@ -412,8 +412,17 @@ export default function MasterAttendancePage() {
               { start: '19:15', end: '21:30', type: 'support', note: '自習室監督・質問対応', isAuto: false },
               { start: '21:30', end: '22:00', type: 'office', note: '見回り・片付け', isAuto: false }
             ];
+          } else if ((day + index) % 4 === 1) {
+            // ★新規追加パターンC：事務→授業→事務（16:00～19:00のショート勤務）
+            startTime = `${dateStr}T16:00:00+09:00`;
+            endTime = `${dateStr}T19:00:00+09:00`;
+            segments = [
+              { start: '16:00', end: '17:00', type: 'office', note: '事務', isAuto: false },
+              { start: '17:00', end: '18:00', type: 'lesson', note: '授業', isAuto: false },
+              { start: '18:00', end: '19:00', type: 'office', note: '事務', isAuto: false }
+            ];
           } else {
-            // パターンA：通常（授業あり）
+            // パターンA：通常（授業あり・フルタイム）
             startTime = `${dateStr}T16:00:00+09:00`;
             endTime = `${dateStr}T22:30:00+09:00`;
             segments = [
@@ -534,7 +543,7 @@ export default function MasterAttendancePage() {
   // ★CSV一括出力
   const handleBulkDownload = async () => {
     if (filteredRecords.length === 0) return alert('出力するデータがありません');
-    if (!confirm('表示中の全データを校舎・職員番号順にソートし、講師ごとの合計行を含めてCSV出力しますか？')) return;
+    if (!confirm('表示中の全データを校舎・職員番号順にソートしてCSV出力しますか？')) return;
 
     setIsCsvGenerating(true);
 
@@ -566,18 +575,18 @@ export default function MasterAttendancePage() {
         groupedData[tid].push(rec);
       });
 
-      // 3. 行生成 (ヘッダー修正：H列に休憩、サポートを分離、手当判定を追加)
+      // 3. 行生成 (ヘッダー修正：勤務形態を2列に分ける)
       const header = [
         '校舎番号', '職員番号', '氏名',
         '日付', '曜日',
         '出勤時刻', '退勤時刻', '休憩時間',
         '授業(開始)', '授業(終了)',
-        '事務(開始)', '事務(終了)',
+        '事務・研修(開始)', '事務・研修(終了)',
         'サポート(開始)', 'サポート(終了)',
         '授業時間(~22時)', '授業時間(22時~)',
-        '事務時間(~22時)', '事務時間(22時~)',
+        '事務・研修時間(~22時)', '事務・研修時間(22時~)',
         'サポート時間(~22時)', 'サポート時間(22時~)',
-        '手当判定',
+        '勤務形態(授業)', '勤務形態(サポート)', // ★ 手当判定を勤務形態に変更
         '交通費(区間)', '交通費(金額)'
       ].join(',');
 
@@ -594,15 +603,6 @@ export default function MasterAttendancePage() {
       teacherOrder.forEach(tid => {
         const teacherRecords = groupedData[tid];
         const userInfo = usersMap[tid] || { name: teacherRecords[0].teacher_name || '不明', school_code: '', staff_id: '' };
-        
-        let totalLessonNormalSum = 0;
-        let totalLessonLateSum = 0;
-        let totalOfficeNormalSum = 0;
-        let totalOfficeLateSum = 0;
-        let totalSupportNormalSum = 0;
-        let totalSupportLateSum = 0;
-        let totalBreakSum = 0;
-        let totalTransportCostSum = 0;
 
         teacherRecords.forEach(rec => {
           const dateObj = new Date(rec.date);
@@ -642,26 +642,17 @@ export default function MasterAttendancePage() {
             }
           });
 
-          // 授業またはサポートの手当判定（金額表記なし）
-          let allowance = '';
+          // ★ 出勤簿の「勤務形態」に合わせ、授業・サポートそれぞれの列に「1」を出力する
+          let allowanceLesson = '';
+          let allowanceSupport = '';
           if ((lessonTimeNormal + lessonTimeLate) > 0) {
-            allowance = '授業';
+            allowanceLesson = '1';
           } else if ((supportTimeNormal + supportTimeLate) > 0) {
-            allowance = 'サポート';
+            allowanceSupport = '1';
           }
 
           const transportText = rec.transportation?.map((t: any) => `${t.from}-${t.to}`).join(' / ') || '';
           const transportCost = calcTotalCost(rec.transportation);
-
-          // 合計に加算
-          totalLessonNormalSum += lessonTimeNormal;
-          totalLessonLateSum += lessonTimeLate;
-          totalOfficeNormalSum += officeTimeNormal;
-          totalOfficeLateSum += officeTimeLate;
-          totalSupportNormalSum += supportTimeNormal;
-          totalSupportLateSum += supportTimeLate;
-          totalBreakSum += breakTime;
-          totalTransportCostSum += transportCost;
 
           const startTimeStr = rec.start_time ? new Date(rec.start_time).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
           const endTimeStr = rec.end_time ? new Date(rec.end_time).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
@@ -678,23 +669,10 @@ export default function MasterAttendancePage() {
             minToHm(lessonTimeNormal), minToHm(lessonTimeLate),
             minToHm(officeTimeNormal), minToHm(officeTimeLate),
             minToHm(supportTimeNormal), minToHm(supportTimeLate),
-            `"${allowance}"`,
+            `"${allowanceLesson}"`, `"${allowanceSupport}"`, // ★ 勤務形態(授業), 勤務形態(サポート)
             `"${transportText}"`, transportCost
           ].join(','));
         });
-
-        // 合計行を追加
-        csvRows.push([
-          `"${userInfo.school_code !== '999' ? userInfo.school_code : ''}"`, 
-          `"${userInfo.staff_id !== '9999' ? userInfo.staff_id : ''}"`,
-          `"${userInfo.name} 合計"`,
-          '', '', '', '', minToHm(totalBreakSum), 
-          '', '', '', '', '', '',
-          minToHm(totalLessonNormalSum), minToHm(totalLessonLateSum),
-          minToHm(totalOfficeNormalSum), minToHm(totalOfficeLateSum),
-          minToHm(totalSupportNormalSum), minToHm(totalSupportLateSum),
-          '', '', totalTransportCostSum
-        ].join(','));
       });
 
       // 4. ダウンロード
