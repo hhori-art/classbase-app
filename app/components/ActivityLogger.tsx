@@ -17,7 +17,7 @@ export default function ActivityLogger({ uid }: { uid?: string }) {
       if (lastLoggedDate === today) return;
 
       try {
-        // 1. 全体統計 (日別アクティブユーザー集計用)
+        // 1. 全体統計 (日別アクティブユーザー集計)
         const statsRef = doc(db, 'system_stats', `daily_${today}`);
         await setDoc(statsRef, {
           date: today,
