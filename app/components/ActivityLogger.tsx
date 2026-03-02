@@ -13,7 +13,7 @@ export default function ActivityLogger({ uid }: { uid?: string }) {
       const lastLogKey = `last_logged_date_${uid}`;
       const lastLoggedDate = localStorage.getItem(lastLogKey);
 
-      // 今日すでに記録済みならスキップ (F5連打対策)
+      // 今日すでに記録済みならスキップ 
       if (lastLoggedDate === today) return;
 
       try {
