@@ -23,14 +23,18 @@ export default function LoginPage() {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ lifetimeId, password: pass }),
     });
+
     const data = await res.json().catch(() => ({}));
 
     if (!res.ok || !data?.ok) {
+      // APIが返す理由をそのままユーザー向けに変換
       if (data?.error === 'not-registered') throw new Error('登録データが見つかりません。');
-      if (data?.error === 'wrong-initial-password') throw new Error('パスワードが間違っています。');
-      if (data?.error === 'missing-initial-password') throw new Error('初回パスワードが未設定です。');
+      if (data?.error === 'wrong-initial-password') throw new Error('IDまたはパスワードが間違っています。');
+      if (data?.error === 'missing-initial-password') throw new Error('初回パスワードが未設定です。管理者に連絡してください。');
       throw new Error('初回登録処理に失敗しました。');
     }
+
+    return data; // { ok:true, uid, email }
   };
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -54,30 +58,42 @@ export default function LoginPage() {
     const email = `${id}@${EMAIL_DOMAIN}`;
 
     try {
+      // 1) まず通常ログイン
       try {
-        // 1) まず通常ログイン
         await signInWithEmailAndPassword(auth, email, password);
         setLoading(false);
         return;
       } catch (signInError: any) {
-        // 2) Auth未作成の場合だけ初回処理
-        if (signInError?.code === 'auth/user-not-found') {
+        const code = signInError?.code;
+
+        // ★重要：初回ユーザーは user-not-found ではなく invalid-credential が返ることがある
+        if (code === 'auth/user-not-found' || code === 'auth/invalid-credential') {
+          // 2) 初回登録APIを試す（ここで initial_password が一致しないなら弾かれる）
           await firstLoginViaApi(id, password);
+
+          // 3) 作成/復旧できたら改めてログイン
           await signInWithEmailAndPassword(auth, email, password);
           setLoading(false);
           return;
         }
+
         throw signInError;
       }
     } catch (e: any) {
       console.error('Login Error:', e);
 
       let message = 'ログイン中にエラーが発生しました。';
-      if (e?.code === 'auth/invalid-credential') message = 'IDまたはパスワードが間違っています。';
-      else if (e?.code === 'auth/wrong-password') message = 'パスワードが間違っています。';
-      else if (e?.code === 'auth/too-many-requests') message = '試行回数が多すぎます。しばらく待ってください。';
-      else if (e?.code === 'auth/network-request-failed') message = 'ネットワークエラーです。通信環境をご確認ください。';
-      else if (e?.message) message = e.message;
+      // Firebase Auth側エラー
+      if (e?.code === 'auth/invalid-credential' || e?.code === 'auth/wrong-password') {
+        message = 'IDまたはパスワードが間違っています。';
+      } else if (e?.code === 'auth/too-many-requests') {
+        message = '試行回数が多すぎます。しばらく待ってください。';
+      } else if (e?.code === 'auth/network-request-failed') {
+        message = 'ネットワークエラーです。通信環境をご確認ください。';
+      } else if (e?.message) {
+        // 初回API由来の分かりやすいメッセージ
+        message = e.message;
+      }
 
       setErrorMsg(message);
       setLoading(false);

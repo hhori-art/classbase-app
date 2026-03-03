@@ -1,4 +1,3 @@
-// app/api/first-login/route.ts
 import { NextResponse } from 'next/server';
 import { adminAuth, adminDb } from '@/lib/firebase-admin';
 
@@ -30,6 +29,7 @@ async function findSeedDoc(db: FirebaseFirestore.Firestore, lifetimeIdRaw: strin
     snap = await db.collection('users').where('lifetime_id', '==', n).limit(1).get();
     if (!snap.empty) return snap.docs[0];
   }
+
   return null;
 }
 
@@ -51,15 +51,14 @@ export async function POST(req: Request) {
     const db = adminDb();
     const auth = adminAuth();
 
-    // 1) Firestore seed を探す（型ズレ対応）
+    // 1) seed取得（lifetime_id 検索）
     const seedDoc = await findSeedDoc(db, lifetimeId);
     if (!seedDoc) {
       return NextResponse.json({ ok: false, error: 'not-registered' }, { status: 404 });
     }
-
     const seed = seedDoc.data();
 
-    // 2) 初回パスワード照合（文字列で比較）
+    // 2) 初回PW検証
     if (seed.initial_password == null) {
       return NextResponse.json({ ok: false, error: 'missing-initial-password' }, { status: 401 });
     }
@@ -67,25 +66,34 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: 'wrong-initial-password' }, { status: 401 });
     }
 
-    // 3) email をサーバー側で固定生成
+    // 3) email 固定
     const email = `${lifetimeId}@${EMAIL_DOMAIN}`;
 
-    // 4) Auth作成（存在するなら取得）
+    // 4) Auth作成 or 既存取得（既存なら未移行時だけPW更新で救済）
     let uid: string;
     try {
       const created = await auth.createUser({ email, password: String(password) });
       uid = created.uid;
     } catch (e: any) {
       const msg = String(e?.message || '');
-      if (e?.code === 'auth/email-already-exists' || msg.toLowerCase().includes('already exists')) {
-        const existing = await auth.getUserByEmail(email);
-        uid = existing.uid;
-      } else {
-        throw e;
+      const alreadyExists =
+        e?.code === 'auth/email-already-exists' ||
+        msg.toLowerCase().includes('already exists');
+
+      if (!alreadyExists) throw e;
+
+      const existing = await auth.getUserByEmail(email);
+      uid = existing.uid;
+
+      // users/{uid} が未移行なら PW を合わせて救済（移行済みは触らない）
+      const existingUserDoc = await db.collection('users').doc(uid).get();
+      const alreadyMigrated = existingUserDoc.exists && !!existingUserDoc.data()?.migrated_at;
+      if (!alreadyMigrated) {
+        await auth.updateUser(uid, { password: String(password) });
       }
     }
 
-    // 5) users/{uid} を確実に作る（merge）
+    // 5) users/{uid} に移行（merge）
     await db.collection('users').doc(uid).set(
       {
         ...seed,
