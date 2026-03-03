@@ -13,6 +13,22 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
 
+  const firstLoginViaApi = async (lifetimeId: string, email: string, pass: string) => {
+    const res = await fetch('/api/first-login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ lifetimeId, email, password: pass }),
+    });
+
+    const data = await res.json().catch(() => ({}));
+
+    if (!res.ok || !data?.ok) {
+      if (data?.error === 'not-registered') throw new Error('登録データが見つかりません。');
+      if (data?.error === 'wrong-initial-password') throw new Error('パスワードが間違っています。');
+      throw new Error('初回登録処理に失敗しました。');
+    }
+  };
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -30,13 +46,11 @@ export default function LoginPage() {
     const email = isId ? `${input}@sozogakuen.co.jp` : input;
 
     try {
-      // 1) 通常ログイン
       try {
         await signInWithEmailAndPassword(auth, email, password);
         setLoading(false);
         return;
       } catch (signInError: any) {
-        // 2) 初回ログイン（Authユーザー未作成）なら API へ
         const code = signInError?.code;
         if (code === 'auth/user-not-found' || code === 'auth/invalid-credential') {
           await firstLoginViaApi(lifetimeId, email, password);
@@ -54,28 +68,12 @@ export default function LoginPage() {
       else if (e?.code === 'auth/too-many-requests') message = '試行回数が多すぎます。しばらく待ってください。';
       else if (e?.code === 'auth/invalid-email') message = 'メールアドレス（ID）の形式が正しくありません。';
       else if (e?.code === 'auth/user-disabled') message = 'このアカウントは無効化されています。';
-      else if (e?.code === 'auth/network-request-failed') message = 'ネットワークエラーです。通信環境をご確認ください。';
-      else if (e?.message === '登録データが見つかりません。') message = '指定されたIDはシステムに登録されていません。';
+      else if (e?.code === 'auth/network-request-failed') message = 'ネットワークエラーです。';
+      else if (e?.message === '登録データが見つかりません。') message = '指定されたIDは登録されていません。';
       else if (e?.message === 'パスワードが間違っています。') message = '初回パスワードが間違っています。';
 
       setErrorMsg(message);
       setLoading(false);
-    }
-  };
-
-  const firstLoginViaApi = async (lifetimeId: string, email: string, pass: string) => {
-    const res = await fetch('/api/first-login', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ lifetimeId, email, password: pass }),
-    });
-
-    const data = await res.json().catch(() => ({}));
-
-    if (!res.ok || !data?.ok) {
-      if (data?.error === 'not-registered') throw new Error('登録データが見つかりません。');
-      if (data?.error === 'wrong-initial-password') throw new Error('パスワードが間違っています。');
-      throw new Error('初回登録処理に失敗しました。');
     }
   };
 

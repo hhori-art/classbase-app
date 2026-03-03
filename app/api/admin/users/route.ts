@@ -1,137 +1,179 @@
+// app/api/admin/users/route.ts
 import { NextResponse } from 'next/server';
-import { adminAuth, adminDb } from '@/lib/firebase-admin'; // Firebase Adminのインポート
+import { adminAuth, adminDb } from '@/lib/firebase-admin';
 
-// ---------------------------------------------------------
-// ヘルパー: 1人のユーザーに関連するデータを全削除する関数
-// ---------------------------------------------------------
-async function deleteUserData(userId: string) {
-  // 1. 関連コレクションの定義
-  const collections = [
-    'attendance',
-    'submissions',
-    'requests',
-    'teacher_availability',
-    'shift_assignments'
-  ];
+export const runtime = 'nodejs';
 
-  // 2. 各コレクションから user_id が一致するドキュメントを検索して削除
-  // Firestoreには「一括削除」がないため、Query -> Batch Delete の手順を踏みます
-  const deletePromises = collections.map(async (colName) => {
-    const snapshot = await adminDb.collection(colName).where('user_id', '==', userId).get();
-    if (snapshot.empty) return;
+const RELATED_COLLECTIONS = [
+  'attendance',
+  'submissions',
+  'requests',
+  'teacher_availability',
+  'shift_assignments',
+] as const;
 
-    const batch = adminDb.batch();
-    snapshot.docs.forEach((doc) => {
-      batch.delete(doc.ref);
-    });
-    await batch.commit();
-  });
+const BATCH_LIMIT = 450; // 500未満（余裕を持たせる）
+const CONCURRENCY = 8;   // 同時実行数（Vercelタイムアウト/負荷対策）
 
-  await Promise.all(deletePromises);
-
-  // 3. Authユーザーの削除
-  try {
-    await adminAuth.deleteUser(userId);
-  } catch (e) {
-    console.log(`Auth user ${userId} not found or already deleted.`);
-  }
-
-  // 4. プロフィール(usersコレクション)の削除
-  await adminDb.collection('users').doc(userId).delete();
+function chunk<T>(arr: T[], size: number): T[][] {
+  const res: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) res.push(arr.slice(i, i + size));
+  return res;
 }
 
-// ---------------------------------------------------------
-// DELETE: 削除機能 (個別削除 & 生徒一括削除)
-// ---------------------------------------------------------
+async function runWithConcurrency<T>(items: T[], limit: number, fn: (item: T) => Promise<void>) {
+  const queue = [...items];
+  const workers = Array.from({ length: limit }, async () => {
+    while (queue.length) {
+      const item = queue.shift();
+      if (item === undefined) return;
+      await fn(item);
+    }
+  });
+  await Promise.all(workers);
+}
+
+/**
+ * 指定コレクションから user_id == userId のドキュメントを全削除（ページング＋batch分割）
+ */
+async function deleteDocsByUserId(colName: string, userId: string) {
+  const db = adminDb();
+
+  let lastDoc: FirebaseFirestore.QueryDocumentSnapshot | null = null;
+
+  while (true) {
+    let q = db.collection(colName).where('user_id', '==', userId).orderBy('__name__').limit(BATCH_LIMIT);
+    if (lastDoc) q = q.startAfter(lastDoc);
+
+    const snap = await q.get();
+    if (snap.empty) break;
+
+    const batch = db.batch();
+    snap.docs.forEach(d => batch.delete(d.ref));
+    await batch.commit();
+
+    lastDoc = snap.docs[snap.docs.length - 1];
+    if (snap.size < BATCH_LIMIT) break;
+  }
+}
+
+/**
+ * 1ユーザーに紐づくデータを削除（関連コレクション→Auth→users doc）
+ */
+async function deleteUserData(userId: string) {
+  const db = adminDb();
+  const auth = adminAuth();
+
+  // 1) 関連コレクション削除
+  await Promise.all(RELATED_COLLECTIONS.map(col => deleteDocsByUserId(col, userId)));
+
+  // 2) Authユーザー削除
+  try {
+    await auth.deleteUser(userId);
+  } catch (e: any) {
+    // admin SDK は not-found のcodeが環境で変わることがあるので広めに握る
+    const msg = String(e?.message || '');
+    if (!msg.toLowerCase().includes('not found')) {
+      console.log(`Auth deleteUser warning for ${userId}:`, e?.code || e);
+    }
+  }
+
+  // 3) usersコレクション削除
+  await db.collection('users').doc(userId).delete().catch(() => {});
+}
+
+/**
+ * GET: （必要なら）ユーザー一覧取得
+ * ※ 今回は元コードに無いので未実装。必要なら言ってください。
+ */
+
 export async function DELETE(request: Request) {
   try {
+    const db = adminDb();
+
     const { searchParams } = new URL(request.url);
     const targetId = searchParams.get('id');
 
-    // A. 個別削除モード (ID指定あり)
+    // A) 個別削除
     if (targetId) {
       await deleteUserData(targetId);
       return NextResponse.json({ success: true, message: '削除しました' });
     }
 
-    // B. 全生徒削除モード (ID指定なし)
-    // roleが 'student' のユーザーを検索 (最大500件)
-    const snapshot = await adminDb
-      .collection('users')
-      .where('role', '==', 'student')
-      .limit(500)
-      .get();
+    // B) 生徒一括削除（最大500件ずつ）
+    const snap = await db.collection('users').where('role', '==', 'student').limit(500).get();
 
-    if (snapshot.empty) {
+    if (snap.empty) {
       return NextResponse.json({ success: true, count: 0, message: '削除対象がいません' });
     }
 
-    const userIds = snapshot.docs.map(doc => doc.id);
+    const userIds = snap.docs.map(d => d.id);
 
-    // 並列処理で削除実行
-    // (数が多い場合はPromise.allの並列数を制限する必要がありますが、500程度ならVercelのタイムアウト内に収まる想定)
-    await Promise.all(userIds.map(id => deleteUserData(id)));
-
-    return NextResponse.json({ 
-      success: true, 
-      count: userIds.length,
-      message: `${userIds.length}件削除しました。まだ残っている場合はもう一度ボタンを押してください。`
+    // 同時実行数を制限して削除
+    await runWithConcurrency(userIds, CONCURRENCY, async (id) => {
+      await deleteUserData(id);
     });
 
+    return NextResponse.json({
+      success: true,
+      count: userIds.length,
+      message: `${userIds.length}件削除しました。まだ残っている場合はもう一度実行してください。`,
+    });
   } catch (error: any) {
     console.error('DELETE Error:', error);
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return NextResponse.json({ success: false, error: error.message || String(error) }, { status: 500 });
   }
 }
 
-// ---------------------------------------------------------
-// POST: 作成・更新機能
-// ---------------------------------------------------------
 export async function POST(request: Request) {
   try {
+    const db = adminDb();
+    const auth = adminAuth();
+
     const body = await request.json();
-    const { users } = body; 
-    
-    // クラス設定(ルール)を取得
-    const rulesSnapshot = await adminDb.collection('class_settings').get();
+    const { users } = body as { users: any[] };
+
+    if (!Array.isArray(users)) {
+      return NextResponse.json({ success: false, error: 'users must be an array' }, { status: 400 });
+    }
+
+    // クラス設定(ルール)取得
+    const rulesSnapshot = await db.collection('class_settings').get();
     const rules = rulesSnapshot.docs.map(doc => doc.data());
 
-    const results = [];
-    const errors = [];
-    const processedIds = new Set();
+    const results: string[] = [];
+    const errors: any[] = [];
+    const processedIds = new Set<string>();
 
     for (const user of users) {
-      // ID決定 (IDがない場合はスキップ)
       const loginId = user.lifetime_id || user.student_id;
       if (!loginId) {
         errors.push({ name: user.student_name, error: 'ID(生涯番号)がありません' });
         continue;
       }
 
-      // 重複チェック (今回のリクエスト内での重複)
       const strId = String(loginId).trim();
       if (processedIds.has(strId)) continue;
       processedIds.add(strId);
 
+      // ※ email ルールは要件に合わせているが、本番運用ではドメイン設計を再検討推奨
       const email = `${strId}@classbase.local`;
-      const password = user.password || 'class1234'; // パスワードがない場合はデフォルト
-
-      // ロール設定
+      const password = user.password || 'class1234';
       const role = user.role || 'student';
 
       // 生徒の場合のみURL自動設定
-      let autoUrl1 = null;
-      let autoUrl2 = null;
+      let autoUrl1: string | null = null;
+      let autoUrl2: string | null = null;
 
       if (role === 'student') {
-        const scienceRule = rules.find((r: any) => 
-          r.grade === user.grade && 
-          r.day_of_week === user.day_of_week && 
+        const scienceRule = rules.find((r: any) =>
+          r.grade === user.grade &&
+          r.day_of_week === user.day_of_week &&
           r.subject_name === user.science_subject
         );
-        const socialRule = rules.find((r: any) => 
-          r.grade === user.grade && 
-          r.day_of_week === user.day_of_week && 
+        const socialRule = rules.find((r: any) =>
+          r.grade === user.grade &&
+          r.day_of_week === user.day_of_week &&
           r.subject_name === user.social_subject
         );
         autoUrl1 = scienceRule ? scienceRule.zoom_url : null;
@@ -140,67 +182,76 @@ export async function POST(request: Request) {
 
       let userId = '';
 
-      // Firebase Authでユーザー検索 (メールアドレスで確認)
+      // Authでユーザー検索→更新 / いなければ作成
       try {
-        const existingUser = await adminAuth.getUserByEmail(email);
-        userId = existingUser.uid;
-        
-        // 既存ユーザー: パスワード更新
-        await adminAuth.updateUser(userId, {
-          password: password,
-          displayName: user.student_name
-        });
+        const existing = await auth.getUserByEmail(email);
+        userId = existing.uid;
 
+        await auth.updateUser(userId, {
+          password,
+          displayName: user.student_name,
+        });
       } catch (authError: any) {
-        // ユーザーが存在しない場合(auth/user-not-found)は新規作成
-        if (authError.code === 'auth/user-not-found') {
+        const msg = String(authError?.message || '');
+
+        const isNotFound =
+          authError?.code === 'auth/user-not-found' ||
+          msg.toLowerCase().includes('no user record') ||
+          msg.toLowerCase().includes('not found');
+
+        if (isNotFound) {
           try {
-            const newUser = await adminAuth.createUser({
-              email: email,
-              password: password,
+            const created = await auth.createUser({
+              email,
+              password,
               emailVerified: true,
-              displayName: user.student_name
+              displayName: user.student_name,
             });
-            userId = newUser.uid;
+            userId = created.uid;
           } catch (createError: any) {
-            errors.push({ name: user.student_name, error: createError.message });
+            errors.push({ name: user.student_name, error: createError.message || String(createError) });
             continue;
           }
         } else {
-          // その他のエラー
-          errors.push({ name: user.student_name, error: authError.message });
+          errors.push({ name: user.student_name, error: authError.message || String(authError) });
           continue;
         }
       }
 
-      // Firestoreへの保存 (upsert相当: merge: true を使用)
-      await adminDb.collection('users').doc(userId).set({
-        id: userId, // ドキュメント内にIDを持たせておくと便利
-        role: role,
-        student_name: user.student_name,
-        name_kana: user.name_kana || '',
-        grade: user.grade || '',
-        student_id: user.student_id || '',
-        lifetime_id: user.lifetime_id || '',
-        classroom: user.classroom || '',
-        phone_number: user.phone_number || '',
-        email: email,
-        day_of_week: user.day_of_week || '',
-        science_subject: user.science_subject || '',
-        social_subject: user.social_subject || '',
-        zoom_url: autoUrl1, // 自動設定されたURL
-        zoom_url_2: autoUrl2,
-        raw_password: password, // ※セキュリティ的には非推奨だが要件通り保存
-        updated_at: new Date()
-      }, { merge: true });
+      // Firestore保存（merge）
+      await db.collection('users').doc(userId).set(
+        {
+          id: userId,
+          uid: userId,
+          role,
+          student_name: user.student_name,
+          name_kana: user.name_kana || '',
+          grade: user.grade || '',
+          student_id: user.student_id || '',
+          lifetime_id: user.lifetime_id || '',
+          classroom: user.classroom || '',
+          phone_number: user.phone_number || '',
+          email,
+          day_of_week: user.day_of_week || '',
+          science_subject: user.science_subject || '',
+          social_subject: user.social_subject || '',
+          zoom_url: autoUrl1,
+          zoom_url_2: autoUrl2,
+
+          // ★要件で必要なら残す。ただしセキュリティ上は非推奨。
+          raw_password: password,
+
+          updated_at: new Date(),
+        },
+        { merge: true }
+      );
 
       results.push(user.student_name);
     }
 
     return NextResponse.json({ success: true, createdCount: results.length, results, errors });
-
   } catch (error: any) {
     console.error('POST Error:', error);
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return NextResponse.json({ success: false, error: error.message || String(error) }, { status: 500 });
   }
 }

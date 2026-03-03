@@ -1,3 +1,4 @@
+// app/api/first-login/route.ts
 import { NextResponse } from 'next/server';
 import { adminAuth, adminDb } from '@/lib/firebase-admin';
 
@@ -15,8 +16,11 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: 'invalid-params' }, { status: 400 });
     }
 
-    // 1) 初回登録データを Firestore から検索（Admin権限）
-    const snap = await adminDb
+    const db = adminDb();
+    const auth = adminAuth();
+
+    // 1) 初回登録データを検索
+    const snap = await db
       .collection('users')
       .where('lifetime_id', '==', lifetimeId)
       .limit(1)
@@ -34,22 +38,22 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: 'wrong-initial-password' }, { status: 401 });
     }
 
-    // 3) Firebase Auth ユーザー作成（すでにあれば取得）
+    // 3) Authユーザー作成（既存なら取得）
     let uid: string;
     try {
-      const created = await adminAuth.createUser({ email, password });
+      const created = await auth.createUser({ email, password });
       uid = created.uid;
     } catch (e: any) {
       if (e?.code === 'auth/email-already-exists') {
-        const existing = await adminAuth.getUserByEmail(email);
+        const existing = await auth.getUserByEmail(email);
         uid = existing.uid;
       } else {
         throw e;
       }
     }
 
-    // 4) users/{uid} に移行（merge）
-    await adminDb.collection('users').doc(uid).set(
+    // 4) users/{uid} に移行
+    await db.collection('users').doc(uid).set(
       {
         ...userData,
         uid,
@@ -59,14 +63,21 @@ export async function POST(req: Request) {
       { merge: true }
     );
 
-    // 5) 旧ドキュメント削除（同一IDなら削除しない）
+    // 5) 旧doc削除（同一IDなら削除しない）
     if (oldDoc.ref.id !== uid) {
       await oldDoc.ref.delete();
     }
 
     return NextResponse.json({ ok: true, uid }, { status: 200 });
-  } catch (err) {
+  } catch (err: any) {
     console.error('[first-login] error', err);
+    const msg = String(err?.message || '');
+
+    // env不足をレスポンスに出すと特定しやすい（本番では隠してもOK）
+    if (msg.startsWith('Missing env:')) {
+      return NextResponse.json({ ok: false, error: msg }, { status: 500 });
+    }
+
     return NextResponse.json({ ok: false, error: 'server-error' }, { status: 500 });
   }
 }

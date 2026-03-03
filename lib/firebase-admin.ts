@@ -1,33 +1,53 @@
+// src/lib/firebaseAdmin.ts
 import 'server-only';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
 
-function mustEnv(name: string) {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing env: ${name}`);
-  return v;
+function env(name: string): string | undefined {
+  return process.env[name];
 }
 
-function getPrivateKey() {
-  // Vercel環境変数は改行が \n になっていることがあるので復元
-  // ついでに余計なダブルクォートが付いているケースも除去
-  return mustEnv('FIREBASE_PRIVATE_KEY')
-    .replace(/^"|"$/g, '')
-    .replace(/\\n/g, '\n');
+function normalizePrivateKey(raw: string) {
+  // Vercel で \n になって入る・余計な " が付くケースを吸収
+  return raw.replace(/^"|"$/g, '').replace(/\\n/g, '\n');
 }
 
-if (!getApps().length) {
-  // 本番は必須。足りなければエラーで原因を明確化
+/**
+ * ★重要：import時にthrowしない
+ * adminDb()/adminAuth() が呼ばれた時点で初めて env を検証して初期化する
+ */
+function ensureAdminInitialized() {
+  if (getApps().length) return;
+
+  const projectId = env('FIREBASE_PROJECT_ID');
+  const clientEmail = env('FIREBASE_CLIENT_EMAIL');
+  const privateKeyRaw = env('FIREBASE_PRIVATE_KEY');
+
+  const missing: string[] = [];
+  if (!projectId) missing.push('FIREBASE_PROJECT_ID');
+  if (!clientEmail) missing.push('FIREBASE_CLIENT_EMAIL');
+  if (!privateKeyRaw) missing.push('FIREBASE_PRIVATE_KEY');
+
+  if (missing.length) {
+    throw new Error(`Missing env: ${missing.join(', ')}`);
+  }
+
   initializeApp({
     credential: cert({
-      projectId: mustEnv('FIREBASE_PROJECT_ID'),
-      clientEmail: mustEnv('FIREBASE_CLIENT_EMAIL'),
-      privateKey: getPrivateKey(),
+      projectId,
+      clientEmail,
+      privateKey: normalizePrivateKey(privateKeyRaw!),
     }),
   });
 }
 
-// ✅ 初期化されていない状態で export しない（上で必ず初期化される）
-export const adminAuth = getAuth();
-export const adminDb = getFirestore();
+export function adminAuth() {
+  ensureAdminInitialized();
+  return getAuth();
+}
+
+export function adminDb() {
+  ensureAdminInitialized();
+  return getFirestore();
+}
