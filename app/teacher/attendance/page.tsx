@@ -372,7 +372,7 @@ export default function TeacherAttendancePage() {
   const saveData = async () => {
     if (!editingRecord) return;
     
-    // ★ 追加：出勤直後の休憩を禁止するバリデーション
+    // ★ 追加：出勤直後の休憩を禁止する
     const newStartISO = editingRecord.start_time;
     if (segments.length > 0 && newStartISO) {
       const toMinutes = (s: string) => {
