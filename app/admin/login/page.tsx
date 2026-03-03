@@ -5,9 +5,11 @@ import { signInWithEmailAndPassword } from 'firebase/auth';
 import { auth, db } from '@/lib/firebase';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { Lock, Loader2, Wrench, ArrowLeft } from 'lucide-react';
-import Link from 'next/link'; // リンク用
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 
 export default function AutoFixLoginPage() {
+  const router = useRouter();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -16,46 +18,65 @@ export default function AutoFixLoginPage() {
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
-    setStatus('🚀 認証を開始します...');
+    setStatus('🚀 1/3: 認証を開始します...');
 
     try {
       // 1. Firebase Auth認証
       const userCredential = await signInWithEmailAndPassword(auth, email, password);
       const user = userCredential.user;
-      setStatus(`✅ 認証成功 (UID: ${user.uid.slice(0, 5)}...)`);
+      setStatus(`✅ 2/3: 認証成功! データベースを確認中...`); // ★ ここで止まるならFirestoreへの接続に問題あり
 
       // 2. Firestoreデータ確認
-      const userDocRef = doc(db, 'users', user.uid);
-      const userDoc = await getDoc(userDocRef);
+      let userDoc;
+      try {
+        const userDocRef = doc(db, 'users', user.uid);
+        userDoc = await getDoc(userDocRef);
+      } catch (dbError: any) {
+        throw new Error(`Firestore読込エラー: ${dbError.message}`);
+      }
       
       if (!userDoc.exists()) {
-        setStatus('⚠️ データ欠落を検知。自動修復を実行中...');
-        await setDoc(userDocRef, {
-          uid: user.uid,
-          name: '管理者(自動修復)',
-          email: user.email,
-          role: 'master',
-          created_at: new Date().toISOString()
-        });
-        setStatus('✨ 修復完了！移動します...');
-        window.location.href = '/master';
+        setStatus('⚠️ データ欠落。自動修復中...');
+        try {
+          const userDocRef = doc(db, 'users', user.uid);
+          await setDoc(userDocRef, {
+            uid: user.uid,
+            name: '管理者(自動修復)',
+            email: user.email,
+            role: 'master',
+            created_at: new Date().toISOString()
+          });
+        } catch (dbWriteError: any) {
+          throw new Error(`Firestore書込エラー: ${dbWriteError.message}`);
+        }
+        
+        setStatus('✨ 3/3: 修復完了！画面を移動します...');
+        router.push('/master');
+        // ★ ルーターがフリーズした場合の強制移動（フェイルセーフ）
+        setTimeout(() => { window.location.href = '/master'; }, 1500); 
         return;
       }
 
       const userData = userDoc.data();
-      setStatus(`✅ データ確認OK (${userData.role})。移動します...`);
+      setStatus(`✅ 3/3: 権限確認OK (${userData?.role})。画面を移動します...`);
 
-      if (userData.role === 'master') window.location.href = '/master';
-      else {
+      if (userData?.role === 'master') {
+        router.push('/master');
+        // ★ ルーターがフリーズした場合の強制移動（フェイルセーフ）
+        setTimeout(() => { window.location.href = '/master'; }, 1500);
+      } else {
         alert('ここは管理者専用です。生徒・講師画面へ移動します。');
-        window.location.href = '/';
+        router.push('/');
+        setTimeout(() => { window.location.href = '/'; }, 1500);
       }
 
     } catch (error: any) {
-      console.error(error);
-      setStatus(`❌ エラー: ${error.code}`);
-      if(error.code === 'auth/invalid-credential') {
+      console.error('Login Error:', error);
+      
+      if (error.code === 'auth/invalid-credential') {
         setStatus('❌ メールまたはパスワードが違います');
+      } else {
+        setStatus(`❌ エラー: ${error.message || '不明なエラーが発生しました'}`);
       }
       setLoading(false);
     }
@@ -97,10 +118,10 @@ export default function AutoFixLoginPage() {
             />
           </div>
 
-          <div className={`p-3 rounded-lg text-sm font-bold text-center ${
+          <div className={`p-3 rounded-lg text-sm font-bold text-center break-words ${
             status.includes('❌') ? 'bg-red-100 text-red-700' :
-            status.includes('✨') ? 'bg-green-100 text-green-700' :
-            status.includes('🚀') || status.includes('⚠️') ? 'bg-yellow-50 text-yellow-700' :
+            status.includes('✨') || status.includes('3/3') ? 'bg-green-100 text-green-700' :
+            status.includes('🚀') || status.includes('⚠️') || status.includes('2/3') ? 'bg-yellow-50 text-yellow-700' :
             'bg-gray-50 text-gray-500'
           }`}>
             {status || '管理者情報を入力してください'}
@@ -115,7 +136,6 @@ export default function AutoFixLoginPage() {
           </button>
         </form>
 
-        {/* ★ここを追加: 一般ログイン画面へのリンク */}
         <div className="mt-6 text-center pt-6 border-t border-gray-100">
           <Link href="/" className="text-sm text-gray-400 hover:text-gray-600 flex items-center justify-center gap-1 font-bold">
             <ArrowLeft size={16}/> 生徒・講師ログインへ戻る

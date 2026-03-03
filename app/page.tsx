@@ -2,13 +2,16 @@
 
 import { useState } from 'react';
 import { signInWithEmailAndPassword } from 'firebase/auth';
-import { auth } from '@/lib/firebase';
+import { doc, getDoc } from 'firebase/firestore';
+import { auth, db } from '@/lib/firebase';
+import { useRouter } from 'next/navigation';
 import { LogIn, Loader2, User, AlertCircle, Eye, EyeOff, Lock, ArrowRight } from 'lucide-react';
 import Link from 'next/link';
 
 const EMAIL_DOMAIN = 'sozogakuen.co.jp';
 
 export default function LoginPage() {
+  const router = useRouter();
   const [loginInput, setLoginInput] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -58,11 +61,12 @@ export default function LoginPage() {
     const email = `${id}@${EMAIL_DOMAIN}`;
 
     try {
+      let loggedInUser;
+
       // 1) まず通常ログイン
       try {
-        await signInWithEmailAndPassword(auth, email, password);
-        setLoading(false);
-        return;
+        const userCredential = await signInWithEmailAndPassword(auth, email, password);
+        loggedInUser = userCredential.user;
       } catch (signInError: any) {
         const code = signInError?.code;
 
@@ -72,13 +76,34 @@ export default function LoginPage() {
           await firstLoginViaApi(id, password);
 
           // 3) 作成/復旧できたら改めてログイン
-          await signInWithEmailAndPassword(auth, email, password);
-          setLoading(false);
-          return;
+          const userCredential = await signInWithEmailAndPassword(auth, email, password);
+          loggedInUser = userCredential.user;
+        } else {
+          throw signInError;
         }
-
-        throw signInError;
       }
+
+      // 4) ログイン成功後、Firestoreからroleを取得してリダイレクト
+      if (loggedInUser) {
+        // ※ Firestoreに 'users' コレクションがあり、ドキュメントIDがuidであることを想定
+        const userDocRef = doc(db, 'users', loggedInUser.uid);
+        const userDocSnap = await getDoc(userDocRef);
+
+        if (userDocSnap.exists()) {
+          const role = userDocSnap.data().role;
+          
+          if (role === 'teacher') {
+            router.push('/app/teacher');
+          } else if (role === 'student') {
+            router.push('/app/student');
+          } else {
+            throw new Error('アカウントの権限（role）が正しく設定されていません。');
+          }
+        } else {
+          throw new Error('データベース上にユーザー情報が見つかりません。');
+        }
+      }
+
     } catch (e: any) {
       console.error('Login Error:', e);
 
@@ -91,7 +116,7 @@ export default function LoginPage() {
       } else if (e?.code === 'auth/network-request-failed') {
         message = 'ネットワークエラーです。通信環境をご確認ください。';
       } else if (e?.message) {
-        // 初回API由来の分かりやすいメッセージ
+        // 初回API由来、または権限チェック時の分かりやすいメッセージ
         message = e.message;
       }
 
