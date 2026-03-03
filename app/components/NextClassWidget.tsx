@@ -20,22 +20,64 @@ type ShiftAssignment = {
 // --- ヘルパー関数 ---
 const toHalfWidth = (str: string) => !str ? '' : str.replace(/[！-～]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0)).replace(/　/g, ' ');
 
-// ★名前マッチングロジック (スペース無視・部分一致)
-// 例: shiftName="板 福井 裕次郎", profileName="福井 裕次郎" -> true
+// 名前マッチングロジック
 const isNameMatch = (shiftName: string | undefined, profileName: string) => {
   if (!shiftName || !profileName) return false;
-  const s = shiftName.replace(/[ 　]/g, ''); // シフト名から全スペース除去
-  const p = profileName.replace(/[ 　]/g, ''); // プロフィール名から全スペース除去
-  return s.includes(p); // 含まれていればOK
+  const s = shiftName.replace(/[ 　]/g, '');
+  const p = profileName.replace(/[ 　]/g, '');
+  return s.includes(p);
 };
 
-// 日本時間の日付文字列 (YYYY-MM-DD)
-const getJSTDate = (offsetDays: number = 0) => {
-  const d = new Date();
-  // 9時間足してJSTへ
-  d.setHours(d.getHours() + 9);
-  d.setDate(d.getDate() + offsetDays);
+// 日本時間を取得
+const getJSTNow = () => {
+  return new Date(Date.now() + 9 * 60 * 60 * 1000);
+};
+
+const getJSTDateStr = (offsetDays: number = 0) => {
+  const d = getJSTNow();
+  d.setUTCDate(d.getUTCDate() + offsetDays);
   return d.toISOString().split('T')[0];
+};
+
+// ★追加: 日付の表記ゆれ（2026/3/2, 2026-3-2 など）を "2026-03-02" に統一する関数
+const normalizeDateStr = (raw: string) => {
+  if (!raw) return '';
+  // 1. スラッシュをハイフンに変換
+  let s = raw.replace(/\//g, '-');
+  // 2. ゼロ埋め（例: 2026-3-2 -> 2026-03-02）
+  const parts = s.split('-');
+  if (parts.length === 3) {
+    const y = parts[0];
+    const m = parts[1].padStart(2, '0');
+    const d = parts[2].padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  return s;
+};
+
+// 授業が「これから（未終了）」かどうかを判定する
+const isUpcomingClass = (normalizedTargetDate: string, note?: string) => {
+  const todayStr = getJSTDateStr(0);
+  
+  // 表記ゆれを無くした状態で比較するため、過去の授業は確実に弾かれます
+  if (normalizedTargetDate > todayStr) return true;
+  if (normalizedTargetDate < todayStr) return false;
+
+  // 今日の授業の場合、時間をチェックする
+  if (!note) return true; 
+
+  const timeMatches = note.match(/([0-9]{1,2})[:：]([0-9]{2})/g);
+  if (!timeMatches || timeMatches.length === 0) return true; 
+
+  let endTimeStr = timeMatches[timeMatches.length - 1].replace('：', ':');
+  if (endTimeStr.length === 4) endTimeStr = '0' + endTimeStr; 
+
+  const now = getJSTNow();
+  const currentHH = now.getUTCHours().toString().padStart(2, '0');
+  const currentMM = now.getUTCMinutes().toString().padStart(2, '0');
+  const currentTimeStr = `${currentHH}:${currentMM}`;
+
+  return endTimeStr >= currentTimeStr;
 };
 
 export default function NextClassWidget({ profile }: { profile: any }) {
@@ -55,15 +97,12 @@ export default function NextClassWidget({ profile }: { profile: any }) {
       console.log(`🔍 授業検索開始: User=${userName}, ID=${userId}`);
 
       try {
-        const todayStr = getJSTDate(0);      // 今日
-        const tomorrowStr = getJSTDate(1);   // 明日
+        const todayStr = getJSTDateStr(0);      
+        const tomorrowStr = getJSTDateStr(1);   
 
         const shiftsMap = new Map<string, ShiftAssignment>();
         const promises = [];
 
-        // ----------------------------------------------------
-        // 1. ID検索 (ID紐付けがあるデータ)
-        // ----------------------------------------------------
         if (userId) {
           const idCandidates = Array.from(new Set([userId, toHalfWidth(userId)])).filter(Boolean);
           if (idCandidates.length > 0) {
@@ -77,10 +116,6 @@ export default function NextClassWidget({ profile }: { profile: any }) {
           }
         }
 
-        // ----------------------------------------------------
-        // 2. 今日のデータを「全件」取得 (limitなし)
-        // ※ここが重要: 今日の授業が埋もれないようにする
-        // ----------------------------------------------------
         promises.push(
           getDocs(query(
             collection(db, 'shift_assignments'),
@@ -88,19 +123,15 @@ export default function NextClassWidget({ profile }: { profile: any }) {
           ))
         );
 
-        // ----------------------------------------------------
-        // 3. 明日以降のデータを取得 (少しだけ)
-        // ----------------------------------------------------
         promises.push(
           getDocs(query(
             collection(db, 'shift_assignments'),
             where('target_date', '>=', tomorrowStr),
             orderBy('target_date', 'asc'),
-            limit(100) // 明日以降は100件まで探す
+            limit(100)
           ))
         );
 
-        // 実行
         const results = await Promise.all(promises);
 
         let totalFetched = 0;
@@ -111,16 +142,20 @@ export default function NextClassWidget({ profile }: { profile: any }) {
           snap.docs.forEach(doc => {
             const data = doc.data() as Omit<ShiftAssignment, 'id'>;
             
-            // 重複除外
             if (shiftsMap.has(doc.id)) return;
 
-            // マッチング判定
             const isIdMatched = data.user_id === userId;
             const isNameMatched = isNameMatch(data.teacher_name, userName);
 
             if (isIdMatched || isNameMatched) {
-              shiftsMap.set(doc.id, { ...data, id: doc.id });
-              matchedCount++;
+              // ★ 取得した日付の表記ゆれをここで一律綺麗にする
+              const normalizedDate = normalizeDateStr(data.target_date);
+              
+              if (isUpcomingClass(normalizedDate, data.note)) {
+                // 綺麗な日付でデータを上書きして保存する
+                shiftsMap.set(doc.id, { ...data, id: doc.id, target_date: normalizedDate });
+                matchedCount++;
+              }
             }
           });
         });
@@ -134,8 +169,8 @@ export default function NextClassWidget({ profile }: { profile: any }) {
         });
 
         if (futureShifts.length > 0) {
-          // 直近の日付の授業のみを表示
           const nearestDate = futureShifts[0].target_date;
+          // 直近の日付の授業のみを表示
           const todaysClasses = futureShifts.filter(s => s.target_date === nearestDate);
           setNextClasses(todaysClasses);
         } else {
@@ -164,7 +199,7 @@ export default function NextClassWidget({ profile }: { profile: any }) {
   if (nextClasses.length === 0) return null; 
 
   const firstClass = nextClasses[0];
-  const isToday = firstClass.target_date === getJSTDate(0);
+  const isToday = firstClass.target_date === getJSTDateStr(0);
 
   const handleJoin = (meetingId?: string) => {
      if (!meetingId) return alert("ミーティングIDが未設定です");
@@ -184,6 +219,7 @@ export default function NextClassWidget({ profile }: { profile: any }) {
           </div>
           <div className="flex items-center gap-3">
              <span className="text-sm font-bold tracking-wider text-indigo-100">次回担当授業</span>
+             {/* 表記ゆれを綺麗にしたので、常に YYYY/MM/DD と美しく表示されます */}
              <span className="text-lg font-black">{firstClass.target_date.replace(/-/g, '/')}</span>
              {isToday && (
                 <span className="bg-rose-500 text-white px-2 py-0.5 rounded text-[10px] font-bold animate-pulse shadow-sm">TODAY</span>
@@ -209,8 +245,6 @@ export default function NextClassWidget({ profile }: { profile: any }) {
                     <BookOpen size={10} className="shrink-0 opacity-70"/>
                     <span className="truncate">{cls.unit || '単元設定なし'}</span>
                   </div>
-                  {/* デバッグ用: 実際にヒットした名前を表示 */}
-                  {/* <div className="text-[10px] opacity-50">担当: {cls.teacher_name}</div> */}
                 </div>
               </div>
 
