@@ -2,49 +2,82 @@
 import { NextResponse } from 'next/server';
 import { adminAuth, adminDb } from '@/lib/firebase-admin';
 
+export const runtime = 'nodejs';
+
 type Body = {
   lifetimeId: string;
-  email: string;
   password: string;
 };
 
+const EMAIL_DOMAIN = 'sozogakuen.co.jp';
+
+function normalizeId(id: string) {
+  return String(id || '')
+    .trim()
+    .replace(/[０-９]/g, (s) => String.fromCharCode(s.charCodeAt(0) - 0xfee0));
+}
+
+async function findSeedDoc(db: FirebaseFirestore.Firestore, lifetimeIdRaw: string) {
+  const lifetimeId = normalizeId(lifetimeIdRaw);
+
+  // 文字列で検索
+  let snap = await db.collection('users').where('lifetime_id', '==', lifetimeId).limit(1).get();
+  if (!snap.empty) return snap.docs[0];
+
+  // 数値で検索（型ズレ対策）
+  const n = Number(lifetimeId);
+  if (!Number.isNaN(n)) {
+    snap = await db.collection('users').where('lifetime_id', '==', n).limit(1).get();
+    if (!snap.empty) return snap.docs[0];
+  }
+  return null;
+}
+
 export async function POST(req: Request) {
   try {
-    const { lifetimeId, email, password } = (await req.json()) as Body;
+    const body = (await req.json()) as Partial<Body>;
+    const lifetimeIdRaw = body.lifetimeId;
+    const password = body.password;
 
-    if (!lifetimeId || !email || !password) {
+    if (!lifetimeIdRaw || !password) {
       return NextResponse.json({ ok: false, error: 'invalid-params' }, { status: 400 });
+    }
+
+    const lifetimeId = normalizeId(lifetimeIdRaw);
+    if (!/^[0-9]+$/.test(lifetimeId)) {
+      return NextResponse.json({ ok: false, error: 'id-must-be-numeric' }, { status: 400 });
     }
 
     const db = adminDb();
     const auth = adminAuth();
 
-    // 1) 初回登録データを検索
-    const snap = await db
-      .collection('users')
-      .where('lifetime_id', '==', lifetimeId)
-      .limit(1)
-      .get();
-
-    if (snap.empty) {
+    // 1) Firestore seed を探す（型ズレ対応）
+    const seedDoc = await findSeedDoc(db, lifetimeId);
+    if (!seedDoc) {
       return NextResponse.json({ ok: false, error: 'not-registered' }, { status: 404 });
     }
 
-    const oldDoc = snap.docs[0];
-    const userData = oldDoc.data();
+    const seed = seedDoc.data();
 
-    // 2) 初回パスワード検証
-    if (userData.initial_password && userData.initial_password !== password) {
+    // 2) 初回パスワード照合（文字列で比較）
+    if (seed.initial_password == null) {
+      return NextResponse.json({ ok: false, error: 'missing-initial-password' }, { status: 401 });
+    }
+    if (String(seed.initial_password) !== String(password)) {
       return NextResponse.json({ ok: false, error: 'wrong-initial-password' }, { status: 401 });
     }
 
-    // 3) Authユーザー作成（既存なら取得）
+    // 3) email をサーバー側で固定生成
+    const email = `${lifetimeId}@${EMAIL_DOMAIN}`;
+
+    // 4) Auth作成（存在するなら取得）
     let uid: string;
     try {
-      const created = await auth.createUser({ email, password });
+      const created = await auth.createUser({ email, password: String(password) });
       uid = created.uid;
     } catch (e: any) {
-      if (e?.code === 'auth/email-already-exists') {
+      const msg = String(e?.message || '');
+      if (e?.code === 'auth/email-already-exists' || msg.toLowerCase().includes('already exists')) {
         const existing = await auth.getUserByEmail(email);
         uid = existing.uid;
       } else {
@@ -52,32 +85,26 @@ export async function POST(req: Request) {
       }
     }
 
-    // 4) users/{uid} に移行
+    // 5) users/{uid} を確実に作る（merge）
     await db.collection('users').doc(uid).set(
       {
-        ...userData,
+        ...seed,
         uid,
+        id: uid,
         email,
         migrated_at: new Date().toISOString(),
       },
       { merge: true }
     );
 
-    // 5) 旧doc削除（同一IDなら削除しない）
-    if (oldDoc.ref.id !== uid) {
-      await oldDoc.ref.delete();
+    // 6) 旧doc削除（同一IDなら削除しない）
+    if (seedDoc.ref.id !== uid) {
+      await seedDoc.ref.delete().catch(() => {});
     }
 
-    return NextResponse.json({ ok: true, uid }, { status: 200 });
+    return NextResponse.json({ ok: true, uid, email }, { status: 200 });
   } catch (err: any) {
-    console.error('[first-login] error', err);
-    const msg = String(err?.message || '');
-
-    // env不足をレスポンスに出すと特定しやすい（本番では隠してもOK）
-    if (msg.startsWith('Missing env:')) {
-      return NextResponse.json({ ok: false, error: msg }, { status: 500 });
-    }
-
+    console.error('[first-login] error:', err);
     return NextResponse.json({ ok: false, error: 'server-error' }, { status: 500 });
   }
 }

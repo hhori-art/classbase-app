@@ -27,12 +27,23 @@ type ClassEvent = {
 // --- ヘルパー関数 ---
 const toHalfWidth = (str: string) => !str ? '' : str.replace(/[！-～]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0)).replace(/　/g, ' ');
 
-// ★重要: 名前マッチングロジック (部分一致対応)
 const isNameMatch = (shiftName: string | undefined, profileName: string) => {
   if (!shiftName || !profileName) return false;
   const s = shiftName.replace(/[ 　]/g, '');
   const p = profileName.replace(/[ 　]/g, '');
   return s.includes(p);
+};
+
+// ★追加: JSTの今日の日付を確実に 'YYYY-MM-DD' 形式で取得する関数
+const getJSTDateString = () => {
+  const now = new Date();
+  // 端末のタイムゾーンオフセットを相殺し、強制的にJST(+9時間)へ変換
+  const jstTime = now.getTime() + (now.getTimezoneOffset() * 60000) + (9 * 3600000);
+  const jstDate = new Date(jstTime);
+  const y = jstDate.getFullYear();
+  const m = String(jstDate.getMonth() + 1).padStart(2, '0');
+  const d = String(jstDate.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
 };
 
 const TIME_MAP: Record<string, { start: string, end: string }> = {
@@ -48,15 +59,14 @@ export default function FutureClassesModal({ isOpen, onClose, profile }: Props) 
 
   useEffect(() => {
     if (isOpen && profile) {
-      // 初期表示時は今日の年月を表示
-      const d = new Date();
-      d.setHours(d.getHours() + 9); // JST
-      setViewDate(d);
-      setSelectedDateStr(d.toISOString().split('T')[0]); 
+      // 初期表示時は今日の年月を表示（+9時間の重複バグを解消）
+      const todayStr = getJSTDateString();
+      const [y, m, d] = todayStr.split('-');
+      setViewDate(new Date(Number(y), Number(m) - 1, Number(d)));
+      setSelectedDateStr(todayStr); 
     }
   }, [isOpen, profile]);
 
-  // 月が変わったらデータを再取得
   useEffect(() => {
     if (isOpen && profile) {
       fetchMonthClasses();
@@ -69,14 +79,11 @@ export default function FutureClassesModal({ isOpen, onClose, profile }: Props) 
       const userId = profile.id || profile.uid;
       const userName = profile.student_name || profile.name || '';
 
-      // 月初の取得 (YYYY-MM-01)
       const year = viewDate.getFullYear();
       const month = viewDate.getMonth() + 1;
       const startOfMonth = `${year}-${String(month).padStart(2, '0')}-01`;
-      // 月末の取得
-      const endOfMonth = `${year}-${String(month).padStart(2, '0')}-31`; // 簡易的に31日指定（Firestore文字列比較なら問題なし）
+      const endOfMonth = `${year}-${String(month).padStart(2, '0')}-31`; 
 
-      // その月のデータを全件取得する
       const q = query(
         collection(db, 'shift_assignments'),
         where('target_date', '>=', startOfMonth),
@@ -89,7 +96,6 @@ export default function FutureClassesModal({ isOpen, onClose, profile }: Props) 
 
       snap.docs.forEach(doc => {
         const data = doc.data();
-        // ID一致 または 名前部分一致でフィルタリング
         if (data.user_id === userId || isNameMatch(data.teacher_name, userName)) {
           shiftsMap.set(doc.id, { ...data, id: doc.id });
         }
@@ -104,10 +110,14 @@ export default function FutureClassesModal({ isOpen, onClose, profile }: Props) 
 
           const times = TIME_MAP[timeSlot] || { start: '090000', end: '100000' };
 
+          // ★重要: 時刻付きやスラッシュ区切りのデータが混入していても確実に 'YYYY-MM-DD' に正規化する
+          const rawDate = d.target_date || '';
+          const normalizedDate = rawDate.replace(/\//g, '-').split('T')[0].split(' ')[0].trim();
+
           return {
             id: d.id,
             title: `【${d.target_grade}】${d.target_subject}`,
-            dateStr: d.target_date,
+            dateStr: normalizedDate,
             timeSlot,
             startTime: times.start,
             endTime: times.end,
@@ -144,6 +154,7 @@ export default function FutureClassesModal({ isOpen, onClose, profile }: Props) 
   };
 
   const handleExportMonth = () => {
+    // 省略せずに記述
     if (allEvents.length === 0) return alert('この月の予定はありません');
 
     let icsContent = "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//Class Schedule//EN\nCALSCALE:GREGORIAN\nMETHOD:PUBLISH\n";
@@ -172,6 +183,7 @@ export default function FutureClassesModal({ isOpen, onClose, profile }: Props) 
 
   const changeMonth = (diff: number) => {
     const newDate = new Date(viewDate);
+    newDate.setDate(1); // ★修正: 月またぎのバグ（31日の月に遷移して月が飛ぶ現象）を防止
     newDate.setMonth(newDate.getMonth() + diff);
     setViewDate(newDate);
   };
@@ -194,6 +206,7 @@ export default function FutureClassesModal({ isOpen, onClose, profile }: Props) 
 
   const calendarDays = generateCalendarDays();
   const selectedDayEvents = allEvents.filter(e => e.dateStr === selectedDateStr);
+  const todayJstStr = getJSTDateString(); // レンダリング中の今日判定用
 
   if (!isOpen) return null;
 
@@ -235,11 +248,7 @@ export default function FutureClassesModal({ isOpen, onClose, profile }: Props) 
               
               const dayEvents = allEvents.filter(e => e.dateStr === d.dateStr);
               const isSelected = d.dateStr === selectedDateStr;
-              
-              // JSTでの今日判定
-              const today = new Date();
-              today.setHours(today.getHours() + 9);
-              const isToday = d.dateStr === today.toISOString().split('T')[0];
+              const isToday = d.dateStr === todayJstStr;
 
               return (
                 <button
