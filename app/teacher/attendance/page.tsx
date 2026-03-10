@@ -289,7 +289,12 @@ export default function TeacherAttendancePage() {
     if (segments.length > 0) {
       nextStart = segments[segments.length - 1].end;
     } else if (editingRecord) {
-      nextStart = new Date(editingRecord.start_time).toLocaleTimeString('ja-JP', {hour:'2-digit', minute:'2-digit'});
+      // 最初のセグメントを追加する場合は、出勤時刻を5分単位で切り上げた時刻を初期値にする
+      const shiftStart = new Date(editingRecord.start_time);
+      const startMin = Math.ceil((shiftStart.getHours() * 60 + shiftStart.getMinutes()) / 5) * 5;
+      const h = Math.floor(startMin / 60);
+      const m = startMin % 60;
+      nextStart = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
     }
     setSegments([...segments, { start: nextStart, end: '', type: 'office', note: '' }]);
   };
@@ -315,6 +320,7 @@ export default function TeacherAttendancePage() {
     } catch (e) { console.error(e); }
   };
 
+  // ★修正: 打刻時間を5分単位に丸めてから隙間を計算する
   const fillGaps = (currentSegments: WorkSegment[], startTime: string, endTime: string | null) => {
     if (!startTime || !endTime) return currentSegments;
     const toMinutes = (s: string) => {
@@ -330,8 +336,11 @@ export default function TeacherAttendancePage() {
 
     const shiftStart = new Date(startTime);
     const shiftEnd = new Date(endTime);
-    const startMin = shiftStart.getHours() * 60 + shiftStart.getMinutes();
-    const endMin = shiftEnd.getHours() * 60 + shiftEnd.getMinutes();
+    
+    // 出勤時刻は5分単位に「切り上げ」
+    const startMin = Math.ceil((shiftStart.getHours() * 60 + shiftStart.getMinutes()) / 5) * 5;
+    // 退勤時刻は5分単位に「切り捨て」
+    const endMin = Math.floor((shiftEnd.getHours() * 60 + shiftEnd.getMinutes()) / 5) * 5;
 
     const sorted = [...currentSegments]
       .filter(s => s.start && s.end)
@@ -372,34 +381,61 @@ export default function TeacherAttendancePage() {
   const saveData = async () => {
     if (!editingRecord) return;
     
-    // ★ 追加：出勤直後の休憩を禁止する
+    // 講師用画面は打刻時間を変更できないため、editingRecordの値をそのまま使う
     const newStartISO = editingRecord.start_time;
-    if (segments.length > 0 && newStartISO) {
-      const toMinutes = (s: string) => {
-        if(!s) return -1;
-        const [h, m] = s.split(':').map(Number);
-        return h * 60 + m;
-      };
-      
-      const sortedSegments = [...segments]
-        .filter(s => s.start && s.end)
-        .sort((a, b) => toMinutes(a.start) - toMinutes(b.start));
+    const newEndISO = editingRecord.end_time;
 
-      if (sortedSegments.length > 0) {
-        const shiftStart = new Date(newStartISO);
-        const startMin = shiftStart.getHours() * 60 + shiftStart.getMinutes();
-        const firstSegMin = toMinutes(sortedSegments[0].start);
+    // ★ 修正: 詳細(業務内訳)の入力のみ5分単位であることをチェック
+    const isTimeStrMultipleOf5 = (timeStr: string) => {
+      if (!timeStr) return true;
+      const [, m] = timeStr.split(':').map(Number);
+      return m % 5 === 0;
+    };
 
-        // 1. 出勤時刻と最初の業務開始時刻の間に隙間がある（自動で休憩になる）場合
-        if (firstSegMin > startMin) {
-          alert('【エラー】出勤直後に空白時間を作ることはできません（自動補完で休憩になってしまうため）。\n打刻された出勤時刻と「最初の業務の開始時刻」を一致させてください。');
-          return;
+    const toMinutes = (s: string) => {
+      if(!s) return -1;
+      const [h, m] = s.split(':').map(Number);
+      return h * 60 + m;
+    };
+
+    for (const seg of segments) {
+      if (seg.start && seg.end) {
+        if (!isTimeStrMultipleOf5(seg.start) || !isTimeStrMultipleOf5(seg.end)) {
+          return alert('【エラー】業務内訳の開始・終了時刻は5分単位（0, 5, 10...）で入力してください。');
         }
+      }
+    }
 
-        // 2. 最初のセグメントが手動で「休憩」に設定されている場合
-        if (sortedSegments[0].type === 'break') {
-          alert('【エラー】出勤直後の最初の業務区分に「休憩」を登録することはできません。');
-          return;
+    // ★ 修正: 打刻時間を丸めた範囲内に詳細が収まっているか、および開始直後の休憩禁止チェック
+    if (newStartISO && newEndISO) {
+      const shiftStart = new Date(newStartISO);
+      const shiftEnd = new Date(newEndISO);
+      // 出勤は切り上げ、退勤は切り捨て
+      const startMin = Math.ceil((shiftStart.getHours() * 60 + shiftStart.getMinutes()) / 5) * 5;
+      const endMin = Math.floor((shiftEnd.getHours() * 60 + shiftEnd.getMinutes()) / 5) * 5;
+
+      // 範囲チェック
+      for (const seg of segments) {
+        if (seg.start && seg.end) {
+          const sMin = toMinutes(seg.start);
+          const eMin = toMinutes(seg.end);
+          if (sMin < startMin || eMin > endMin) {
+             return alert(`【エラー】業務内訳は打刻時間に基づき「${Math.floor(startMin/60)}:${String(startMin%60).padStart(2,'0')}」から「${Math.floor(endMin/60)}:${String(endMin%60).padStart(2,'0')}」の間で入力してください。`);
+          }
+        }
+      }
+
+      // 最初の業務までの空白チェック＆休憩チェック
+      if (segments.length > 0) {
+        const sortedSegments = [...segments].filter(s => s.start && s.end).sort((a, b) => toMinutes(a.start) - toMinutes(b.start));
+        if (sortedSegments.length > 0) {
+          const firstSegMin = toMinutes(sortedSegments[0].start);
+          if (firstSegMin > startMin) {
+            return alert(`【エラー】出勤時刻（打刻丸め後: ${Math.floor(startMin/60)}:${String(startMin%60).padStart(2,'0')}）から最初の業務までに空白時間を作ることはできません。\n最初の業務の開始時刻を合わせるか、管理者に打刻時刻の修正を依頼してください。`);
+          }
+          if (sortedSegments[0].type === 'break') {
+            return alert('【エラー】出勤直後の最初の業務区分に「休憩」を登録することはできません。');
+          }
         }
       }
     }
@@ -408,6 +444,15 @@ export default function TeacherAttendancePage() {
       const validSegments = segments.filter(s => s.start && s.end);
       validSegments.sort((a, b) => a.start.localeCompare(b.start));
       const filledSegments = fillGaps(validSegments, editingRecord.start_time, editingRecord.end_time);
+
+      // ★ 修正: 最後が休憩で終わることを禁止するバリデーション
+      if (filledSegments.length > 0) {
+        const lastSeg = filledSegments[filledSegments.length - 1];
+        if (lastSeg.type === 'break') {
+          return alert('【エラー】最後が「休憩」で終わることはできません。\n最後の業務の終了時刻と退勤時刻(丸め後)を一致させてください。');
+        }
+      }
+
       const formattedExpenses = expenses.map(e => ({ ...e, cost: Number(e.cost) }));
       
       await updateDoc(doc(db, 'work_records', editingRecord.id), {
