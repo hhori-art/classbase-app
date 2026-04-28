@@ -6,8 +6,6 @@ import { useRouter } from 'next/navigation';
 import { db } from '@/lib/firebase';
 import { doc, getDoc, collection, query, where, getDocs, orderBy, limit } from 'firebase/firestore'; 
 import { useAuth } from '@/app/context/AuthContext'; 
-import { signOut } from 'firebase/auth';
-import { auth } from '@/lib/firebase';
 import { 
   Video, BookOpen, AlertTriangle, 
   ChevronRight, Calendar, Trophy, Settings,
@@ -48,7 +46,7 @@ const ErrorFallback = ({ message, onRetry }: { message: string, onRetry: () => v
 );
 
 export default function StudentDashboard() {
-  const { user, profile, loading: authLoading } = useAuth();
+  const { user, profile, loading: authLoading, logout } = useAuth();
   
   const [globalError, setGlobalError] = useState<string | null>(null);
   const [mounted, setMounted] = useState(false);
@@ -84,9 +82,8 @@ export default function StudentDashboard() {
 
   const handleForceLogout = async () => {
     try {
-      await signOut(auth);
       clearAllCookies(); // ★ログアウト時にCookieも確実に破壊する
-      window.location.href = '/?logout=true'; 
+      await logout();
     } catch (e) {
       clearAllCookies();
       window.location.href = '/';

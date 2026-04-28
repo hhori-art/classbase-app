@@ -11,6 +11,8 @@ import { logActivity } from '@/lib/logActivity';
 export default function StudentChat() {
   const { user, profile } = useAuth();
   const [isSendingToTeacher, setIsSendingToTeacher] = useState(false);
+  const showChatDestination = process.env.NEXT_PUBLIC_SHOW_CHAT_DESTINATION !== 'false';
+  const stamps = ['ありがとう', 'わかった', '質問です', '復習します'];
   
   // useChat フック
   const { messages, input, handleInputChange, handleSubmit, isLoading, setMessages } = useChat({
@@ -109,13 +111,29 @@ export default function StudentChat() {
     }
   };
 
+  const sendStamp = async (stamp: string) => {
+    if (!user) return;
+    try {
+      await addDoc(collection(db, 'users', user.uid, 'chat_history'), {
+        role: 'user',
+        content: `[スタンプ] ${stamp}`,
+        message_type: 'stamp',
+        createdAt: serverTimestamp(),
+      });
+      // @ts-ignore
+      setMessages(current => [...current, { id: `stamp-${Date.now()}`, role: 'user', content: `[スタンプ] ${stamp}` }]);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
   return (
-    <div className="flex flex-col h-[calc(100vh-80px)] bg-[#F0F4F8] font-sans">
+    <div className="flex flex-col h-[calc(100vh-80px)] bg-[#F0F4F8] font-sans overflow-hidden">
       
       {/* ヘッダー: 教育アプリらしいポップで信頼感のあるデザイン */}
       <div className="bg-white/80 backdrop-blur-md px-4 py-3 shadow-sm border-b border-indigo-50 flex items-center justify-between sticky top-0 z-10">
@@ -131,7 +149,7 @@ export default function StudentChat() {
               AIチューター <Sparkles size={14} className="text-yellow-500 fill-yellow-500 animate-pulse"/>
             </h1>
             <p className="text-[10px] text-gray-500 font-bold bg-gray-100 px-2 py-0.5 rounded-full inline-block mt-0.5">
-              24時間いつでも質問OK
+              {showChatDestination ? '宛先: AIチューター' : '24時間いつでも質問OK'}
             </p>
           </div>
         </div>
@@ -214,7 +232,14 @@ export default function StudentChat() {
       </div>
 
       {/* 入力エリア: 浮かんでいるようなモダンなデザイン */}
-      <div className="p-4 pb-6 bg-[#F0F4F8]"> {/* 背景色に合わせて一体感を出す */}
+      <div className="p-3 pb-6 bg-[#F0F4F8] sm:p-4"> {/* 背景色に合わせて一体感を出す */}
+        <div className="mx-auto mb-2 flex max-w-3xl gap-2 overflow-x-auto pb-1">
+          {stamps.map(stamp => (
+            <button key={stamp} onClick={() => sendStamp(stamp)} className="shrink-0 rounded-full bg-white px-3 py-1.5 text-xs font-black text-indigo-500 shadow-sm border border-indigo-50">
+              {stamp}
+            </button>
+          ))}
+        </div>
         <form onSubmit={customSubmit} className="relative flex items-end gap-2 max-w-3xl mx-auto">
           <div className="flex-1 bg-white rounded-3xl shadow-lg shadow-gray-200 border border-gray-100 focus-within:ring-2 focus-within:ring-indigo-100 transition-all flex items-center p-1.5 pl-4">
             <input

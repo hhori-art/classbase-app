@@ -21,6 +21,11 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
   const [targetYear, setTargetYear] = useState<number>(new Date().getFullYear());
   const [forceOverwrite, setForceOverwrite] = useState(false);
 
+  // 2026年度の講師配置CSVは C〜J 列が授業枠、K列以降が欄外の全体サポート欄。
+  // K列以降を授業クラスとして読まないよう、列境界を明示する。
+  const LESSON_COLUMN_START = 2; // C列
+  const GENERAL_SUPPORT_COLUMN_START = 10; // K列
+
   // テンプレートDL
   const downloadTemplate = () => {
     const csvContent = '\uFEFF日付,曜日,時限,教科,クラス,単元,場所,ｻｲﾝｲﾝｱﾄﾞﾚｽ,ミーティングID,講師,サポート,枠外(全体サポート)\n12/1,月,1,中3理科,中3理科(生物),力と運動,手柄,sozo_kyoumu@example.com,,鈴木 先生,個安 佐藤 先生,田中 先生(全体)';
@@ -179,6 +184,32 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
       if (clean.replace(/\s+/g, '') === regName.replace(/\s+/g, '')) return data;
     }
     return null; 
+  };
+
+  const normalizeSupportName = (rawName: string) => {
+    return rawName
+      .replace(/\r?\n/g, ' ')
+      .replace(/\s+/g, ' ')
+      .replace(/^【遠】/, '')
+      .trim();
+  };
+
+  const isIgnorableSupportCell = (rawName: string) => {
+    const value = normalizeSupportName(rawName);
+    if (!value) return true;
+    if (['未', '―', '-', 'ー', '全体サポート', '枠外', 'Nan', 'nan'].includes(value)) return true;
+    if (/^[\d\s]+$/.test(value)) return true;
+    if (value.includes('@')) return true;
+    if (value.includes('ﾐｰﾃｨﾝｸﾞID') || value.includes('ミーティングID')) return true;
+    if (value.includes('ｻｲﾝｲﾝｱﾄﾞﾚｽ') || value.includes('サインインアドレス')) return true;
+    return false;
+  };
+
+  const getGeneralSupportNamesFromOutOfRangeColumns = (row: string[]) => {
+    return row
+      .slice(GENERAL_SUPPORT_COLUMN_START)
+      .map(normalizeSupportName)
+      .filter(name => !isIgnorableSupportCell(name));
   };
 
   const processCSV = async (csvText: string) => {
@@ -440,11 +471,80 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
         const isSupportRow = col1.includes('サポート') || col1.includes('サブ');
         const isGeneralRow = col1.includes('全体サポート') || col1.includes('枠外');
 
-        const maxCol = row.length; 
+        const maxCol = row.length;
+        const lessonEndCol = Math.min(maxCol, GENERAL_SUPPORT_COLUMN_START);
+
+        const insertGeneralSupport = async (rawName: string, period: number) => {
+          const normalizedName = normalizeSupportName(rawName);
+          if (isIgnorableSupportCell(normalizedName)) return;
+
+          const teacherInfo = resolveTeacherInfo(normalizedName, teacherMap);
+          const teacherName = teacherInfo ? teacherInfo.name : normalizedName;
+          const userId = teacherInfo ? teacherInfo.id : '';
+
+          if (normalizedName && !userId) missingTeacherCount++;
+
+          let targetDates = [currentDate];
+          if (importMode === 'weekly_repeat') {
+            const d = new Date(currentDate);
+            const dayOfWeek = ['日','月','火','水','木','金','土'][d.getDay()];
+            targetDates = getDatesInRange(startDate, endDate, dayOfWeek);
+          }
+
+          for (const targetDate of targetDates) {
+            if (!targetDate || !period) continue;
+
+            const duplicateKey = `${targetDate}_${period}_${userId || teacherName}_general`;
+            const existingId = existingGeneralMap.get(duplicateKey);
+            const shiftData = {
+              user_id: userId,
+              teacher_name: teacherName,
+              target_date: targetDate,
+              role_type: 'general',
+              target_grade: null,
+              target_subject: null,
+              target_detail_subject: null,
+              target_place: null,
+              unit: null,
+              parent_id: null,
+              note: `【${period}限】全体サポート`,
+              created_at: new Date().toISOString()
+            };
+
+            if (existingId) {
+              if (forceOverwrite) {
+                batch.set(doc(db, 'shift_assignments', existingId), shiftData, { merge: true });
+                overwriteCount++;
+              } else {
+                skipCount++;
+              }
+            } else {
+              const newRef = doc(collection(db, 'shift_assignments'));
+              batch.set(newRef, shiftData);
+              count++;
+              existingGeneralMap.set(duplicateKey, newRef.id);
+            }
+
+            batchCount++;
+            if (batchCount >= 400) await commitBatch();
+          }
+        };
+
+        const outOfRangeSupportNames = getGeneralSupportNamesFromOutOfRangeColumns(row);
+        if (outOfRangeSupportNames.length > 0 && currentDate) {
+          const supportPeriod =
+            currentPeriod ||
+            (col0.includes('集会') || col0.includes('準備') ? 1 : 0);
+          if (supportPeriod) {
+            for (const supportName of outOfRangeSupportNames) {
+              await insertGeneralSupport(supportName, supportPeriod);
+            }
+          }
+        }
 
         // 全体（ブロック外）に設定されているミーティングIDなどを保持・反映
         if (isZoomRow) { 
-          for (let c = 2; c < maxCol; c++) {
+          for (let c = LESSON_COLUMN_START; c < lessonEndCol; c++) {
             if (row[c] && row[c].trim()) {
               globalZoomIds[c] = row[c].trim();
               if (colMap[c]) colMap[c]!.meetingId = globalZoomIds[c];
@@ -453,7 +553,7 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
           continue; 
         }
         if (isSigninRow) { 
-          for (let c = 2; c < maxCol; c++) {
+          for (let c = LESSON_COLUMN_START; c < lessonEndCol; c++) {
             if (row[c] && row[c].trim()) {
               globalSigninAddresses[c] = row[c].replace(/\s+/g, '').trim();
               if (colMap[c]) colMap[c]!.signinAddress = globalSigninAddresses[c];
@@ -479,18 +579,20 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
             if (scanCol1.includes('教科')) break; // 次のブロックに入ったら探索終了
             
             if (scanCol1.includes('ﾐｰﾃｨﾝｸﾞID') || scanCol1.includes('ミーティングID')) {
-              for (let c = 2; c < scanRow.length; c++) {
+              const scanEndCol = Math.min(scanRow.length, GENERAL_SUPPORT_COLUMN_START);
+              for (let c = LESSON_COLUMN_START; c < scanEndCol; c++) {
                 if (scanRow[c] && scanRow[c].trim()) blockZoomIds[c] = scanRow[c].trim();
               }
             }
             if (scanCol1.includes('ｻｲﾝｲﾝｱﾄﾞﾚｽ') || scanCol1.includes('サインインアドレス')) {
-              for (let c = 2; c < scanRow.length; c++) {
+              const scanEndCol = Math.min(scanRow.length, GENERAL_SUPPORT_COLUMN_START);
+              for (let c = LESSON_COLUMN_START; c < scanEndCol; c++) {
                 if (scanRow[c] && scanRow[c].trim()) blockSigninAddresses[c] = scanRow[c].replace(/\s+/g, '').trim();
               }
             }
           }
 
-          for (let c = 2; c < maxCol; c++) {
+          for (let c = LESSON_COLUMN_START; c < lessonEndCol; c++) {
             const val = row[c] || '';
             const norm = val.replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0));
             
@@ -518,12 +620,15 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
           continue;
         }
 
-        if (isClassRow) { for (let c = 2; c < maxCol; c++) if (colMap[c]) colMap[c]!.detail = (row[c] || '').replace(/[【】]/g, '').trim(); continue; }
-        if (isUnitRow) { for (let c = 2; c < maxCol; c++) if (colMap[c]) colMap[c]!.unit = row[c] || ''; continue; }
-        if (isPlaceRow) { for (let c = 2; c < maxCol; c++) if (colMap[c]) colMap[c]!.place = row[c] || ''; continue; }
+        if (isClassRow) { for (let c = LESSON_COLUMN_START; c < lessonEndCol; c++) if (colMap[c]) colMap[c]!.detail = (row[c] || '').replace(/[【】]/g, '').trim(); continue; }
+        if (isUnitRow) { for (let c = LESSON_COLUMN_START; c < lessonEndCol; c++) if (colMap[c]) colMap[c]!.unit = row[c] || ''; continue; }
+        if (isPlaceRow) { for (let c = LESSON_COLUMN_START; c < lessonEndCol; c++) if (colMap[c]) colMap[c]!.place = row[c] || ''; continue; }
 
         if (isTeacherRow || isSupportRow || isGeneralRow) {
-          for (let c = 2; c < maxCol; c++) {
+          const startCol = LESSON_COLUMN_START;
+          const endCol = isGeneralRow ? maxCol : lessonEndCol;
+
+          for (let c = startCol; c < endCol; c++) {
             const rawName = (row[c] || '').trim();
             const info = colMap[c];
 

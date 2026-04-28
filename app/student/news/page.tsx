@@ -28,7 +28,7 @@ export default function StudentNewsPage() {
 
         // ★フィルタリング: 「全員宛」または「生徒宛」のみ抽出
         const myNews = allData.filter((item: any) => 
-          item.target === 'all' || item.target === 'student'
+          !item.target || item.target === 'all' || item.target === 'student'
         );
 
         setList(myNews);

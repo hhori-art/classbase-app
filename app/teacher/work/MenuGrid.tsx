@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { 
   ClipboardList, CalendarPlus, MessageCircle, Users, 
-  Phone, BarChart3, Briefcase, AlertTriangle, Lock 
+  Phone, BarChart3, Briefcase, AlertTriangle, Lock, Megaphone
 } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
 
@@ -25,6 +25,14 @@ export default function TeacherWorkMenu({ isInternalNetwork }: Props) {
       color: 'teal',
       desc: '出退勤の記録',
       restricted: false // 許可
+    },
+    {
+      title: '代行掲示板',
+      href: '/teacher/substitutions',
+      icon: <Megaphone size={28}/>,
+      color: 'red',
+      desc: '代行募集・引受',
+      restricted: false
     },
     {
       title: '連絡',

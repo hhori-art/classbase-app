@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { useSettings } from '@/app/context/SettingsContext';
-import { db, auth } from '@/lib/firebase';
+import { db } from '@/lib/firebase';
 import { doc, updateDoc } from 'firebase/firestore';
 import { updatePassword } from 'firebase/auth';
 import { 
@@ -14,7 +14,7 @@ import {
 import Link from 'next/link';
 
 export default function StudentSettingsPage() {
-  const { user, profile } = useAuth();
+  const { user, profile, logout } = useAuth();
   const { textSize, setTextSize } = useSettings();
   
   // --- State ---
@@ -330,7 +330,7 @@ export default function StudentSettingsPage() {
         </section>
 
         <div className="pt-4 pb-10">
-           <button onClick={() => auth.signOut()} className="w-full bg-white border-2 border-red-50 text-red-400 py-4 rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-red-50">
+           <button onClick={logout} className="w-full bg-white border-2 border-red-50 text-red-400 py-4 rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-red-50">
              <LogOut size={20}/> ログアウト
            </button>
         </div>

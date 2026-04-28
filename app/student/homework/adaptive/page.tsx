@@ -1,12 +1,12 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { db } from '@/lib/firebase';
-import { doc, updateDoc, increment, collection, addDoc, serverTimestamp, query, where, getDocs, orderBy } from 'firebase/firestore';
+import { auth, db } from '@/lib/firebase';
+import { collection, query, where, getDocs, orderBy } from 'firebase/firestore';
 import { useAuth } from '@/app/context/AuthContext';
 import { 
   CheckCircle, XCircle, ArrowRight, ArrowLeft, Loader2, 
-  RotateCcw, AlertTriangle, Trophy, Star, Brain, Play, FlaskConical, Globe, Calculator,
+  RotateCcw, AlertTriangle, Trophy, Star, Brain, Play, FlaskConical, Globe, BookOpenText,
   BookOpen, List, History
 } from 'lucide-react';
 import Link from 'next/link';
@@ -36,7 +36,7 @@ interface Question {
 const SUBJECTS = {
   science: { label: '理科', icon: <FlaskConical size={18}/>, items: ['物理', '化学', '生物', '地学'], color: 'bg-purple-100 text-purple-700 hover:bg-purple-200' },
   society: { label: '社会', icon: <Globe size={18}/>, items: ['地理', '歴史', '公民'], color: 'bg-orange-100 text-orange-700 hover:bg-orange-200' },
-  basics:  { label: '主要', icon: <Calculator size={18}/>, items: ['英語', '数学'], color: 'bg-blue-100 text-blue-700 hover:bg-blue-200' }
+  japanese: { label: '国語', icon: <BookOpenText size={18}/>, items: ['漢字', '語句', '古文単語', '文法'], color: 'bg-rose-100 text-rose-700 hover:bg-rose-200' }
 };
 
 export default function AdaptiveLearningPage() {
@@ -169,27 +169,20 @@ export default function AdaptiveLearningPage() {
 
     if (user) {
       try {
-        // 1. 結果履歴を保存
-        await addDoc(collection(db, 'quest_results'), {
-          student_id: user.uid,
-          grade: selectedGrade,
-          subject: selectedSubject,
-          unit_name: selectedUnit?.unit_name || '不明な単元',
-          score: Math.round(scoreRate * 100),
-          is_passed: passed,
-          created_at: serverTimestamp()
+        const token = await auth.currentUser?.getIdToken();
+        const res = await fetch('/api/quest-results', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            grade: selectedGrade,
+            subject: selectedSubject,
+            unit_name: selectedUnit?.unit_name || '不明な単元',
+            score: Math.round(scoreRate * 100),
+            is_passed: passed,
+          }),
         });
-
-        // 2. 合格ならポイント付与
-        if (passed) {
-          const userRef = doc(db, 'users', user.uid);
-          await updateDoc(userRef, {
-            points: increment(POINTS_PER_CLEAR),
-            total_coins: increment(POINTS_PER_CLEAR),
-            quest_clear_count: increment(1)
-          });
-          setEarnedPoints(POINTS_PER_CLEAR);
-        }
+        const saved = await res.json();
+        if (passed) setEarnedPoints(saved.earned_points || POINTS_PER_CLEAR);
       } catch (e) {
         console.error("Save Error:", e);
       }
@@ -213,7 +206,10 @@ export default function AdaptiveLearningPage() {
       <div className="min-h-screen bg-[#F0F4F8] p-4 sm:p-6 flex flex-col items-center justify-center font-sans">
         <div className="max-w-xl w-full">
           
-          <div className="flex justify-end mb-4">
+          <div className="flex justify-between mb-4">
+            <Link href="/student" className="bg-white px-4 py-2 rounded-full shadow-sm text-sm font-bold text-gray-500 hover:text-indigo-600 flex items-center gap-2">
+              <ArrowLeft size={16}/> 戻る
+            </Link>
             <Link href="/student/history" className="bg-white px-4 py-2 rounded-full shadow-sm text-sm font-bold text-gray-500 hover:text-indigo-600 flex items-center gap-2">
               <History size={16}/> 履歴を見る
             </Link>
@@ -257,10 +253,10 @@ export default function AdaptiveLearningPage() {
                   </div>
                 </div>
                 <div>
-                  <div className="flex items-center gap-2 text-xs font-bold text-blue-500 mb-2"><Calculator size={14}/> 主要</div>
+                  <div className="flex items-center gap-2 text-xs font-bold text-rose-500 mb-2"><BookOpenText size={14}/> 国語</div>
                   <div className="grid grid-cols-2 gap-2">
-                    {SUBJECTS.basics.items.map(s => (
-                      <button key={s} onClick={() => setSelectedSubject(s)} className={`py-2.5 rounded-lg text-sm font-bold transition-all ${selectedSubject === s ? 'bg-blue-500 text-white' : SUBJECTS.basics.color}`}>{s}</button>
+                    {SUBJECTS.japanese.items.map(s => (
+                      <button key={s} onClick={() => setSelectedSubject(s)} className={`py-2.5 rounded-lg text-sm font-bold transition-all ${selectedSubject === s ? 'bg-rose-500 text-white' : SUBJECTS.japanese.color}`}>{s}</button>
                     ))}
                   </div>
                 </div>

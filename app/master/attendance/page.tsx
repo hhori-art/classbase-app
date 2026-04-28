@@ -8,6 +8,7 @@ import {
   Loader2, Clock, Layout, Copy, AlertCircle, ChevronRight, Calendar, User, DollarSign, CheckSquare, FileText, Coffee, Database
 } from 'lucide-react';
 import Link from 'next/link';
+import { useAuth } from '@/app/context/AuthContext';
 
 // 型定義
 interface WorkSegment {
@@ -30,7 +31,19 @@ interface UserInfo {
   staff_id: string;
 }
 
+interface CorrectionRequest {
+  id: string;
+  work_record_id: string;
+  teacher_id: string;
+  requested_start_time?: string | null;
+  requested_end_time?: string | null;
+  reason?: string;
+  status: string;
+  created_at?: any;
+}
+
 export default function MasterAttendancePage() {
+  const { user: authUser } = useAuth();
   const [records, setRecords] = useState<any[]>([]);
   const [usersMap, setUsersMap] = useState<{[key:string]: UserInfo}>({}); 
   const [loading, setLoading] = useState(true);
@@ -38,6 +51,8 @@ export default function MasterAttendancePage() {
   const [filterName, setFilterName] = useState('');
   const [showOnlyPending, setShowOnlyPending] = useState(false);
   const [isCsvGenerating, setIsCsvGenerating] = useState(false);
+  const [correctionRequests, setCorrectionRequests] = useState<CorrectionRequest[]>([]);
+  const [processingCorrectionId, setProcessingCorrectionId] = useState('');
 
   const [filterDate, setFilterDate] = useState('');
   const [newRecordSearch, setNewRecordSearch] = useState('');
@@ -61,6 +76,7 @@ export default function MasterAttendancePage() {
 
   useEffect(() => {
     fetchRecords();
+    fetchCorrectionRequests();
     setSelectedRecordIds(new Set()); // 月が切り替わったら選択をリセット
   }, [filterMonth]);
 
@@ -107,6 +123,46 @@ export default function MasterAttendancePage() {
       setRecords(snap2.docs.map(d => ({ id: d.id, ...d.data() })).filter((r: any) => r.date && r.date.startsWith(filterMonth)));
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchCorrectionRequests = async () => {
+    try {
+      const q = query(collection(db, 'attendance_correction_requests'), orderBy('created_at', 'desc'), limit(30));
+      const snap = await getDocs(q);
+      setCorrectionRequests(snap.docs.map(d => ({ id: d.id, ...d.data() } as CorrectionRequest)));
+    } catch (e) {
+      console.warn('Correction requests fetch error:', e);
+      setCorrectionRequests([]);
+    }
+  };
+
+  const handleCorrectionReview = async (requestId: string, status: 'approved' | 'rejected') => {
+    const label = status === 'approved' ? '承認' : '却下';
+    if (!confirm(`この打刻修正依頼を${label}しますか？`)) return;
+
+    setProcessingCorrectionId(requestId);
+    try {
+      const token = await authUser?.getIdToken();
+      if (!token) throw new Error('ログイン情報を確認できません。再ログインしてください。');
+      const res = await fetch('/api/attendance-corrections', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action: 'review', request_id: requestId, status }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) {
+        const message = data.error === 'work_record_id is missing on correction request'
+          ? '対象の勤務記録が見つかりません。この依頼は古い形式か壊れているため、勤務記録から再申請してください。'
+          : data.error || 'failed';
+        throw new Error(message);
+      }
+      await fetchCorrectionRequests();
+      await fetchRecords();
+    } catch (e: any) {
+      alert(`修正依頼の${label}に失敗しました: ${e.message || e}`);
+    } finally {
+      setProcessingCorrectionId('');
     }
   };
 
@@ -651,6 +707,20 @@ export default function MasterAttendancePage() {
     };
   }, [records]);
 
+  const pendingCorrectionRequests = useMemo(
+    () => correctionRequests.filter(req => (req.status || 'pending') === 'pending'),
+    [correctionRequests]
+  );
+
+  const formatCorrectionTime = (value?: string | null) => {
+    if (!value) return '変更なし';
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return '変更なし';
+    return d.toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  };
+
+  const getRecordById = (id: string) => records.find(record => record.id === id);
+
   // CSV一括出力
   const handleBulkDownload = async () => {
     if (filteredRecords.length === 0) return alert('出力するデータがありません');
@@ -871,6 +941,10 @@ export default function MasterAttendancePage() {
           </div>
 
           <div className="flex gap-4 flex-wrap">
+            <Link href="/master/attendance-corrections" className="bg-amber-500 px-5 py-3 rounded-xl shadow-sm flex flex-col items-center min-w-[120px] text-white hover:bg-amber-600 transition-colors">
+              <span className="text-[10px] font-bold uppercase flex items-center gap-1"><CheckSquare size={12}/> 打刻修正</span>
+              <span className="text-xl font-black">{pendingCorrectionRequests.length}</span>
+            </Link>
             <div className="bg-white px-5 py-3 rounded-xl border border-gray-200 shadow-sm flex flex-col items-center min-w-[100px]">
               <span className="text-[10px] text-gray-400 font-bold uppercase flex items-center gap-1"><FileText size={12}/> 授業時間</span>
               <span className="text-xl font-black text-blue-600 font-mono">{summary.lessonTime}</span>
@@ -885,6 +959,81 @@ export default function MasterAttendancePage() {
             </div>
           </div>
         </div>
+
+        {pendingCorrectionRequests.length > 0 && (
+          <section className="mb-6 rounded-3xl border border-amber-200 bg-amber-50/70 p-4 shadow-sm">
+            <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h2 className="flex items-center gap-2 text-lg font-black text-amber-900">
+                  <AlertCircle size={20} /> 打刻修正依頼
+                </h2>
+                <p className="mt-1 text-xs font-bold text-amber-700">講師から届いた出退勤時刻の修正申請です。承認すると勤務記録へ反映されます。</p>
+              </div>
+              <span className="inline-flex w-fit rounded-full bg-white px-3 py-1 text-xs font-black text-amber-700 ring-1 ring-amber-200">
+                未処理 {pendingCorrectionRequests.length}件
+              </span>
+            </div>
+
+            <div className="grid gap-3 lg:grid-cols-2">
+              {pendingCorrectionRequests.map(req => {
+                const rec = getRecordById(req.work_record_id);
+                const teacher = usersMap[req.teacher_id];
+                return (
+                  <div key={req.id} className="rounded-2xl border border-amber-100 bg-white p-4 shadow-sm">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="min-w-0">
+                        <p className="text-sm font-black text-slate-900">{teacher?.name || rec?.teacher_name || '講師未設定'}</p>
+                        <p className="mt-1 text-xs font-bold text-slate-400">{rec?.date || '日付未取得'} / 申請ID: {req.id.slice(0, 8)}</p>
+                      </div>
+                      <span className="w-fit rounded-full bg-amber-100 px-3 py-1 text-[10px] font-black text-amber-700">承認待ち</span>
+                    </div>
+
+                    <div className="mt-4 grid grid-cols-2 gap-2">
+                      <div className="rounded-xl bg-slate-50 p-3">
+                        <p className="text-[10px] font-black text-slate-400">現在の出勤</p>
+                        <p className="mt-1 text-xs font-black text-slate-700">{formatCorrectionTime(rec?.start_time)}</p>
+                      </div>
+                      <div className="rounded-xl bg-indigo-50 p-3">
+                        <p className="text-[10px] font-black text-indigo-400">修正後の出勤</p>
+                        <p className="mt-1 text-xs font-black text-indigo-700">{formatCorrectionTime(req.requested_start_time)}</p>
+                      </div>
+                      <div className="rounded-xl bg-slate-50 p-3">
+                        <p className="text-[10px] font-black text-slate-400">現在の退勤</p>
+                        <p className="mt-1 text-xs font-black text-slate-700">{formatCorrectionTime(rec?.end_time)}</p>
+                      </div>
+                      <div className="rounded-xl bg-indigo-50 p-3">
+                        <p className="text-[10px] font-black text-indigo-400">修正後の退勤</p>
+                        <p className="mt-1 text-xs font-black text-indigo-700">{formatCorrectionTime(req.requested_end_time)}</p>
+                      </div>
+                    </div>
+
+                    <div className="mt-3 rounded-xl bg-slate-50 p-3">
+                      <p className="text-[10px] font-black text-slate-400">理由</p>
+                      <p className="mt-1 text-sm font-bold leading-relaxed text-slate-700">{req.reason || '理由未入力'}</p>
+                    </div>
+
+                    <div className="mt-4 flex justify-end gap-2">
+                      <button
+                        onClick={() => handleCorrectionReview(req.id, 'rejected')}
+                        disabled={processingCorrectionId === req.id}
+                        className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-black text-slate-500 hover:bg-slate-50 disabled:opacity-50"
+                      >
+                        却下
+                      </button>
+                      <button
+                        onClick={() => handleCorrectionReview(req.id, 'approved')}
+                        disabled={processingCorrectionId === req.id}
+                        className="flex items-center gap-2 rounded-xl bg-amber-500 px-4 py-2 text-xs font-black text-white hover:bg-amber-600 disabled:opacity-50"
+                      >
+                        {processingCorrectionId === req.id ? <Loader2 className="animate-spin" size={14} /> : <CheckSquare size={14} />} 承認して反映
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
 
         {/* フィルター & 操作バー */}
         <div className="bg-white p-4 rounded-2xl shadow-sm border border-gray-200 mb-4 flex flex-col md:flex-row gap-4 items-center justify-between sticky top-4 z-20">

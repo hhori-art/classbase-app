@@ -10,6 +10,22 @@ import Link from 'next/link';
 
 const EMAIL_DOMAIN = 'sozogakuen.co.jp';
 
+const normalizeRole = (role: any) => {
+  const r = String(role || '').toLowerCase();
+  if (r === 'teacher') return 'teacher';
+  if (r === 'parent' || r === 'guardian') return 'parent';
+  if (r === 'master') return 'master';
+  if (['admin', 'school_admin', 'branch_admin', 'campus_admin', 'classroom_admin'].includes(r)) return 'admin';
+  return 'student';
+};
+
+const targetPathByRole = (role: string) => {
+  if (role === 'teacher') return '/teacher';
+  if (role === 'parent') return '/parent';
+  if (role === 'master' || role === 'admin') return '/master';
+  return '/student';
+};
+
 export default function LoginPage() {
   const router = useRouter();
   const [loginInput, setLoginInput] = useState('');
@@ -90,15 +106,10 @@ export default function LoginPage() {
         const userDocSnap = await getDoc(userDocRef);
 
         if (userDocSnap.exists()) {
-          const role = userDocSnap.data().role;
-          
-          if (role === 'teacher') {
-            router.push('/app/teacher');
-          } else if (role === 'student') {
-            router.push('/app/student');
-          } else {
-            throw new Error('アカウントの権限（role）が正しく設定されていません。');
-          }
+          const role = normalizeRole(userDocSnap.data().role);
+          const target = targetPathByRole(role);
+          router.replace(target);
+          setTimeout(() => { window.location.href = target; }, 800);
         } else {
           throw new Error('データベース上にユーザー情報が見つかりません。');
         }

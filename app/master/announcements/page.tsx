@@ -5,7 +5,7 @@ import { db } from '@/lib/firebase';
 import { collection, query, orderBy, getDocs, addDoc, deleteDoc, doc } from 'firebase/firestore';
 import { 
   ArrowLeft, Send, Trash2, BellRing, Loader2, Filter, XCircle, 
-  Megaphone, Users, User, GraduationCap, Check, AlertCircle 
+  Megaphone, Users, User, GraduationCap, Check, AlertCircle, ShieldCheck, UserRound
 } from 'lucide-react';
 import Link from 'next/link';
 
@@ -21,13 +21,17 @@ const LABELS = {
 const TARGETS = [
   { id: 'all', label: '全員', icon: <Users size={16}/> },
   { id: 'student', label: '生徒のみ', icon: <GraduationCap size={16}/> },
+  { id: 'parent', label: '保護者のみ', icon: <UserRound size={16}/> },
   { id: 'teacher', label: '先生のみ', icon: <User size={16}/> },
+  { id: 'admin', label: '校舎管理者のみ', icon: <ShieldCheck size={16}/> },
 ];
 
 const TARGET_NAMES: {[key: string]: string} = {
   all: '全員',
   student: '生徒',
-  teacher: '先生'
+  parent: '保護者',
+  teacher: '先生',
+  admin: '校舎管理者'
 };
 
 export default function AnnouncementsPage() {
@@ -126,7 +130,7 @@ export default function AnnouncementsPage() {
                 {/* 送信先選択 */}
                 <div>
                   <label className="text-xs font-bold text-slate-400 mb-2 block uppercase tracking-wider">送信先</label>
-                  <div className="grid grid-cols-3 gap-2">
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                     {TARGETS.map((t) => (
                       <button
                         key={t.id}
@@ -217,7 +221,9 @@ export default function AnnouncementsPage() {
                   <option value="any">送信先: 全て</option>
                   <option value="all">全員</option>
                   <option value="student">生徒</option>
+                  <option value="parent">保護者</option>
                   <option value="teacher">先生</option>
+                  <option value="admin">校舎管理者</option>
                 </select>
 
                 {/* タグフィルター */}

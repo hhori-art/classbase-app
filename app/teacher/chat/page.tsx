@@ -36,6 +36,7 @@ export default function TeacherChatPage() {
   const [inputText, setInputText] = useState('');
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
+  const [teacherInquiries, setTeacherInquiries] = useState<any[]>([]);
 
   // 動的な絞り込み選択肢用ステート
   const [availableOptions, setAvailableOptions] = useState({
@@ -121,6 +122,9 @@ export default function TeacherChatPage() {
 
         setStudents(enrichedStudents);
         setFilteredStudents(enrichedStudents);
+
+        const inquirySnap = await getDocs(query(collection(db, 'teacher_inquiries'), where('status', '==', 'unread'), limit(20)));
+        setTeacherInquiries(inquirySnap.docs.map(d => ({ id: d.id, ...d.data() })));
       } catch (e) {
         console.error(e);
       } finally {
@@ -276,15 +280,15 @@ export default function TeacherChatPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-100 p-6 flex flex-col h-screen overflow-hidden font-sans">
+    <div className="min-h-screen bg-gray-100 p-3 md:p-6 flex flex-col h-[100dvh] overflow-hidden font-sans">
       <div className="flex-none mb-4">
         <Link href="/teacher/work" className="flex items-center text-gray-500 hover:text-gray-800"><ArrowLeft size={18}/> 管理画面へ戻る</Link>
       </div>
 
-      <div className="flex flex-1 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden relative">
+      <div className="flex flex-1 flex-col md:flex-row bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden relative min-h-0">
         
         {/* 左サイドバー */}
-        <div className="w-1/3 border-r border-gray-200 flex flex-col min-w-[300px]">
+        <div className="w-full md:w-1/3 border-b md:border-b-0 md:border-r border-gray-200 flex flex-col md:min-w-[300px] max-h-[38dvh] md:max-h-none">
           <div className="p-4 border-b border-gray-200 bg-gray-50">
             <div className="flex justify-between items-center mb-3">
               <h2 className="font-bold text-gray-700 flex items-center gap-2">
@@ -297,6 +301,27 @@ export default function TeacherChatPage() {
                 <Users size={14}/> 一斉送信
               </button>
             </div>
+            {teacherInquiries.length > 0 && (
+              <div className="mb-3 rounded-xl border border-orange-100 bg-orange-50 p-3">
+                <p className="mb-2 flex items-center gap-1 text-xs font-black text-orange-700">
+                  <AlertTriangle size={14} /> AIチューターから先生へ報告 {teacherInquiries.length}件
+                </p>
+                <div className="max-h-28 space-y-2 overflow-y-auto">
+                  {teacherInquiries.map(inquiry => (
+                    <button
+                      key={inquiry.id}
+                      onClick={() => {
+                        const student = students.find(s => s.id === inquiry.studentId);
+                        if (student) setSelectedStudent(student);
+                      }}
+                      className="w-full rounded-lg bg-white px-3 py-2 text-left text-xs font-bold text-slate-600 shadow-sm hover:text-orange-700"
+                    >
+                      {inquiry.studentName || '生徒'}：{String(inquiry.content || '').slice(0, 42)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="relative">
               <Search className="absolute left-3 top-2.5 text-gray-400" size={16} />
               <input 
@@ -349,7 +374,7 @@ export default function TeacherChatPage() {
         </div>
 
         {/* 右メインエリア */}
-        <div className="flex-1 flex flex-col bg-gray-50">
+        <div className="flex-1 flex flex-col bg-gray-50 min-h-0">
           {selectedStudent ? (
             <>
               <div className="p-4 bg-white border-b border-gray-200 shadow-sm z-10 flex items-center gap-3">

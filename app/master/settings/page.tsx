@@ -3,12 +3,13 @@
 import { useState, useEffect } from 'react';
 import { db, auth } from '@/lib/firebase';
 import { doc, setDoc, getDoc, updateDoc } from 'firebase/firestore';
-import { updatePassword, signOut } from 'firebase/auth';
+import { updatePassword } from 'firebase/auth';
+import { useAuth } from '@/app/context/AuthContext';
 import { 
   ArrowLeft, Link as LinkIcon, Loader2, Save, 
   Settings, User, Lock, LogOut, Smartphone, 
   Download, Share, HelpCircle, Check, PlusSquare, 
-  Type, Globe, Beaker, BookOpen
+  Type, Globe, Beaker, BookOpen, Eye
 } from 'lucide-react';
 import Link from 'next/link';
 
@@ -17,11 +18,110 @@ const GRADES = ['中1', '中2', '中3'];
 const BASIC_SUBJECTS = ['英語', '数学', '国語'];
 const SOCIAL_FIELDS = ['地理', '歴史', '公民'];
 const SCIENCE_FIELDS = ['物理', '化学', '生物', '地学'];
+const DEFAULT_VISIBILITY = {
+  student: {
+    adaptiveQuest: true,
+    chat: true,
+    homework: true,
+    recordings: true,
+    absence: true,
+    calendar: true,
+    changeRequest: true,
+    community: true,
+  },
+  parent: {
+    homework: true,
+    attendance: true,
+    absence: true,
+    transfer: true,
+    recordings: true,
+    aiMessages: true,
+    announcements: true,
+    calendar: true,
+    contact: true,
+    notificationSettings: true,
+  },
+  admin: {
+    users: true,
+    schoolStudents: true,
+    sso: true,
+    shifts: true,
+    monthlySchedules: true,
+    attendance: false,
+    attendanceCorrections: false,
+    substitutions: true,
+    announcements: true,
+    requests: true,
+    parentInquiries: true,
+    registrationTasks: true,
+    curriculum: true,
+    pf: true,
+    recordings: true,
+    community: true,
+    rewards: true,
+    stats: true,
+    surveySettings: true,
+    imports: true,
+    delete: true,
+    line: true,
+    settings: true,
+  },
+};
+
+const STUDENT_VISIBILITY_ITEMS = [
+  { key: 'adaptiveQuest', label: 'AI学習クエスト' },
+  { key: 'chat', label: 'AIチューター' },
+  { key: 'homework', label: '宿題提出' },
+  { key: 'recordings', label: '授業録画' },
+  { key: 'absence', label: '欠席連絡' },
+  { key: 'calendar', label: '学習カレンダー' },
+  { key: 'changeRequest', label: '科目・曜日変更申請' },
+  { key: 'community', label: 'コミュニティ' },
+] as const;
+
+const PARENT_VISIBILITY_ITEMS = [
+  { key: 'homework', label: '宿題提出状況' },
+  { key: 'attendance', label: '出席状況' },
+  { key: 'absence', label: '欠席連絡' },
+  { key: 'transfer', label: '振替登録' },
+  { key: 'recordings', label: '録画視聴状況' },
+  { key: 'aiMessages', label: 'AIメッセージ' },
+  { key: 'announcements', label: 'お知らせ' },
+  { key: 'calendar', label: 'カレンダー操作' },
+  { key: 'contact', label: 'お問い合わせ' },
+  { key: 'notificationSettings', label: '通知設定' },
+] as const;
+
+const ADMIN_VISIBILITY_ITEMS = [
+  { key: 'users', label: 'ユーザー管理・印刷' },
+  { key: 'schoolStudents', label: '校舎別 生徒管理' },
+  { key: 'sso', label: 'SSO権限・校舎管理' },
+  { key: 'shifts', label: 'シフト管理' },
+  { key: 'monthlySchedules', label: '月間予定' },
+  { key: 'substitutions', label: '代行依頼管理' },
+  { key: 'announcements', label: 'お知らせ配信' },
+  { key: 'requests', label: '承認・申請' },
+  { key: 'parentInquiries', label: '保護者お問い合わせ' },
+  { key: 'registrationTasks', label: '登録依頼作成' },
+  { key: 'curriculum', label: 'カリキュラム管理' },
+  { key: 'pf', label: 'PFデータ管理' },
+  { key: 'recordings', label: '授業アーカイブ' },
+  { key: 'community', label: 'コミュニティ' },
+  { key: 'rewards', label: '景品・コイン' },
+  { key: 'stats', label: '統計・分析' },
+  { key: 'surveySettings', label: 'アンケート設定' },
+  { key: 'imports', label: 'CSV一括登録' },
+  { key: 'delete', label: '一括削除' },
+  { key: 'line', label: 'LINE一斉送信' },
+  { key: 'settings', label: '設定' },
+] as const;
 
 export default function SettingsPage() {
-  const [activeTab, setActiveTab] = useState<'system' | 'account'>('system');
+  const { logout } = useAuth();
+  const [activeTab, setActiveTab] = useState<'system' | 'visibility' | 'account'>('system');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [savingVisibility, setSavingVisibility] = useState(false);
   const [user, setUser] = useState<any>(null);
 
   // --- Zoom URL設定 State ---
@@ -32,6 +132,7 @@ export default function SettingsPage() {
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [passwordMsg, setPasswordMsg] = useState('');
+  const [visibility, setVisibility] = useState(DEFAULT_VISIBILITY);
 
   // --- PWA State ---
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
@@ -52,6 +153,16 @@ export default function SettingsPage() {
         const subjectSnap = await getDoc(doc(db, 'settings', 'subjects'));
         if (subjectSnap.exists()) {
           setUrls(subjectSnap.data().urls || {});
+        }
+
+        const visibilitySnap = await getDoc(doc(db, 'settings', 'portal_visibility'));
+        if (visibilitySnap.exists()) {
+          const data = visibilitySnap.data();
+          setVisibility({
+            student: { ...DEFAULT_VISIBILITY.student, ...(data.student || {}) },
+            parent: { ...DEFAULT_VISIBILITY.parent, ...(data.parent || {}) },
+            admin: { ...DEFAULT_VISIBILITY.admin, ...(data.admin || {}) },
+          });
         }
 
         // PWAチェック
@@ -99,6 +210,38 @@ export default function SettingsPage() {
     }
   };
 
+  const handleVisibilityChange = (group: 'student' | 'parent' | 'admin', key: string, value: boolean) => {
+    setVisibility(prev => ({
+      ...prev,
+      [group]: {
+        ...prev[group],
+        [key]: value,
+      },
+    }));
+  };
+
+  const handleSaveVisibility = async () => {
+    setSavingVisibility(true);
+    try {
+      await setDoc(doc(db, 'settings', 'portal_visibility'), {
+        ...visibility,
+        admin: {
+          ...visibility.admin,
+          attendance: false,
+          attendanceCorrections: false,
+        },
+        updated_at: new Date().toISOString(),
+        updated_by: user?.uid || null,
+      }, { merge: true });
+      alert('表示設定を保存しました');
+    } catch (e) {
+      console.error(e);
+      alert('保存エラー');
+    } finally {
+      setSavingVisibility(false);
+    }
+  };
+
   // パスワード変更
   const handleChangePassword = async () => {
     if (!newPassword || newPassword !== confirmPassword) {
@@ -132,8 +275,7 @@ export default function SettingsPage() {
   // ログアウト
   const handleLogout = async () => {
     if (!confirm('ログアウトしますか？')) return;
-    await signOut(auth);
-    window.location.href = '/';
+    await logout();
   };
 
   if (loading) return <div className="min-h-screen flex justify-center items-center"><Loader2 className="animate-spin text-slate-400" size={40}/></div>;
@@ -163,6 +305,12 @@ export default function SettingsPage() {
               className={`flex-1 md:flex-none px-6 py-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all ${activeTab === 'system' ? 'bg-slate-800 text-white shadow-md' : 'text-slate-500 hover:bg-slate-50'}`}
             >
               <LinkIcon size={14}/> Zoom URL設定
+            </button>
+            <button
+              onClick={() => setActiveTab('visibility')}
+              className={`flex-1 md:flex-none px-6 py-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all ${activeTab === 'visibility' ? 'bg-emerald-600 text-white shadow-md' : 'text-slate-500 hover:bg-slate-50'}`}
+            >
+              <Eye size={14}/> 表示設定
             </button>
             <button 
               onClick={() => setActiveTab('account')}
@@ -285,7 +433,56 @@ export default function SettingsPage() {
         )}
 
         {/* =======================
-            タブ2: アカウント・アプリ設定
+            タブ2: 生徒・保護者の表示設定
+           ======================= */}
+        {activeTab === 'visibility' && (
+          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2">
+            <div className="rounded-[32px] border border-emerald-100 bg-white p-6 shadow-sm">
+              <div className="mb-6">
+                <p className="text-xs font-black uppercase tracking-wider text-emerald-500">Portal Visibility</p>
+                <h2 className="mt-1 text-xl font-black text-slate-800">アカウント別の表示制御</h2>
+                <p className="mt-2 text-sm font-bold text-slate-400">OFFにした項目は、生徒・保護者の画面から非表示になります。</p>
+              </div>
+
+              <div className="grid gap-6 xl:grid-cols-3">
+                <VisibilityPanel
+                  title="生徒アカウント"
+                  description="生徒ホームと下部ナビの主要導線"
+                  items={STUDENT_VISIBILITY_ITEMS}
+                  values={visibility.student}
+                  onChange={(key, value) => handleVisibilityChange('student', key, value)}
+                />
+                <VisibilityPanel
+                  title="保護者アカウント"
+                  description="保護者ダッシュボードの詳細項目とカレンダー操作"
+                  items={PARENT_VISIBILITY_ITEMS}
+                  values={visibility.parent}
+                  onChange={(key, value) => handleVisibilityChange('parent', key, value)}
+                />
+                <VisibilityPanel
+                  title="管理者アカウント"
+                  description="校舎管理者に見せる管理メニュー"
+                  items={ADMIN_VISIBILITY_ITEMS}
+                  values={visibility.admin}
+                  onChange={(key, value) => handleVisibilityChange('admin', key, value)}
+                />
+              </div>
+            </div>
+
+            <div className="sticky bottom-6 z-20 flex justify-end">
+              <button
+                onClick={handleSaveVisibility}
+                disabled={savingVisibility}
+                className="bg-emerald-600 text-white px-8 py-4 rounded-2xl font-black shadow-xl shadow-emerald-100 hover:bg-emerald-700 transition-all active:scale-95 flex items-center gap-2 disabled:opacity-50"
+              >
+                {savingVisibility ? <Loader2 className="animate-spin" size={20}/> : <Save size={20}/>} 表示設定を保存
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* =======================
+            タブ3: アカウント・アプリ設定
            ======================= */}
         {activeTab === 'account' && (
           <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2">
@@ -356,6 +553,42 @@ export default function SettingsPage() {
           </div>
         )}
 
+      </div>
+    </div>
+  );
+}
+
+function VisibilityPanel({
+  title,
+  description,
+  items,
+  values,
+  onChange,
+}: {
+  title: string;
+  description: string;
+  items: readonly { key: string; label: string }[];
+  values: Record<string, boolean>;
+  onChange: (key: string, value: boolean) => void;
+}) {
+  return (
+    <div className="rounded-[28px] border border-slate-100 bg-slate-50 p-5">
+      <div className="mb-4">
+        <h3 className="text-base font-black text-slate-800">{title}</h3>
+        <p className="mt-1 text-xs font-bold text-slate-400">{description}</p>
+      </div>
+      <div className="space-y-2">
+        {items.map(item => (
+          <label key={item.key} className="flex items-center justify-between rounded-2xl bg-white px-4 py-3 shadow-sm">
+            <span className="text-sm font-black text-slate-700">{item.label}</span>
+            <input
+              type="checkbox"
+              checked={values[item.key] !== false}
+              onChange={e => onChange(item.key, e.target.checked)}
+              className="h-5 w-5 accent-emerald-600"
+            />
+          </label>
+        ))}
       </div>
     </div>
   );

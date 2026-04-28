@@ -16,7 +16,7 @@ interface NewsItem {
 }
 
 interface Props {
-  role?: 'student' | 'teacher';
+  role?: 'student' | 'teacher' | 'parent' | 'admin';
   pendingRequests?: any[];
   onOpenRequest?: (req: any) => void;
 }
@@ -26,9 +26,9 @@ export default function NewsWidget({ role, pendingRequests = [], onOpenRequest }
   const [loading, setLoading] = useState(true);
 
   // 一覧ページへのパス
-  const listPagePath = role === 'student' ? '/student/news' : '/teacher/news';
+  const listPagePath = role === 'student' ? '/student/news' : role === 'teacher' ? '/teacher/news' : '#';
   // 詳細ページへのプレフィックス
-  const detailPagePrefix = role === 'student' ? '/student/news' : '/teacher/news';
+  const detailPagePrefix = role === 'student' ? '/student/news' : role === 'teacher' ? '/teacher/news' : '#';
 
   useEffect(() => {
     const fetchNews = async () => {
@@ -59,7 +59,8 @@ export default function NewsWidget({ role, pendingRequests = [], onOpenRequest }
         const filteredList = list.filter(item => 
           !item.target || 
           item.target === 'all' || 
-          (role && item.target === role)
+          (role && item.target === role) ||
+          (role === 'admin' && ['admin', 'school_admin'].includes(item.target))
         );
 
         setNews(filteredList);

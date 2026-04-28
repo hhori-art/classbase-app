@@ -6,15 +6,15 @@ import {
   ChevronLeft, ChevronRight, LayoutList, Layout, Maximize2, Minimize2,
   Briefcase, Clock, KeyRound, ExternalLink,
   Video, Loader2, Zap,
-  LogOut, Sparkles
+  LogOut, Sparkles, Megaphone
 } from 'lucide-react';
-import { signOut } from 'firebase/auth';
-import { auth } from '@/lib/firebase';
 import Link from 'next/link';
+import { useAuth } from '@/app/context/AuthContext';
 import NewsWidget from '@/app/components/NewsWidget';
 import ShiftMonitorButton from '@/app/components/ShiftMonitorButton';
 import NextClassWidget from '@/app/components/NextClassWidget';
 import FutureClassesModal from '@/app/components/FutureClassesModal'; // ★カレンダーモーダル
+import CalendarWidget from '@/app/components/CalendarWidget';
 
 // --- 型定義 ---
 type ShiftAssignment = {
@@ -321,6 +321,7 @@ const DailyShiftViewer = ({ assignments, currentUserProfile, isExpanded, date }:
 
 // --- メインコンポーネント ---
 export default function TeacherDashboard({ profile, allAssignments, pendingCount, currentDate, onDateChange, viewMode, onViewModeChange, isExpanded, onExpandChange }: Props) {
+  const { logout } = useAuth();
   const days = ['日', '月', '火', '水', '木', '金', '土'];
   const dayOfWeek = days[new Date(currentDate).getDay()];
   const teacherName = profile?.student_name || profile?.name || '講師';
@@ -328,7 +329,7 @@ export default function TeacherDashboard({ profile, allAssignments, pendingCount
   // ★追加: カレンダーモーダル用ステート
   const [isCalendarModalOpen, setIsCalendarModalOpen] = useState(false);
 
-  const handleLogout = async () => { if (confirm('ログアウトしますか？')) { await signOut(auth); window.location.href = '/'; } };
+  const handleLogout = async () => { if (confirm('ログアウトしますか？')) await logout(); };
   const handleDateChange = (direction: number) => { const d = new Date(currentDate); const increment = viewMode === 'week' ? 7 : 1; d.setDate(d.getDate() + (direction * increment)); onDateChange(d.toISOString().split('T')[0]); };
   const targetDates = [currentDate];
   if (viewMode === 'week') { for (let i = 1; i < 7; i++) { const d = new Date(currentDate); d.setDate(d.getDate() + i); targetDates.push(d.toISOString().split('T')[0]); } }
@@ -342,8 +343,7 @@ export default function TeacherDashboard({ profile, allAssignments, pendingCount
           <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
             <div className="flex items-center gap-2"><div className="bg-slate-900 p-2 rounded-xl text-white shadow-lg shadow-indigo-500/20"><Briefcase size={20} /></div><span className="font-black text-lg tracking-tight text-slate-800 hidden md:inline">講師ポータル</span></div>
             <div className="flex items-center gap-4">
-              {/* ★追加: 勤怠打刻ページへのリンク */}
-              <Link href="/teacher/work" className="p-2 bg-indigo-50 hover:bg-indigo-100 rounded-full text-indigo-600 transition-colors shadow-sm" title="勤怠打刻">
+              <Link href="/teacher/attendance" className="p-2 bg-indigo-50 hover:bg-indigo-100 rounded-full text-indigo-600 transition-colors shadow-sm" title="勤怠打刻">
                 <Clock size={20} />
               </Link>
 
@@ -398,6 +398,15 @@ export default function TeacherDashboard({ profile, allAssignments, pendingCount
                </h2>
             </div>
 
+            <div className="grid w-full gap-2 md:w-auto md:grid-cols-2">
+              <Link href="/teacher/attendance" className="flex items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-3 text-sm font-black text-white shadow-sm hover:bg-slate-800">
+                <Clock size={18} /> 打刻する
+              </Link>
+              <Link href="/teacher/substitutions" className="flex items-center justify-center gap-2 rounded-xl border border-rose-100 bg-rose-50 px-4 py-3 text-sm font-black text-rose-700 hover:bg-rose-100">
+                <Megaphone size={18} /> 代行掲示板
+              </Link>
+            </div>
+
             <div className="flex items-center bg-slate-50 rounded-xl p-1.5 border border-slate-100 shadow-inner w-full md:w-auto justify-between md:justify-start">
                <button onClick={() => handleDateChange(-1)} className="p-3 hover:bg-white rounded-lg transition text-slate-400 hover:text-indigo-600 shadow-sm active:scale-95"><ChevronLeft size={20}/></button>
                
@@ -419,6 +428,15 @@ export default function TeacherDashboard({ profile, allAssignments, pendingCount
         
         {!isExpanded && <NewsWidget role="teacher" />}
         {!isExpanded && <NextClassWidget profile={profile} />}
+        {!isExpanded && (
+          <section className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="mb-3 flex items-center gap-2">
+              <CalendarIcon className="text-indigo-600" size={18} />
+              <h3 className="text-sm font-black text-slate-800">年間予定カレンダー</h3>
+            </div>
+            <CalendarWidget role="teacher" />
+          </section>
+        )}
 
         <div className={`space-y-4 ${isExpanded ? 'h-full flex flex-col' : ''}`}>
           <div className="flex items-center justify-between px-1 shrink-0">

@@ -60,7 +60,8 @@ export default function AutoFixLoginPage() {
       const userData = userDoc.data();
       setStatus(`✅ 3/3: 権限確認OK (${userData?.role})。画面を移動します...`);
 
-      if (userData?.role === 'master') {
+      const role = String(userData?.role || '').toLowerCase();
+      if (role === 'master' || ['admin', 'school_admin', 'branch_admin', 'campus_admin', 'classroom_admin'].includes(role)) {
         router.push('/master');
         // ★ ルーターがフリーズした場合の強制移動（フェイルセーフ）
         setTimeout(() => { window.location.href = '/master'; }, 1500);

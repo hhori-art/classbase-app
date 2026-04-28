@@ -1,70 +1,122 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { usePathname, useRouter } from 'next/navigation';
+import { usePathname } from 'next/navigation';
 import { 
   Home, Users, Calendar, Briefcase, Megaphone, CheckSquare, 
   ClipboardList, FileText, Video, MessageCircle, ShoppingBag, 
-  Activity, Database, Trash2, Settings, Menu, X, LogOut, 
-  GraduationCap, ListChecks
+  Activity, Database, Trash2, Settings, Menu, LogOut, 
+  GraduationCap, ListChecks, BookOpen
 } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
-import { auth } from '@/lib/firebase';
-import { signOut } from 'firebase/auth';
+import { db } from '@/lib/firebase';
+import { doc, getDoc } from 'firebase/firestore';
+
+const DEFAULT_ADMIN_VISIBILITY: Record<string, boolean> = {
+  users: true,
+  schoolStudents: true,
+  sso: true,
+  shifts: true,
+  monthlySchedules: true,
+  attendance: false,
+  attendanceCorrections: false,
+  substitutions: true,
+  announcements: true,
+  requests: true,
+  parentInquiries: true,
+  registrationTasks: true,
+  curriculum: true,
+  pf: true,
+  recordings: true,
+  community: true,
+  rewards: true,
+  stats: true,
+  surveySettings: true,
+  imports: true,
+  delete: true,
+  line: true,
+  settings: true,
+};
 
 // メニュー項目の定義
 const MENU_ITEMS = [
   { 
     category: "メイン", 
     items: [
-      { title: 'ダッシュボード', icon: Home, href: '/master' },
+      { key: 'dashboard', title: 'ダッシュボード', icon: Home, href: '/master' },
     ]
   },
   { 
     category: "運営・管理", 
     items: [
-      { title: '生徒・講師管理', icon: Users, href: '/master/users' },
-      { title: 'シフト管理', icon: Calendar, href: '/master/shifts' },
-      { title: '勤怠管理', icon: Briefcase, href: '/master/attendance' },
-      { title: 'お知らせ配信', icon: Megaphone, href: '/master/announcements' },
-      { title: '承認・申請', icon: CheckSquare, href: '/master/requests' },
-      { title: '登録依頼作成', icon: ClipboardList, href: '/master/registration-tasks' },
+      { key: 'users', title: 'ユーザー管理・印刷', icon: Users, href: '/master/users' },
+      { key: 'schoolStudents', title: '校舎別 生徒管理', icon: GraduationCap, href: '/master/school-students' },
+      { key: 'sso', title: 'SSO権限・校舎管理', icon: Users, href: '/master/accounts/sso' },
+      { key: 'shifts', title: 'シフト管理', icon: Calendar, href: '/master/shifts' },
+      { key: 'monthlySchedules', title: '月間予定', icon: Calendar, href: '/master/monthly-schedules' },
+      { key: 'attendance', title: '勤怠管理', icon: Briefcase, href: '/master/attendance' },
+      { key: 'attendanceCorrections', title: '打刻修正承認', icon: CheckSquare, href: '/master/attendance-corrections' },
+      { key: 'substitutions', title: '代行依頼管理', icon: Megaphone, href: '/master/substitutions' },
+      { key: 'announcements', title: 'お知らせ配信', icon: Megaphone, href: '/master/announcements' },
+      { key: 'requests', title: '承認・申請', icon: CheckSquare, href: '/master/requests' },
+      { key: 'parentInquiries', title: '保護者お問い合わせ', icon: MessageCircle, href: '/master/parent-inquiries' },
+      { key: 'registrationTasks', title: '登録依頼作成', icon: ClipboardList, href: '/master/registration-tasks' },
+      { key: 'curriculum', title: 'カリキュラム管理', icon: BookOpen, href: '/master/curriculum' },
     ]
   },
   { 
     category: "学習・コミュニティ", 
     items: [
-      { title: 'PFデータ管理', icon: FileText, href: '/master/pf' },
-      { title: '授業アーカイブ', icon: Video, href: '/master/recordings' },
-      { title: 'コミュニティ', icon: MessageCircle, href: '/master/community' },
-      { title: '景品・コイン', icon: ShoppingBag, href: '/master/rewards' },
+      { key: 'pf', title: 'PFデータ管理', icon: FileText, href: '/master/pf' },
+      { key: 'recordings', title: '授業アーカイブ', icon: Video, href: '/master/recordings' },
+      { key: 'community', title: 'コミュニティ', icon: MessageCircle, href: '/master/community' },
+      { key: 'rewards', title: '景品・コイン', icon: ShoppingBag, href: '/master/rewards' },
     ]
   },
   { 
     category: "システム", 
     items: [
-      { title: '統計・分析', icon: Activity, href: '/master/stats' },
-      { title: 'アンケート設定', icon: ListChecks, href: '/master/survey-settings' },
-      { title: 'CSV一括登録', icon: Database, href: '/master/imports' },
-      { title: '一括削除', icon: Trash2, href: '/master/delete' },
-      { title: '設定', icon: Settings, href: '/master/settings' },
+      { key: 'stats', title: '統計・分析', icon: Activity, href: '/master/stats' },
+      { key: 'surveySettings', title: 'アンケート設定', icon: ListChecks, href: '/master/survey-settings' },
+      { key: 'imports', title: 'CSV一括登録', icon: Database, href: '/master/imports' },
+      { key: 'delete', title: '一括削除', icon: Trash2, href: '/master/delete' },
+      { key: 'settings', title: '設定', icon: Settings, href: '/master/settings' },
     ]
   }
 ];
 
 export default function MasterLayout({ children }: { children: React.ReactNode }) {
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [adminVisibility, setAdminVisibility] = useState(DEFAULT_ADMIN_VISIBILITY);
   const pathname = usePathname();
-  const router = useRouter();
-  const { user } = useAuth();
+  const { user, profile, logout } = useAuth();
+
+  useEffect(() => {
+    const loadVisibility = async () => {
+      try {
+        const snap = await getDoc(doc(db, 'settings', 'portal_visibility'));
+        if (snap.exists()) setAdminVisibility(prev => ({ ...prev, ...(snap.data().admin || {}) }));
+      } catch (e) {
+        console.warn('Admin menu visibility read failed:', e);
+      }
+    };
+    loadVisibility();
+  }, []);
+
+  const isMaster = profile?.role === 'master';
+  const schoolIds = Array.isArray(profile?.school_ids) ? profile?.school_ids.filter(Boolean) : [];
+  const currentSchoolLabel = isMaster ? 'マスター管理者' : schoolIds[0] || profile?.school_id || profile?.school || '校舎未設定';
+  const visibleMenuItems = MENU_ITEMS.map(section => ({
+    ...section,
+    items: section.items.filter(item => isMaster || item.key === 'dashboard' || adminVisibility[item.key] !== false),
+  })).filter(section => section.items.length > 0);
 
   // ログアウト処理
   const handleLogout = async () => {
     if (confirm('管理画面からログアウトしますか？')) {
       try {
-        await signOut(auth);
-        router.push('/'); // ログイン画面へリダイレクト
+        await logout();
       } catch (error) {
         console.error('Logout error:', error);
         alert('ログアウトに失敗しました。');
@@ -73,12 +125,12 @@ export default function MasterLayout({ children }: { children: React.ReactNode }
   };
 
   return (
-    <div className="flex h-screen w-full bg-[#F0F3FF] font-sans overflow-hidden">
+    <div className="flex h-dvh w-full bg-[#F0F3FF] font-sans overflow-hidden">
       
       {/* サイドバー */}
       <aside 
         className={`bg-slate-900 text-slate-300 flex-shrink-0 transition-all duration-300 ease-in-out flex flex-col z-50 h-full
-          ${isSidebarOpen ? 'w-64' : 'w-20'}
+          ${isSidebarOpen ? 'w-64' : 'w-16 sm:w-20'}
         `}
       >
         {/* ロゴエリア */}
@@ -117,7 +169,7 @@ export default function MasterLayout({ children }: { children: React.ReactNode }
         {/* メニューリスト */}
         <div className="flex-1 overflow-y-auto py-4 custom-scrollbar">
           <nav className="space-y-6 px-3">
-            {MENU_ITEMS.map((section, idx) => (
+            {visibleMenuItems.map((section, idx) => (
               <div key={idx}>
                 {isSidebarOpen && (
                   <h3 className="px-3 text-[10px] font-black text-slate-500 uppercase tracking-wider mb-2 animate-in fade-in duration-500">
@@ -171,6 +223,7 @@ export default function MasterLayout({ children }: { children: React.ReactNode }
             {isSidebarOpen && (
               <div className="min-w-0 flex-1 animate-in fade-in duration-300">
                 <p className="text-sm font-bold text-white truncate">{user?.displayName || '管理者'}</p>
+                <p className="mt-0.5 truncate text-[10px] font-black text-indigo-300">{currentSchoolLabel}</p>
                 <button 
                   onClick={handleLogout}
                   className="text-xs text-slate-400 hover:text-red-400 flex items-center gap-1 transition-colors mt-0.5 font-medium group w-full text-left"
@@ -188,7 +241,7 @@ export default function MasterLayout({ children }: { children: React.ReactNode }
         {/* ★修正箇所: コンテンツラッパーにパディングを追加
           p-8 (32px) 〜 md:p-12 (48px) の余白を設定し、コンテンツを右下に配置します。
         */}
-        <div className="min-h-full p-8 md:p-10 max-w-[1600px] mx-auto">
+        <div className="min-h-full p-4 sm:p-6 md:p-10 max-w-[1600px] mx-auto overflow-x-hidden">
           {children}
         </div>
       </main>

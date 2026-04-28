@@ -1,11 +1,27 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { Home, Users, Settings } from 'lucide-react'; // アイコン変更
+import { db } from '@/lib/firebase';
+import { doc, getDoc } from 'firebase/firestore';
 
 export default function BottomNav() {
   const pathname = usePathname();
+  const [visibility, setVisibility] = useState({ community: true });
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const snap = await getDoc(doc(db, 'settings', 'portal_visibility'));
+        if (snap.exists()) setVisibility(prev => ({ ...prev, ...(snap.data().student || {}) }));
+      } catch (e) {
+        console.warn('Student nav visibility read failed:', e);
+      }
+    };
+    load();
+  }, []);
 
   // ★修正: メニューを3つに厳選
   const navItems = [
@@ -14,23 +30,26 @@ export default function BottomNav() {
       path: '/student', 
       icon: <Home size={24} />, 
       activeColor: 'text-indigo-500', 
-      bgColor: 'bg-indigo-50' 
+      bgColor: 'bg-indigo-50',
+      visible: true,
     },
     { 
       label: '広場', // ★ここに追加
       path: '/student/community', 
       icon: <Users size={24} />, 
       activeColor: 'text-pink-500', 
-      bgColor: 'bg-pink-50' 
+      bgColor: 'bg-pink-50',
+      visible: visibility.community !== false,
     },
     { 
       label: '設定', 
       path: '/student/settings', 
       icon: <Settings size={24} />, 
       activeColor: 'text-gray-600', 
-      bgColor: 'bg-gray-100' 
+      bgColor: 'bg-gray-100',
+      visible: true,
     },
-  ];
+  ].filter(item => item.visible);
 
   const isActive = (path: string) => {
     if (path === '/student') return pathname === '/student';
@@ -67,12 +86,6 @@ export default function BottomNav() {
             `}>
               {item.label}
             </span>
-            
-            {/* アクティブ時の下線ドット */}
-            <span className={`
-              w-1 h-1 rounded-full mt-1 transition-all duration-300
-              ${active ? item.activeColor.replace('text-', 'bg-') : 'bg-transparent'}
-            `}></span>
           </Link>
         );
       })}

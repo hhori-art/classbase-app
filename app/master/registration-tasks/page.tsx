@@ -2,8 +2,10 @@
 
 import { useState, useEffect } from 'react';
 import { db } from '@/lib/firebase';
-import { collection, addDoc, query, orderBy, getDocs, updateDoc, doc, deleteDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, addDoc, query, orderBy, getDocs, updateDoc, doc, deleteDoc, serverTimestamp, limit } from 'firebase/firestore';
 import { Plus, CheckCircle, StopCircle, Loader2, FileText, X, Trash2, Calendar, BookOpen, Users, UserPlus, GraduationCap, Check } from 'lucide-react';
+import CourseRegistrationCalendar from '@/app/components/CourseRegistrationCalendar';
+import { enrichCourseOptionsWithShifts } from '@/lib/course-registration-match';
 
 // デフォルトの科目リスト
 const DEFAULT_SUBJECTS = ['英語', '数学', '国語', '理科', '社会'];
@@ -16,6 +18,7 @@ type TargetAudience = 'all' | 'new_only' | 'grade';
 
 export default function AdminRegistrationTasksPage() {
   const [requests, setRequests] = useState<any[]>([]);
+  const [courseOptions, setCourseOptions] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   
   // 作成モーダル用ステート
@@ -30,14 +33,29 @@ export default function AdminRegistrationTasksPage() {
     
     // ★追加: 送信対象設定
     targetAudience: 'all' as TargetAudience,
-    targetGrades: [] as string[]
+    targetGrades: [] as string[],
+    periodStart: '',
+    periodEnd: '',
+    termFilter: 'all',
+    monthFilter: 'all',
+    courseOptionIds: [] as string[],
   });
 
   const fetchRequests = async () => {
     try {
-      const q = query(collection(db, 'registration_requests'), orderBy('created_at', 'desc'));
-      const snap = await getDocs(q);
+      const [snap, optionSnap, curriculumSnap, shiftSnap] = await Promise.all([
+        getDocs(query(collection(db, 'registration_requests'), orderBy('created_at', 'desc'))),
+        getDocs(query(collection(db, 'course_registration_options'), orderBy('year', 'desc'))).catch(() => ({ docs: [] as any[] })),
+        getDocs(query(collection(db, 'annual_curriculum_schedules'), limit(1000))).catch(() => ({ docs: [] as any[] })),
+        getDocs(query(collection(db, 'shift_assignments'), orderBy('target_date', 'asc'), limit(1000))).catch(() => ({ docs: [] as any[] })),
+      ]);
       setRequests(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      const rawOptions = optionSnap.docs.map((d: any) => ({ id: d.id, ...d.data() })).filter((item: any) => item.is_active !== false);
+      setCourseOptions(enrichCourseOptionsWithShifts(
+        rawOptions,
+        curriculumSnap.docs.map((d: any) => ({ id: d.id, ...d.data() })),
+        shiftSnap.docs.map((d: any) => ({ id: d.id, ...d.data() }))
+      ));
     } catch (e) {
       console.error(e);
     } finally {
@@ -61,11 +79,56 @@ export default function AdminRegistrationTasksPage() {
       deadline: defaultDeadline,
       subjects: [...DEFAULT_SUBJECTS],
       newSubject: '',
-      targetAudience: 'all',
-      targetGrades: []
+      targetAudience: type === 'course_registration' ? 'grade' : 'all',
+      targetGrades: [],
+      periodStart: new Date().toISOString().split('T')[0],
+      periodEnd: defaultDeadline,
+      termFilter: 'all',
+      monthFilter: 'all',
+      courseOptionIds: []
     });
     setIsModalOpen(true);
   };
+
+  const toggleCourseOption = (id: string) => {
+    setFormData(prev => ({
+      ...prev,
+      courseOptionIds: prev.courseOptionIds.includes(id)
+        ? prev.courseOptionIds.filter(item => item !== id)
+        : [...prev.courseOptionIds, id],
+    }));
+  };
+
+  const groupedCourseOptions = () => {
+    const visible = courseOptions.filter((option: any) => {
+      if (formData.type === 'course_registration' && formData.targetGrades.length === 0) return false;
+      if (formData.targetAudience !== 'grade' || formData.targetGrades.length === 0) return true;
+      return formData.targetGrades.includes(option.grade);
+    }).filter((option: any) => {
+      if (formData.termFilter === 'all') return true;
+      return `${option.year || ''}_${option.term || option.term_label || ''}` === formData.termFilter;
+    }).filter((option: any) => {
+      if (formData.monthFilter === 'all') return true;
+      return String(option.month_label || '') === formData.monthFilter;
+    });
+    return visible.reduce((acc: Record<string, any[]>, option: any) => {
+      const key = `${option.year || '年度未設定'}_${option.term_label || option.term || 'ターム未設定'}_${option.grade || '学年未設定'}_${option.month_label || '月未設定'}`;
+      if (!acc[key]) acc[key] = [];
+      acc[key].push(option);
+      return acc;
+    }, {});
+  };
+
+  const courseTerms = Array.from(new Map(courseOptions.map((option: any) => {
+    const key = `${option.year || ''}_${option.term || option.term_label || ''}`;
+    return [key, {
+      key,
+      label: `${option.year || '年度未設定'} / ${option.term_label || option.term || 'ターム未設定'}`,
+    }];
+  })).values()).filter((item: any) => item.key !== '_');
+
+  const courseMonths = Array.from(new Set(courseOptions.map((option: any) => String(option.month_label || '')).filter(Boolean)))
+    .sort((a, b) => a.localeCompare(b, 'ja', { numeric: true }));
 
   // 科目の追加
   const addSubject = () => {
@@ -101,7 +164,12 @@ export default function AdminRegistrationTasksPage() {
   // 実際にFirestoreに保存
   const handleSave = async () => {
     if (!formData.title || !formData.deadline) return alert('タイトルと期限は必須です');
-    if (formData.subjects.length === 0) return alert('科目を少なくとも1つ設定してください');
+    if (formData.type === 'course_registration') {
+      if (!formData.periodStart || !formData.periodEnd) return alert('登録期間を入力してください');
+      if (formData.periodEnd < formData.periodStart) return alert('登録終了日は開始日以降にしてください');
+      if (formData.targetGrades.length === 0) return alert('受講講座登録は送信する学年を選択してください');
+      if (formData.courseOptionIds.length === 0) return alert('カリキュラムから講座を選択してください');
+    } else if (formData.subjects.length === 0) return alert('科目を少なくとも1つ設定してください');
     if (formData.targetAudience === 'grade' && formData.targetGrades.length === 0) return alert('対象の学年を選択してください');
 
     setCreating(true);
@@ -112,11 +180,17 @@ export default function AdminRegistrationTasksPage() {
         is_active: true,
         created_at: serverTimestamp(),
         deadline: formData.deadline,
-        subjects: formData.subjects,
+        subjects: formData.type === 'course_registration' ? [] : formData.subjects,
+        request_kind: formData.type === 'course_registration' ? 'course_registration' : 'subject_registration',
+        period_start: formData.type === 'course_registration' ? formData.periodStart : null,
+        period_end: formData.type === 'course_registration' ? formData.periodEnd : null,
+        course_option_ids: formData.type === 'course_registration' ? formData.courseOptionIds : [],
+        curriculum_term: formData.type === 'course_registration' ? formData.termFilter : null,
+        curriculum_month: formData.type === 'course_registration' ? formData.monthFilter : null,
         
         // ★追加: 送信対象データ
-        target_audience: formData.targetAudience, // 'all', 'new_only', 'grade'
-        target_grades: formData.targetAudience === 'grade' ? formData.targetGrades : null,
+        target_audience: formData.type === 'course_registration' ? 'grade' : formData.targetAudience, // 'all', 'new_only', 'grade'
+        target_grades: formData.type === 'course_registration' || formData.targetAudience === 'grade' ? formData.targetGrades : null,
       });
       await fetchRequests();
       setIsModalOpen(false);
@@ -171,7 +245,7 @@ export default function AdminRegistrationTasksPage() {
       </div>
 
       {/* 作成ボタンエリア */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-10">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-10">
         <button 
           onClick={() => openCreateModal('初回受講科目登録', 'initial')}
           className="bg-white border-2 border-indigo-100 hover:border-indigo-500 text-indigo-700 p-6 rounded-2xl shadow-sm hover:shadow-md transition-all text-left group"
@@ -183,6 +257,19 @@ export default function AdminRegistrationTasksPage() {
             </div>
           </div>
           <p className="text-xs text-gray-400 font-bold">新入生向け / 科目選択のみ</p>
+        </button>
+
+        <button 
+          onClick={() => openCreateModal('次期 受講講座登録', 'course_registration')}
+          className="bg-white border-2 border-amber-100 hover:border-amber-500 text-amber-700 p-6 rounded-2xl shadow-sm hover:shadow-md transition-all text-left group"
+        >
+          <div className="flex items-center justify-between mb-2">
+            <span className="font-bold text-lg">受講講座登録</span>
+            <div className="bg-amber-50 p-2 rounded-full group-hover:bg-amber-600 group-hover:text-white transition-colors">
+              <Plus size={20}/>
+            </div>
+          </div>
+          <p className="text-xs text-gray-400 font-bold">CSVカリキュラムから講座を選択 / 保護者向け</p>
         </button>
 
         <button 
@@ -222,7 +309,8 @@ export default function AdminRegistrationTasksPage() {
                   <div className="flex items-center gap-4 text-xs text-gray-400 font-medium pl-1">
                     <span>作成: {req.created_at?.toDate().toLocaleDateString()}</span>
                     <span className="flex items-center gap-1"><Calendar size={12}/> 期限: {req.deadline}</span>
-                    <span className="flex items-center gap-1"><BookOpen size={12}/> 科目: {req.subjects?.length || 5}個</span>
+                    <span className="flex items-center gap-1"><BookOpen size={12}/> {req.request_kind === 'course_registration' ? `講座: ${req.course_option_ids?.length || 0}個` : `科目: ${req.subjects?.length || 5}個`}</span>
+                    {req.period_start && <span>登録期間: {req.period_start} - {req.period_end}</span>}
                   </div>
                 </div>
                 
@@ -251,7 +339,7 @@ export default function AdminRegistrationTasksPage() {
       {/* 設定モーダル */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white w-full max-w-lg rounded-2xl shadow-xl overflow-hidden animate-in zoom-in-95 flex flex-col max-h-[85vh]">
+          <div className="bg-white w-full max-w-6xl rounded-2xl shadow-xl overflow-hidden animate-in zoom-in-95 flex flex-col max-h-[88vh]">
             <div className="bg-gray-50 px-6 py-4 border-b border-gray-100 flex justify-between items-center shrink-0">
               <h2 className="font-bold text-gray-700">募集内容の設定</h2>
               <button onClick={() => setIsModalOpen(false)}><X size={20} className="text-gray-400 hover:text-gray-600"/></button>
@@ -275,23 +363,25 @@ export default function AdminRegistrationTasksPage() {
                 <label className="block text-xs font-bold text-gray-500 mb-2">送信対象</label>
                 <div className="grid grid-cols-3 gap-2">
                   <button 
+                    disabled={formData.type === 'course_registration'}
                     onClick={() => setFormData({...formData, targetAudience: 'all'})}
                     className={`p-3 rounded-xl border-2 flex flex-col items-center gap-1 transition-all ${
                       formData.targetAudience === 'all' 
                         ? 'border-indigo-500 bg-indigo-50 text-indigo-700' 
                         : 'border-gray-100 text-gray-400 hover:bg-gray-50'
-                    }`}
+                    } ${formData.type === 'course_registration' ? 'cursor-not-allowed opacity-40' : ''}`}
                   >
                     <Users size={20}/>
                     <span className="text-xs font-bold">全員</span>
                   </button>
                   <button 
+                    disabled={formData.type === 'course_registration'}
                     onClick={() => setFormData({...formData, targetAudience: 'new_only'})}
                     className={`p-3 rounded-xl border-2 flex flex-col items-center gap-1 transition-all ${
                       formData.targetAudience === 'new_only' 
                         ? 'border-orange-500 bg-orange-50 text-orange-700' 
                         : 'border-gray-100 text-gray-400 hover:bg-gray-50'
-                    }`}
+                    } ${formData.type === 'course_registration' ? 'cursor-not-allowed opacity-40' : ''}`}
                   >
                     <UserPlus size={20}/>
                     <span className="text-xs font-bold">未登録のみ</span>
@@ -310,9 +400,11 @@ export default function AdminRegistrationTasksPage() {
                 </div>
 
                 {/* 学年指定時の詳細選択 */}
-                {formData.targetAudience === 'grade' && (
+                {(formData.targetAudience === 'grade' || formData.type === 'course_registration') && (
                   <div className="mt-3 p-3 bg-blue-50/50 rounded-xl border border-blue-100 animate-in fade-in slide-in-from-top-2">
-                    <p className="text-[10px] font-bold text-blue-400 mb-2">対象学年を選択してください（複数可）</p>
+                    <p className="text-[10px] font-bold text-blue-400 mb-2">
+                      {formData.type === 'course_registration' ? '登録依頼を送信する学年を選択してください' : '対象学年を選択してください（複数可）'}
+                    </p>
                     <div className="flex flex-wrap gap-2">
                       {GRADE_OPTIONS.map(grade => (
                         <button
@@ -344,7 +436,133 @@ export default function AdminRegistrationTasksPage() {
                 />
               </div>
 
-              {/* 科目設定 */}
+              {formData.type === 'course_registration' ? (
+                <div className="space-y-5">
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div>
+                      <label className="block text-xs font-bold text-gray-500 mb-1">登録開始日</label>
+                      <input
+                        type="date"
+                        value={formData.periodStart}
+                        onChange={e => setFormData({...formData, periodStart: e.target.value})}
+                        className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl font-bold text-gray-700 focus:ring-2 focus:ring-indigo-500 outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-gray-500 mb-1">登録終了日</label>
+                      <input
+                        type="date"
+                        value={formData.periodEnd}
+                        onChange={e => setFormData({...formData, periodEnd: e.target.value, deadline: e.target.value})}
+                        className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl font-bold text-gray-700 focus:ring-2 focus:ring-indigo-500 outline-none"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <div className="mb-3 rounded-2xl border border-cyan-100 bg-cyan-50 p-4">
+                      <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                          <p className="text-xs font-black text-cyan-700">カリキュラム管理との紐づけ</p>
+                          <p className="mt-1 text-[11px] font-bold text-cyan-700/70">タームで絞ると、そのタームの講座だけを登録依頼に含められます。</p>
+                        </div>
+                        <a href="/master/curriculum" className="rounded-xl bg-white px-3 py-2 text-xs font-black text-cyan-700 shadow-sm ring-1 ring-cyan-100 hover:bg-cyan-50">カリキュラム管理</a>
+                      </div>
+                      <select
+                        value={formData.termFilter}
+                        onChange={e => setFormData(prev => ({ ...prev, termFilter: e.target.value, courseOptionIds: [] }))}
+                        className="w-full rounded-xl border border-cyan-100 bg-white px-3 py-2 text-sm font-black text-slate-700 outline-none"
+                      >
+                        <option value="all">すべてのターム</option>
+                        {courseTerms.map((term: any) => <option key={term.key} value={term.key}>{term.label}</option>)}
+                      </select>
+                      <div className="mt-3">
+                        <p className="mb-2 text-[11px] font-black text-cyan-700">実施月で絞り込み</p>
+                        <select
+                          value={formData.monthFilter}
+                          onChange={e => setFormData(prev => ({ ...prev, monthFilter: e.target.value, courseOptionIds: [] }))}
+                          className="w-full rounded-xl border border-cyan-100 bg-white px-3 py-2 text-sm font-black text-slate-700 outline-none"
+                        >
+                          <option value="all">すべての月</option>
+                          {courseMonths.map(month => <option key={month} value={month}>{month}</option>)}
+                        </select>
+                      </div>
+                    </div>
+                    <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+                      <div>
+                        <label className="block text-xs font-bold text-gray-500">CSV登録済みカリキュラム</label>
+                        <p className="mt-1 text-[11px] font-bold text-gray-400">カリキュラムのターム設定と連動し、1つのターム内の同じ単元は代表曜日1つだけを表示します。</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setFormData(prev => ({
+                          ...prev,
+                          courseOptionIds: Object.values(groupedCourseOptions()).flat().map((option: any) => option.id),
+                        }))}
+                        className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-black text-amber-700 hover:bg-amber-100"
+                      >
+                        表示中をすべて選択
+                      </button>
+                    </div>
+                    {formData.targetGrades.length === 0 ? (
+                      <div className="rounded-xl border-2 border-dashed border-blue-200 bg-blue-50 p-6 text-center text-sm font-bold text-blue-500">
+                        先に送信する学年を選択してください
+                      </div>
+                    ) : courseOptions.length === 0 ? (
+                      <div className="rounded-xl border-2 border-dashed border-gray-200 p-6 text-center text-sm font-bold text-gray-400">
+                        まだカリキュラムCSVが取り込まれていません
+                      </div>
+                    ) : (
+                      <div className="max-h-[52vh] overflow-y-auto rounded-xl border border-gray-100 bg-gray-50 p-3">
+                        <div className="space-y-5">
+                          {(Object.entries(groupedCourseOptions()) as [string, any[]][]).map(([key, items]) => {
+                            const [year, term, grade, month] = key.split('_');
+                            const selectedCount = items.filter(item => formData.courseOptionIds.includes(item.id)).length;
+                            const matchedCount = items.filter(item => item.shift_match_status === 'matched').length;
+                            const courseMatchedCount = items.filter(item => item.shift_match_status === 'course_matched').length;
+                            const unmatchedCount = items.filter(item => item.shift_match_status === 'unmatched').length;
+                            return (
+                              <section key={key} className="rounded-2xl bg-white p-4 shadow-sm">
+                                <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                                  <div>
+                                    <h3 className="text-sm font-black text-gray-800">{year} / {term} / {grade} / {month}</h3>
+                                    <p className="text-[11px] font-bold text-gray-400">{items.length}件中 {selectedCount}件選択中</p>
+                                    <p className="mt-1 text-[10px] font-bold text-gray-400">
+                                      単元一致 {matchedCount}件 / 講座名一致 {courseMatchedCount}件 / 未配置 {unmatchedCount}件
+                                    </p>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => setFormData(prev => {
+                                      const ids = items.map(item => item.id);
+                                      const allSelected = ids.every(id => prev.courseOptionIds.includes(id));
+                                      return {
+                                        ...prev,
+                                        courseOptionIds: allSelected
+                                          ? prev.courseOptionIds.filter(id => !ids.includes(id))
+                                          : Array.from(new Set([...prev.courseOptionIds, ...ids])),
+                                      };
+                                    })}
+                                    className="rounded-xl bg-gray-100 px-3 py-2 text-xs font-black text-gray-600 hover:bg-gray-200"
+                                  >
+                                    {selectedCount === items.length ? 'この表を解除' : 'この表を選択'}
+                                  </button>
+                                </div>
+                                <CourseRegistrationCalendar
+                                  options={items}
+                                  selectedIds={formData.courseOptionIds}
+                                  onToggle={toggleCourseOption}
+                                  compact
+                                />
+                              </section>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                    <p className="mt-2 text-[11px] font-bold text-gray-400">{formData.courseOptionIds.length}件選択中</p>
+                  </div>
+                </div>
+              ) : (
               <div>
                 <label className="block text-xs font-bold text-gray-500 mb-2">選択肢（科目）の設定</label>
                 <div className="flex gap-2 mb-3">
@@ -373,6 +591,7 @@ export default function AdminRegistrationTasksPage() {
                   ))}
                 </div>
               </div>
+              )}
             </div>
 
             <div className="p-6 bg-gray-50 border-t border-gray-100 flex gap-3 shrink-0">

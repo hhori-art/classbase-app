@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
-import { collection, query, orderBy, getDocs, doc, updateDoc, increment, addDoc, serverTimestamp, getDoc } from 'firebase/firestore';
+import { collection, query, orderBy, getDocs, doc, getDoc } from 'firebase/firestore';
 import { ArrowLeft, ShoppingBag, Coins, Lock, Loader2, CheckCircle } from 'lucide-react';
 // import Image from 'next/image'; // ★削除
 import Link from 'next/link';
@@ -48,25 +48,23 @@ export default function StudentShopPage() {
     try {
       if (!user) throw new Error('Auth Error');
 
-      // 1. コインを減らす
-      await updateDoc(doc(db, 'users', user.uid), {
-        coins: increment(-reward.required_coins)
+      const token = await user.getIdToken();
+      const res = await fetch('/api/coin-transactions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action: 'reward_exchange', reward_id: reward.id }),
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) {
+        const message = data.error === 'insufficient-coins' ? 'コインが足りません！' : data.error || '交換申請に失敗しました';
+        throw new Error(message);
+      }
 
-      // 2. 交換申請を作成（管理者が確認するため）
-      await addDoc(collection(db, 'requests'), {
-        type: 'exchange', // 種類: 交換
-        userId: user.uid,
-        userName: user.displayName || '生徒',
-        rewardId: reward.id,
-        rewardName: reward.name,
-        cost: reward.required_coins,
-        status: 'pending', // 保留中
-        created_at: serverTimestamp()
-      });
-
-      // 3. 画面上のコイン表示を更新
-      setUserCoins(prev => prev - reward.required_coins);
+      if (typeof data.coins === 'number') {
+        setUserCoins(data.coins);
+      } else {
+        setUserCoins(prev => prev - reward.required_coins);
+      }
       
       alert('交換申請が完了しました！\n先生からの連絡を待ってね。');
 

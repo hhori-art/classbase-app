@@ -7,9 +7,9 @@ import {
   X, Lock, Star, Coins, Trophy, UserCircle, CheckCircle2, ShoppingBag, 
   ArrowRight, Calendar, Loader2, Brain 
 } from 'lucide-react';
-import { db } from '@/lib/firebase';
+import { auth, db } from '@/lib/firebase';
 import { 
-  doc, updateDoc, collection, query, orderBy, limit, getDocs, increment, getDoc // getDoc重要
+  doc, updateDoc, collection, query, orderBy, limit, getDocs, getDoc
 } from 'firebase/firestore';
 import Link from 'next/link';
 
@@ -148,15 +148,18 @@ export default function TrophyModal({ isOpen, onClose, userData }: Props) {
   ) => {
     const today = getTodayString();
     try {
-      const userRef = doc(db, 'users', userData.uid);
-      await updateDoc(userRef, {
-        coins: increment(reward),
-        total_coins: increment(reward),
-        [dateField]: today 
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) throw new Error('ログイン情報を確認できません');
+      const res = await fetch('/api/coin-transactions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action: 'mission_reward', date_field: dateField }),
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) throw new Error(data.error || 'reward failed');
       setDoneState(true);
-      setCurrentCoins(prev => prev + reward);
-      alert(`ミッション達成！ ${reward}コイン獲得！`);
+      if (data.applied) setCurrentCoins(prev => prev + reward);
+      alert(data.applied ? `ミッション達成！ ${reward}コイン獲得！` : '本日のミッション報酬は受取済みです。');
     } catch (e) {
       console.error(e);
       alert('エラーが発生しました');

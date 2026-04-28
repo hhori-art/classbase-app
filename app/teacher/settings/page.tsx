@@ -2,9 +2,9 @@
 
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
-import { db, auth } from '@/lib/firebase';
+import { db } from '@/lib/firebase';
 import { doc, updateDoc } from 'firebase/firestore';
-import { updatePassword, signOut } from 'firebase/auth';
+import { updatePassword } from 'firebase/auth';
 import { 
   User, Lock, LogOut, ChevronRight, 
   Save, Loader2, Shield, Bell, Type, 
@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 
 export default function TeacherSettingsPage() {
-  const { user, profile } = useAuth();
+  const { user, profile, logout } = useAuth();
   
   const [textSize, setTextSize] = useState('normal'); 
 
@@ -201,8 +201,7 @@ export default function TeacherSettingsPage() {
 
   const handleLogout = async () => {
     if (!confirm('ログアウトしますか？')) return;
-    await signOut(auth);
-    window.location.href = '/';
+    await logout();
   };
 
   return (

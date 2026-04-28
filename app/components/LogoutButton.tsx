@@ -1,27 +1,14 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
-import { auth } from '@/lib/firebase';
-import { signOut } from 'firebase/auth';
 import { LogOut } from 'lucide-react';
+import { useAuth } from '@/app/context/AuthContext';
 
 export default function LogoutButton() {
-  const router = useRouter();
+  const { logout } = useAuth();
 
   const handleLogout = async () => {
     if (!confirm('ログアウトしますか？')) return;
-
-    try {
-      // 1. Firebaseからログアウト
-      await signOut(auth);
-      
-      // 2. ログイン画面（トップページ）へ移動
-      // window.location.href を使うことで確実にフルリロードしてキャッシュやステートをクリア
-      window.location.href = '/'; 
-    } catch (error) {
-      console.error('Logout error:', error);
-      alert('ログアウトに失敗しました');
-    }
+    await logout();
   };
 
   return (

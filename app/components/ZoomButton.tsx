@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { db, auth } from '@/lib/firebase';
-import { doc, setDoc, updateDoc, increment, serverTimestamp, arrayUnion } from 'firebase/firestore';
+import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { Loader2, Coins, Sparkles, ExternalLink } from 'lucide-react';
 
 // 画像に基づいた校舎名の略称変換ロジック
@@ -83,6 +83,7 @@ export default function ZoomButton(props: {
   startTime?: string,
   endTime?: string,
   classDay?: string,
+  classId?: string,
   userProfile?: any
 }) {
   const { 
@@ -90,6 +91,7 @@ export default function ZoomButton(props: {
     label = "Zoomに参加する", 
     subLabel = "現在開催中の授業",
     color = "blue",
+    classId,
     userProfile 
   } = props;
 
@@ -102,7 +104,7 @@ export default function ZoomButton(props: {
     if (!url) return;
     if (loading) return;
 
-    if (!confirm(`${label}しますか？\n（出席として記録され、コインを獲得します！）`)) return;
+    if (!confirm(`${label}しますか？\n（参加ログとして記録されます）`)) return;
 
     setLoading(true);
     const today = new Date().toISOString().split('T')[0];
@@ -160,12 +162,15 @@ export default function ZoomButton(props: {
         updated_at: serverTimestamp()
       }, { merge: true });
       
-      // --- 3. ゲーミフィケーション処理 ---
-      await updateDoc(doc(db, 'users', user.uid), {
-        coins: increment(30),
-        total_coins: increment(30),
-        attendance_count: increment(1),
-        earned_badges: arrayUnion('badge_1') 
+      // --- 3. イベント記録（コインは授業後のサマリ・承認で付与） ---
+      const token = await user.getIdToken();
+      await fetch('/api/class-participation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          target_date: today,
+          class_id: classId || `${user.uid}_${today}`,
+        }),
       });
 
       // --- 4. Zoomアプリ起動 ---
@@ -226,9 +231,9 @@ export default function ZoomButton(props: {
               </div>
             </div>
             <div className="flex flex-col items-center justify-between gap-2 pl-4 border-l border-white/20">
-              <div className="bg-yellow-400 text-yellow-950 px-3 py-1 rounded-full flex items-center gap-1.5 shadow-lg transform group-hover:-translate-y-1 transition-transform duration-300 border-2 border-white/30">
+              <div className="bg-white/20 text-white px-3 py-1 rounded-full flex items-center gap-1.5 shadow-lg transform group-hover:-translate-y-1 transition-transform duration-300 border border-white/30">
                 <Coins size={14} className="fill-yellow-600 stroke-yellow-800" />
-                <span className="text-xs font-black">+30</span>
+                <span className="text-xs font-black">ログ</span>
                 <Sparkles size={12} className="text-yellow-700 animate-pulse" />
               </div>
               <div className={`

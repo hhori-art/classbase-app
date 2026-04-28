@@ -1,0 +1,226 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function myUser() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function role() {
+      return signedIn() ? myUser().role : null;
+    }
+
+    function isStudent() {
+      return role() == 'student';
+    }
+
+    function isParent() {
+      return role() == 'parent' || role() == 'guardian';
+    }
+
+    function isTeacher() {
+      return role() == 'teacher';
+    }
+
+    function isAdmin() {
+      return role() == 'admin' ||
+        role() == 'master' ||
+        role() == 'school_admin' ||
+        role() == 'branch_admin' ||
+        role() == 'campus_admin' ||
+        role() == 'classroom_admin';
+    }
+
+    function canManageSchool(school) {
+      return role() == 'master' ||
+        (isAdmin() && (school == null || (myUser().school_ids is list && school in myUser().school_ids) || school == myUser().school || school == myUser().school_id || school == myUser().classroom));
+    }
+
+    function parentLinkedTo(studentId) {
+      return isParent() &&
+        ((myUser().student_ids is list && studentId in myUser().student_ids) ||
+          get(/databases/$(database)/documents/users/$(studentId)).data.parent_uid == request.auth.uid);
+    }
+
+    function userSafeUpdate() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+        'coins', 'total_coins', 'points', 'total_points', 'risk', 'churn_risk',
+        'role', 'admin', 'school_ids', 'account_status', 'status',
+        'earned_badges', 'attendance_count', 'quest_clear_count'
+      ]);
+    }
+
+    function teacherWorkCreate() {
+      return isTeacher() &&
+        request.resource.data.teacher_id == request.auth.uid &&
+        request.resource.data.status == 'pending';
+    }
+
+    function teacherWorkUpdate() {
+      return isTeacher() &&
+        resource.data.teacher_id == request.auth.uid &&
+        request.resource.data.teacher_id == request.auth.uid &&
+        resource.data.status != 'approved' &&
+        request.resource.data.status == resource.data.status &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'teacher_id', 'teacher_name', 'status', 'approved_at', 'approved_by'
+        ]);
+    }
+
+    match /users/{userId} {
+      allow read: if signedIn() && (
+        request.auth.uid == userId ||
+        isTeacher() ||
+        isAdmin() ||
+        parentLinkedTo(userId)
+      );
+      allow create: if isAdmin();
+      allow update: if signedIn() && (
+        isAdmin() ||
+        (request.auth.uid == userId && userSafeUpdate())
+      );
+      allow delete: if isAdmin();
+
+      match /chat_history/{messageId} {
+        allow read: if signedIn() && (request.auth.uid == userId || isTeacher() || isAdmin() || parentLinkedTo(userId));
+        allow create: if signedIn() && request.auth.uid == userId;
+        allow update, delete: if isAdmin();
+      }
+
+      match /point_history/{historyId} {
+        allow read: if signedIn() && (request.auth.uid == userId || isTeacher() || isAdmin() || parentLinkedTo(userId));
+        allow write: if false;
+      }
+    }
+
+    match /learning_events/{eventId} {
+      allow read: if isTeacher() || isAdmin();
+      allow write: if false;
+    }
+
+    match /recording_views/{viewId} {
+      allow read: if signedIn() && (
+        resource.data.user_id == request.auth.uid ||
+        isTeacher() ||
+        isAdmin() ||
+        parentLinkedTo(resource.data.user_id)
+      );
+      allow write: if false;
+    }
+
+    match /coin_transactions/{transactionId} {
+      allow read: if signedIn() && (resource.data.user_id == request.auth.uid || isTeacher() || isAdmin() || parentLinkedTo(resource.data.user_id));
+      allow write: if false;
+    }
+
+    match /camera_session_summaries/{summaryId} {
+      allow read: if signedIn() && (resource.data.student_id == request.auth.uid || isTeacher() || isAdmin() || parentLinkedTo(resource.data.student_id));
+      allow write: if false;
+    }
+
+    match /notification_jobs/{jobId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    match /monthly_schedules/{scheduleId} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    match /annual_lesson_schedules/{scheduleId} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    match /annual_curriculum_schedules/{scheduleId} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    match /course_registration_options/{optionId} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    match /course_registrations/{registrationId} {
+      allow read: if signedIn() && (resource.data.parent_id == request.auth.uid || isAdmin() || parentLinkedTo(resource.data.student_id));
+      allow write: if false;
+    }
+
+    match /attendance_correction_requests/{requestId} {
+      allow read: if signedIn() && (resource.data.teacher_id == request.auth.uid || isAdmin());
+      allow write: if false;
+    }
+
+    match /attendance/{attendanceId} {
+      allow read: if signedIn() && (resource.data.user_id == request.auth.uid || isTeacher() || isAdmin() || parentLinkedTo(resource.data.user_id));
+      allow create, update: if isAdmin() || (isStudent() && request.resource.data.user_id == request.auth.uid);
+      allow delete: if isAdmin();
+    }
+
+    match /submissions/{submissionId} {
+      allow read: if signedIn() && (resource.data.student_id == request.auth.uid || isTeacher() || isAdmin() || parentLinkedTo(resource.data.student_id));
+      allow create, update: if isStudent() && request.resource.data.student_id == request.auth.uid;
+      allow delete: if isAdmin();
+    }
+
+    match /class_recordings/{recordingId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /teacher_inquiries/{inquiryId} {
+      allow read: if isTeacher() || isAdmin();
+      allow create: if isStudent() && request.resource.data.studentId == request.auth.uid;
+      allow update: if isTeacher() || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    match /chat_logs/{messageId} {
+      allow read: if signedIn() && (resource.data.uid == request.auth.uid || isTeacher() || isAdmin() || parentLinkedTo(resource.data.uid));
+      allow create: if isTeacher() || isAdmin();
+      allow update, delete: if isAdmin();
+    }
+
+    match /work_records/{recordId} {
+      allow read: if signedIn() && (resource.data.teacher_id == request.auth.uid || isAdmin());
+      allow create: if teacherWorkCreate();
+      allow update: if teacherWorkUpdate() || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    match /teacher_availability/{availabilityId} {
+      allow read: if isTeacher() || isAdmin();
+      allow create, update, delete: if isTeacher() || isAdmin();
+    }
+
+    match /teacher_substitution_posts/{postId} {
+      allow read: if isTeacher() || isAdmin();
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    match /requests/{requestId} {
+      allow read: if signedIn() && (resource.data.user_id == request.auth.uid || isAdmin() || parentLinkedTo(resource.data.user_id));
+      allow create: if signedIn();
+      allow update, delete: if isAdmin();
+    }
+
+    match /parent_inquiries/{inquiryId} {
+      allow read: if signedIn() && (resource.data.parent_id == request.auth.uid || isAdmin());
+      allow create: if isParent() && request.resource.data.parent_id == request.auth.uid;
+      allow update, delete: if isAdmin();
+    }
+
+    match /{document=**} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+  }
+}

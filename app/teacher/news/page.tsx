@@ -27,7 +27,7 @@ export default function TeacherNewsPage() {
 
         // ★フィルタリング: 「全員宛」または「先生宛」のみ抽出
         const myNews = allData.filter((item: any) => 
-          item.target === 'all' || item.target === 'teacher'
+          !item.target || item.target === 'all' || item.target === 'teacher'
         );
 
         setList(myNews);

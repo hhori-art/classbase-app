@@ -1,22 +1,27 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { ChevronLeft, ChevronRight, Loader2, BookOpen } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Loader2, BookOpen, Megaphone } from 'lucide-react';
 import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs } from 'firebase/firestore';
+import { collection, query, where, getDocs, orderBy } from 'firebase/firestore';
 
 // 曜日の数値変換マップ
 const DAY_MAP: { [key: string]: number } = { '日': 0, '月': 1, '火': 2, '水': 3, '木': 4, '金': 5, '土': 6 };
+const scheduleStart = (item: any) => item.start_date || item.target_date || '';
+const scheduleEnd = (item: any) => item.end_date || item.target_date || scheduleStart(item);
+const scheduleCoversDate = (item: any, date: string) => scheduleStart(item) <= date && date <= scheduleEnd(item);
 
 interface Props {
   classDay?: string; // 生徒の授業曜日 (例: "月")
   grade?: string;    // 生徒の学年 (例: "中1") ★追加
+  role?: 'student' | 'parent' | 'teacher';
 }
 
-export default function CalendarWidget({ classDay, grade }: Props) {
+export default function CalendarWidget({ classDay, grade, role = 'student' }: Props) {
   const [currentDate, setCurrentDate] = useState(new Date());
   const [shifts, setShifts] = useState<string[]>([]);
   const [homeworks, setHomeworks] = useState<string[]>([]); // 宿題の期限日リスト
+  const [monthlySchedules, setMonthlySchedules] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
 
   // 表示月が変わったらデータを取得
@@ -55,6 +60,36 @@ export default function CalendarWidget({ classDay, grade }: Props) {
         // 重複を除去してセット
         setHomeworks([...new Set(hwDates)]);
 
+        const rangeScheduleQuery = query(
+          collection(db, 'monthly_schedules'),
+          where('start_date', '<=', endStr),
+          orderBy('start_date', 'asc')
+        );
+        const legacyScheduleQuery = query(
+          collection(db, 'monthly_schedules'),
+          where('target_date', '>=', startStr),
+          where('target_date', '<=', endStr)
+        );
+        const [rangeScheduleSnap, legacyScheduleSnap] = await Promise.all([
+          getDocs(rangeScheduleQuery).catch(() => ({ docs: [] as any[] })),
+          getDocs(legacyScheduleQuery).catch(() => ({ docs: [] as any[] })),
+        ]);
+        const scheduleMap = new Map<string, any>();
+        [...rangeScheduleSnap.docs, ...legacyScheduleSnap.docs].forEach((d: any) => {
+          const item = { id: d.id, ...d.data() };
+          if (scheduleStart(item) <= endStr && scheduleEnd(item) >= startStr) scheduleMap.set(item.id, item);
+        });
+        setMonthlySchedules(Array.from(scheduleMap.values())
+          .filter((data: any) => !data.archived)
+          .filter((data: any) => {
+            const audience = data.audience || 'all';
+            if (role === 'teacher') return ['all', 'teacher', 'staff', 'student_parent'].includes(audience);
+            if (role === 'parent') return ['all', 'student_parent', 'parent'].includes(audience);
+            return ['all', 'student_parent', 'student'].includes(audience) && data.category !== 'curriculum';
+          })
+          .filter((data: any) => !grade || !Array.isArray(data.grades) || data.grades.length === 0 || data.grades.includes(grade))
+        );
+
       } catch (e) {
         console.error(e);
       } finally {
@@ -63,7 +98,7 @@ export default function CalendarWidget({ classDay, grade }: Props) {
     };
 
     fetchData();
-  }, [currentDate, grade]);
+  }, [currentDate, grade, role]);
 
   // カレンダー生成ロジック
   const year = currentDate.getFullYear();
@@ -149,6 +184,7 @@ export default function CalendarWidget({ classDay, grade }: Props) {
           const isMyClassDay = classDay && DAY_MAP[classDay] === currentDayOfWeek;
           const hasShift = shifts.includes(currentDayStr);
           const hasHomework = homeworks.includes(currentDayStr); // 宿題あり判定
+          const daySchedules = monthlySchedules.filter(item => scheduleCoversDate(item, currentDayStr));
 
           let shiftStatus = 'none';
           if (isMyClassDay) {
@@ -187,6 +223,11 @@ export default function CalendarWidget({ classDay, grade }: Props) {
                     <BookOpen size={8} className="shrink-0"/> 提出
                   </div>
                 )}
+                {daySchedules.slice(0, 2).map(item => (
+                  <div key={item.id} className="bg-emerald-100 text-emerald-700 text-[9px] font-black py-0.5 rounded shadow-sm border border-emerald-200 flex items-center justify-center gap-0.5 truncate" title={item.title}>
+                    <Megaphone size={8} className="shrink-0"/> {item.title}
+                  </div>
+                ))}
               </div>
             </div>
           );
@@ -211,6 +252,10 @@ export default function CalendarWidget({ classDay, grade }: Props) {
         <div className="flex items-center gap-1">
           <div className="bg-orange-100 text-orange-700 text-[9px] font-black px-1.5 py-0.5 rounded border border-orange-200 flex items-center gap-0.5"><BookOpen size={8}/> 提出</div>
           <span className="text-[10px] text-gray-500 font-bold">宿題期限</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <div className="bg-emerald-100 text-emerald-700 text-[9px] font-black px-1.5 py-0.5 rounded border border-emerald-200 flex items-center gap-0.5"><Megaphone size={8}/> 予定</div>
+          <span className="text-[10px] text-gray-500 font-bold">月間予定</span>
         </div>
       </div>
     </div>

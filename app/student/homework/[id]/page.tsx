@@ -3,7 +3,7 @@
 import { useState, useEffect, use, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { db, storage } from '@/lib/firebase';
-import { doc, getDoc, setDoc, updateDoc, increment, arrayUnion } from 'firebase/firestore';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { useAuth } from '@/app/context/AuthContext';
 import { ArrowLeft, Clock, Send, CheckCircle, AlertCircle, Loader2, Image as ImageIcon, X, Plus, ExternalLink, RefreshCw, Calendar, FileText, Stamp, MessageCircle } from 'lucide-react';
@@ -118,18 +118,16 @@ export default function HomeworkDetailPage({ params }: { params: Promise<{ id: s
 
       await setDoc(subRef, submissionData, { merge: true });
 
-      // コイン付与 (初回提出時のみなど制御が必要な場合は別途ロジック追加)
-      // ここでは提出ごとに加算（または1課題につき1回にするならsubmissionsコレクションをチェックするなど）
-      const userRef = doc(db, 'users', user.uid);
-      await updateDoc(userRef, {
-        coins: increment(50),
-        total_coins: increment(50),
-        homework_count: increment(1),
-        // 初めてならバッジ付与などの処理
-        earned_badges: arrayUnion('badge_pencil') 
+      const token = await user.getIdToken();
+      const rewardRes = await fetch('/api/coin-transactions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action: 'homework_submission_reward', assignment_id: assignmentId }),
       });
+      const rewardData = await rewardRes.json().catch(() => ({}));
+      if (!rewardRes.ok || rewardData.ok === false) throw new Error(rewardData.error || 'reward failed');
 
-      alert('提出しました！ 50コイン獲得！');
+      alert(rewardData.applied ? '提出しました！ 50コイン獲得！' : '提出しました！この課題のコインは受取済みです。');
       setSelectedFile(null);
       setPreviewUrl(null);
       await fetchData(); // 画面更新

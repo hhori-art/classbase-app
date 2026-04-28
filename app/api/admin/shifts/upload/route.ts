@@ -1,9 +1,16 @@
 import { NextResponse } from 'next/server';
-import { db } from '@/lib/firebase';
-import { collection, doc, writeBatch } from 'firebase/firestore';
+import { NextRequest } from 'next/server';
+import { FieldValue } from 'firebase-admin/firestore';
+import { adminDb } from '@/lib/firebase-admin';
+import { getServerUser, isAdminLike, jsonError } from '@/lib/server-auth';
 
-export async function POST(request: Request) {
+export const runtime = 'nodejs';
+
+export async function POST(request: NextRequest) {
   try {
+    const actor = await getServerUser(request);
+    if (!isAdminLike(actor)) throw new Error('forbidden');
+
     const body = await request.json();
     const { shifts } = body; // フロントエンドから { shifts: [...] } という形で受け取る想定
 
@@ -21,23 +28,30 @@ export async function POST(request: Request) {
     }
 
     let successCount = 0;
+    const db = adminDb();
 
     // チャンクごとにバッチ処理を実行
     for (const chunk of chunks) {
-      const batch = writeBatch(db);
+      const batch = db.batch();
       
       chunk.forEach((shift: any) => {
         // IDはFirestoreに自動生成させる
-        const shiftRef = doc(collection(db, 'shift_assignments'));
+        const shiftRef = db.collection('shift_assignments').doc();
         
         batch.set(shiftRef, {
           date: shift.date,             // 日付 (YYYY-MM-DD)
+          target_date: shift.target_date || shift.date,
           time_period: shift.period,    // 時間帯 (1 or 2)
+          note: shift.note || `【${shift.period || 1}限】`,
           teacher_name: shift.teacher,  // 講師名
           target_grade: shift.grade,    // 学年
           target_subject: shift.subject,// 科目
+          target_detail_subject: shift.detail_subject || shift.course_name || shift.class || '',
+          unit: shift.unit || '',
           role_type: 'main',            // 役割 (main/sub)
-          created_at: new Date().toISOString()
+          uploaded_by: actor.uid,
+          created_at: FieldValue.serverTimestamp(),
+          updated_at: FieldValue.serverTimestamp(),
         });
       });
 
@@ -49,6 +63,6 @@ export async function POST(request: Request) {
 
   } catch (error: any) {
     console.error('Batch upload error:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return jsonError(error);
   }
 }

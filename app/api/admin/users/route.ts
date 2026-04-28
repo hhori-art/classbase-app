@@ -1,6 +1,8 @@
 // app/api/admin/users/route.ts
 import { NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
 import { adminAuth, adminDb } from '@/lib/firebase-admin';
+import { canManageSchool, getServerUser, isAdminLike, jsonError, ServerUser } from '@/lib/server-auth';
 
 export const runtime = 'nodejs';
 
@@ -82,13 +84,51 @@ async function deleteUserData(userId: string) {
   await db.collection('users').doc(userId).delete().catch(() => {});
 }
 
-/**
- * GET: （必要なら）ユーザー一覧取得
- * ※ 今回は元コードに無いので未実装。必要なら言ってください。
- */
+async function getTargetUserOrThrow(userId: string, actor: ServerUser) {
+  const snap = await adminDb().collection('users').doc(userId).get();
+  if (!snap.exists) throw new Error('user-not-found');
+  const data = snap.data() || {};
+  const targetSchool = data.school_id || data.school || data.classroom || null;
+  if (!canManageSchool(actor, targetSchool)) throw new Error('forbidden');
+  if (data.role === 'master' && actor.role !== 'master') throw new Error('forbidden');
+  return { id: snap.id, ...data };
+}
 
-export async function DELETE(request: Request) {
+export async function GET(request: NextRequest) {
   try {
+    const actor = await getServerUser(request);
+    if (!isAdminLike(actor)) throw new Error('forbidden');
+
+    const { searchParams } = request.nextUrl;
+    const role = String(searchParams.get('role') || '').trim();
+    const requestedSchool = String(searchParams.get('school') || '').trim();
+    const limitParam = Math.min(Number(searchParams.get('limit') || 200), 500);
+    const school = actor.role === 'master' ? requestedSchool : actor.school_ids[0] || actor.school || '';
+
+    let q: FirebaseFirestore.Query = adminDb().collection('users');
+    if (role) q = q.where('role', '==', role);
+    if (school) q = q.where('school_id', '==', school);
+    q = q.limit(Number.isFinite(limitParam) ? limitParam : 200);
+
+    const snap = await q.get();
+    const users = snap.docs
+      .map(doc => ({ id: doc.id, uid: doc.id, ...doc.data() }))
+      .filter((item: any) => actor.role === 'master' || canManageSchool(actor, item.school_id || item.school || item.classroom || null))
+      .map((item: any) => {
+        const { raw_password, ...safe } = item;
+        return safe;
+      });
+
+    return NextResponse.json({ success: true, users });
+  } catch (error) {
+    return jsonError(error);
+  }
+}
+
+export async function DELETE(request: NextRequest) {
+  try {
+    const actor = await getServerUser(request);
+    if (!isAdminLike(actor)) throw new Error('forbidden');
     const db = adminDb();
 
     const { searchParams } = new URL(request.url);
@@ -96,11 +136,13 @@ export async function DELETE(request: Request) {
 
     // A) 個別削除
     if (targetId) {
+      await getTargetUserOrThrow(targetId, actor);
       await deleteUserData(targetId);
       return NextResponse.json({ success: true, message: '削除しました' });
     }
 
     // B) 生徒一括削除（最大500件ずつ）
+    if (actor.role !== 'master') throw new Error('forbidden');
     const snap = await db.collection('users').where('role', '==', 'student').limit(500).get();
 
     if (snap.empty) {
@@ -121,12 +163,14 @@ export async function DELETE(request: Request) {
     });
   } catch (error: any) {
     console.error('DELETE Error:', error);
-    return NextResponse.json({ success: false, error: error.message || String(error) }, { status: 500 });
+    return jsonError(error);
   }
 }
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
   try {
+    const actor = await getServerUser(request);
+    if (!isAdminLike(actor)) throw new Error('forbidden');
     const db = adminDb();
     const auth = adminAuth();
 
@@ -160,6 +204,15 @@ export async function POST(request: Request) {
       const email = `${strId}@classbase.local`;
       const password = user.password || 'class1234';
       const role = user.role || 'student';
+      const schoolId = String(user.school_id || user.school || actor.school_ids[0] || actor.school || '').trim();
+      if (role === 'master' && actor.role !== 'master') {
+        errors.push({ name: user.student_name, error: 'masterアカウントは作成できません' });
+        continue;
+      }
+      if (!canManageSchool(actor, schoolId || null)) {
+        errors.push({ name: user.student_name, error: 'この校舎のアカウントを作成する権限がありません' });
+        continue;
+      }
 
       // 生徒の場合のみURL自動設定
       let autoUrl1: string | null = null;
@@ -230,6 +283,8 @@ export async function POST(request: Request) {
           student_id: user.student_id || '',
           lifetime_id: user.lifetime_id || '',
           classroom: user.classroom || '',
+          school_id: schoolId || null,
+          school: schoolId || null,
           phone_number: user.phone_number || '',
           email,
           day_of_week: user.day_of_week || '',
@@ -252,6 +307,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ success: true, createdCount: results.length, results, errors });
   } catch (error: any) {
     console.error('POST Error:', error);
-    return NextResponse.json({ success: false, error: error.message || String(error) }, { status: 500 });
+    return jsonError(error);
   }
 }

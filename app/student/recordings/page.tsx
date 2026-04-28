@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
 import { 
-  collection, query, orderBy, getDocs, updateDoc, doc, increment, arrayUnion 
+  collection, query, orderBy, getDocs
 } from 'firebase/firestore';
 import { 
   ArrowLeft, Video, Calendar as CalendarIcon, PlayCircle, Loader2, 
@@ -141,11 +141,15 @@ export default function StudentRecordingsPage() {
     setProcessingId(rec.id);
     try {
       if (user) {
-        const userRef = doc(db, 'users', user.uid);
-        await updateDoc(userRef, {
-          coins: increment(10), 
-          total_coins: increment(10),
-          earned_badges: arrayUnion('badge_1') 
+        const token = await user.getIdToken();
+        await fetch('/api/recording-view', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            recording_id: rec.id,
+            event_type: 'start',
+            watched_seconds: 0,
+          }),
         });
       }
     } catch (err) { console.error(err); } 
@@ -171,7 +175,7 @@ export default function StudentRecordingsPage() {
               </span>
               授業アーカイブ
             </h1>
-            <p className="text-xs font-bold text-gray-400 mt-1 pl-1">過去の授業が見放題！復習してコインをゲットしよう</p>
+            <p className="text-xs font-bold text-gray-400 mt-1 pl-1">過去の授業で復習しよう。視聴ログは自動で記録されます</p>
           </div>
         </div>
 
@@ -329,11 +333,11 @@ export default function StudentRecordingsPage() {
                         <div className="flex flex-wrap items-center gap-2 mb-3">
                           <span className="text-[10px] font-black px-3 py-1 rounded-full bg-gray-100 text-gray-600 border border-gray-200">{rec.grade} | {rec.subject}</span>
                           {(searchMode === 'unit' || searchQuery) && <span className="text-[10px] font-bold text-gray-400 bg-gray-50 px-2 py-1 rounded-lg">{rec.target_date}</span>}
-                          <span className="text-[10px] font-bold bg-yellow-400 text-yellow-900 px-2 py-1 rounded-full flex items-center gap-1 shadow-sm"><Coins size={10} /> +10pt</span>
+                          <span className="text-[10px] font-bold bg-yellow-100 text-yellow-800 px-2 py-1 rounded-full flex items-center gap-1 shadow-sm"><Coins size={10} /> 完了時に記録</span>
                         </div>
                         {/* ★変更: タイトルホバー色を赤に */}
                         <h4 className="text-lg font-black text-gray-800 group-hover:text-red-600 transition-colors line-clamp-2">{rec.title}</h4>
-                        <div className="flex items-center gap-2 mt-2 text-xs font-bold text-gray-400"><span className="w-1.5 h-1.5 rounded-full bg-green-400"></span>{processingId === rec.id ? 'コイン追加中...' : '視聴してコインGET'}</div>
+                        <div className="flex items-center gap-2 mt-2 text-xs font-bold text-gray-400"><span className="w-1.5 h-1.5 rounded-full bg-green-400"></span>{processingId === rec.id ? '視聴開始を記録中...' : '視聴開始を記録して開く'}</div>
                       </div>
                       
                       {/* ★変更: 再生ボタンを赤に */}

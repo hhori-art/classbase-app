@@ -1,18 +1,17 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { db, auth } from '@/lib/firebase'; // authを追加
-import { collection, query, where, onSnapshot, getDocs, Timestamp } from 'firebase/firestore';
-import { signOut } from 'firebase/auth'; // signOutを追加
-import { useRouter } from 'next/navigation'; // ルーティング用
+import { db } from '@/lib/firebase';
+import { collection, doc, getDoc, query, where, onSnapshot, getDocs, Timestamp } from 'firebase/firestore';
 import { 
-  Users, AlertTriangle, ArrowRight, Activity, 
+  Users, AlertTriangle, ArrowRight, Activity, Building2,
   Megaphone, Calendar, ClipboardList, MonitorPlay, BookOpen,
   BarChart2, CheckSquare, Sparkles, Clock, Filter,
   Settings, FileSpreadsheet, Briefcase, Video, ShoppingBag, 
   Database, Trash2, Edit3, X, Check, LogOut, MessageCircle, Send // ★ Send を追加
 } from 'lucide-react';
 import Link from 'next/link';
+import { useAuth } from '@/app/context/AuthContext';
 
 // --- 型定義 ---
 type ActiveStudent = {
@@ -36,34 +35,88 @@ type UserMap = {
   [uid: string]: { grade: string; name: string }
 };
 
+type TeacherPlacement = {
+  id: string;
+  teacher_name?: string;
+  target_date?: string;
+  role_type?: string;
+  target_grade?: string;
+  target_subject?: string;
+  target_detail_subject?: string;
+  target_place?: string;
+  note?: string;
+};
+
+const toDateSafe = (value: any): Date | null => {
+  if (!value) return null;
+  if (value?.toDate) return value.toDate();
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const DEFAULT_ADMIN_VISIBILITY: Record<string, boolean> = {
+  users: true,
+  schoolStudents: true,
+  sso: true,
+  shifts: true,
+  monthlySchedules: true,
+  attendance: false,
+  attendanceCorrections: false,
+  substitutions: true,
+  announcements: true,
+  requests: true,
+  parentInquiries: true,
+  registrationTasks: true,
+  curriculum: true,
+  pf: true,
+  recordings: true,
+  community: true,
+  rewards: true,
+  stats: true,
+  surveySettings: true,
+  imports: true,
+  delete: true,
+  line: true,
+  settings: true,
+};
+
 // ★ カスタマイズ可能なアクション一覧
 const AVAILABLE_ACTIONS = [
-  { id: '/master/announcements', title: 'お知らせ配信', icon: Megaphone },
-  { id: '/master/shifts', title: 'シフト確認', icon: Calendar },
-  { id: '/master/registration-tasks', title: '登録依頼作成', icon: ClipboardList },
-  { id: '/master/approval', title: '録画承認', icon: Video }, 
-  { id: '/master/community', title: 'コミュニティ管理', icon: MessageCircle },
-  { id: '/master/line', title: 'LINE一斉送信', icon: Send }, // ★ 追加
-  { id: '/master/users', title: '生徒・講師管理', icon: FileSpreadsheet },
-  { id: '/master/attendance', title: '勤怠管理', icon: Briefcase },
-  { id: '/master/rewards', title: '景品管理', icon: ShoppingBag },
-  { id: '/master/stats', title: '統計・分析', icon: Activity },
-  { id: '/master/imports', title: 'CSV一括登録', icon: Database },
-  { id: '/master/settings', title: 'システム設定', icon: Settings },
+  { key: 'announcements', id: '/master/announcements', title: 'お知らせ配信', icon: Megaphone },
+  { key: 'sso', id: '/master/accounts/sso', title: 'SSOアカウント', icon: Users },
+  { key: 'shifts', id: '/master/shifts', title: 'シフト確認', icon: Calendar },
+  { key: 'monthlySchedules', id: '/master/monthly-schedules', title: '月間予定', icon: Calendar },
+  { key: 'registrationTasks', id: '/master/registration-tasks', title: '登録依頼作成', icon: ClipboardList },
+  { key: 'curriculum', id: '/master/curriculum', title: 'カリキュラム管理', icon: BookOpen },
+  { key: 'parentInquiries', id: '/master/parent-inquiries', title: '保護者お問い合わせ', icon: MessageCircle },
+  { key: 'recordings', id: '/master/recordings', title: '録画承認', icon: Video },
+  { key: 'community', id: '/master/community', title: 'コミュニティ管理', icon: MessageCircle },
+  { key: 'line', id: '/master/line', title: 'LINE一斉送信', icon: Send }, // ★ 追加
+  { key: 'users', id: '/master/users', title: '生徒・講師管理', icon: FileSpreadsheet },
+  { key: 'schoolStudents', id: '/master/school-students', title: '校舎別 生徒管理', icon: Users },
+  { key: 'attendance', id: '/master/attendance', title: '勤怠管理', icon: Briefcase },
+  { key: 'attendanceCorrections', id: '/master/attendance-corrections', title: '打刻修正承認', icon: CheckSquare },
+  { key: 'substitutions', id: '/master/substitutions', title: '代行依頼管理', icon: Megaphone },
+  { key: 'rewards', id: '/master/rewards', title: '景品管理', icon: ShoppingBag },
+  { key: 'stats', id: '/master/stats', title: '統計・分析', icon: Activity },
+  { key: 'imports', id: '/master/imports', title: 'CSV一括登録', icon: Database },
+  { key: 'settings', id: '/master/settings', title: 'システム設定', icon: Settings },
 ];
 
 // デフォルトの表示項目
 const DEFAULT_ACTIONS = [
   '/master/announcements',
+  '/master/accounts/sso',
   '/master/shifts',
-  '/master/approval',
+  '/master/recordings',
   '/master/registration-tasks'
 ];
 
 export default function MasterDashboard() {
-  const router = useRouter();
+  const { profile, logout } = useAuth();
   const [activeStudents, setActiveStudents] = useState<ActiveStudent[]>([]);
   const [weeklyStats, setWeeklyStats] = useState<DailyStats[]>([]);
+  const [clock, setClock] = useState<{ time: string; date: string } | null>(null);
   
   // フィルタリング用
   const [filterGrade, setFilterGrade] = useState<string>('all');
@@ -81,6 +134,9 @@ export default function MasterDashboard() {
   
   const [pendingCommunityCount, setPendingCommunityCount] = useState(0); // 未承認投稿数
   const [recordingCheckCount, setRecordingCheckCount] = useState(0); // 録画チェック候補数
+  const [dashboardError, setDashboardError] = useState('');
+  const [adminVisibility, setAdminVisibility] = useState(DEFAULT_ADMIN_VISIBILITY);
+  const [todayPlacements, setTodayPlacements] = useState<TeacherPlacement[]>([]);
 
   // クイックアクション設定
   const [quickActions, setQuickActions] = useState<string[]>(DEFAULT_ACTIONS);
@@ -98,12 +154,60 @@ export default function MasterDashboard() {
     }
   }, []);
 
+  useEffect(() => {
+    const today = new Date().toISOString().split('T')[0];
+    const qTodayPlacements = query(collection(db, 'shift_assignments'), where('target_date', '==', today));
+    const unsub = onSnapshot(qTodayPlacements, (snap) => {
+      const list = snap.docs.map(d => ({ id: d.id, ...d.data() } as TeacherPlacement));
+      list.sort((a, b) => `${a.note || ''}${a.target_grade || ''}`.localeCompare(`${b.note || ''}${b.target_grade || ''}`, 'ja'));
+      setTodayPlacements(list.slice(0, 8));
+    }, (error) => {
+      console.warn('Teacher placement read error:', error);
+      setTodayPlacements([]);
+    });
+    return () => unsub();
+  }, []);
+
+  useEffect(() => {
+    const loadVisibility = async () => {
+      try {
+        const snap = await getDoc(doc(db, 'settings', 'portal_visibility'));
+        if (snap.exists()) setAdminVisibility(prev => ({ ...prev, ...(snap.data().admin || {}) }));
+      } catch (e) {
+        console.warn('Admin dashboard visibility read failed:', e);
+      }
+    };
+    loadVisibility();
+  }, []);
+
+  const isMaster = profile?.role === 'master';
+  const visibleActions = AVAILABLE_ACTIONS.filter(action => isMaster || adminVisibility[action.key] !== false);
+  const visibleQuickActions = quickActions.filter(path => visibleActions.some(action => action.id === path));
+  const loggedInSchoolLabel = isMaster
+    ? 'マスター管理者'
+    : (Array.isArray(profile?.school_ids) && profile.school_ids.length > 0
+      ? profile.school_ids.join(' / ')
+      : profile?.school_id || profile?.school || '校舎未設定');
+
+  useEffect(() => {
+    const updateClock = () => {
+      const now = new Date();
+      setClock({
+        time: now.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }),
+        date: now.toLocaleDateString('ja-JP', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short' }),
+      });
+    };
+
+    updateClock();
+    const timer = window.setInterval(updateClock, 30000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   // --- ログアウト処理 ---
   const handleLogout = async () => {
     if (!confirm('管理画面からログアウトしますか？')) return;
     try {
-      await signOut(auth);
-      router.push('/'); // ログイン画面へリダイレクト
+      await logout();
     } catch (error) {
       console.error('Logout failed', error);
       alert('ログアウトに失敗しました');
@@ -136,6 +240,7 @@ export default function MasterDashboard() {
     const qStudents = query(collection(db, 'users'), where('role', '==', 'student'));
 
     const unsubStudents = onSnapshot(qStudents, (snapshot) => {
+      setDashboardError('');
       const now = new Date();
       let online = 0;
       let alerts = 0;
@@ -155,7 +260,7 @@ export default function MasterDashboard() {
           tempGradeCounts['その他'] = (tempGradeCounts['その他'] || 0) + 1;
         }
         
-        const lastLogin = data.last_login_at ? data.last_login_at.toDate() : null; // last_login -> last_login_at に修正（DBによる）
+        const lastLogin = toDateSafe(data.last_login_at || data.last_login);
         // 30分以内のアクティビティをオンラインとみなす
         const isOnline = lastLogin && (now.getTime() - lastLogin.getTime() < 30 * 60 * 1000);
         
@@ -186,6 +291,13 @@ export default function MasterDashboard() {
         onlineCount: online, 
         alertCount: alerts 
       }));
+    }, (error) => {
+      console.error('Master dashboard users read error:', error);
+      setDashboardError('校舎管理者の権限でユーザー情報を読み込めません。Firestoreルールと users/{uid}.role / school_ids を確認してください。');
+      setStats(prev => ({ ...prev, studentCount: 0, totalStudentCount: 0, onlineCount: 0, alertCount: 0 }));
+      setActiveStudents([]);
+      setUserMap({});
+      setGradeCounts({});
     });
 
     return () => unsubStudents();
@@ -195,12 +307,18 @@ export default function MasterDashboard() {
   useEffect(() => {
     // 未承認のコミュニティ投稿
     const qComm = query(collection(db, 'community_topics'), where('is_approved', '==', false));
-    const unsubComm = onSnapshot(qComm, (snap) => setPendingCommunityCount(snap.size));
+    const unsubComm = onSnapshot(qComm, (snap) => setPendingCommunityCount(snap.size), (error) => {
+      console.warn('Master dashboard community read error:', error);
+      setPendingCommunityCount(0);
+    });
 
     // 録画URLがあるシフト（簡易チェック）
     // 本来は承認済みを除外するが、ダッシュボードでは「URLが入っているシフト数」を目安として表示
     const qRec = query(collection(db, 'shift_assignments'), where('target_recording_url', '!=', null));
-    const unsubRec = onSnapshot(qRec, (snap) => setRecordingCheckCount(snap.size));
+    const unsubRec = onSnapshot(qRec, (snap) => setRecordingCheckCount(snap.size), (error) => {
+      console.warn('Master dashboard recording read error:', error);
+      setRecordingCheckCount(0);
+    });
 
     return () => {
       unsubComm();
@@ -214,7 +332,10 @@ export default function MasterDashboard() {
     today.setHours(0, 0, 0, 0);
     const todayTimestamp = Timestamp.fromDate(today);
     const qToday = query(collection(db, 'homework_answers'), where('submitted_at', '>=', todayTimestamp));
-    const unsubToday = onSnapshot(qToday, (snap) => setStats(prev => ({ ...prev, submissionCount: snap.size })));
+    const unsubToday = onSnapshot(qToday, (snap) => setStats(prev => ({ ...prev, submissionCount: snap.size })), (error) => {
+      console.warn('Master dashboard homework read error:', error);
+      setStats(prev => ({ ...prev, submissionCount: 0 }));
+    });
     return () => unsubToday();
   }, []);
 
@@ -262,8 +383,9 @@ export default function MasterDashboard() {
 
       logsSnap.forEach(doc => {
         const data = doc.data();
-        if (data.created_at && isTargetUser(data.uid)) {
-          const date = data.created_at.toDate().toISOString().split('T')[0];
+        const createdAt = toDateSafe(data.created_at);
+        if (createdAt && isTargetUser(data.uid)) {
+          const date = createdAt.toISOString().split('T')[0];
           // ログイン系のアクションログを集計
           if (['login', 'app_open', 'submit'].includes(data.type)) {
             if (!loginMap[date]) loginMap[date] = new Set();
@@ -296,7 +418,10 @@ export default function MasterDashboard() {
       }
       setWeeklyStats(resultStats);
     };
-    fetchWeeklyData();
+    fetchWeeklyData().catch((error) => {
+      console.warn('Master dashboard weekly stats read error:', error);
+      setWeeklyStats([]);
+    });
   }, [stats.totalStudentCount, filterGrade, userMap, gradeCounts]);
 
   return (
@@ -307,14 +432,17 @@ export default function MasterDashboard() {
         <div>
           <h1 className="text-2xl font-extrabold text-gray-800 tracking-tight">管理ダッシュボード</h1>
           <p className="text-xs font-bold text-gray-400 mt-1">システム全体の稼働状況と分析</p>
+          <div className="mt-3 inline-flex items-center gap-2 rounded-2xl border border-indigo-100 bg-indigo-50 px-4 py-2 text-xs font-black text-indigo-700">
+            <Building2 size={15} /> ログイン校舎: {loggedInSchoolLabel}
+          </div>
         </div>
         <div className="flex items-center gap-4">
           <div className="text-right hidden sm:block">
             <div className="text-2xl font-black text-indigo-600 font-mono">
-              {new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}
+              {clock?.time || '--:--'}
             </div>
             <div className="text-[10px] font-bold text-gray-400">
-              {new Date().toLocaleDateString('ja-JP', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short' })}
+              {clock?.date || ''}
             </div>
           </div>
           {/* ログアウトボタン */}
@@ -327,6 +455,12 @@ export default function MasterDashboard() {
           </button>
         </div>
       </div>
+
+      {dashboardError && (
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-bold text-amber-800">
+          {dashboardError}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
 
@@ -448,8 +582,8 @@ export default function MasterDashboard() {
             </div>
 
             <div className="flex flex-wrap gap-3 relative z-10">
-              {quickActions.map(path => {
-                const action = AVAILABLE_ACTIONS.find(a => a.id === path);
+              {visibleQuickActions.map(path => {
+                const action = visibleActions.find(a => a.id === path);
                 if (!action) return null;
                 const Icon = action.icon;
                 return (
@@ -463,7 +597,7 @@ export default function MasterDashboard() {
                 );
               })}
               
-              {quickActions.length === 0 && (
+              {visibleQuickActions.length === 0 && (
                 <button onClick={() => setIsCustomizedModalOpen(true)} className="text-slate-500 text-sm border border-dashed border-slate-700 px-4 py-2 rounded-xl hover:border-slate-500 hover:text-slate-300">
                   + アクションを追加
                 </button>
@@ -474,6 +608,50 @@ export default function MasterDashboard() {
 
         {/* --- 右カラム (1/3) --- */}
         <div className="space-y-6">
+
+          {/* 本日の講師配置 */}
+          <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+            <div className="p-5 border-b border-gray-100 bg-gradient-to-r from-indigo-50 to-blue-50">
+              <h2 className="font-bold text-gray-800 flex items-center gap-2">
+                <Briefcase className="text-indigo-500" size={20}/> 本日の講師配置
+              </h2>
+              <p className="text-[10px] text-gray-500 font-bold mt-1">シフト管理で登録された担当一覧</p>
+            </div>
+            <div className="divide-y divide-gray-50">
+              {todayPlacements.length > 0 ? (
+                todayPlacements.map(item => (
+                  <div key={item.id} className="p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-sm font-black text-gray-800 truncate">{item.teacher_name || '講師未設定'}</p>
+                        <p className="mt-1 text-xs font-bold text-gray-500">
+                          {item.note || '-'} {item.target_grade || ''} {item.target_subject || ''}{item.target_detail_subject ? `/${item.target_detail_subject}` : ''}
+                        </p>
+                        {item.target_place && <p className="mt-1 text-[10px] font-bold text-indigo-500">{item.target_place}</p>}
+                      </div>
+                      <span className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-black ${
+                        item.role_type === 'main' ? 'bg-indigo-100 text-indigo-700' :
+                        item.role_type === 'sub' ? 'bg-emerald-100 text-emerald-700' :
+                        'bg-slate-100 text-slate-500'
+                      }`}>
+                        {item.role_type === 'main' ? '担当' : item.role_type === 'sub' ? '補助' : '全体'}
+                      </span>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="p-8 text-center">
+                  <div className="bg-slate-50 w-12 h-12 rounded-full flex items-center justify-center mx-auto mb-2 text-slate-300">
+                    <Briefcase size={22}/>
+                  </div>
+                  <p className="text-xs font-bold text-slate-400">本日の講師配置はまだありません</p>
+                  <Link href="/master/shifts" className="mt-3 inline-flex items-center gap-1 rounded-xl bg-slate-900 px-3 py-2 text-xs font-black text-white">
+                    シフト管理へ <ArrowRight size={12} />
+                  </Link>
+                </div>
+              )}
+            </div>
+          </div>
 
           {/* 運営インサイト (修正済み) */}
           <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
@@ -602,7 +780,7 @@ export default function MasterDashboard() {
             <div className="p-5 max-h-[60vh] overflow-y-auto">
               <p className="text-xs text-gray-500 mb-4 font-bold">よく使う機能を最大6個まで選択してください</p>
               <div className="grid grid-cols-2 gap-3">
-                {AVAILABLE_ACTIONS.map(action => {
+                {visibleActions.map(action => {
                   const isSelected = quickActions.includes(action.id);
                   const Icon = action.icon;
                   return (

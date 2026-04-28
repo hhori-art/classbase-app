@@ -8,7 +8,7 @@ import {
   Clock, CheckCircle, AlertCircle, Play, Square, Briefcase, 
   ArrowLeft, Plus, Trash2, Save, X, Edit3, Train, 
   ChevronLeft, ChevronRight, Loader2, Copy,
-  Calendar, LayoutTemplate, Coffee, DollarSign
+  Calendar, LayoutTemplate, Coffee, DollarSign, Send
 } from 'lucide-react';
 import Link from 'next/link';
 
@@ -42,6 +42,33 @@ interface ShiftData {
 const TIME_SLOTS: Record<string, { start: string; end: string }> = {
   '1限': { start: '19:20', end: '20:25' },
   '2限': { start: '20:35', end: '21:40' },
+};
+
+const toLocalDate = (dateStr: string) => new Date(`${String(dateStr || '').slice(0, 10)}T00:00:00+09:00`);
+const dayLabel = (dateStr: string) => {
+  const date = toLocalDate(dateStr);
+  return Number.isNaN(date.getTime()) ? '-' : ['日', '月', '火', '水', '木', '金', '土'][date.getDay()];
+};
+const dateLabel = (dateStr: string) => {
+  const date = toLocalDate(dateStr);
+  if (Number.isNaN(date.getTime())) return String(dateStr || '-');
+  return `${date.getMonth() + 1}/${date.getDate()}`;
+};
+const timeLabel = (value?: string | null) => {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+  return date.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+};
+const roundedWorkRange = (record: any) => {
+  if (!record?.start_time || !record?.end_time) return { start: '-', end: '-' };
+  const start = new Date(record.start_time);
+  const end = new Date(record.end_time);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return { start: '-', end: '-' };
+  const startMin = Math.ceil((start.getHours() * 60 + start.getMinutes()) / 5) * 5;
+  const endMin = Math.floor((end.getHours() * 60 + end.getMinutes()) / 5) * 5;
+  const toText = (mins: number) => `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
+  return { start: toText(startMin), end: toText(endMin) };
 };
 
 // --- サブコンポーネント: タイムライン表示 ---
@@ -120,6 +147,9 @@ export default function TeacherAttendancePage() {
   const [editingRecord, setEditingRecord] = useState<any>(null);
   const [segments, setSegments] = useState<WorkSegment[]>([]);
   const [expenses, setExpenses] = useState<Transportation[]>([]);
+  const [correctionModalOpen, setCorrectionModalOpen] = useState(false);
+  const [correctionSending, setCorrectionSending] = useState(false);
+  const [correctionForm, setCorrectionForm] = useState({ requested_start_time: '', requested_end_time: '', reason: '' });
 
   // その日のシフト情報
   const [dailyShifts, setDailyShifts] = useState<ShiftData[]>([]);
@@ -467,6 +497,71 @@ export default function TeacherAttendancePage() {
     } catch (e: any) { alert('保存エラー: ' + e.message); }
   };
 
+  const toLocalInputValue = (value?: string | null) => {
+    if (!value) return '';
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return '';
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+
+  const formatDateTimeLabel = (value?: string | null) => {
+    if (!value) return '-';
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return '-';
+    return d.toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  };
+
+  const openCorrectionModal = () => {
+    if (!editingRecord) return;
+    if (editingRecord.status === 'approved') {
+      alert('承認済みの勤怠記録は講師側から修正できません。管理者へ連絡してください。');
+      return;
+    }
+    setCorrectionForm({
+      requested_start_time: toLocalInputValue(editingRecord.start_time),
+      requested_end_time: toLocalInputValue(editingRecord.end_time),
+      reason: '',
+    });
+    setCorrectionModalOpen(true);
+  };
+
+  const requestTimeCorrection = async () => {
+    if (!editingRecord) return;
+    if (!correctionForm.reason.trim()) return alert('修正理由を入力してください。');
+    if (!correctionForm.requested_start_time && !correctionForm.requested_end_time) return alert('修正後の出勤時刻または退勤時刻を入力してください。');
+
+    try {
+      setCorrectionSending(true);
+      const token = await user?.getIdToken();
+      if (!token) throw new Error('ログイン情報を確認できません。再ログインしてください。');
+      const res = await fetch('/api/attendance-corrections', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          action: 'request',
+          work_record_id: editingRecord.id,
+          requested_start_time: correctionForm.requested_start_time ? new Date(correctionForm.requested_start_time).toISOString() : null,
+          requested_end_time: correctionForm.requested_end_time ? new Date(correctionForm.requested_end_time).toISOString() : null,
+          reason: correctionForm.reason,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) {
+        const message = data.error === 'approved work records cannot be changed by teacher'
+          ? '承認済みの勤怠記録は講師側から修正できません。管理者へ連絡してください。'
+          : data.error || 'failed';
+        throw new Error(message);
+      }
+      setCorrectionModalOpen(false);
+      alert('勤怠修正依頼を送信しました。管理者の承認後に反映されます。');
+    } catch (e: any) {
+      alert(`修正依頼の送信に失敗しました: ${e.message || e}`);
+    } finally {
+      setCorrectionSending(false);
+    }
+  };
+
   const changeMonth = (diff: number) => {
     const newDate = new Date(viewDate);
     newDate.setMonth(newDate.getMonth() + diff);
@@ -574,8 +669,8 @@ export default function TeacherAttendancePage() {
                 <div className="flex justify-between items-start mb-4">
                   <div className="flex gap-3">
                     <div className="flex flex-col items-center justify-center bg-gray-50 rounded-xl px-3 min-w-[3.5rem] border border-gray-100">
-                      <span className="text-[10px] font-bold text-gray-400 uppercase">{new Date(rec.date).toLocaleDateString('en-US', {month:'short'})}</span>
-                      <span className="text-xl font-black text-gray-700">{new Date(rec.date).getDate()}</span>
+                      <span className="text-[10px] font-black text-blue-500">{dayLabel(rec.date)}曜日</span>
+                      <span className="text-xl font-black text-gray-700">{dateLabel(rec.date)}</span>
                     </div>
                     <div>
                       <div className="font-black text-gray-800 text-lg font-mono flex items-center gap-1">{new Date(rec.start_time).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}<ArrowLeft size={12} className="rotate-180 text-gray-300"/>{rec.end_time ? new Date(rec.end_time).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '...'}</div>
@@ -604,7 +699,13 @@ export default function TeacherAttendancePage() {
                 ) : <div className="mb-4 text-xs text-blue-500 font-bold flex items-center gap-1 bg-blue-50 p-2 rounded-lg border border-blue-100"><LayoutTemplate size={14}/> シフトから自動入力可能です</div>}
                 
                 {rec.transportation?.length > 0 && <div className="mb-4 pt-2 border-t border-dashed border-gray-100 flex items-center justify-between text-xs text-gray-500 px-1"><span className="flex items-center gap-1 font-bold"><Train size={12}/> 交通費あり</span><span className="font-mono font-bold">¥{calcTotalCost(rec.transportation).toLocaleString()}</span></div>}
-                {rec.end_time && rec.status !== 'approved' && <button onClick={() => openEditModal(rec)} className="w-full py-3 rounded-xl bg-gray-50 text-gray-600 text-xs font-bold hover:bg-blue-50 hover:text-blue-600 transition-all flex items-center justify-center gap-2"><Edit3 size={14}/> {displaySegments?.length > 0 ? '詳細を修正' : '詳細・交通費を入力'}</button>}
+                {rec.end_time && rec.status !== 'approved' ? (
+                  <button onClick={() => openEditModal(rec)} className="w-full py-3 rounded-xl bg-gray-50 text-gray-600 text-xs font-bold hover:bg-blue-50 hover:text-blue-600 transition-all flex items-center justify-center gap-2"><Edit3 size={14}/> {displaySegments?.length > 0 ? '詳細を修正' : '詳細・交通費を入力'}</button>
+                ) : rec.end_time && (
+                  <div className="w-full rounded-xl bg-emerald-50 px-4 py-3 text-center text-xs font-black text-emerald-700">
+                    承認済みのため、時間・詳細・交通費は講師側では変更できません
+                  </div>
+                )}
               </div>
             );
           })}
@@ -619,11 +720,28 @@ export default function TeacherAttendancePage() {
             
             {/* モーダルヘッダー */}
             <div className="bg-white p-5 border-b border-gray-100 flex justify-between items-center shrink-0">
-              <div><h3 className="font-black text-gray-800 text-lg flex items-center gap-2"><LayoutTemplate size={20} className="text-blue-600"/> 業務詳細修正</h3><p className="text-xs text-gray-400 font-bold mt-0.5">{editingRecord.date}</p></div>
-              <button onClick={() => setEditingRecord(null)} className="bg-gray-100 hover:bg-gray-200 p-2 rounded-full transition-colors"><X size={20} className="text-gray-600"/></button>
+              <div><h3 className="font-black text-gray-800 text-lg flex items-center gap-2"><LayoutTemplate size={20} className="text-blue-600"/> 業務詳細修正</h3><p className="text-xs text-gray-400 font-bold mt-0.5">{editingRecord.date}（{dayLabel(editingRecord.date)}）</p></div>
+              <div className="flex items-center gap-2">
+                <button onClick={openCorrectionModal} className="rounded-xl bg-amber-50 px-3 py-2 text-xs font-black text-amber-700 hover:bg-amber-100">打刻修正依頼</button>
+                <button onClick={() => setEditingRecord(null)} className="bg-gray-100 hover:bg-gray-200 p-2 rounded-full transition-colors"><X size={20} className="text-gray-600"/></button>
+              </div>
             </div>
             
             <div className="flex-1 overflow-y-auto p-4 md:p-6 bg-gray-50 space-y-6 custom-scrollbar">
+              <section className="grid gap-3 sm:grid-cols-3">
+                <div className="rounded-2xl border border-blue-100 bg-blue-50 p-4">
+                  <p className="text-[10px] font-black text-blue-500">実打刻</p>
+                  <p className="mt-1 text-lg font-black text-slate-800">{timeLabel(editingRecord.start_time)} - {timeLabel(editingRecord.end_time)}</p>
+                </div>
+                <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-4">
+                  <p className="text-[10px] font-black text-emerald-600">入力可能範囲</p>
+                  <p className="mt-1 text-lg font-black text-slate-800">{roundedWorkRange(editingRecord).start} - {roundedWorkRange(editingRecord).end}</p>
+                </div>
+                <div className="rounded-2xl border border-amber-100 bg-amber-50 p-4">
+                  <p className="text-[10px] font-black text-amber-600">確認ポイント</p>
+                  <p className="mt-1 text-xs font-bold leading-relaxed text-amber-800">打刻時間を見ながら、業務内訳を5分単位で入力してください。</p>
+                </div>
+              </section>
               
               {/* ビジュアルタイムライン */}
               <section>
@@ -758,6 +876,80 @@ export default function TeacherAttendancePage() {
                 </span>
               </div>
               <button onClick={saveData} className="w-full bg-gray-900 text-white py-4 rounded-2xl font-bold hover:bg-gray-800 shadow-lg transition-all active:scale-95 flex items-center justify-center gap-2 text-lg"><Save size={20}/> 保存して完了</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editingRecord && correctionModalOpen && (
+        <div className="fixed inset-0 z-[10000] flex items-end justify-center bg-slate-950/60 p-0 backdrop-blur-sm sm:items-center sm:p-4">
+          <div className="w-full max-w-lg rounded-t-[28px] bg-white shadow-2xl sm:rounded-[28px]">
+            <div className="border-b border-slate-100 p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-black uppercase tracking-[0.2em] text-amber-500">Time Correction</p>
+                  <h3 className="mt-1 text-xl font-black text-slate-900">打刻修正依頼</h3>
+                  <p className="mt-1 text-xs font-bold text-slate-400">{editingRecord.date} の出退勤時刻を管理者へ申請します</p>
+                </div>
+                <button onClick={() => setCorrectionModalOpen(false)} className="rounded-full bg-slate-100 p-2 text-slate-500 hover:bg-slate-200">
+                  <X size={18} />
+                </button>
+              </div>
+            </div>
+
+            <div className="space-y-5 p-5">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-2xl bg-slate-50 p-4">
+                  <p className="text-[10px] font-black text-slate-400">現在の出勤</p>
+                  <p className="mt-1 text-sm font-black text-slate-800">{formatDateTimeLabel(editingRecord.start_time)}</p>
+                </div>
+                <div className="rounded-2xl bg-slate-50 p-4">
+                  <p className="text-[10px] font-black text-slate-400">現在の退勤</p>
+                  <p className="mt-1 text-sm font-black text-slate-800">{formatDateTimeLabel(editingRecord.end_time)}</p>
+                </div>
+              </div>
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <label>
+                  <span className="mb-2 block text-xs font-black text-slate-600">修正後の出勤時刻</span>
+                  <input
+                    type="datetime-local"
+                    value={correctionForm.requested_start_time}
+                    onChange={e => setCorrectionForm(prev => ({ ...prev, requested_start_time: e.target.value }))}
+                    className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none focus:border-amber-300 focus:ring-2 focus:ring-amber-100"
+                  />
+                </label>
+                <label>
+                  <span className="mb-2 block text-xs font-black text-slate-600">修正後の退勤時刻</span>
+                  <input
+                    type="datetime-local"
+                    value={correctionForm.requested_end_time}
+                    onChange={e => setCorrectionForm(prev => ({ ...prev, requested_end_time: e.target.value }))}
+                    className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none focus:border-amber-300 focus:ring-2 focus:ring-amber-100"
+                  />
+                </label>
+              </div>
+
+              <label>
+                <span className="mb-2 block text-xs font-black text-slate-600">修正理由</span>
+                <textarea
+                  value={correctionForm.reason}
+                  onChange={e => setCorrectionForm(prev => ({ ...prev, reason: e.target.value }))}
+                  placeholder="例: 退勤ボタンを押し忘れたため、22:10退勤へ修正をお願いします。"
+                  className="min-h-[110px] w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:border-amber-300 focus:ring-2 focus:ring-amber-100"
+                />
+              </label>
+
+              <div className="rounded-2xl border border-amber-100 bg-amber-50 p-4 text-xs font-bold leading-relaxed text-amber-800">
+                送信後は管理者の承認が必要です。承認されるまで、元の打刻時間は変更されません。
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 border-t border-slate-100 bg-slate-50 p-5">
+              <button onClick={() => setCorrectionModalOpen(false)} className="rounded-2xl px-5 py-3 text-sm font-black text-slate-500 hover:bg-slate-200">キャンセル</button>
+              <button onClick={requestTimeCorrection} disabled={correctionSending} className="flex items-center gap-2 rounded-2xl bg-amber-500 px-5 py-3 text-sm font-black text-white shadow-lg shadow-amber-100 hover:bg-amber-600 disabled:opacity-60">
+                {correctionSending ? <Loader2 className="animate-spin" size={18} /> : <Send size={18} />} 依頼を送信
+              </button>
             </div>
           </div>
         </div>

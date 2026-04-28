@@ -16,7 +16,6 @@ import Link from 'next/link';
 
 // 定数設定
 const LIKE_REWARD_THRESHOLD = 10; 
-const COINS_PER_REWARD = 5;
 
 // カテゴリ定義
 const CATEGORIES = {
@@ -159,11 +158,15 @@ export default function TeacherCommunityPage() {
       const topicRef = doc(db, 'teacher_community_topics', topic.id);
       await updateDoc(topicRef, { likes: increment(1), liked_by: arrayUnion(uid) });
       
-      // いいね報酬 (匿名でも報酬は裏で付与される)
       if (!topic.reward_given && (topic.likes || 0) + 1 >= LIKE_REWARD_THRESHOLD) {
-        const creatorRef = doc(db, 'users', topic.creator_uid);
-        await updateDoc(creatorRef, { coins: increment(COINS_PER_REWARD), total_coins: increment(COINS_PER_REWARD) });
-        await updateDoc(topicRef, { reward_given: true });
+        const token = await user?.getIdToken();
+        if (token) {
+          await fetch('/api/coin-transactions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ action: 'community_like_reward', collection_name: 'teacher_community_topics', topic_id: topic.id }),
+          });
+        }
       }
     } catch (e) { console.error(e); }
   };

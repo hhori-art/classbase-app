@@ -69,6 +69,7 @@ export function middleware(request: NextRequest) {
         '/teacher/attendance',
         '/teacher/chat',
         '/teacher/shifts',
+        '/teacher/substitutions',
       ];
 
       const isAllowedPath = allowedTeacherPaths.some(p => pathname === p || pathname.startsWith(`${p}/`));

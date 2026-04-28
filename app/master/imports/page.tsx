@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { ArrowLeft, Database, FileText, UserPlus, Calendar, AlertTriangle, Users, Presentation } from 'lucide-react';
 import AccountImportButton from '@/app/components/AccountImportButton';
+import AnnualScheduleImportButton from '@/app/components/AnnualScheduleImportButton';
 import PfImportButton from '@/app/components/PfImportButton';
 import ShiftImportButton from '@/app/components/ShiftImportButton';
 
@@ -141,6 +142,67 @@ export default function ImportCenterPage() {
             </div>
           </section>
 
+          {/* 5. 年間授業予定 */}
+          <section className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+            <div className="bg-indigo-50 p-5 border-b border-indigo-100 flex items-center gap-4">
+              <div className="bg-white p-3 rounded-xl text-indigo-600 shadow-sm">
+                <Calendar size={28} />
+              </div>
+              <div>
+                <h2 className="text-xl font-bold text-gray-800">5. 年間授業予定CSV</h2>
+                <p className="text-sm text-gray-500">マスター管理者用。取り込んだ予定は生徒・保護者カレンダーにも反映されます。</p>
+              </div>
+            </div>
+            <div className="p-6">
+              <div className="flex flex-col gap-6 md:flex-row md:items-start md:justify-between">
+                <div className="text-sm text-gray-600 space-y-1 flex-1">
+                  <p><strong>対応列:</strong> 日付/開始日/終了日, 学年, 科目, 単元, 回, 授業内容, 校舎, 備考</p>
+                  <p>日付は「2026/4/1」「4/1」「4月1日」やExcel日付シリアルを受け付けます。</p>
+                  <p className="text-xs text-gray-400">※ 2026_OL理社講座カリキュラム原案の列に寄せ、列名の揺れを吸収します。</p>
+                </div>
+                <div className="shrink-0 md:w-[360px]">
+                  <AnnualScheduleImportButton
+                    type="lesson_schedule"
+                    label="授業予定CSVを取り込む"
+                    sample="日付,学年,科目,回,単元,授業内容,校舎,備考"
+                  />
+                </div>
+              </div>
+            </div>
+          </section>
+
+          {/* 6. 年間カリキュラム予定 */}
+          <section className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+            <div className="bg-cyan-50 p-5 border-b border-cyan-100 flex items-center gap-4">
+              <div className="bg-white p-3 rounded-xl text-cyan-600 shadow-sm">
+                <FileText size={28} />
+              </div>
+              <div>
+                <h2 className="text-xl font-bold text-gray-800">6. 年間カリキュラム予定CSV</h2>
+                <p className="text-sm text-gray-500">単元進行や年間カリキュラムをCSVで登録します。</p>
+              </div>
+            </div>
+            <div className="p-6">
+              <div className="flex flex-col gap-6 md:flex-row md:items-start md:justify-between">
+                <div className="text-sm text-gray-600 space-y-1 flex-1">
+                  <p><strong>対応列:</strong> 開始日/終了日, 学年, 科目, 単元, カリキュラム, 内容, 備考</p>
+                  <p>複数日に跨る単元予定は、開始日と終了日の両方を指定してください。</p>
+                  <p className="text-xs font-bold text-cyan-700">取り込み後は「カリキュラム管理」でターム設定を保存すると、講座登録用の候補に反映されます。</p>
+                </div>
+                <div className="shrink-0 md:w-[360px]">
+                  <Link href="/master/curriculum" className="mb-3 inline-flex w-full items-center justify-center rounded-xl border border-cyan-200 bg-cyan-50 px-4 py-2 text-sm font-bold text-cyan-700 hover:bg-cyan-100">
+                    カリキュラム管理を開く
+                  </Link>
+                  <AnnualScheduleImportButton
+                    type="curriculum"
+                    label="カリキュラムCSVを取り込む"
+                    sample="開始日,終了日,学年,科目,単元,内容,備考"
+                  />
+                </div>
+              </div>
+            </div>
+          </section>
+
           {/* 5. スライド・教材データ管理 */}
           <section className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
             <div className="bg-teal-50 p-5 border-b border-teal-100 flex items-center gap-4">
@@ -148,7 +210,7 @@ export default function ImportCenterPage() {
                 <Presentation size={28} />
               </div>
               <div>
-                <h2 className="text-xl font-bold text-gray-800">5. スライド・教材データ登録</h2>
+                <h2 className="text-xl font-bold text-gray-800">7. スライド・教材データ登録</h2>
                 <p className="text-sm text-gray-500">AI問題生成の元となる学習単元データを登録します。</p>
               </div>
             </div>

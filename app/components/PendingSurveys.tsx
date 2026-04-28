@@ -1,8 +1,8 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs, addDoc, serverTimestamp, doc, getDoc, updateDoc, increment } from 'firebase/firestore';
+import { auth, db } from '@/lib/firebase';
+import { collection, query, where, getDocs, addDoc, serverTimestamp, doc, getDoc } from 'firebase/firestore';
 import { Loader2, MessageSquare, Star, X, Send, Trophy } from 'lucide-react';
 
 // 型定義
@@ -137,14 +137,18 @@ export default function PendingSurveys({ student }: { student: Student }) {
         created_at: serverTimestamp()
       });
 
-      // ★追加: コインを付与（回答報酬: 10コイン）
       const rewardCoins = 10;
-      const userRef = doc(db, 'users', student.uid);
-      await updateDoc(userRef, {
-        coins: increment(rewardCoins)
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) throw new Error('ログイン情報を確認できません');
+      const rewardRes = await fetch('/api/coin-transactions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action: 'survey_reward', shift_id: selectedClass.id }),
       });
+      const rewardData = await rewardRes.json().catch(() => ({}));
+      if (!rewardRes.ok || rewardData.ok === false) throw new Error(rewardData.error || 'reward failed');
       
-      alert(`回答ありがとうございました！\nボーナスとして ${rewardCoins}コイン GETしました！🪙`);
+      alert(rewardData.applied ? `回答ありがとうございました！\nボーナスとして ${rewardCoins}コイン GETしました！` : '回答ありがとうございました！この授業の回答ボーナスは受取済みです。');
       
       setIsModalOpen(false);
       // リスト更新（次の未回答があればそれが表示される）

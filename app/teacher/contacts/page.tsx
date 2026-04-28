@@ -5,7 +5,7 @@ import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
 import { collection, query, where, getDocs, doc, setDoc, addDoc, serverTimestamp, getDoc } from 'firebase/firestore';
 import { 
-  Phone, Search, Filter, CheckCircle, PhoneOff, 
+  Phone, Search, Filter, CheckCircle, PhoneOff, CameraOff,
   ArrowLeft, Loader2, Calendar, Clock, UserX 
 } from 'lucide-react';
 import Link from 'next/link';
@@ -76,6 +76,7 @@ export default function TeacherContactsPage() {
       const targetList = allStudents.filter((st: any) => {
         if (filters.day && st.day_of_week !== filters.day) return false;
         if (filters.grade && st.grade !== filters.grade) return false;
+        if (st.absence_call_not_required) return false;
 
         const status = statusMap.get(st.uid);
         if (status === '出' || status === '欠' || status === '遅') return false;
@@ -232,6 +233,11 @@ export default function TeacherContactsPage() {
                       <span className="text-xs text-gray-400 font-bold">
                         {student.day_of_week}曜クラス
                       </span>
+                      {student.camera_off_requested && (
+                        <span className="bg-indigo-50 text-indigo-600 text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
+                          <CameraOff size={10}/> カメラオフ希望
+                        </span>
+                      )}
                     </div>
                     
                     <h3 className="text-xl font-black text-gray-800 mb-2 flex items-center gap-2">

@@ -2,10 +2,9 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { db, auth } from '@/lib/firebase';
-import { doc, onSnapshot, collection, query, where, getDocs, orderBy, limit } from 'firebase/firestore'; 
+import { db } from '@/lib/firebase';
+import { doc, getDoc, onSnapshot, collection, query, where, getDocs, orderBy, limit } from 'firebase/firestore'; 
 import { useAuth } from '@/app/context/AuthContext';
-import { signOut } from 'firebase/auth';
 import { 
   Video, BookOpen, AlertTriangle, 
   ChevronRight, Calendar, Trophy, Settings,
@@ -18,7 +17,6 @@ import NewsWidget from '@/app/components/NewsWidget';
 import TrophyModal from '@/app/components/TrophyModal';
 import SmartClassButton from '@/app/components/SmartClassButton';
 import ActivityLogger from '@/app/components/ActivityLogger';
-import RegistrationModal from '@/app/components/RegistrationModal';
 
 import { BADGES } from '@/lib/gamification';
 
@@ -27,8 +25,19 @@ const CLASS_TIMES = {
   period2: { start: '20:35', end: '21:40' }
 };
 
+const DEFAULT_STUDENT_VISIBILITY = {
+  adaptiveQuest: true,
+  chat: true,
+  homework: true,
+  recordings: true,
+  absence: true,
+  calendar: true,
+  changeRequest: true,
+  community: true,
+};
+
 export default function StudentDashboard() {
-  const { user, profile: authProfile, loading: authLoading } = useAuth();
+  const { user, profile: authProfile, loading: authLoading, logout } = useAuth();
   
   const [mounted, setMounted] = useState(false);
   const [userData, setUserData] = useState<any>(authProfile || null);
@@ -43,9 +52,7 @@ export default function StudentDashboard() {
   const [nextClassInfo, setNextClassInfo] = useState<{ date: string; status: 'open' | 'closed' | 'checking' } | null>(null);
   const [urgentHomework, setUrgentHomework] = useState<{ title: string; deadline: string; daysLeft: number } | null>(null);
 
-  const [pendingRequests, setPendingRequests] = useState<any[]>([]);
-  const [targetRequest, setTargetRequest] = useState<any>(null);
-  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [visibility, setVisibility] = useState(DEFAULT_STUDENT_VISIBILITY);
 
   // 初期化 (日時・挨拶)
   useEffect(() => {
@@ -63,6 +70,18 @@ export default function StudentDashboard() {
     setNow(d);
     const timer = setInterval(() => setNow(new Date()), 60000);
     return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const loadVisibility = async () => {
+      try {
+        const snap = await getDoc(doc(db, 'settings', 'portal_visibility'));
+        if (snap.exists()) setVisibility(prev => ({ ...prev, ...(snap.data().student || {}) }));
+      } catch (e) {
+        console.warn('Student visibility settings read failed:', e);
+      }
+    };
+    loadVisibility();
   }, []);
 
   // ★修正: ユーザーデータ監視 (エラーハンドリング強化)
@@ -116,42 +135,13 @@ export default function StudentDashboard() {
   const handleLogout = async () => {
     if (confirm('ログアウトしますか？')) {
       try {
-        await signOut(auth);
-        window.location.href = '/'; 
+        await logout();
       } catch (error) {
         console.error("Logout failed", error);
         window.location.href = '/';
       }
     }
   };
-
-  // 未回答依頼チェック
-  useEffect(() => {
-    if (!user?.uid) return;
-    const checkRegistrations = async () => {
-      try {
-        const reqQuery = query(collection(db, 'registration_requests'), where('is_active', '==', true));
-        const reqSnap = await getDocs(reqQuery);
-        const activeRequests = reqSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-        if (activeRequests.length === 0) return;
-
-        const myRegQuery = query(collection(db, 'student_registrations'), where('student_id', '==', user.uid));
-        const myRegSnap = await getDocs(myRegQuery);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const myAnsweredIds = myRegSnap.docs.map((d: any) => d.data().request_id);
-
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const pending = activeRequests.filter((req: any) => !myAnsweredIds.includes(req.id));
-        setPendingRequests(pending);
-
-        if (pending.length > 0) {
-          setTargetRequest(pending[0]);
-          setIsModalOpen(true);
-        }
-      } catch (e) { console.error(e); } // 権限エラー時は無視
-    };
-    checkRegistrations();
-  }, [user]);
 
   const checkNextClass = async (dayOfWeek: string) => {
     if (!dayOfWeek) return;
@@ -218,13 +208,6 @@ export default function StudentDashboard() {
   const showPeriod1 = isClassActive(CLASS_TIMES.period1.start, CLASS_TIMES.period1.end);
   const showPeriod2 = isClassActive(CLASS_TIMES.period2.start, CLASS_TIMES.period2.end);
 
-  const handleRegistrationComplete = () => {
-    setIsModalOpen(false);
-    if (targetRequest) setPendingRequests((prev: any[]) => prev.filter((req: any) => req.id !== targetRequest.id));
-    setTargetRequest(null);
-  };
-  const handleOpenRequest = (req: any) => { setTargetRequest(req); setIsModalOpen(true); };
-
   // --- Render ---
 
   if (!mounted) {
@@ -253,14 +236,6 @@ export default function StudentDashboard() {
           ✨ {popMessage}
         </div>
       )}
-
-      <RegistrationModal 
-        isOpen={isModalOpen}
-        onClose={() => setIsModalOpen(false)}
-        onComplete={handleRegistrationComplete}
-        request={targetRequest}
-        studentId={displayProfile?.uid}
-      />
 
       <TrophyModal isOpen={isTrophyOpen} onClose={() => setIsTrophyOpen(false)} userData={displayProfile} />
 
@@ -333,22 +308,22 @@ export default function StudentDashboard() {
         </div>
 
         <div className="grid grid-cols-2 gap-4">
-          <Link href="/student/homework/adaptive" className="col-span-2 block group"><div className="bg-gradient-to-r from-teal-400 to-emerald-500 p-5 rounded-3xl shadow-lg text-white flex items-center justify-between relative overflow-hidden"><div className="flex items-center gap-4 relative z-10"><div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center"><Brain size={28}/></div><div><div className="flex items-center gap-2 mb-1"><span className="text-lg font-bold">AI学習クエスト</span><span className="bg-yellow-400 text-yellow-900 text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 animate-pulse"><Sparkles size={10} fill="currentColor"/> NEW</span></div><p className="text-xs opacity-90">キミに最適な問題をAIが出題！</p></div></div><ChevronRight size={24} className="opacity-70 group-hover:translate-x-1 transition-transform"/></div></Link>
-          <Link href="/student/chat" className="block group"><div className="bg-white p-5 rounded-3xl shadow-sm border border-indigo-100 hover:border-indigo-300 transition-all flex flex-col items-center text-center h-full"><div className="w-12 h-12 bg-indigo-100 text-indigo-600 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><Bot size={24}/></div><h2 className="font-bold text-gray-800">AIチューター</h2><p className="text-[10px] text-gray-400 mt-1">24時間 質問OK!</p></div></Link>
-          <Link href="/student/homework" className="block group"><div className="bg-white p-5 rounded-3xl shadow-sm border border-gray-100 hover:border-orange-200 transition-all flex flex-col items-center text-center h-full"><div className="w-12 h-12 bg-orange-100 text-orange-500 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><BookOpen size={24}/></div><h2 className="font-bold text-gray-800">宿題提出</h2><p className="text-[10px] text-gray-400 mt-1">写真を送信</p></div></Link>
-          <Link href="/student/recordings" className="block group"><div className="bg-white p-5 rounded-3xl shadow-sm border border-gray-100 hover:border-red-200 transition-all flex flex-col items-center text-center h-full"><div className="w-12 h-12 bg-red-100 text-red-500 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><Video size={24}/></div><h2 className="font-bold text-gray-800">授業録画</h2><p className="text-[10px] text-gray-400 mt-1">見逃し配信</p></div></Link>
-          <Link href="/student/absence" className="block group"><div className="bg-white p-5 rounded-3xl shadow-sm border border-gray-100 hover:border-green-200 transition-all flex flex-col items-center text-center h-full"><div className="w-12 h-12 bg-green-100 text-green-500 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><AlertTriangle size={24}/></div><h2 className="font-bold text-gray-800">欠席連絡</h2><p className="text-[10px] text-gray-400 mt-1">お休み申請</p></div></Link>
+          {visibility.adaptiveQuest && <Link href="/student/homework/adaptive" className="col-span-2 block group"><div className="bg-gradient-to-r from-teal-400 to-emerald-500 p-5 rounded-3xl shadow-lg text-white flex items-center justify-between relative overflow-hidden"><div className="flex items-center gap-4 relative z-10"><div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center"><Brain size={28}/></div><div><div className="flex items-center gap-2 mb-1"><span className="text-lg font-bold">AI学習クエスト</span><span className="bg-yellow-400 text-yellow-900 text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 animate-pulse"><Sparkles size={10} fill="currentColor"/> NEW</span></div><p className="text-xs opacity-90">キミに最適な問題をAIが出題！</p></div></div><ChevronRight size={24} className="opacity-70 group-hover:translate-x-1 transition-transform"/></div></Link>}
+          {visibility.chat && <Link href="/student/chat" className="block group"><div className="bg-white p-5 rounded-3xl shadow-sm border border-indigo-100 hover:border-indigo-300 transition-all flex flex-col items-center text-center h-full"><div className="w-12 h-12 bg-indigo-100 text-indigo-600 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><Bot size={24}/></div><h2 className="font-bold text-gray-800">AIチューター</h2><p className="text-[10px] text-gray-400 mt-1">24時間 質問OK!</p></div></Link>}
+          {visibility.homework && <Link href="/student/homework" className="block group"><div className="bg-white p-5 rounded-3xl shadow-sm border border-gray-100 hover:border-orange-200 transition-all flex flex-col items-center text-center h-full"><div className="w-12 h-12 bg-orange-100 text-orange-500 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><BookOpen size={24}/></div><h2 className="font-bold text-gray-800">宿題提出</h2><p className="text-[10px] text-gray-400 mt-1">写真を送信</p></div></Link>}
+          {visibility.recordings && <Link href="/student/recordings" className="block group"><div className="bg-white p-5 rounded-3xl shadow-sm border border-gray-100 hover:border-red-200 transition-all flex flex-col items-center text-center h-full"><div className="w-12 h-12 bg-red-100 text-red-500 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><Video size={24}/></div><h2 className="font-bold text-gray-800">授業録画</h2><p className="text-[10px] text-gray-400 mt-1">見逃し配信</p></div></Link>}
+          {visibility.absence && <Link href="/student/absence" className="block group"><div className="bg-white p-5 rounded-3xl shadow-sm border border-gray-100 hover:border-green-200 transition-all flex flex-col items-center text-center h-full"><div className="w-12 h-12 bg-green-100 text-green-500 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><AlertTriangle size={24}/></div><h2 className="font-bold text-gray-800">欠席連絡</h2><p className="text-[10px] text-gray-400 mt-1">お休み申請</p></div></Link>}
         </div>
 
-        <NewsWidget role="student" pendingRequests={pendingRequests} onOpenRequest={handleOpenRequest} />
+        <NewsWidget role="student" />
         
-        <div className="bg-white p-2 rounded-3xl shadow-sm border border-gray-100">
+        {visibility.calendar && <div className="bg-white p-2 rounded-3xl shadow-sm border border-gray-100">
           <CalendarWidget classDay={displayProfile.day_of_week} grade={displayProfile.grade} />
-        </div>
+        </div>}
         
-        <Link href="/student/change-request" className="flex items-center justify-between bg-white p-4 rounded-2xl border border-gray-100 shadow-sm hover:bg-gray-50 transition-colors no-underline mb-8">
+        {visibility.changeRequest && <Link href="/student/change-request" className="flex items-center justify-between bg-white p-4 rounded-2xl border border-gray-100 shadow-sm hover:bg-gray-50 transition-colors no-underline mb-8">
           <div className="flex items-center gap-3"><div className="bg-gray-100 p-2 rounded-lg text-gray-500"><Settings size={18}/></div><span className="text-sm font-bold text-gray-600">科目・曜日の変更申請</span></div><ChevronRight size={20} className="text-gray-400" />
-        </Link>
+        </Link>}
       </div>
       <BottomNav />
     </div>
