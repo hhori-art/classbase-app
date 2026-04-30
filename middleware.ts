@@ -53,7 +53,6 @@ export function middleware(request: NextRequest) {
   // 管理者 (/master) は社外アクセス禁止
   if (pathname.startsWith('/master')) {
     if (!isInternalNetwork) {
-      // 必要ならここだけログ（本番ログ肥大化防止）
       console.log(`[Middleware] Blocked /master from IP: ${ip}`);
       return NextResponse.redirect(new URL('/403', request.url));
     }

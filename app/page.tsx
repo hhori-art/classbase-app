@@ -9,13 +9,23 @@ import { LogIn, Loader2, User, AlertCircle, Eye, EyeOff, Lock, ArrowRight } from
 import Link from 'next/link';
 
 const EMAIL_DOMAIN = 'sozogakuen.co.jp';
+const ADMIN_ROLE_ALIASES = [
+  'admin',
+  'school_admin',
+  'branch_admin',
+  'campus_admin',
+  'classroom_admin',
+  'test_admin',
+  'master_admin',
+  'super_admin',
+];
 
 const normalizeRole = (role: any) => {
   const r = String(role || '').toLowerCase();
   if (r === 'teacher') return 'teacher';
   if (r === 'parent' || r === 'guardian') return 'parent';
   if (r === 'master') return 'master';
-  if (['admin', 'school_admin', 'branch_admin', 'campus_admin', 'classroom_admin'].includes(r)) return 'admin';
+  if (ADMIN_ROLE_ALIASES.includes(r)) return 'admin';
   return 'student';
 };
 

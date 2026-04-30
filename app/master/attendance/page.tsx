@@ -33,8 +33,11 @@ interface UserInfo {
 
 interface CorrectionRequest {
   id: string;
-  work_record_id: string;
+  work_record_id?: string | null;
+  request_type?: string;
   teacher_id: string;
+  teacher_name?: string;
+  target_date?: string | null;
   requested_start_time?: string | null;
   requested_end_time?: string | null;
   reason?: string;
@@ -154,6 +157,8 @@ export default function MasterAttendancePage() {
       if (!res.ok || data.ok === false) {
         const message = data.error === 'work_record_id is missing on correction request'
           ? '対象の勤務記録が見つかりません。この依頼は古い形式か壊れているため、勤務記録から再申請してください。'
+          : data.error === 'target_date is missing on correction request'
+          ? '申請日が記録されていないため反映できません。却下して再申請してください。'
           : data.error || 'failed';
         throw new Error(message);
       }
@@ -976,14 +981,18 @@ export default function MasterAttendancePage() {
 
             <div className="grid gap-3 lg:grid-cols-2">
               {pendingCorrectionRequests.map(req => {
-                const rec = getRecordById(req.work_record_id);
+                const rec = req.work_record_id ? getRecordById(req.work_record_id) : undefined;
                 const teacher = usersMap[req.teacher_id];
+                const isMissingClock = req.request_type === 'missing_clock' || !req.work_record_id;
                 return (
                   <div key={req.id} className="rounded-2xl border border-amber-100 bg-white p-4 shadow-sm">
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                       <div className="min-w-0">
-                        <p className="text-sm font-black text-slate-900">{teacher?.name || rec?.teacher_name || '講師未設定'}</p>
-                        <p className="mt-1 text-xs font-bold text-slate-400">{rec?.date || '日付未取得'} / 申請ID: {req.id.slice(0, 8)}</p>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="text-sm font-black text-slate-900">{teacher?.name || req.teacher_name || rec?.teacher_name || '講師未設定'}</p>
+                          {isMissingClock && <span className="rounded-full bg-rose-50 px-2 py-1 text-[10px] font-black text-rose-600">打刻なし新規</span>}
+                        </div>
+                        <p className="mt-1 text-xs font-bold text-slate-400">{rec?.date || req.target_date || '日付未取得'} / 申請ID: {req.id.slice(0, 8)}</p>
                       </div>
                       <span className="w-fit rounded-full bg-amber-100 px-3 py-1 text-[10px] font-black text-amber-700">承認待ち</span>
                     </div>
@@ -991,7 +1000,7 @@ export default function MasterAttendancePage() {
                     <div className="mt-4 grid grid-cols-2 gap-2">
                       <div className="rounded-xl bg-slate-50 p-3">
                         <p className="text-[10px] font-black text-slate-400">現在の出勤</p>
-                        <p className="mt-1 text-xs font-black text-slate-700">{formatCorrectionTime(rec?.start_time)}</p>
+                        <p className="mt-1 text-xs font-black text-slate-700">{isMissingClock ? '記録なし' : formatCorrectionTime(rec?.start_time)}</p>
                       </div>
                       <div className="rounded-xl bg-indigo-50 p-3">
                         <p className="text-[10px] font-black text-indigo-400">修正後の出勤</p>
@@ -999,7 +1008,7 @@ export default function MasterAttendancePage() {
                       </div>
                       <div className="rounded-xl bg-slate-50 p-3">
                         <p className="text-[10px] font-black text-slate-400">現在の退勤</p>
-                        <p className="mt-1 text-xs font-black text-slate-700">{formatCorrectionTime(rec?.end_time)}</p>
+                        <p className="mt-1 text-xs font-black text-slate-700">{isMissingClock ? '記録なし' : formatCorrectionTime(rec?.end_time)}</p>
                       </div>
                       <div className="rounded-xl bg-indigo-50 p-3">
                         <p className="text-[10px] font-black text-indigo-400">修正後の退勤</p>

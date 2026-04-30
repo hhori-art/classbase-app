@@ -3,10 +3,59 @@
 import { useState } from 'react';
 import { signInWithEmailAndPassword } from 'firebase/auth';
 import { auth, db } from '@/lib/firebase';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { doc, getDoc } from 'firebase/firestore';
 import { Lock, Loader2, Wrench, ArrowLeft } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+
+const ADMIN_ROLE_ALIASES = [
+  'admin',
+  'school_admin',
+  'branch_admin',
+  'campus_admin',
+  'classroom_admin',
+  'test_admin',
+  'master_admin',
+  'super_admin',
+];
+
+const normalizeLoginInput = (value: string) =>
+  value.trim().normalize('NFKC').replace(/\s+/g, '').toLowerCase();
+
+const buildLoginCandidates = (value: string) => {
+  const normalized = normalizeLoginInput(value);
+  if (!normalized) return [];
+
+  const candidates = [normalized];
+  if (normalized.includes('@')) {
+    const [localPart] = normalized.split('@');
+    if (localPart) {
+      candidates.push(`${localPart}@classbase.local`);
+      candidates.push(`${localPart}@sozogakuen.co.jp`);
+    }
+  } else {
+    candidates.push(`${normalized}@classbase.local`);
+    candidates.push(`${normalized}@sozogakuen.co.jp`);
+  }
+
+  return Array.from(new Set(candidates));
+};
+
+const adminFirstLogin = async (login: string, pass: string) => {
+  const res = await fetch('/api/admin/first-login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ login, password: pass }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.ok === false) {
+    if (data.error === 'not-registered') throw new Error('管理者登録データが見つかりません。');
+    if (data.error === 'not-admin') throw new Error('このアカウントは管理者権限ではありません。');
+    if (data.error === 'wrong-password') throw new Error('ログインIDまたはパスワードが違います。');
+    throw new Error(data.error || '管理者Auth復旧に失敗しました。');
+  }
+  return data as { ok: true; email: string };
+};
 
 export default function AutoFixLoginPage() {
   const router = useRouter();
@@ -22,7 +71,27 @@ export default function AutoFixLoginPage() {
 
     try {
       // 1. Firebase Auth認証
-      const userCredential = await signInWithEmailAndPassword(auth, email, password);
+      const loginCandidates = buildLoginCandidates(email);
+      let userCredential;
+      let lastAuthError: any = null;
+
+      for (const candidate of loginCandidates) {
+        try {
+          userCredential = await signInWithEmailAndPassword(auth, candidate, password);
+          break;
+        } catch (authError: any) {
+          lastAuthError = authError;
+          if (!['auth/invalid-credential', 'auth/user-not-found', 'auth/wrong-password'].includes(authError?.code)) {
+            throw authError;
+          }
+        }
+      }
+
+      if (!userCredential) {
+        setStatus('⚠️ Auth未登録またはメール形式違いの可能性があります。管理者データを確認中...');
+        const restored = await adminFirstLogin(email, password);
+        userCredential = await signInWithEmailAndPassword(auth, restored.email, password);
+      }
       const user = userCredential.user;
       setStatus(`✅ 2/3: 認証成功! データベースを確認中...`); // ★ ここで止まるならFirestoreへの接続に問題あり
 
@@ -36,18 +105,22 @@ export default function AutoFixLoginPage() {
       }
       
       if (!userDoc.exists()) {
-        setStatus('⚠️ データ欠落。自動修復中...');
+        setStatus('⚠️ データ欠落。サーバーAPIで自動修復中...');
         try {
-          const userDocRef = doc(db, 'users', user.uid);
-          await setDoc(userDocRef, {
-            uid: user.uid,
-            name: '管理者(自動修復)',
-            email: user.email,
-            role: 'master',
-            created_at: new Date().toISOString()
+          const token = await user.getIdToken();
+          const res = await fetch('/api/admin/bootstrap-profile', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}` },
           });
-        } catch (dbWriteError: any) {
-          throw new Error(`Firestore書込エラー: ${dbWriteError.message}`);
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || data.ok === false) {
+            const message = data.error === 'bootstrap-not-allowed'
+              ? '管理者プロフィールを自動作成できません。このメールアドレスは許可対象外です。'
+              : data.error || 'bootstrap failed';
+            throw new Error(message);
+          }
+        } catch (repairError: any) {
+          throw new Error(`Firestore自動修復エラー: ${repairError.message}`);
         }
         
         setStatus('✨ 3/3: 修復完了！画面を移動します...');
@@ -61,7 +134,7 @@ export default function AutoFixLoginPage() {
       setStatus(`✅ 3/3: 権限確認OK (${userData?.role})。画面を移動します...`);
 
       const role = String(userData?.role || '').toLowerCase();
-      if (role === 'master' || ['admin', 'school_admin', 'branch_admin', 'campus_admin', 'classroom_admin'].includes(role)) {
+      if (role === 'master' || ADMIN_ROLE_ALIASES.includes(role)) {
         router.push('/master');
         // ★ ルーターがフリーズした場合の強制移動（フェイルセーフ）
         setTimeout(() => { window.location.href = '/master'; }, 1500);
@@ -74,8 +147,10 @@ export default function AutoFixLoginPage() {
     } catch (error: any) {
       console.error('Login Error:', error);
       
-      if (error.code === 'auth/invalid-credential') {
-        setStatus('❌ メールまたはパスワードが違います');
+      if (error.code === 'auth/invalid-credential' || error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password') {
+        setStatus('❌ ログインIDまたはパスワードが違います');
+      } else if (error.code === 'auth/user-disabled') {
+        setStatus('❌ このアカウントは停止中です。管理者に確認してください');
       } else {
         setStatus(`❌ エラー: ${error.message || '不明なエラーが発生しました'}`);
       }
@@ -99,9 +174,9 @@ export default function AutoFixLoginPage() {
 
         <form onSubmit={handleLogin} className="space-y-6">
           <div>
-            <label className="block text-sm font-bold text-gray-700 mb-2">メールアドレス</label>
+            <label className="block text-sm font-bold text-gray-700 mb-2">メールアドレス または 初期ID</label>
             <input 
-              type="email" 
+              type="text" 
               required
               className="w-full p-3 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
               value={email}

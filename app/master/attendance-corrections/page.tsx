@@ -9,8 +9,11 @@ import { useAuth } from '@/app/context/AuthContext';
 
 type CorrectionRequest = {
   id: string;
-  work_record_id: string;
+  work_record_id?: string | null;
+  request_type?: string;
   teacher_id: string;
+  teacher_name?: string;
+  target_date?: string | null;
   requested_start_time?: string | null;
   requested_end_time?: string | null;
   reason?: string;
@@ -104,6 +107,8 @@ export default function AttendanceCorrectionsPage() {
       if (!res.ok || data.ok === false) {
         const message = data.error === 'work_record_id is missing on correction request'
           ? '対象の勤務記録が見つかりません。この依頼は古い形式か壊れているため、勤務記録から再申請してください。'
+          : data.error === 'target_date is missing on correction request'
+          ? '申請日が記録されていないため反映できません。却下して再申請してください。'
           : data.error || 'failed';
         throw new Error(message);
       }
@@ -167,15 +172,19 @@ export default function AttendanceCorrectionsPage() {
       ) : (
         <div className="grid gap-4 lg:grid-cols-2">
           {visibleRequests.map(item => {
-            const rec = records[item.work_record_id];
+            const rec = item.work_record_id ? records[item.work_record_id] : undefined;
             const teacher = teachers[item.teacher_id];
             const status = item.status || 'pending';
+            const isMissingClock = item.request_type === 'missing_clock' || !item.work_record_id;
             return (
               <article key={item.id} className="rounded-3xl border border-slate-100 bg-white p-5 shadow-sm">
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <p className="text-lg font-black text-slate-900">{teacher?.name || rec?.teacher_name || '講師未設定'}</p>
-                    <p className="mt-1 text-xs font-bold text-slate-400">{rec?.date || '日付未取得'} / 申請ID: {item.id.slice(0, 8)}</p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-lg font-black text-slate-900">{teacher?.name || item.teacher_name || rec?.teacher_name || '講師未設定'}</p>
+                      {isMissingClock && <span className="rounded-full bg-rose-50 px-2 py-1 text-[10px] font-black text-rose-600">打刻なし新規</span>}
+                    </div>
+                    <p className="mt-1 text-xs font-bold text-slate-400">{rec?.date || item.target_date || '日付未取得'} / 申請ID: {item.id.slice(0, 8)}</p>
                   </div>
                   <span className={`rounded-full px-3 py-1 text-[10px] font-black ${
                     status === 'approved' ? 'bg-emerald-100 text-emerald-700' :
@@ -187,9 +196,9 @@ export default function AttendanceCorrectionsPage() {
                 </div>
 
                 <div className="mt-5 grid grid-cols-2 gap-2">
-                  <TimeBox label="現在の出勤" value={formatDateTime(rec?.start_time)} muted />
+                  <TimeBox label={isMissingClock ? '現在の出勤' : '現在の出勤'} value={isMissingClock ? '記録なし' : formatDateTime(rec?.start_time)} muted />
                   <TimeBox label="修正後の出勤" value={formatDateTime(item.requested_start_time)} />
-                  <TimeBox label="現在の退勤" value={formatDateTime(rec?.end_time)} muted />
+                  <TimeBox label={isMissingClock ? '現在の退勤' : '現在の退勤'} value={isMissingClock ? '記録なし' : formatDateTime(rec?.end_time)} muted />
                   <TimeBox label="修正後の退勤" value={formatDateTime(item.requested_end_time)} />
                 </div>
 

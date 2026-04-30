@@ -138,6 +138,7 @@ const TimelineVisual = ({ record, currentSegments }: { record: any, currentSegme
 export default function TeacherAttendancePage() {
   const { user, profile } = useAuth();
   const [loading, setLoading] = useState(true);
+  const [clockLabel, setClockLabel] = useState({ weekday: '', time: '--:--' });
   
   const [currentSession, setCurrentSession] = useState<any>(null);
   const [todayRecord, setTodayRecord] = useState<any>(null);
@@ -148,8 +149,15 @@ export default function TeacherAttendancePage() {
   const [segments, setSegments] = useState<WorkSegment[]>([]);
   const [expenses, setExpenses] = useState<Transportation[]>([]);
   const [correctionModalOpen, setCorrectionModalOpen] = useState(false);
+  const [missingCorrectionOpen, setMissingCorrectionOpen] = useState(false);
   const [correctionSending, setCorrectionSending] = useState(false);
   const [correctionForm, setCorrectionForm] = useState({ requested_start_time: '', requested_end_time: '', reason: '' });
+  const [missingCorrectionForm, setMissingCorrectionForm] = useState({
+    target_date: new Date().toISOString().slice(0, 10),
+    requested_start_time: '',
+    requested_end_time: '',
+    reason: '',
+  });
 
   // その日のシフト情報
   const [dailyShifts, setDailyShifts] = useState<ShiftData[]>([]);
@@ -160,6 +168,19 @@ export default function TeacherAttendancePage() {
       fetchMonthlyHistory();
     }
   }, [user, viewDate]);
+
+  useEffect(() => {
+    const updateClock = () => {
+      const now = new Date();
+      setClockLabel({
+        weekday: now.toLocaleDateString('ja-JP', { weekday: 'long' }),
+        time: now.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }),
+      });
+    };
+    updateClock();
+    const timer = window.setInterval(updateClock, 30000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   // --- データ取得 ---
   const fetchTodayStatus = async () => {
@@ -526,6 +547,26 @@ export default function TeacherAttendancePage() {
     setCorrectionModalOpen(true);
   };
 
+  const openMissingCorrectionModal = () => {
+    const targetDate = new Date().toISOString().slice(0, 10);
+    setMissingCorrectionForm({
+      target_date: targetDate,
+      requested_start_time: `${targetDate}T19:20`,
+      requested_end_time: `${targetDate}T21:40`,
+      reason: '',
+    });
+    setMissingCorrectionOpen(true);
+  };
+
+  const updateMissingTargetDate = (targetDate: string) => {
+    setMissingCorrectionForm(prev => ({
+      ...prev,
+      target_date: targetDate,
+      requested_start_time: prev.requested_start_time ? `${targetDate}T${prev.requested_start_time.slice(11, 16)}` : '',
+      requested_end_time: prev.requested_end_time ? `${targetDate}T${prev.requested_end_time.slice(11, 16)}` : '',
+    }));
+  };
+
   const requestTimeCorrection = async () => {
     if (!editingRecord) return;
     if (!correctionForm.reason.trim()) return alert('修正理由を入力してください。');
@@ -557,6 +598,47 @@ export default function TeacherAttendancePage() {
       alert('勤怠修正依頼を送信しました。管理者の承認後に反映されます。');
     } catch (e: any) {
       alert(`修正依頼の送信に失敗しました: ${e.message || e}`);
+    } finally {
+      setCorrectionSending(false);
+    }
+  };
+
+  const requestMissingClockCorrection = async () => {
+    if (!missingCorrectionForm.target_date) return alert('申請する日付を選択してください。');
+    if (!missingCorrectionForm.requested_start_time || !missingCorrectionForm.requested_end_time) return alert('出勤時刻と退勤時刻を入力してください。');
+    if (!missingCorrectionForm.reason.trim()) return alert('申請理由を入力してください。');
+    if (new Date(missingCorrectionForm.requested_start_time) >= new Date(missingCorrectionForm.requested_end_time)) {
+      return alert('退勤時刻は出勤時刻より後にしてください。');
+    }
+    const exists = history.some(rec => rec.date === missingCorrectionForm.target_date);
+    if (exists && !confirm('この日はすでに勤務記録があります。既存の記録から「打刻修正依頼」を送る方が確実です。このまま新規申請しますか？')) return;
+
+    try {
+      setCorrectionSending(true);
+      const token = await user?.getIdToken();
+      if (!token) throw new Error('ログイン情報を確認できません。再ログインしてください。');
+      const res = await fetch('/api/attendance-corrections', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          action: 'request',
+          target_date: missingCorrectionForm.target_date,
+          requested_start_time: new Date(missingCorrectionForm.requested_start_time).toISOString(),
+          requested_end_time: new Date(missingCorrectionForm.requested_end_time).toISOString(),
+          reason: missingCorrectionForm.reason,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) {
+        const message = data.error === 'work record already exists for target_date'
+          ? 'この日はすでに勤務記録があります。該当日の「詳細・交通費を入力」から打刻修正依頼を送ってください。'
+          : data.error || 'failed';
+        throw new Error(message);
+      }
+      setMissingCorrectionOpen(false);
+      alert('打刻忘れの申請を送信しました。管理者の承認後に勤務記録が作成されます。');
+    } catch (e: any) {
+      alert(`申請の送信に失敗しました: ${e.message || e}`);
     } finally {
       setCorrectionSending(false);
     }
@@ -608,10 +690,10 @@ export default function TeacherAttendancePage() {
           <div className="absolute top-0 left-0 w-full h-1.5 bg-gradient-to-r from-blue-400 via-green-400 to-orange-400"></div>
           <div className="flex justify-between items-center mb-2">
             <span className="text-xs font-bold bg-gray-100 text-gray-500 px-2 py-1 rounded-md">TODAY</span>
-            <span className="text-xs font-bold text-gray-400">{new Date().toLocaleDateString('ja-JP', { weekday: 'long' })}</span>
+            <span className="text-xs font-bold text-gray-400">{clockLabel.weekday || ' '}</span>
           </div>
           <div className="text-5xl font-black text-gray-800 font-mono mb-6 tracking-tighter mt-2">
-            {new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}
+            {clockLabel.time}
           </div>
           {loading ? <div className="h-16 flex items-center justify-center"><Loader2 className="animate-spin text-gray-300"/></div> : currentSession ? (
             <div className="space-y-4">
@@ -655,6 +737,12 @@ export default function TeacherAttendancePage() {
               <div className="text-xl font-black text-gray-800 flex items-baseline"><span className="text-sm text-gray-400 mr-1">¥</span>{monthlySummary.cost.toLocaleString()}</div>
             </div>
           </div>
+          <button
+            onClick={openMissingCorrectionModal}
+            className="flex w-full items-center justify-center gap-2 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-black text-amber-700 shadow-sm transition-all hover:bg-amber-100 active:scale-[0.99]"
+          >
+            <Send size={16} /> 打刻を忘れた日の申請をする
+          </button>
         </div>
 
         {/* 履歴リスト */}
@@ -949,6 +1037,79 @@ export default function TeacherAttendancePage() {
               <button onClick={() => setCorrectionModalOpen(false)} className="rounded-2xl px-5 py-3 text-sm font-black text-slate-500 hover:bg-slate-200">キャンセル</button>
               <button onClick={requestTimeCorrection} disabled={correctionSending} className="flex items-center gap-2 rounded-2xl bg-amber-500 px-5 py-3 text-sm font-black text-white shadow-lg shadow-amber-100 hover:bg-amber-600 disabled:opacity-60">
                 {correctionSending ? <Loader2 className="animate-spin" size={18} /> : <Send size={18} />} 依頼を送信
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {missingCorrectionOpen && (
+        <div className="fixed inset-0 z-[10000] flex items-end justify-center bg-slate-950/60 p-0 backdrop-blur-sm sm:items-center sm:p-4">
+          <div className="w-full max-w-lg rounded-t-[28px] bg-white shadow-2xl sm:rounded-[28px]">
+            <div className="border-b border-slate-100 p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-black uppercase tracking-[0.2em] text-amber-500">Missing Clock</p>
+                  <h3 className="mt-1 text-xl font-black text-slate-900">打刻忘れ申請</h3>
+                  <p className="mt-1 text-xs font-bold text-slate-400">打刻をしていない日も、任意の日付を選んで管理者へ申請できます。</p>
+                </div>
+                <button onClick={() => setMissingCorrectionOpen(false)} className="rounded-full bg-slate-100 p-2 text-slate-500 hover:bg-slate-200">
+                  <X size={18} />
+                </button>
+              </div>
+            </div>
+
+            <div className="space-y-5 p-5">
+              <label>
+                <span className="mb-2 block text-xs font-black text-slate-600">申請する日付</span>
+                <input
+                  type="date"
+                  value={missingCorrectionForm.target_date}
+                  onChange={e => updateMissingTargetDate(e.target.value)}
+                  className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none focus:border-amber-300 focus:ring-2 focus:ring-amber-100"
+                />
+              </label>
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <label>
+                  <span className="mb-2 block text-xs font-black text-slate-600">申請する出勤時刻</span>
+                  <input
+                    type="datetime-local"
+                    value={missingCorrectionForm.requested_start_time}
+                    onChange={e => setMissingCorrectionForm(prev => ({ ...prev, requested_start_time: e.target.value }))}
+                    className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none focus:border-amber-300 focus:ring-2 focus:ring-amber-100"
+                  />
+                </label>
+                <label>
+                  <span className="mb-2 block text-xs font-black text-slate-600">申請する退勤時刻</span>
+                  <input
+                    type="datetime-local"
+                    value={missingCorrectionForm.requested_end_time}
+                    onChange={e => setMissingCorrectionForm(prev => ({ ...prev, requested_end_time: e.target.value }))}
+                    className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none focus:border-amber-300 focus:ring-2 focus:ring-amber-100"
+                  />
+                </label>
+              </div>
+
+              <label>
+                <span className="mb-2 block text-xs font-black text-slate-600">申請理由</span>
+                <textarea
+                  value={missingCorrectionForm.reason}
+                  onChange={e => setMissingCorrectionForm(prev => ({ ...prev, reason: e.target.value }))}
+                  placeholder="例: 出勤・退勤の打刻を忘れたため、勤務実績の作成をお願いします。"
+                  className="min-h-[110px] w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:border-amber-300 focus:ring-2 focus:ring-amber-100"
+                />
+              </label>
+
+              <div className="rounded-2xl border border-amber-100 bg-amber-50 p-4 text-xs font-bold leading-relaxed text-amber-800">
+                承認されると、指定した日付・時刻で勤務記録が新規作成されます。勤務詳細と交通費は、作成後に通常の勤務記録から入力できます。
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 border-t border-slate-100 bg-slate-50 p-5">
+              <button onClick={() => setMissingCorrectionOpen(false)} className="rounded-2xl px-5 py-3 text-sm font-black text-slate-500 hover:bg-slate-200">キャンセル</button>
+              <button onClick={requestMissingClockCorrection} disabled={correctionSending} className="flex items-center gap-2 rounded-2xl bg-amber-500 px-5 py-3 text-sm font-black text-white shadow-lg shadow-amber-100 hover:bg-amber-600 disabled:opacity-60">
+                {correctionSending ? <Loader2 className="animate-spin" size={18} /> : <Send size={18} />} 申請を送信
               </button>
             </div>
           </div>

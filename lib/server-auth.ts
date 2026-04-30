@@ -13,6 +13,16 @@ export type ServerUser = {
 };
 
 const ADMIN_ROLES: AppRole[] = ['master', 'admin'];
+const ADMIN_ROLE_ALIASES = [
+  'admin',
+  'school_admin',
+  'branch_admin',
+  'campus_admin',
+  'classroom_admin',
+  'test_admin',
+  'master_admin',
+  'super_admin',
+];
 
 export async function getServerUser(request: NextRequest): Promise<ServerUser> {
   const authHeader = request.headers.get('authorization') || '';
@@ -49,7 +59,7 @@ export function normalizeRole(role: unknown): AppRole {
   const r = String(role || '').toLowerCase();
   if (r === 'teacher') return 'teacher';
   if (r === 'master') return 'master';
-  if (['admin', 'school_admin', 'branch_admin', 'campus_admin', 'classroom_admin'].includes(r)) return 'admin';
+  if (ADMIN_ROLE_ALIASES.includes(r)) return 'admin';
   if (r === 'parent' || r === 'guardian') return 'parent';
   return 'student';
 }

@@ -10,6 +10,7 @@ import {
   browserLocalPersistence,
 } from 'firebase/auth';
 import { doc, getDoc, getDocFromCache } from 'firebase/firestore';
+import { usePathname } from 'next/navigation';
 import { auth, db } from '@/lib/firebase';
 
 export interface UserProfile {
@@ -45,12 +46,22 @@ const isLoginLikePath = (path: string) =>
 
 const isDeniedPath = (path: string) => path === '/403' || path.startsWith('/403');
 const FORCE_LOGOUT_KEY = 'classbase_force_logout';
+const ADMIN_ROLE_ALIASES = [
+  'admin',
+  'school_admin',
+  'branch_admin',
+  'campus_admin',
+  'classroom_admin',
+  'test_admin',
+  'master_admin',
+  'super_admin',
+];
 
 const normalizeRole = (role: any): 'student' | 'teacher' | 'master' | 'admin' | 'parent' => {
   const r = String(role || '').toLowerCase();
   if (r === 'teacher') return 'teacher';
   if (r === 'master') return 'master';
-  if (['admin', 'school_admin', 'branch_admin', 'campus_admin', 'classroom_admin'].includes(r)) return 'admin';
+  if (ADMIN_ROLE_ALIASES.includes(r)) return 'admin';
   if (r === 'parent' || r === 'guardian') return 'parent';
   return 'student';
 };
@@ -93,12 +104,13 @@ const getBrowserPath = () =>
   typeof window === 'undefined' ? null : window.location.pathname;
 
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
+  const pathname = usePathname();
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [connectionIssue, setConnectionIssue] = useState(false);
   const [profileMissing, setProfileMissing] = useState(false);
-  const [clientPath, setClientPath] = useState<string | null>(() => getBrowserPath());
+  const [clientPath, setClientPath] = useState<string | null>(null);
 
   const redirectingRef = useRef(false);
   const lastPathRef = useRef<string>('');
@@ -359,8 +371,9 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     await signInWithEmailAndPassword(auth, email, pass);
   };
 
+  const renderPath = clientPath || pathname || '';
   const shouldShowLoading =
-    loading && !(clientPath !== null && isLoginLikePath(clientPath));
+    loading && !(renderPath && isLoginLikePath(renderPath));
 
   return (
     <AuthContext.Provider value={{ user, profile, loading, connectionIssue, profileMissing, login, logout }}>

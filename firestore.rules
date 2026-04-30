@@ -32,7 +32,10 @@ service cloud.firestore {
         role() == 'school_admin' ||
         role() == 'branch_admin' ||
         role() == 'campus_admin' ||
-        role() == 'classroom_admin';
+        role() == 'classroom_admin' ||
+        role() == 'test_admin' ||
+        role() == 'master_admin' ||
+        role() == 'super_admin';
     }
 
     function canManageSchool(school) {
