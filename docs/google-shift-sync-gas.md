@@ -59,6 +59,24 @@ GAS から Next.js API を経由せず、Firestore REST API へ直接同期す�
 
 Firestore rules は Admin/サービスアカウント経由の REST 書き込みには適用されません。したがって、キーはスクリプトプロパティにのみ保存し、シート本文や共有ドキュメントには置かないでください。
 
+### 複合インデックス
+
+`Firebaseから反映` では `shift_assignments` を次の条件で検索します。
+
+- `source_spreadsheet_id`
+- `source_sheet_name`
+- `target_date`
+
+そのため Firestore の複合インデックスが必要です。リポジトリには `firestore.indexes.json` を追加済みです。
+
+Firebase CLI で反映する場合:
+
+```bash
+npx firebase-tools deploy --only firestore:indexes --project class-base-app
+```
+
+Firebase Console のエラーに表示されたリンクから作成しても問題ありません。作成後、インデックスが有効になるまで数分かかります。
+
 ## Firebase 直接同期版 Apps Script
 
 以下は `シート → Firestore` と `Firestore → シート` の同期を行う版です。アクセスキーは空欄のままです。

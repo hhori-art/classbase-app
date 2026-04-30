@@ -1,0 +1,41 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "shift_assignments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "source_sheet_name",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "source_spreadsheet_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "target_date",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "shift_assignments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "source_spreadsheet_id",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "source_sheet_name",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "target_date",
+          "order": "ASCENDING"
+        }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}
