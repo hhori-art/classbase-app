@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { auth } from '@/lib/firebase';
 import { Bell, Mail, MessageCircle, Save, Smartphone } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
+import LineLinkPanel from '@/app/components/LineLinkPanel';
 
 export default function ParentSettingsPage() {
   const { profile } = useAuth();
@@ -56,6 +57,12 @@ export default function ParentSettingsPage() {
         <p className="text-xs font-black uppercase tracking-wider text-indigo-400">Notification</p>
         <h2 className="text-2xl font-black text-slate-900">通知設定</h2>
       </div>
+      <LineLinkPanel
+        role="parent"
+        lineUserId={profile?.line_user_id}
+        description="連携すると、授業開始・欠席連絡・登録依頼・お知らせなどをLINEでも受け取れます。"
+        compact
+      />
       <div className="rounded-2xl bg-white p-4 shadow-sm">
         {items.map(item => {
           const Icon = item.icon;
@@ -76,4 +83,3 @@ export default function ParentSettingsPage() {
     </div>
   );
 }
-

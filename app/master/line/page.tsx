@@ -1,13 +1,15 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { db } from '@/lib/firebase';
+import { auth, db } from '@/lib/firebase';
 import { collection, query, getDocs, where } from 'firebase/firestore';
 import { MessageCircle, Send, Loader2, Users, Bell, AlertCircle, ArrowLeft, CheckCircle } from 'lucide-react';
 import Link from 'next/link';
 
 export default function MasterLineBroadcastPage() {
   const [teachers, setTeachers] = useState<any[]>([]);
+  const [parents, setParents] = useState<any[]>([]);
+  const [students, setStudents] = useState<any[]>([]);
   const [shifts, setShifts] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
@@ -20,12 +22,12 @@ export default function MasterLineBroadcastPage() {
   const fetchData = async () => {
     setLoading(true);
     try {
-      // 1. LINE連携済みの講師を取得
-      const tQ = query(collection(db, 'users'), where('role', '==', 'teacher'));
-      const tSnap = await getDocs(tQ);
-      // ★修正: as any を追加してTypeScriptのエラーを回避
-      const allTeachers = tSnap.docs.map(d => ({ id: d.id, ...d.data() } as any));
-      setTeachers(allTeachers.filter((t: any) => t.line_user_id)); // 連携済みのみ
+      // 1. LINE連携済みのユーザーを取得
+      const userSnap = await getDocs(collection(db, 'users'));
+      const lineUsers = userSnap.docs.map(d => ({ id: d.id, ...d.data() } as any)).filter((u: any) => u.line_user_id);
+      setTeachers(lineUsers.filter((u: any) => u.role === 'teacher'));
+      setParents(lineUsers.filter((u: any) => u.role === 'parent' || u.role === 'guardian'));
+      setStudents(lineUsers.filter((u: any) => u.role === 'student'));
 
       // 2. 今日のシフトを取得
       const today = new Date().toISOString().split('T')[0];
@@ -40,15 +42,16 @@ export default function MasterLineBroadcastPage() {
   };
 
   // メッセージ送信実行関数
-  const executePush = async (tasks: { userId: string; text: string }[]) => {
-    if (tasks.length === 0) return alert('送信対象の講師がいません。');
-    if (!confirm(`${tasks.length}名の講師にLINEを送信しますか？`)) return;
+  const executePush = async (tasks: { uid?: string; userId: string; role?: string; kind?: string; text: string }[]) => {
+    if (tasks.length === 0) return alert('送信対象がいません。');
+    if (!confirm(`${tasks.length}名にLINEを送信しますか？`)) return;
 
     setSending(true);
     try {
+      const token = await auth.currentUser?.getIdToken();
       const res = await fetch('/api/line/push', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ tasks })
       });
       if (res.ok) {
@@ -77,7 +80,7 @@ export default function MasterLineBroadcastPage() {
         
         const messageText = `${teacher.name}先生\n\nおはようございます！\n本日の授業予定をお知らせします。\n\n${shiftDetails}\n\n本日もよろしくお願いいたします。`;
         
-        tasks.push({ userId: teacher.line_user_id, text: messageText });
+        tasks.push({ uid: teacher.id, userId: teacher.line_user_id, role: 'teacher', kind: 'class_start', text: messageText });
       }
     });
 
@@ -87,7 +90,9 @@ export default function MasterLineBroadcastPage() {
   // ② シフト提出お願いの送信
   const handleSendShiftRequest = () => {
     const tasks = teachers.map(t => ({
+      uid: t.id,
       userId: t.line_user_id,
+      role: 'teacher',
       text: `${t.name}先生\n\nお疲れ様です。運営よりお知らせです。\n\n次回のシフト提出期限が近づいております。\nシステムにログインの上、提出をお願いいたします！`
     }));
     executePush(tasks);
@@ -96,9 +101,13 @@ export default function MasterLineBroadcastPage() {
   // ③ 自由メッセージの送信
   const handleSendCustom = () => {
     if (!customMessage.trim()) return alert('メッセージを入力してください');
-    const tasks = teachers.map(t => ({
+    const targets = [...teachers, ...parents, ...students];
+    const tasks = targets.map(t => ({
+      uid: t.id,
       userId: t.line_user_id,
-      text: `${t.name}先生\n\n${customMessage}`
+      role: t.role || 'student',
+      kind: 'announcements',
+      text: `${t.name || t.student_name || t.display_name || 'ご利用者'}様\n\n${customMessage}`
     }));
     executePush(tasks);
   };
@@ -117,15 +126,18 @@ export default function MasterLineBroadcastPage() {
             <h1 className="text-xl font-black text-slate-800 flex items-center gap-2">
               <MessageCircle className="text-[#06C755]" /> LINE一斉送信
             </h1>
-            <p className="text-xs text-slate-500 mt-1">連携済みの講師へLINEメッセージを送信します</p>
+            <p className="text-xs text-slate-500 mt-1">連携済みの講師・保護者・生徒へLINEメッセージを送信します</p>
           </div>
         </div>
 
         <div className="bg-[#06C755]/10 border border-[#06C755]/20 p-4 rounded-2xl flex items-center justify-between">
           <div className="flex items-center gap-2 text-[#06C755] font-bold">
-            <CheckCircle size={20}/> LINE連携済みの講師
+            <CheckCircle size={20}/> LINE連携済み
           </div>
-          <div className="text-2xl font-black text-[#06C755]">{teachers.length} <span className="text-sm">名</span></div>
+          <div className="text-right">
+            <div className="text-2xl font-black text-[#06C755]">{teachers.length + parents.length + students.length} <span className="text-sm">名</span></div>
+            <p className="text-[11px] font-bold text-slate-400">講師 {teachers.length} / 保護者 {parents.length} / 生徒 {students.length}</p>
+          </div>
         </div>
 
         <div className="grid md:grid-cols-2 gap-4">
@@ -163,14 +175,14 @@ export default function MasterLineBroadcastPage() {
           <h3 className="font-bold flex items-center gap-2 mb-4 text-slate-700"><Users size={18}/> 自由入力で一斉送信</h3>
           <textarea 
             value={customMessage} onChange={e => setCustomMessage(e.target.value)}
-            placeholder="代行募集や全体への連絡事項を入力してください..."
+            placeholder="授業連絡、登録依頼、代行募集などを入力してください..."
             className="w-full bg-slate-50 border border-slate-200 rounded-xl p-4 text-sm font-medium focus:ring-2 focus:ring-[#06C755] outline-none min-h-[120px] mb-4"
           />
           <button 
             onClick={handleSendCustom} disabled={sending || !customMessage.trim()}
             className="w-full bg-[#06C755] text-white font-bold py-3 rounded-xl hover:bg-[#05b34c] transition-all flex items-center justify-center gap-2 active:scale-95 disabled:opacity-50"
           >
-            {sending ? <Loader2 size={18} className="animate-spin"/> : <MessageCircle size={18}/>} 自由メッセージを送信
+            {sending ? <Loader2 size={18} className="animate-spin"/> : <MessageCircle size={18}/>} 全連携ユーザーへ送信
           </button>
         </div>
 

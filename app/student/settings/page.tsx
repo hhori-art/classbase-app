@@ -12,6 +12,7 @@ import {
   Volume2, Smartphone, Download, Share, PlusSquare, HelpCircle, Check, Copy
 } from 'lucide-react';
 import Link from 'next/link';
+import LineLinkPanel from '@/app/components/LineLinkPanel';
 
 export default function StudentSettingsPage() {
   const { user, profile, logout } = useAuth();
@@ -270,6 +271,12 @@ export default function StudentSettingsPage() {
             </div>
           </div>
         </section>
+
+        <LineLinkPanel
+          role="student"
+          lineUserId={profile?.line_user_id}
+          description="連携すると、授業開始・宿題・お知らせなどの大切な通知をLINEでも受け取れます。"
+        />
 
         {/* --- 3. 音・通知 --- */}
         <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">

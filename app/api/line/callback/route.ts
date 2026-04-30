@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { getRequestOrigin, parseLineState, safeRedirectUrl, saveLineUserId } from '@/lib/line';
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -8,7 +9,14 @@ export async function GET(request: Request) {
 
   // ユーザーが連携をキャンセルした場合など
   if (error) {
-    return NextResponse.redirect(new URL('/teacher/settings?error=line_auth_failed', request.url));
+    try {
+      const parsed = state ? parseLineState(state) : null;
+      const redirectUrl = parsed ? safeRedirectUrl(parsed.redirect, request) : new URL('/teacher/settings', getRequestOrigin(request));
+      redirectUrl.searchParams.set('error', 'line_auth_failed');
+      return NextResponse.redirect(redirectUrl);
+    } catch {
+      return NextResponse.redirect(new URL('/teacher/settings?error=line_auth_failed', getRequestOrigin(request)));
+    }
   }
 
   if (!code || !state) {
@@ -17,13 +25,17 @@ export async function GET(request: Request) {
 
   try {
     // state を復元して、元の設定画面のURLを取り出す
-    const decodedState = JSON.parse(Buffer.from(state, 'base64').toString('utf-8'));
-    const { redirect } = decodedState;
+    const decodedState = parseLineState(state);
+    const redirectObj = safeRedirectUrl(decodedState.redirect, request);
 
-    const clientId = process.env.LINE_LOGIN_CHANNEL_ID!;
-    const clientSecret = process.env.LINE_LOGIN_CHANNEL_SECRET!;
-    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
-    const callbackUrl = `${baseUrl}/api/line/callback`;
+    const clientId = process.env.LINE_LOGIN_CHANNEL_ID;
+    const clientSecret = process.env.LINE_LOGIN_CHANNEL_SECRET;
+    if (!clientId || !clientSecret) {
+      redirectObj.searchParams.set('error', 'line_env_missing');
+      return NextResponse.redirect(redirectObj);
+    }
+
+    const callbackUrl = `${getRequestOrigin(request)}/api/line/callback`;
 
     // 1. LINEから「アクセストークン」をもらう
     const tokenResponse = await fetch('https://api.line.me/oauth2/v2.1/token', {
@@ -42,7 +54,8 @@ export async function GET(request: Request) {
 
     if (!tokenResponse.ok) {
       console.error('Token Error:', tokenData);
-      return NextResponse.redirect(new URL(`${redirect}?error=token_failed`, request.url));
+      redirectObj.searchParams.set('error', 'token_failed');
+      return NextResponse.redirect(redirectObj);
     }
 
     // 2. アクセストークンを使って「プロフィール（LINE ID）」をもらう
@@ -54,15 +67,16 @@ export async function GET(request: Request) {
 
     if (!profileResponse.ok) {
       console.error('Profile Error:', profileData);
-      return NextResponse.redirect(new URL(`${redirect}?error=profile_failed`, request.url));
+      redirectObj.searchParams.set('error', 'profile_failed');
+      return NextResponse.redirect(redirectObj);
     }
 
     // 取得できたLINE専用のユーザーID
     const lineUserId = profileData.userId;
 
-    // 3. 元の設定画面に、取得したLINE IDをパラメータとしてくっつけて戻す
-    const redirectObj = new URL(redirect);
-    redirectObj.searchParams.append('line_id', lineUserId);
+    // 3. サーバー側でLINE IDを保存してから元の設定画面へ戻す
+    await saveLineUserId(decodedState.uid, lineUserId);
+    redirectObj.searchParams.set('line_linked', '1');
 
     return NextResponse.redirect(redirectObj.toString());
 

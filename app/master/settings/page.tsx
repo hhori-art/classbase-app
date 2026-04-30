@@ -1,15 +1,16 @@
 'use client';
 
+import type React from 'react';
 import { useState, useEffect } from 'react';
 import { db, auth } from '@/lib/firebase';
-import { doc, setDoc, getDoc, updateDoc } from 'firebase/firestore';
+import { doc, setDoc, getDoc } from 'firebase/firestore';
 import { updatePassword } from 'firebase/auth';
 import { useAuth } from '@/app/context/AuthContext';
 import { 
   ArrowLeft, Link as LinkIcon, Loader2, Save, 
   Settings, User, Lock, LogOut, Smartphone, 
-  Download, Share, HelpCircle, Check, PlusSquare, 
-  Type, Globe, Beaker, BookOpen, Eye
+  Download, Share, HelpCircle, PlusSquare, 
+  Type, Globe, Beaker, BookOpen, Eye, Bell, Mail, MessageCircle
 } from 'lucide-react';
 import Link from 'next/link';
 
@@ -68,6 +69,18 @@ const DEFAULT_VISIBILITY = {
   },
 };
 
+const DEFAULT_NOTIFICATION_SETTINGS = {
+  line_enabled: true,
+  email_enabled: true,
+  in_app_enabled: true,
+  class_start_enabled: true,
+  homework_enabled: true,
+  announcements_enabled: true,
+  student_line_enabled: true,
+  parent_line_enabled: true,
+  teacher_line_enabled: true,
+};
+
 const STUDENT_VISIBILITY_ITEMS = [
   { key: 'adaptiveQuest', label: 'AI学習クエスト' },
   { key: 'chat', label: 'AIチューター' },
@@ -118,7 +131,7 @@ const ADMIN_VISIBILITY_ITEMS = [
 
 export default function SettingsPage() {
   const { logout } = useAuth();
-  const [activeTab, setActiveTab] = useState<'system' | 'visibility' | 'account'>('system');
+  const [activeTab, setActiveTab] = useState<'system' | 'visibility' | 'notifications' | 'account'>('system');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [savingVisibility, setSavingVisibility] = useState(false);
@@ -133,6 +146,8 @@ export default function SettingsPage() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [passwordMsg, setPasswordMsg] = useState('');
   const [visibility, setVisibility] = useState(DEFAULT_VISIBILITY);
+  const [notificationSettings, setNotificationSettings] = useState(DEFAULT_NOTIFICATION_SETTINGS);
+  const [savingNotifications, setSavingNotifications] = useState(false);
 
   // --- PWA State ---
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
@@ -163,6 +178,11 @@ export default function SettingsPage() {
             parent: { ...DEFAULT_VISIBILITY.parent, ...(data.parent || {}) },
             admin: { ...DEFAULT_VISIBILITY.admin, ...(data.admin || {}) },
           });
+        }
+
+        const notificationSnap = await getDoc(doc(db, 'settings', 'notification_channels'));
+        if (notificationSnap.exists()) {
+          setNotificationSettings(prev => ({ ...prev, ...notificationSnap.data() }));
         }
 
         // PWAチェック
@@ -242,6 +262,27 @@ export default function SettingsPage() {
     }
   };
 
+  const handleNotificationChange = (key: keyof typeof DEFAULT_NOTIFICATION_SETTINGS, value: boolean) => {
+    setNotificationSettings(prev => ({ ...prev, [key]: value }));
+  };
+
+  const handleSaveNotifications = async () => {
+    setSavingNotifications(true);
+    try {
+      await setDoc(doc(db, 'settings', 'notification_channels'), {
+        ...notificationSettings,
+        updated_at: new Date().toISOString(),
+        updated_by: user?.uid || null,
+      }, { merge: true });
+      alert('通知連携設定を保存しました');
+    } catch (e) {
+      console.error(e);
+      alert('保存エラー');
+    } finally {
+      setSavingNotifications(false);
+    }
+  };
+
   // パスワード変更
   const handleChangePassword = async () => {
     if (!newPassword || newPassword !== confirmPassword) {
@@ -311,6 +352,12 @@ export default function SettingsPage() {
               className={`flex-1 md:flex-none px-6 py-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all ${activeTab === 'visibility' ? 'bg-emerald-600 text-white shadow-md' : 'text-slate-500 hover:bg-slate-50'}`}
             >
               <Eye size={14}/> 表示設定
+            </button>
+            <button
+              onClick={() => setActiveTab('notifications')}
+              className={`flex-1 md:flex-none px-6 py-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all ${activeTab === 'notifications' ? 'bg-[#06C755] text-white shadow-md' : 'text-slate-500 hover:bg-slate-50'}`}
+            >
+              <Bell size={14}/> 通知連携
             </button>
             <button 
               onClick={() => setActiveTab('account')}
@@ -482,7 +529,70 @@ export default function SettingsPage() {
         )}
 
         {/* =======================
-            タブ3: アカウント・アプリ設定
+            タブ3: 通知連携設定
+           ======================= */}
+        {activeTab === 'notifications' && (
+          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2">
+            <div className="rounded-[32px] border border-green-100 bg-white p-6 shadow-sm">
+              <div className="mb-6">
+                <p className="text-xs font-black uppercase tracking-wider text-[#06C755]">Notification Channels</p>
+                <h2 className="mt-1 text-xl font-black text-slate-800">通知連携のオン・オフ</h2>
+                <p className="mt-2 text-sm font-bold text-slate-400">
+                  LINE・メール・アプリ内通知の利用可否を全体で管理します。ユーザー個別の通知設定よりもこちらが優先されます。
+                </p>
+              </div>
+
+              <div className="grid gap-5 lg:grid-cols-3">
+                <NotificationPanel
+                  title="配信チャネル"
+                  icon={<Bell size={18} className="text-slate-500" />}
+                  items={[
+                    { key: 'line_enabled', label: 'LINE通知を使う', description: '全アカウントのLINE通知を有効にします。' },
+                    { key: 'email_enabled', label: 'メール通知を使う', description: 'メール送信ジョブの利用を有効にします。' },
+                    { key: 'in_app_enabled', label: 'アプリ内通知を使う', description: 'アプリ内のお知らせ・通知表示を有効にします。' },
+                  ]}
+                  values={notificationSettings}
+                  onChange={handleNotificationChange}
+                />
+                <NotificationPanel
+                  title="LINE対象アカウント"
+                  icon={<MessageCircle size={18} className="text-[#06C755]" />}
+                  items={[
+                    { key: 'teacher_line_enabled', label: '講師へのLINE通知', description: 'シフト・代行・運営連絡をLINE送信できます。' },
+                    { key: 'parent_line_enabled', label: '保護者へのLINE通知', description: '登録依頼・欠席・お知らせをLINE送信できます。' },
+                    { key: 'student_line_enabled', label: '生徒へのLINE通知', description: '授業開始・宿題・お知らせをLINE送信できます。' },
+                  ]}
+                  values={notificationSettings}
+                  onChange={handleNotificationChange}
+                />
+                <NotificationPanel
+                  title="通知種別"
+                  icon={<Mail size={18} className="text-indigo-500" />}
+                  items={[
+                    { key: 'class_start_enabled', label: '授業開始通知', description: '授業前リマインドの配信を許可します。' },
+                    { key: 'homework_enabled', label: '宿題通知', description: '宿題・提出期限の配信を許可します。' },
+                    { key: 'announcements_enabled', label: 'お知らせ通知', description: '管理者のお知らせ配信を許可します。' },
+                  ]}
+                  values={notificationSettings}
+                  onChange={handleNotificationChange}
+                />
+              </div>
+            </div>
+
+            <div className="sticky bottom-6 z-20 flex justify-end">
+              <button
+                onClick={handleSaveNotifications}
+                disabled={savingNotifications}
+                className="bg-[#06C755] text-white px-8 py-4 rounded-2xl font-black shadow-xl shadow-green-100 hover:bg-[#05b34c] transition-all active:scale-95 flex items-center gap-2 disabled:opacity-50"
+              >
+                {savingNotifications ? <Loader2 className="animate-spin" size={20}/> : <Save size={20}/>} 通知連携設定を保存
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* =======================
+            タブ4: アカウント・アプリ設定
            ======================= */}
         {activeTab === 'account' && (
           <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2">
@@ -586,6 +696,45 @@ function VisibilityPanel({
               checked={values[item.key] !== false}
               onChange={e => onChange(item.key, e.target.checked)}
               className="h-5 w-5 accent-emerald-600"
+            />
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function NotificationPanel({
+  title,
+  icon,
+  items,
+  values,
+  onChange,
+}: {
+  title: string;
+  icon: React.ReactNode;
+  items: { key: keyof typeof DEFAULT_NOTIFICATION_SETTINGS; label: string; description: string }[];
+  values: typeof DEFAULT_NOTIFICATION_SETTINGS;
+  onChange: (key: keyof typeof DEFAULT_NOTIFICATION_SETTINGS, value: boolean) => void;
+}) {
+  return (
+    <div className="rounded-[28px] border border-slate-100 bg-slate-50 p-5">
+      <div className="mb-4 flex items-center gap-2">
+        {icon}
+        <h3 className="text-base font-black text-slate-800">{title}</h3>
+      </div>
+      <div className="space-y-2">
+        {items.map(item => (
+          <label key={item.key} className="flex items-start justify-between gap-3 rounded-2xl bg-white px-4 py-3 shadow-sm">
+            <span>
+              <span className="block text-sm font-black text-slate-700">{item.label}</span>
+              <span className="mt-1 block text-[11px] font-bold leading-relaxed text-slate-400">{item.description}</span>
+            </span>
+            <input
+              type="checkbox"
+              checked={values[item.key] !== false}
+              onChange={e => onChange(item.key, e.target.checked)}
+              className="mt-1 h-5 w-5 shrink-0 accent-[#06C755]"
             />
           </label>
         ))}
