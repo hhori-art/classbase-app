@@ -174,6 +174,11 @@ function firestoreBaseUrl_() {
   return `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents`;
 }
 
+function firestoreDocumentResourceName_(collectionName, docId) {
+  const cfg = firebaseConfig_();
+  return `projects/${cfg.projectId}/databases/(default)/documents/${collectionName}/${encodeURIComponent(docId)}`;
+}
+
 function firestoreValue_(value) {
   if (value === null || value === undefined) return { nullValue: null };
   if (typeof value === 'number') return Number.isInteger(value) ? { integerValue: String(value) } : { doubleValue: value };
@@ -185,10 +190,6 @@ function firestoreFields_(obj) {
   const fields = {};
   Object.keys(obj).forEach(key => fields[key] = firestoreValue_(obj[key]));
   return fields;
-}
-
-function firestoreDocName_(collectionName, docId) {
-  return `${firestoreBaseUrl_()}/${collectionName}/${encodeURIComponent(docId)}`;
 }
 
 function firestoreCommit_(writes) {
@@ -348,7 +349,7 @@ function syncSheetToFirebase() {
 
   const writes = parsed.shifts.map(shift => ({
     update: {
-      name: firestoreDocName_('shift_assignments', encodeURIComponent(shift.sync_key)),
+      name: firestoreDocumentResourceName_('shift_assignments', shift.sync_key),
       fields: firestoreFields_(shift),
     },
   }));
