@@ -3,7 +3,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs, addDoc, updateDoc, doc, orderBy, limit } from 'firebase/firestore';
+import { collection, query, where, getDocs, updateDoc, doc, orderBy, limit } from 'firebase/firestore';
 import { 
   Clock, CheckCircle, AlertCircle, Play, Square, Briefcase, 
   ArrowLeft, Plus, Trash2, Save, X, Edit3, Train, 
@@ -54,6 +54,9 @@ const dateLabel = (dateStr: string) => {
   if (Number.isNaN(date.getTime())) return String(dateStr || '-');
   return `${date.getMonth() + 1}/${date.getDate()}`;
 };
+const getJstNow = () => new Date(Date.now() + 9 * 60 * 60 * 1000);
+const getJstDateKey = () => getJstNow().toISOString().slice(0, 10);
+const isClockClosedNow = () => getJstNow().getUTCHours() >= 23;
 const timeLabel = (value?: string | null) => {
   if (!value) return '-';
   const date = new Date(value);
@@ -139,6 +142,7 @@ export default function TeacherAttendancePage() {
   const { user, profile } = useAuth();
   const [loading, setLoading] = useState(true);
   const [clockLabel, setClockLabel] = useState({ weekday: '', time: '--:--' });
+  const [clockClosed, setClockClosed] = useState(false);
   
   const [currentSession, setCurrentSession] = useState<any>(null);
   const [todayRecord, setTodayRecord] = useState<any>(null);
@@ -146,6 +150,7 @@ export default function TeacherAttendancePage() {
   const [viewDate, setViewDate] = useState(new Date());
 
   const [editingRecord, setEditingRecord] = useState<any>(null);
+  const [correctionTarget, setCorrectionTarget] = useState<any>(null);
   const [segments, setSegments] = useState<WorkSegment[]>([]);
   const [expenses, setExpenses] = useState<Transportation[]>([]);
   const [correctionModalOpen, setCorrectionModalOpen] = useState(false);
@@ -153,7 +158,7 @@ export default function TeacherAttendancePage() {
   const [correctionSending, setCorrectionSending] = useState(false);
   const [correctionForm, setCorrectionForm] = useState({ requested_start_time: '', requested_end_time: '', reason: '' });
   const [missingCorrectionForm, setMissingCorrectionForm] = useState({
-    target_date: new Date().toISOString().slice(0, 10),
+    target_date: getJstDateKey(),
     requested_start_time: '',
     requested_end_time: '',
     reason: '',
@@ -172,10 +177,12 @@ export default function TeacherAttendancePage() {
   useEffect(() => {
     const updateClock = () => {
       const now = new Date();
+      const jst = getJstNow();
       setClockLabel({
         weekday: now.toLocaleDateString('ja-JP', { weekday: 'long' }),
         time: now.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }),
       });
+      setClockClosed(jst.getUTCHours() >= 23);
     };
     updateClock();
     const timer = window.setInterval(updateClock, 30000);
@@ -185,7 +192,7 @@ export default function TeacherAttendancePage() {
   // --- データ取得 ---
   const fetchTodayStatus = async () => {
     try {
-      const todayStr = new Date().toISOString().split('T')[0];
+      const todayStr = getJstDateKey();
       const q = query(collection(db, 'work_records'), where('teacher_id', '==', user?.uid), where('date', '==', todayStr));
       const snap = await getDocs(q);
       
@@ -216,7 +223,10 @@ export default function TeacherAttendancePage() {
 
   // --- アクション ---
   const handleClockIn = async () => {
-    const todayStr = new Date().toISOString().split('T')[0];
+    if (isClockClosedNow()) {
+      alert('23時以降は打刻できません。打刻忘れ申請から管理者へ申請してください。');
+      return;
+    }
     if (todayRecord) {
       alert('本日は既に勤務記録が完了しています。1日1回のみ打刻可能です。');
       return;
@@ -225,29 +235,35 @@ export default function TeacherAttendancePage() {
 
     try {
       setLoading(true);
-      const teacherName = profile?.name || profile?.student_name || user?.displayName || '未設定の講師';
-      await addDoc(collection(db, 'work_records'), {
-        teacher_id: user?.uid,
-        teacher_name: teacherName,
-        date: todayStr,
-        start_time: new Date().toISOString(),
-        end_time: null,
-        status: 'pending',
-        work_segments: [],
-        transportation: [],
-        created_at: new Date().toISOString()
+      const token = await user?.getIdToken();
+      const res = await fetch('/api/teacher/attendance-clock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action: 'clock_in' }),
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) throw new Error(data.error || '出勤打刻に失敗しました');
       await fetchTodayStatus();
       await fetchMonthlyHistory();
     } catch (e: any) { alert('エラー: ' + e.message); } finally { setLoading(false); }
   };
 
   const handleClockOut = async () => {
+    if (isClockClosedNow()) {
+      alert('23時以降は退勤打刻できません。打刻修正依頼から退勤時刻を申請してください。');
+      return;
+    }
     if (!confirm('退勤しますか？')) return;
     try {
       setLoading(true);
-      const ref = doc(db, 'work_records', currentSession.id);
-      await updateDoc(ref, { end_time: new Date().toISOString(), updated_at: new Date().toISOString() });
+      const token = await user?.getIdToken();
+      const res = await fetch('/api/teacher/attendance-clock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action: 'clock_out', work_record_id: currentSession.id }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) throw new Error(data.error || '退勤打刻に失敗しました');
       await fetchTodayStatus();
       await fetchMonthlyHistory();
     } catch (e: any) { alert('エラー: ' + e.message); } finally { setLoading(false); }
@@ -533,22 +549,28 @@ export default function TeacherAttendancePage() {
     return d.toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   };
 
-  const openCorrectionModal = () => {
-    if (!editingRecord) return;
-    if (editingRecord.status === 'approved') {
+  const openCorrectionForRecord = (record: any) => {
+    if (!record) return;
+    if (record.status === 'approved') {
       alert('承認済みの勤怠記録は講師側から修正できません。管理者へ連絡してください。');
       return;
     }
+    setCorrectionTarget(record);
     setCorrectionForm({
-      requested_start_time: toLocalInputValue(editingRecord.start_time),
-      requested_end_time: toLocalInputValue(editingRecord.end_time),
+      requested_start_time: toLocalInputValue(record.start_time),
+      requested_end_time: toLocalInputValue(record.end_time),
       reason: '',
     });
     setCorrectionModalOpen(true);
   };
 
+  const openCorrectionModal = () => {
+    if (!editingRecord) return;
+    openCorrectionForRecord(editingRecord);
+  };
+
   const openMissingCorrectionModal = () => {
-    const targetDate = new Date().toISOString().slice(0, 10);
+    const targetDate = getJstDateKey();
     setMissingCorrectionForm({
       target_date: targetDate,
       requested_start_time: `${targetDate}T19:20`,
@@ -568,9 +590,13 @@ export default function TeacherAttendancePage() {
   };
 
   const requestTimeCorrection = async () => {
-    if (!editingRecord) return;
+    const targetRecord = correctionTarget || editingRecord;
+    if (!targetRecord) return;
     if (!correctionForm.reason.trim()) return alert('修正理由を入力してください。');
     if (!correctionForm.requested_start_time && !correctionForm.requested_end_time) return alert('修正後の出勤時刻または退勤時刻を入力してください。');
+    if (correctionForm.requested_start_time && correctionForm.requested_end_time && new Date(correctionForm.requested_start_time) >= new Date(correctionForm.requested_end_time)) {
+      return alert('退勤時刻は出勤時刻より後にしてください。');
+    }
 
     try {
       setCorrectionSending(true);
@@ -581,7 +607,7 @@ export default function TeacherAttendancePage() {
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
           action: 'request',
-          work_record_id: editingRecord.id,
+          work_record_id: targetRecord.id,
           requested_start_time: correctionForm.requested_start_time ? new Date(correctionForm.requested_start_time).toISOString() : null,
           requested_end_time: correctionForm.requested_end_time ? new Date(correctionForm.requested_end_time).toISOString() : null,
           reason: correctionForm.reason,
@@ -595,6 +621,9 @@ export default function TeacherAttendancePage() {
         throw new Error(message);
       }
       setCorrectionModalOpen(false);
+      setCorrectionTarget(null);
+      await fetchTodayStatus();
+      await fetchMonthlyHistory();
       alert('勤怠修正依頼を送信しました。管理者の承認後に反映されます。');
     } catch (e: any) {
       alert(`修正依頼の送信に失敗しました: ${e.message || e}`);
@@ -636,6 +665,7 @@ export default function TeacherAttendancePage() {
         throw new Error(message);
       }
       setMissingCorrectionOpen(false);
+      await fetchMonthlyHistory();
       alert('打刻忘れの申請を送信しました。管理者の承認後に勤務記録が作成されます。');
     } catch (e: any) {
       alert(`申請の送信に失敗しました: ${e.message || e}`);
@@ -701,7 +731,24 @@ export default function TeacherAttendancePage() {
                 <span className="w-2.5 h-2.5 rounded-full bg-green-500"></span> 
                 勤務中 ({new Date(currentSession.start_time).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})} 〜)
               </div>
-              <button onClick={handleClockOut} className="w-full bg-gradient-to-r from-red-500 to-red-600 text-white py-4 rounded-2xl font-bold text-lg hover:shadow-xl hover:shadow-red-200 transition-all active:scale-95 flex items-center justify-center gap-2"><Square fill="currentColor" size={18} /> 退勤する</button>
+              {clockClosed && (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-black leading-relaxed text-amber-800">
+                  23時以降は退勤打刻できません。退勤時刻は下の修正依頼から申請してください。
+                </div>
+              )}
+              <button
+                onClick={handleClockOut}
+                disabled={clockClosed}
+                className="w-full bg-gradient-to-r from-red-500 to-red-600 text-white py-4 rounded-2xl font-bold text-lg hover:shadow-xl hover:shadow-red-200 transition-all active:scale-95 flex items-center justify-center gap-2 disabled:cursor-not-allowed disabled:from-gray-300 disabled:to-gray-400 disabled:shadow-none"
+              >
+                <Square fill="currentColor" size={18} /> 退勤する
+              </button>
+              <button
+                onClick={() => openCorrectionForRecord(currentSession)}
+                className="flex w-full items-center justify-center gap-2 rounded-2xl border border-amber-200 bg-white px-4 py-3 text-sm font-black text-amber-700 shadow-sm transition-all hover:bg-amber-50 active:scale-[0.99]"
+              >
+                <Send size={16} /> 退勤打刻の修正依頼
+              </button>
             </div>
           ) : (
             <div className="space-y-4">
@@ -714,7 +761,20 @@ export default function TeacherAttendancePage() {
                   </div>
                 </div>
               ) : (
-                <button onClick={handleClockIn} className="w-full bg-gradient-to-r from-blue-600 to-blue-500 text-white py-4 rounded-2xl font-bold text-lg hover:shadow-xl hover:shadow-blue-200 transition-all active:scale-95 flex items-center justify-center gap-2"><Play fill="currentColor" size={18} /> 出勤する</button>
+                <>
+                  {clockClosed && (
+                    <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-black leading-relaxed text-amber-800">
+                      23時以降は出勤打刻できません。打刻を忘れた日は「打刻を忘れた日の申請」から申請してください。
+                    </div>
+                  )}
+                  <button
+                    onClick={handleClockIn}
+                    disabled={clockClosed}
+                    className="w-full bg-gradient-to-r from-blue-600 to-blue-500 text-white py-4 rounded-2xl font-bold text-lg hover:shadow-xl hover:shadow-blue-200 transition-all active:scale-95 flex items-center justify-center gap-2 disabled:cursor-not-allowed disabled:from-gray-300 disabled:to-gray-400 disabled:shadow-none"
+                  >
+                    <Play fill="currentColor" size={18} /> 出勤する
+                  </button>
+                </>
               )}
             </div>
           )}
@@ -789,6 +849,8 @@ export default function TeacherAttendancePage() {
                 {rec.transportation?.length > 0 && <div className="mb-4 pt-2 border-t border-dashed border-gray-100 flex items-center justify-between text-xs text-gray-500 px-1"><span className="flex items-center gap-1 font-bold"><Train size={12}/> 交通費あり</span><span className="font-mono font-bold">¥{calcTotalCost(rec.transportation).toLocaleString()}</span></div>}
                 {rec.end_time && rec.status !== 'approved' ? (
                   <button onClick={() => openEditModal(rec)} className="w-full py-3 rounded-xl bg-gray-50 text-gray-600 text-xs font-bold hover:bg-blue-50 hover:text-blue-600 transition-all flex items-center justify-center gap-2"><Edit3 size={14}/> {displaySegments?.length > 0 ? '詳細を修正' : '詳細・交通費を入力'}</button>
+                ) : !rec.end_time && rec.status !== 'approved' ? (
+                  <button onClick={() => openCorrectionForRecord(rec)} className="w-full py-3 rounded-xl bg-amber-50 text-amber-700 text-xs font-bold hover:bg-amber-100 transition-all flex items-center justify-center gap-2"><Send size={14}/> 退勤打刻の修正依頼</button>
                 ) : rec.end_time && (
                   <div className="w-full rounded-xl bg-emerald-50 px-4 py-3 text-center text-xs font-black text-emerald-700">
                     承認済みのため、時間・詳細・交通費は講師側では変更できません
@@ -969,7 +1031,7 @@ export default function TeacherAttendancePage() {
         </div>
       )}
 
-      {editingRecord && correctionModalOpen && (
+      {(correctionTarget || editingRecord) && correctionModalOpen && (
         <div className="fixed inset-0 z-[10000] flex items-end justify-center bg-slate-950/60 p-0 backdrop-blur-sm sm:items-center sm:p-4">
           <div className="w-full max-w-lg rounded-t-[28px] bg-white shadow-2xl sm:rounded-[28px]">
             <div className="border-b border-slate-100 p-5">
@@ -977,9 +1039,9 @@ export default function TeacherAttendancePage() {
                 <div>
                   <p className="text-xs font-black uppercase tracking-[0.2em] text-amber-500">Time Correction</p>
                   <h3 className="mt-1 text-xl font-black text-slate-900">打刻修正依頼</h3>
-                  <p className="mt-1 text-xs font-bold text-slate-400">{editingRecord.date} の出退勤時刻を管理者へ申請します</p>
+                  <p className="mt-1 text-xs font-bold text-slate-400">{(correctionTarget || editingRecord).date} の出退勤時刻を管理者へ申請します</p>
                 </div>
-                <button onClick={() => setCorrectionModalOpen(false)} className="rounded-full bg-slate-100 p-2 text-slate-500 hover:bg-slate-200">
+                <button onClick={() => { setCorrectionModalOpen(false); setCorrectionTarget(null); }} className="rounded-full bg-slate-100 p-2 text-slate-500 hover:bg-slate-200">
                   <X size={18} />
                 </button>
               </div>
@@ -989,11 +1051,11 @@ export default function TeacherAttendancePage() {
               <div className="grid grid-cols-2 gap-3">
                 <div className="rounded-2xl bg-slate-50 p-4">
                   <p className="text-[10px] font-black text-slate-400">現在の出勤</p>
-                  <p className="mt-1 text-sm font-black text-slate-800">{formatDateTimeLabel(editingRecord.start_time)}</p>
+                  <p className="mt-1 text-sm font-black text-slate-800">{formatDateTimeLabel((correctionTarget || editingRecord).start_time)}</p>
                 </div>
                 <div className="rounded-2xl bg-slate-50 p-4">
                   <p className="text-[10px] font-black text-slate-400">現在の退勤</p>
-                  <p className="mt-1 text-sm font-black text-slate-800">{formatDateTimeLabel(editingRecord.end_time)}</p>
+                  <p className="mt-1 text-sm font-black text-slate-800">{formatDateTimeLabel((correctionTarget || editingRecord).end_time)}</p>
                 </div>
               </div>
 
@@ -1034,7 +1096,7 @@ export default function TeacherAttendancePage() {
             </div>
 
             <div className="flex justify-end gap-3 border-t border-slate-100 bg-slate-50 p-5">
-              <button onClick={() => setCorrectionModalOpen(false)} className="rounded-2xl px-5 py-3 text-sm font-black text-slate-500 hover:bg-slate-200">キャンセル</button>
+              <button onClick={() => { setCorrectionModalOpen(false); setCorrectionTarget(null); }} className="rounded-2xl px-5 py-3 text-sm font-black text-slate-500 hover:bg-slate-200">キャンセル</button>
               <button onClick={requestTimeCorrection} disabled={correctionSending} className="flex items-center gap-2 rounded-2xl bg-amber-500 px-5 py-3 text-sm font-black text-white shadow-lg shadow-amber-100 hover:bg-amber-600 disabled:opacity-60">
                 {correctionSending ? <Loader2 className="animate-spin" size={18} /> : <Send size={18} />} 依頼を送信
               </button>

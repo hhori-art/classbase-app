@@ -199,6 +199,17 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     }
   };
 
+  const tryRepairProfile = async (currentUser: User) => {
+    const token = await currentUser.getIdToken();
+    const res = await fetch('/api/auth/repair-profile', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) throw new Error(data.error || 'profile-repair-failed');
+    return data;
+  };
+
   useEffect(() => {
     setPersistence(auth, browserLocalPersistence).catch(console.error);
 
@@ -295,6 +306,18 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
             snap = await getDocFromCache(profileRef);
           } catch {
             throw fetchError;
+          }
+        }
+
+        if (!snap.exists()) {
+          try {
+            await tryRepairProfile(currentUser);
+            snap = await Promise.race([
+              getDoc(profileRef),
+              timeoutAfter(PROFILE_FETCH_TIMEOUT_MS, 'profile-fetch-timeout'),
+            ]);
+          } catch (repairError) {
+            console.warn('Profile repair failed:', repairError);
           }
         }
 

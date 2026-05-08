@@ -76,7 +76,14 @@ export default function StudentDashboard() {
     const loadVisibility = async () => {
       try {
         const snap = await getDoc(doc(db, 'settings', 'portal_visibility'));
-        if (snap.exists()) setVisibility(prev => ({ ...prev, ...(snap.data().student || {}) }));
+        if (snap.exists()) {
+          const configured = snap.data().student || {};
+          setVisibility(prev => ({
+            ...prev,
+            ...configured,
+            absence: true,
+          }));
+        }
       } catch (e) {
         console.warn('Student visibility settings read failed:', e);
       }

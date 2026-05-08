@@ -57,6 +57,18 @@ const adminFirstLogin = async (login: string, pass: string) => {
   return data as { ok: true; email: string };
 };
 
+const repairProfile = async () => {
+  const token = await auth.currentUser?.getIdToken();
+  if (!token) throw new Error('ログイン情報を確認できません。再ログインしてください。');
+  const res = await fetch('/api/auth/repair-profile', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.ok === false) throw new Error(data.error || 'profile repair failed');
+  return data;
+};
+
 export default function AutoFixLoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState('');
@@ -105,7 +117,18 @@ export default function AutoFixLoginPage() {
       }
       
       if (!userDoc.exists()) {
-        setStatus('⚠️ データ欠落。サーバーAPIで自動修復中...');
+        setStatus('⚠️ データ欠落。既存プロフィールを自動修復中...');
+        try {
+          await repairProfile();
+          const repairedSnap = await getDoc(doc(db, 'users', user.uid));
+          if (repairedSnap.exists()) userDoc = repairedSnap;
+        } catch (repairError) {
+          console.warn('Generic profile repair failed:', repairError);
+        }
+      }
+
+      if (!userDoc.exists()) {
+        setStatus('⚠️ 管理者データ欠落。サーバーAPIで自動修復中...');
         try {
           const token = await user.getIdToken();
           const res = await fetch('/api/admin/bootstrap-profile', {

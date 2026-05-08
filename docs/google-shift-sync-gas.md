@@ -25,6 +25,7 @@ GAS から呼ぶ場合は、HTTP ヘッダー `x-shift-sync-secret` に同期用
 Vercel では次のどちらかを設定します。
 
 - 推奨: `SHIFT_SYNC_SECRET`
+- GAS と同名で管理する場合: `CLASSBASE_SYNC_SECRET`
 - 代替: 既存の `SECRET_KEY`
 
 ## GAS 設定値
@@ -34,8 +35,10 @@ Apps Script の「プロジェクトの設定」→「スクリプト プロパ�
 | key | value |
 | --- | --- |
 | `CLASSBASE_SYNC_ENDPOINT` | `https://classbase-app.vercel.app/api/admin/shifts/sync` |
-| `CLASSBASE_SYNC_SECRET` | Vercel の `SHIFT_SYNC_SECRET` または `SECRET_KEY` と同じ値 |
+| `CLASSBASE_SYNC_SECRET` | Vercel の `SHIFT_SYNC_SECRET` / `CLASSBASE_SYNC_SECRET` / `SECRET_KEY` のいずれかと同じ値 |
 | `CLASSBASE_SYNC_YEAR` | `2026` |
+
+`{"ok":false,"error":"missing-token"}` が出る場合は、GASの `CLASSBASE_SYNC_SECRET` が空、またはVercel側に同期用シークレットが設定されていない可能性が高いです。
 
 ## Firebase 直接同期版について
 
@@ -387,20 +390,84 @@ function syncFirebaseToSheet() {
     limit: 1000,
   });
 
-  let updated = 0;
+  const mainByCell = {};
+  const supportByCell = {};
+  const generalByCell = {};
+
   rows.forEach(row => {
     if (!row.document) return;
     const fields = row.document.fields || {};
-    if (firestoreString_(fields, 'role_type') !== 'main') return;
     const sourceRow = Number(firestoreString_(fields, 'source_row'));
     const sourceCol = Number(firestoreString_(fields, 'source_col'));
-    const teacherName = firestoreString_(fields, 'teacher_name');
     if (!sourceRow || !sourceCol) return;
-    sheet.getRange(sourceRow, sourceCol).setValue(teacherName || '');
+    const key = `${sourceRow}:${sourceCol}`;
+    const shift = {
+      role_type: firestoreString_(fields, 'role_type') || 'main',
+      teacher_name: firestoreString_(fields, 'teacher_name'),
+      subject: firestoreString_(fields, 'target_subject'),
+      detail_subject: firestoreString_(fields, 'target_detail_subject'),
+      unit: firestoreString_(fields, 'unit'),
+      place: firestoreString_(fields, 'target_place'),
+      meeting_id: firestoreString_(fields, 'target_meeting_id'),
+      signin_address: firestoreString_(fields, 'target_signin_address'),
+    };
+    if (shift.role_type === 'main') {
+      mainByCell[key] = shift;
+    } else if (shift.role_type === 'sub') {
+      if (!supportByCell[key]) supportByCell[key] = [];
+      if (shift.teacher_name) supportByCell[key].push(shift.teacher_name);
+    } else if (shift.role_type === 'general') {
+      if (!generalByCell[key]) generalByCell[key] = [];
+      if (shift.teacher_name) generalByCell[key].push(shift.teacher_name);
+    }
+  });
+
+  const cleared = {};
+  parsed.shifts.forEach(shift => {
+    const row = Number(shift.source_row || 0);
+    const col = Number(shift.source_col || 0);
+    if (!row || !col) return;
+    const role = shift.role_type || 'main';
+    if (role === 'main') {
+      for (let r = row - 4; r <= row + 3; r++) {
+        const key = `${r}:${col}`;
+        if (!cleared[key]) {
+          sheet.getRange(r, col).clearContent();
+          cleared[key] = true;
+        }
+      }
+    } else {
+      const key = `${row}:${col}`;
+      if (!cleared[key]) {
+        sheet.getRange(row, col).clearContent();
+        cleared[key] = true;
+      }
+    }
+  });
+
+  let updated = 0;
+  Object.keys(mainByCell).forEach(key => {
+    const [row, col] = key.split(':').map(Number);
+    const shift = mainByCell[key];
+    const supportKey = `${row + 1}:${col}`;
+    sheet.getRange(row - 4, col).setValue(shift.subject || '');
+    sheet.getRange(row - 3, col).setValue(shift.detail_subject || '');
+    sheet.getRange(row - 2, col).setValue(shift.unit || '');
+    sheet.getRange(row - 1, col).setValue(shift.place || '');
+    sheet.getRange(row, col).setValue(shift.teacher_name || '');
+    sheet.getRange(row + 1, col).setValue((supportByCell[supportKey] || []).join('\n'));
+    sheet.getRange(row + 2, col).setValue(shift.meeting_id || '');
+    sheet.getRange(row + 3, col).setValue(shift.signin_address || '');
+    updated += 8;
+  });
+
+  Object.keys(generalByCell).forEach(key => {
+    const [row, col] = key.split(':').map(Number);
+    sheet.getRange(row, col).setValue(generalByCell[key].join('\n'));
     updated++;
   });
 
-  SpreadsheetApp.getUi().alert(`Firebaseからシートへ反映しました。\n更新セル: ${updated}件`);
+  SpreadsheetApp.getUi().alert(`Firebaseからシートへ上書きしました。\n更新セル: ${updated}件`);
 }
 ```
 
@@ -423,11 +490,15 @@ function onOpen() {
 
 function config_() {
   const props = PropertiesService.getScriptProperties();
-  return {
+  const cfg = {
     endpoint: props.getProperty('CLASSBASE_SYNC_ENDPOINT') || 'https://classbase-app.vercel.app/api/admin/shifts/sync',
     secret: props.getProperty('CLASSBASE_SYNC_SECRET') || '',
     year: Number(props.getProperty('CLASSBASE_SYNC_YEAR') || '2026'),
   };
+  if (!cfg.secret) {
+    throw new Error('CLASSBASE_SYNC_SECRET を Apps Script のスクリプトプロパティに設定してください。');
+  }
+  return cfg;
 }
 
 function display_(value) {
@@ -645,22 +716,81 @@ function syncClassbaseToSheet() {
     `&end_date=${encodeURIComponent(dates[dates.length - 1])}`;
 
   const data = getJson_(url);
-  let updated = 0;
+  const mainByCell = {};
+  const supportByCell = {};
+  const generalByCell = {};
 
+  data.shifts.forEach(shift => {
+    const row = Number(shift.source_row || 0);
+    const col = Number(shift.source_col || 0);
+    if (!row || !col) return;
+    const key = `${row}:${col}`;
+    if (shift.role_type === 'main') {
+      mainByCell[key] = shift;
+    } else if (shift.role_type === 'sub') {
+      if (!supportByCell[key]) supportByCell[key] = [];
+      if (shift.teacher_name) supportByCell[key].push(shift.teacher_name);
+    } else if (shift.role_type === 'general') {
+      if (!generalByCell[key]) generalByCell[key] = [];
+      if (shift.teacher_name) generalByCell[key].push(shift.teacher_name);
+    }
+  });
+
+  // 先に管理対象セルを空にして、DBにない値がシートへ残らないようにします。
+  const cleared = {};
+  parsed.shifts.forEach(shift => {
+    const row = Number(shift.source_row || 0);
+    const col = Number(shift.source_col || 0);
+    if (!row || !col) return;
+    const role = shift.role_type || 'main';
+    if (role === 'main') {
+      for (let r = row - 4; r <= row + 3; r++) {
+        const key = `${r}:${col}`;
+        if (!cleared[key]) {
+          sheet.getRange(r, col).clearContent();
+          cleared[key] = true;
+        }
+      }
+    } else {
+      const key = `${row}:${col}`;
+      if (!cleared[key]) {
+        sheet.getRange(row, col).clearContent();
+        cleared[key] = true;
+      }
+    }
+  });
+
+  let updated = 0;
   data.shifts.forEach(shift => {
     if (shift.role_type !== 'main') return;
     if (!shift.source_row || !shift.source_col) return;
-    sheet.getRange(Number(shift.source_row), Number(shift.source_col)).setValue(shift.teacher_name || '');
+    const row = Number(shift.source_row);
+    const col = Number(shift.source_col);
+    const supportKey = `${row + 1}:${col}`;
+    sheet.getRange(row - 4, col).setValue(shift.subject || '');
+    sheet.getRange(row - 3, col).setValue(shift.detail_subject || '');
+    sheet.getRange(row - 2, col).setValue(shift.unit || '');
+    sheet.getRange(row - 1, col).setValue(shift.place || '');
+    sheet.getRange(row, col).setValue(shift.teacher_name || '');
+    sheet.getRange(row + 1, col).setValue((supportByCell[supportKey] || []).join('\n'));
+    sheet.getRange(row + 2, col).setValue(shift.meeting_id || '');
+    sheet.getRange(row + 3, col).setValue(shift.signin_address || '');
+    updated += 8;
+  });
+
+  Object.keys(generalByCell).forEach(key => {
+    const [row, col] = key.split(':').map(Number);
+    sheet.getRange(row, col).setValue(generalByCell[key].join('\n'));
     updated++;
   });
 
-  SpreadsheetApp.getUi().alert(`アプリ → シート反映が完了しました。\n更新セル: ${updated}件`);
+  SpreadsheetApp.getUi().alert(`アプリ → シート上書きが完了しました。\n更新セル: ${updated}件`);
 }
 ```
 
 ## 注意
 
-- `アプリ → シート` は講師配置の「講師」セルのみ戻し書きします。
-- 生徒向けの講座名・単元・Zoom ID などはシートを正として `シート → アプリ` で同期してください。
-- `replace: true` は同じスプレッドシート・同じシート・同じ期間の既存同期データを削除してから取り込みます。
+- `シート → アプリ` は `replace: true` により、同じスプレッドシート・同じシート・同じ期間のDB側データを削除してからシート内容で上書きします。
+- `アプリ → シート` はDB側の講師名だけでなく、科目・クラス/講座名・単元・場所・Zoom ID・サインイン情報・サポート欄もシートへ上書きします。
+- どちらの方向でも「最後に押した同期ボタン側が正」として反映されます。
 - 既存の CSV 取り込みと併用できますが、同じ期間を扱う場合はどちらを正とするかを決めて運用してください。

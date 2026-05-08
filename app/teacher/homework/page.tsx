@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs, addDoc, deleteDoc, doc, orderBy } from 'firebase/firestore';
+import { collection, query, getDocs } from 'firebase/firestore';
 import { ArrowLeft, Plus, Trash2, Calendar, BookOpen, ChevronRight, Loader2, X } from 'lucide-react';
 import Link from 'next/link';
 
@@ -28,7 +28,7 @@ export default function TeacherHomeworkPage() {
     try {
       // 作成日順などで並べたいが、複合インデックスが必要になる可能性があるため
       // シンプルに取得してからJSでソートします
-      const q = query(collection(db, 'assignments'));
+      const q = query(collection(db, 'homework_assignments'));
       const snapshot = await getDocs(q);
       const list = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       
@@ -53,12 +53,14 @@ export default function TeacherHomeworkPage() {
     if (!confirm('この内容で課題を配信しますか？')) return;
 
     try {
-      await addDoc(collection(db, 'assignments'), {
-        ...form,
-        created_by: user?.uid,
-        created_at: new Date().toISOString(),
-        status: 'active'
+      const token = await user?.getIdToken();
+      const res = await fetch('/api/teacher/homework', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action: 'create', ...form, target_grade: form.grade, description: form.content }),
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'homework-create-failed');
       alert('課題を作成しました');
       setShowModal(false);
       setForm({ title: '', content: '', subject: '理科', grade: '中1', deadline: '' });
@@ -72,7 +74,14 @@ export default function TeacherHomeworkPage() {
   const handleDelete = async (id: string) => {
     if (!confirm('本当に削除しますか？\n(提出されたデータも見えなくなります)')) return;
     try {
-      await deleteDoc(doc(db, 'assignments', id));
+      const token = await user?.getIdToken();
+      const res = await fetch('/api/teacher/homework', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action: 'delete', assignment_id: id }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'homework-delete-failed');
       setAssignments(prev => prev.filter(a => a.id !== id));
     } catch (e: any) {
       alert('削除エラー: ' + e.message);
@@ -121,7 +130,7 @@ export default function TeacherHomeworkPage() {
                     </div>
                     <div>
                       <div className="flex items-center gap-2 mb-1">
-                        <span className="bg-gray-100 text-gray-600 text-xs px-2 py-0.5 rounded font-bold">{assign.grade}</span>
+                        <span className="bg-gray-100 text-gray-600 text-xs px-2 py-0.5 rounded font-bold">{assign.target_grade || assign.grade}</span>
                         <h3 className="font-bold text-gray-800 text-lg group-hover:text-orange-600 transition-colors">
                           {assign.title}
                         </h3>

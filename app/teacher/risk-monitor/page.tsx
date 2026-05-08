@@ -2,7 +2,8 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs, doc, setDoc, getDoc } from 'firebase/firestore';
+import { collection, query, where, getDocs, doc, getDoc } from 'firebase/firestore';
+import { useAuth } from '@/app/context/AuthContext';
 import { 
   ArrowLeft, AlertTriangle, CheckCircle, Loader2, Search, RefreshCw
 } from 'lucide-react';
@@ -36,6 +37,7 @@ const RISK_THRESHOLDS = {
 };
 
 export default function RiskMonitorPage() {
+  const { user } = useAuth();
   const [students, setStudents] = useState<Student[]>([]);
   const [risks, setRisks] = useState<RiskData[]>([]);
   const [loading, setLoading] = useState(true);
@@ -194,16 +196,16 @@ export default function RiskMonitorPage() {
   // 対応状況の切り替え
   const toggleResolution = async (studentId: string, currentStatus: boolean) => {
     try {
-      const docId = `${studentId}_${currentYear}`;
       const newStatus = !currentStatus;
-      
-      await setDoc(doc(db, 'pf_resolutions', docId), {
-        student_id: studentId,
-        year: currentYear,
-        att: newStatus,
-        hw: newStatus,
-        updated_at: new Date().toISOString()
-      }, { merge: true });
+
+      const token = await user?.getIdToken();
+      const res = await fetch('/api/teacher/risk-resolution', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ student_id: studentId, year: currentYear, resolved: newStatus }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'risk-resolution-failed');
 
       setRisks(prev => prev.map(r => 
         r.student.id === studentId ? { ...r, isResolved: newStatus } : r

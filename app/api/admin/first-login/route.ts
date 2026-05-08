@@ -28,24 +28,34 @@ const normalizeEmail = (login: string, email?: unknown) => {
   return `${login}@classbase.local`;
 };
 
-async function findUserDoc(db: FirebaseFirestore.Firestore, login: string) {
+async function findUserDocs(db: FirebaseFirestore.Firestore, login: string) {
   const candidates = Array.from(new Set([
     login,
     login.includes('@') ? login.split('@')[0] : login,
   ].filter(Boolean)));
+  const docs = new Map<string, FirebaseFirestore.QueryDocumentSnapshot>();
 
   for (const value of candidates) {
-    let snap = await db.collection('users').where('email', '==', value).limit(1).get();
-    if (!snap.empty) return snap.docs[0];
+    let snap = await db.collection('users').where('email', '==', value).limit(10).get();
+    snap.docs.forEach(doc => docs.set(doc.id, doc));
 
-    snap = await db.collection('users').where('lifetime_id', '==', value).limit(1).get();
-    if (!snap.empty) return snap.docs[0];
+    snap = await db.collection('users').where('lifetime_id', '==', value).limit(10).get();
+    snap.docs.forEach(doc => docs.set(doc.id, doc));
 
-    snap = await db.collection('users').where('initial_login_id', '==', value).limit(1).get();
-    if (!snap.empty) return snap.docs[0];
+    snap = await db.collection('users').where('initial_login_id', '==', value).limit(10).get();
+    snap.docs.forEach(doc => docs.set(doc.id, doc));
   }
 
-  return null;
+  return Array.from(docs.values());
+}
+
+function pickUserDoc(docs: FirebaseFirestore.QueryDocumentSnapshot[], password: string) {
+  const matchingPassword = docs.find(doc => {
+    const data = doc.data() || {};
+    const saved = normalizePassword(data.initial_password || data.raw_password || data.password);
+    return saved && saved === password;
+  });
+  return matchingPassword || docs[0] || null;
 }
 
 function isAdminRole(role: unknown) {
@@ -64,7 +74,8 @@ export async function POST(req: Request) {
 
     const db = adminDb();
     const auth = adminAuth();
-    const userDoc = await findUserDoc(db, login);
+    const userDocs = await findUserDocs(db, login);
+    const userDoc = pickUserDoc(userDocs, password);
 
     if (!userDoc) {
       return NextResponse.json({ ok: false, error: 'not-registered' }, { status: 404 });
@@ -117,9 +128,9 @@ export async function POST(req: Request) {
       updated_at: new Date().toISOString(),
     }, { merge: true });
 
-    if (userDoc.id !== uid) {
-      await userDoc.ref.delete().catch(() => {});
-    }
+    await Promise.all(userDocs
+      .filter(doc => doc.id !== uid)
+      .map(doc => doc.ref.delete().catch(() => {})));
 
     return NextResponse.json({ ok: true, uid, email });
   } catch (error: any) {

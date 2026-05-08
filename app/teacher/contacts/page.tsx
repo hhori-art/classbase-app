@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs, doc, setDoc, addDoc, serverTimestamp, getDoc } from 'firebase/firestore';
+import { collection, query, where, getDocs, doc, getDoc } from 'firebase/firestore';
 import { 
   Phone, Search, Filter, CheckCircle, PhoneOff, CameraOff,
   ArrowLeft, Loader2, Calendar, Clock, UserX 
@@ -23,7 +23,7 @@ const getTodayDayOfWeek = () => {
 };
 
 export default function TeacherContactsPage() {
-  const { profile } = useAuth();
+  const { user } = useAuth();
   const [loading, setLoading] = useState(true);
   const [students, setStudents] = useState<any[]>([]); 
   const [currentWeek, setCurrentWeek] = useState('1');
@@ -98,14 +98,20 @@ export default function TeacherContactsPage() {
     if (!confirm(`${student.student_name} さんに電話済みとして記録しますか？`)) return;
 
     try {
-      await addDoc(collection(db, 'contact_logs'), {
-        student_id: student.uid,
-        student_name: student.student_name,
-        teacher_name: profile?.name || '講師',
-        result: '電話済み(繋がらず/留守)',
-        content: note,
-        created_at: serverTimestamp()
+      const token = await user?.getIdToken();
+      const res = await fetch('/api/teacher/contacts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          action: 'mark_called',
+          student_id: student.uid || student.id,
+          student_name: student.student_name,
+          note,
+          week: currentWeek,
+        }),
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'contact-save-failed');
 
       setCalledStates(prev => ({ ...prev, [student.uid]: true }));
       alert('電話記録を保存しました');
@@ -120,25 +126,20 @@ export default function TeacherContactsPage() {
     if (!confirm(`${student.student_name} さんを「欠席」として確定しますか？\n(リストから消えます)`)) return;
 
     try {
-      const recordId = `${student.uid}_w${currentWeek}`;
-      const pfRef = doc(db, 'pf_records', recordId);
-
-      await setDoc(pfRef, {
-        student_id: student.uid,
-        week_number: currentWeek,
-        attendance_status: '欠', 
-        note: note,
-        updated_at: new Date().toISOString()
-      }, { merge: true });
-
-      await addDoc(collection(db, 'contact_logs'), {
-        student_id: student.uid,
-        student_name: student.student_name,
-        teacher_name: profile?.name || '講師',
-        result: '欠席確定',
-        content: note,
-        created_at: serverTimestamp()
+      const token = await user?.getIdToken();
+      const res = await fetch('/api/teacher/contacts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          action: 'confirm_absence',
+          student_id: student.uid || student.id,
+          student_name: student.student_name,
+          note,
+          week: currentWeek,
+        }),
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'absence-confirm-failed');
 
       alert('欠席登録しました');
       setStudents(prev => prev.filter(s => s.uid !== student.uid));

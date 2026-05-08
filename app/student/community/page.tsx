@@ -4,8 +4,7 @@ import { useState, useEffect } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
 import { 
-  collection, query, where, orderBy, limit, getDocs, addDoc, serverTimestamp, 
-  doc, updateDoc, increment, arrayUnion, onSnapshot 
+  collection, query, where, orderBy, limit, getDocs, onSnapshot
 } from 'firebase/firestore';
 import { 
   MessageCircle, Heart, MessageSquare, Plus, Send, Loader2, 
@@ -75,6 +74,17 @@ export default function CommunityPage() {
   const changeOption = (index: number, val: string) => { const n = [...voteOptions]; n[index] = val; setVoteOptions(n); };
 
   // --- アクション ---
+  const postCommunityAction = async (payload: Record<string, unknown>) => {
+    const token = await user?.getIdToken();
+    const res = await fetch('/api/student/community', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) throw new Error(data.error || 'community-action-failed');
+    return data;
+  };
 
   const handlePostSubmit = async () => {
     if (!newTitle.trim()) return alert('タイトルを入力してください');
@@ -83,19 +93,11 @@ export default function CommunityPage() {
 
     setPostLoading(true);
     try {
-      await addDoc(collection(db, 'community_topics'), {
+      await postCommunityAction({
+        action: 'create_topic',
         title: newTitle,
         type: newType,
-        options: newType === 'vote' ? voteOptions : null,
-        votes: {},
-        voted_by: [],
-        creator_uid: uid,
-        creator_name: currentName,
-        is_approved: false,
-        likes: 0,
-        liked_by: [],
-        created_at: serverTimestamp(),
-        reward_given: false
+        options: newType === 'vote' ? voteOptions : [],
       });
       alert('申請しました！承認をお待ちください。');
       setIsPosting(false); setNewTitle(''); setVoteOptions(['', '']);
@@ -108,8 +110,7 @@ export default function CommunityPage() {
     setTopics(prev => prev.map(t => t.id === topic.id ? { ...t, likes: (t.likes || 0) + 1, liked_by: [...(t.liked_by || []), uid] } : t));
 
     try {
-      const topicRef = doc(db, 'community_topics', topic.id);
-      await updateDoc(topicRef, { likes: increment(1), liked_by: arrayUnion(uid) });
+      await postCommunityAction({ action: 'like', topic_id: topic.id });
       if (!topic.reward_given && (topic.likes || 0) + 1 >= LIKE_REWARD_THRESHOLD) {
         const token = await user?.getIdToken();
         if (token) {
@@ -126,8 +127,7 @@ export default function CommunityPage() {
   const handleVote = async (topicId: string, optionIndex: number) => {
     if (!uid) return;
     try {
-      const topicRef = doc(db, 'community_topics', topicId);
-      await updateDoc(topicRef, { [`votes.${optionIndex}`]: increment(1), voted_by: arrayUnion(uid) });
+      await postCommunityAction({ action: 'vote', topic_id: topicId, option_index: optionIndex });
       setTopics(prev => prev.map(t => {
         if (t.id !== topicId) return t;
         const newVotes = { ...t.votes };
@@ -141,7 +141,7 @@ export default function CommunityPage() {
     if (!newComment.trim() || !expandedTopicId || !uid) return;
     setCommentLoading(true);
     try {
-      await addDoc(collection(db, 'community_topics', expandedTopicId, 'comments'), { text: newComment, uid: uid, name: currentName, created_at: serverTimestamp() });
+      await postCommunityAction({ action: 'comment', topic_id: expandedTopicId, text: newComment });
       setNewComment('');
     } catch (e) { alert('送信失敗'); } finally { setCommentLoading(false); }
   };

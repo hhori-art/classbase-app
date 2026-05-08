@@ -16,21 +16,32 @@ function normalizeId(id: string) {
     .replace(/[０-９]/g, (s) => String.fromCharCode(s.charCodeAt(0) - 0xfee0));
 }
 
-async function findSeedDoc(db: FirebaseFirestore.Firestore, lifetimeIdRaw: string) {
+async function findSeedDocs(db: FirebaseFirestore.Firestore, lifetimeIdRaw: string) {
   const lifetimeId = normalizeId(lifetimeIdRaw);
+  const docs = new Map<string, FirebaseFirestore.QueryDocumentSnapshot>();
 
   // 文字列で検索
-  let snap = await db.collection('users').where('lifetime_id', '==', lifetimeId).limit(1).get();
-  if (!snap.empty) return snap.docs[0];
+  let snap = await db.collection('users').where('lifetime_id', '==', lifetimeId).limit(10).get();
+  snap.docs.forEach(doc => docs.set(doc.id, doc));
+  snap = await db.collection('users').where('initial_login_id', '==', lifetimeId).limit(10).get();
+  snap.docs.forEach(doc => docs.set(doc.id, doc));
+  snap = await db.collection('users').where('email', '==', `${lifetimeId}@${EMAIL_DOMAIN}`).limit(10).get();
+  snap.docs.forEach(doc => docs.set(doc.id, doc));
 
   // 数値で検索（型ズレ対策）
   const n = Number(lifetimeId);
   if (!Number.isNaN(n)) {
-    snap = await db.collection('users').where('lifetime_id', '==', n).limit(1).get();
-    if (!snap.empty) return snap.docs[0];
+    snap = await db.collection('users').where('lifetime_id', '==', n).limit(10).get();
+    snap.docs.forEach(doc => docs.set(doc.id, doc));
   }
 
-  return null;
+  return Array.from(docs.values());
+}
+
+function pickSeedDoc(docs: FirebaseFirestore.QueryDocumentSnapshot[], password: string) {
+  const withMatchingPassword = docs.find(doc => String((doc.data() || {}).initial_password || '').trim() === password);
+  if (withMatchingPassword) return withMatchingPassword;
+  return docs[0] || null;
 }
 
 export async function POST(req: Request) {
@@ -54,7 +65,8 @@ export async function POST(req: Request) {
     const auth = adminAuth();
 
     // 1) seed取得
-    const seedDoc = await findSeedDoc(db, lifetimeId);
+    const seedDocs = await findSeedDocs(db, lifetimeId);
+    const seedDoc = pickSeedDoc(seedDocs, password);
     if (!seedDoc) {
       return NextResponse.json({ ok: false, error: 'not-registered' }, { status: 404 });
     }
@@ -107,9 +119,9 @@ export async function POST(req: Request) {
     );
 
     // 6) 旧doc削除（同一IDなら削除しない）
-    if (seedDoc.ref.id !== uid) {
-      await seedDoc.ref.delete().catch(() => {});
-    }
+    await Promise.all(seedDocs
+      .filter(doc => doc.ref.id !== uid)
+      .map(doc => doc.ref.delete().catch(() => {})));
 
     return NextResponse.json({ ok: true, uid, email }, { status: 200 });
   } catch (err: any) {

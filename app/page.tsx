@@ -66,6 +66,18 @@ export default function LoginPage() {
     return data; // { ok:true, uid, email }
   };
 
+  const repairProfileViaApi = async () => {
+    const token = await auth.currentUser?.getIdToken();
+    if (!token) throw new Error('ログイン情報を確認できません。再ログインしてください。');
+    const res = await fetch('/api/auth/repair-profile', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) throw new Error(data.error || 'ユーザー情報の自動修復に失敗しました。');
+    return data;
+  };
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -113,7 +125,12 @@ export default function LoginPage() {
       if (loggedInUser) {
         // ※ Firestoreに 'users' コレクションがあり、ドキュメントIDがuidであることを想定
         const userDocRef = doc(db, 'users', loggedInUser.uid);
-        const userDocSnap = await getDoc(userDocRef);
+        let userDocSnap = await getDoc(userDocRef);
+
+        if (!userDocSnap.exists()) {
+          await repairProfileViaApi();
+          userDocSnap = await getDoc(userDocRef);
+        }
 
         if (userDocSnap.exists()) {
           const role = normalizeRole(userDocSnap.data().role);

@@ -2,9 +2,6 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-// Firebase関連のインポートに変更
-import { db } from '@/lib/firebase';
-import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 import { useAuth } from '@/app/context/AuthContext'; // 認証コンテキスト（作成者ID用）
 
 import { ArrowLeft, Plus, Calendar, BookOpen, Loader2 } from 'lucide-react';
@@ -19,6 +16,7 @@ export default function CreateAssignmentPage() {
   const [formData, setFormData] = useState({
     title: '',
     subject: '理科', // 初期値
+    target_grade: '中1',
     deadline: '',
     description: ''
   });
@@ -37,18 +35,14 @@ export default function CreateAssignmentPage() {
     setLoading(true);
 
     try {
-      // ★修正: Firestoreへの追加処理
-      // コレクション名は 'homework_assignments' としています
-      await addDoc(collection(db, 'homework_assignments'), {
-        title: formData.title,
-        subject: formData.subject,
-        deadline: formData.deadline, // YYYY-MM-DD形式のまま保存
-        description: formData.description,
-        created_by: user.uid, // 作成した先生のID
-        teacher_name: user.displayName || '担当講師', // 先生の名前
-        created_at: serverTimestamp(), // 作成日時
-        is_completed_count: 0 // 完了者数の初期値
+      const token = await user.getIdToken();
+      const res = await fetch('/api/teacher/homework', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action: 'create', ...formData }),
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'homework-create-failed');
 
       alert('宿題を作成しました！');
       router.push('/teacher/homework'); // 一覧に戻る
@@ -127,6 +121,21 @@ export default function CreateAssignmentPage() {
                 className="w-full pl-10 pr-4 py-3 bg-gray-50 border-2 border-gray-100 rounded-xl focus:border-indigo-500 focus:bg-white outline-none text-gray-900 font-bold transition-all"
               />
             </div>
+          </div>
+
+          {/* 期限 */}
+          <div>
+            <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">対象学年</label>
+            <select
+              name="target_grade"
+              value={formData.target_grade}
+              onChange={handleChange}
+              className="w-full px-4 py-3 bg-gray-50 border-2 border-gray-100 rounded-xl focus:border-indigo-500 focus:bg-white outline-none text-gray-900 font-bold transition-all"
+            >
+              <option>中1</option>
+              <option>中2</option>
+              <option>中3</option>
+            </select>
           </div>
 
           {/* 期限 */}

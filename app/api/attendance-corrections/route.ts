@@ -13,6 +13,18 @@ const toDateKey = (value?: string | null) => {
 
 const isIsoLikeDate = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value);
 
+const ensureValidRange = (startTime?: string | null, endTime?: string | null) => {
+  if (!startTime || !endTime) return;
+  const start = new Date(startTime);
+  const end = new Date(endTime);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    throw new Error('invalid requested time');
+  }
+  if (start >= end) {
+    throw new Error('requested end time must be after start time');
+  }
+};
+
 export async function POST(request: NextRequest) {
   try {
     const user = await getServerUser(request);
@@ -30,6 +42,7 @@ export async function POST(request: NextRequest) {
       if (!requestedStartTime && !requestedEndTime) {
         return Response.json({ ok: false, error: 'requested time is required' }, { status: 400 });
       }
+      ensureValidRange(requestedStartTime, requestedEndTime);
 
       let requestType: 'time_correction' | 'missing_clock' = 'time_correction';
       let teacherName = '';
@@ -42,6 +55,12 @@ export async function POST(request: NextRequest) {
         if (workRecord.status === 'approved') {
           return Response.json({ ok: false, error: 'approved work records cannot be changed by teacher' }, { status: 400 });
         }
+        if (requestedEndTime && workRecord.start_time) {
+          ensureValidRange(String(workRecord.start_time), requestedEndTime);
+        }
+        if (requestedStartTime && workRecord.end_time) {
+          ensureValidRange(requestedStartTime, String(workRecord.end_time));
+        }
         teacherName = String(workRecord.teacher_name || teacherName || '');
       } else {
         requestType = 'missing_clock';
@@ -51,6 +70,7 @@ export async function POST(request: NextRequest) {
         if (!requestedStartTime || !requestedEndTime) {
           return Response.json({ ok: false, error: 'missing clock request requires start and end time' }, { status: 400 });
         }
+        ensureValidRange(requestedStartTime, requestedEndTime);
         const existingSnap = await db.collection('work_records')
           .where('teacher_id', '==', user.uid)
           .where('date', '==', targetDate)
@@ -122,15 +142,15 @@ export async function POST(request: NextRequest) {
         if (!targetDate || !isIsoLikeDate(targetDate)) {
           return Response.json({ ok: false, error: 'target_date is missing on correction request' }, { status: 400 });
         }
-        if (!correction.requested_start_time || !correction.requested_end_time) {
-          return Response.json({ ok: false, error: 'missing clock request requires start and end time' }, { status: 400 });
+        if (!correction.requested_start_time && !correction.requested_end_time) {
+          return Response.json({ ok: false, error: 'missing clock request requires requested time' }, { status: 400 });
         }
         const createdRef = await db.collection('work_records').add({
           teacher_id: correction.teacher_id,
           teacher_name: correction.teacher_name || '未設定の講師',
           date: targetDate,
           start_time: correction.requested_start_time,
-          end_time: correction.requested_end_time,
+          end_time: correction.requested_end_time || null,
           status: 'pending',
           work_segments: [],
           transportation: [],

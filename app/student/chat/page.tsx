@@ -4,13 +4,16 @@ import { useEffect, useRef, useState } from 'react';
 import { useChat } from 'ai/react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
-import { collection, addDoc, serverTimestamp, query, orderBy, getDocs } from 'firebase/firestore';
+import { collection, addDoc, serverTimestamp, query, orderBy, getDocs, where, limit, onSnapshot } from 'firebase/firestore';
 import { Send, User, Bot, Loader2, Mail, Sparkles, MessageCircle, Info } from 'lucide-react';
 import { logActivity } from '@/lib/logActivity';
 
 export default function StudentChat() {
   const { user, profile } = useAuth();
   const [isSendingToTeacher, setIsSendingToTeacher] = useState(false);
+  const [teacherMessages, setTeacherMessages] = useState<any[]>([]);
+  const [teacherReply, setTeacherReply] = useState('');
+  const [teacherReplyLoading, setTeacherReplyLoading] = useState(false);
   const showChatDestination = process.env.NEXT_PUBLIC_SHOW_CHAT_DESTINATION !== 'false';
   const stamps = ['ありがとう', 'わかった', '質問です', '復習します'];
   
@@ -70,6 +73,27 @@ export default function StudentChat() {
     loadHistory();
   }, [user, setMessages]);
 
+  useEffect(() => {
+    if (!user) return;
+    const q = query(collection(db, 'chat_logs'), where('uid', '==', user.uid), limit(100));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const list = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      const toMillis = (value: any) => {
+        if (!value) return 0;
+        if (typeof value.toMillis === 'function') return value.toMillis();
+        if (typeof value.toDate === 'function') return value.toDate().getTime();
+        if (typeof value.seconds === 'number') return value.seconds * 1000;
+        const parsed = new Date(value).getTime();
+        return Number.isFinite(parsed) ? parsed : 0;
+      };
+      list.sort((a: any, b: any) => toMillis(a.created_at || a.createdAt) - toMillis(b.created_at || b.createdAt));
+      setTeacherMessages(list);
+    }, (error) => {
+      console.error('先生チャット読み込みエラー', error);
+    });
+    return () => unsubscribe();
+  }, [user]);
+
   // --- 2. ユーザーのメッセージ送信時に保存 ---
   const customSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -127,6 +151,27 @@ export default function StudentChat() {
     }
   };
 
+  const sendTeacherReply = async () => {
+    if (!user || !teacherReply.trim()) return;
+    setTeacherReplyLoading(true);
+    try {
+      const token = await user.getIdToken();
+      const res = await fetch('/api/student/teacher-chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ message: teacherReply }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'teacher-chat-send-failed');
+      setTeacherReply('');
+    } catch (e) {
+      console.error(e);
+      alert('先生への返信に失敗しました');
+    } finally {
+      setTeacherReplyLoading(false);
+    }
+  };
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -170,6 +215,55 @@ export default function StudentChat() {
 
       {/* メッセージエリア */}
       <div className="flex-1 overflow-y-auto p-4 space-y-6">
+        <section className="mx-auto max-w-3xl rounded-3xl border border-orange-100 bg-white p-4 shadow-sm">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <div className="rounded-2xl bg-orange-50 p-2 text-orange-500"><MessageCircle size={18} /></div>
+              <div>
+                <h2 className="text-sm font-black text-gray-800">先生からのメッセージ</h2>
+                <p className="text-[10px] font-bold text-gray-400">先生宛の返信もここから送れます</p>
+              </div>
+            </div>
+            <span className="rounded-full bg-orange-50 px-3 py-1 text-[10px] font-black text-orange-500">{teacherMessages.length}件</span>
+          </div>
+
+          {teacherMessages.length === 0 ? (
+            <div className="rounded-2xl bg-gray-50 px-4 py-5 text-center text-xs font-bold text-gray-400">
+              まだ先生からのメッセージはありません
+            </div>
+          ) : (
+            <div className="mb-3 max-h-56 space-y-2 overflow-y-auto pr-1">
+              {teacherMessages.slice(-8).map((m) => {
+                const isTeacher = m.role === 'teacher';
+                return (
+                  <div key={m.id} className={`rounded-2xl px-3 py-2 text-xs font-bold leading-relaxed ${isTeacher ? 'bg-orange-50 text-gray-800' : 'bg-indigo-50 text-indigo-700'}`}>
+                    <div className="mb-1 text-[10px] font-black opacity-60">{isTeacher ? '先生' : '自分'}</div>
+                    <div className="whitespace-pre-wrap">{m.message || m.content}</div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="flex gap-2">
+            <input
+              value={teacherReply}
+              onChange={(e) => setTeacherReply(e.target.value)}
+              placeholder="先生へ返信..."
+              className="min-w-0 flex-1 rounded-2xl border border-gray-100 bg-gray-50 px-4 py-3 text-sm font-bold outline-none focus:border-orange-200 focus:bg-white"
+            />
+            <button
+              type="button"
+              onClick={sendTeacherReply}
+              disabled={!teacherReply.trim() || teacherReplyLoading}
+              className="rounded-2xl bg-orange-500 px-4 py-3 text-white shadow-sm disabled:opacity-50"
+              aria-label="先生へ返信"
+            >
+              {teacherReplyLoading ? <Loader2 className="animate-spin" size={18} /> : <Send size={18} />}
+            </button>
+          </div>
+        </section>
+
         {messages.length === 0 && (
           <div className="h-full flex flex-col items-center justify-center text-center opacity-80 animate-in fade-in zoom-in duration-500">
             <div className="w-24 h-24 bg-white rounded-full flex items-center justify-center shadow-xl mb-4 border-4 border-indigo-50">

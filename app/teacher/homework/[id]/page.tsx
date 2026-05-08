@@ -1,13 +1,13 @@
 'use client';
 
 import { useState, useEffect, use, useRef } from 'react';
-import { useRouter } from 'next/navigation';
 import { db, storage } from '@/lib/firebase';
-import { doc, getDoc, collection, query, where, getDocs, updateDoc, setDoc } from 'firebase/firestore';
+import { doc, getDoc, collection, query, where, getDocs } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { ArrowLeft, CheckCircle, User, MessageSquare, ExternalLink, RefreshCw, XCircle, Send, Stamp, Plus, ImageIcon } from 'lucide-react';
 import Link from 'next/link';
 import Image from 'next/image';
+import { useAuth } from '@/app/context/AuthContext';
 
 // デフォルトのスタンプリスト（必要に応じて画像URLを差し替えてください）
 const DEFAULT_STAMPS = [
@@ -18,6 +18,7 @@ const DEFAULT_STAMPS = [
 ];
 
 export default function TeacherHomeworkCheckPage({ params }: { params: Promise<{ id: string }> }) {
+  const { user } = useAuth();
   const { id } = use(params);
   const assignmentId = id;
 
@@ -45,7 +46,7 @@ export default function TeacherHomeworkCheckPage({ params }: { params: Promise<{
   const fetchData = async () => {
     try {
       // 課題情報の取得
-      const assignSnap = await getDoc(doc(db, 'assignments', assignmentId));
+      const assignSnap = await getDoc(doc(db, 'homework_assignments', assignmentId));
       if (!assignSnap.exists()) return;
       setAssignment({ id: assignSnap.id, ...assignSnap.data() });
 
@@ -55,7 +56,15 @@ export default function TeacherHomeworkCheckPage({ params }: { params: Promise<{
       
       const list = subSnap.docs.map(d => ({ id: d.id, ...d.data() } as any));
       // 日付順にソート (新しい順)
-      list.sort((a: any, b: any) => new Date(b.submitted_at).getTime() - new Date(a.submitted_at).getTime());
+      const toMillis = (value: any) => {
+        if (!value) return 0;
+        if (typeof value.toMillis === 'function') return value.toMillis();
+        if (typeof value.toDate === 'function') return value.toDate().getTime();
+        if (typeof value.seconds === 'number') return value.seconds * 1000;
+        const parsed = new Date(value).getTime();
+        return Number.isFinite(parsed) ? parsed : 0;
+      };
+      list.sort((a: any, b: any) => toMillis(b.submitted_at) - toMillis(a.submitted_at));
       setSubmissions(list);
     } catch (e) {
       console.error(e);
@@ -99,37 +108,21 @@ export default function TeacherHomeworkCheckPage({ params }: { params: Promise<{
     if (!checkModal) return;
 
     try {
-      // 1. 提出ステータスとコメント・スタンプを更新
-      await updateDoc(doc(db, 'submissions', checkModal.id), {
-        status: 'checked',
-        checked_at: new Date().toISOString(),
-        feedback: null, // 再提出理由があれば消す
-        teacher_comment: teacherComment, // 先生のコメント
-        stamp_url: selectedStamp // スタンプ画像URL
+      const token = await user?.getIdToken();
+      const res = await fetch('/api/teacher/homework', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          action: 'review_submission',
+          assignment_id: assignmentId,
+          submission_id: checkModal.id,
+          status: 'checked',
+          teacher_comment: teacherComment,
+          stamp_url: selectedStamp,
+        }),
       });
-
-      // 2. PF連携 (成績付与) - 既存ロジック
-      const sub = submissions.find(s => s.id === checkModal.id);
-      if (sub && assignment.target_week && assignment.subject) {
-        const weekNum = assignment.target_week.replace(/[^0-9]/g, '');
-        if (weekNum) {
-          const pfId = `${sub.student_id}_w${weekNum}`;
-          const pfRef = doc(db, 'pf_records', pfId);
-          const pfUpdateData: any = {
-            student_id: sub.student_id,
-            week_number: weekNum,
-            updated_at: new Date().toISOString()
-          };
-          if (assignment.subject.includes('理科') || assignment.subject.includes('物理') || assignment.subject.includes('化学') || assignment.subject.includes('生物')) {
-            pfUpdateData.homework_science = '〇';
-          } else if (assignment.subject.includes('社会') || assignment.subject.includes('地理') || assignment.subject.includes('歴史') || assignment.subject.includes('公民')) {
-            pfUpdateData.homework_social = '〇';
-          }
-          if (pfUpdateData.homework_science || pfUpdateData.homework_social) {
-            await setDoc(pfRef, pfUpdateData, { merge: true });
-          }
-        }
-      }
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'submission-review-failed');
 
       // UI更新
       setSubmissions(prev => prev.map(item => 
@@ -158,13 +151,20 @@ export default function TeacherHomeworkCheckPage({ params }: { params: Promise<{
     if (!feedbackInput || !feedbackInput.text.trim()) return alert('再提出の理由を入力してください');
     
     try {
-      await updateDoc(doc(db, 'submissions', feedbackInput.id), {
-        status: 'resubmit',
-        feedback: feedbackInput.text,
-        checked_at: new Date().toISOString(),
-        teacher_comment: null,
-        stamp_url: null
+      const token = await user?.getIdToken();
+      const res = await fetch('/api/teacher/homework', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          action: 'review_submission',
+          assignment_id: assignmentId,
+          submission_id: feedbackInput.id,
+          status: 'resubmit',
+          feedback: feedbackInput.text,
+        }),
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'submission-review-failed');
 
       setSubmissions(prev => prev.map(item => 
         item.id === feedbackInput.id ? { ...item, status: 'resubmit', feedback: feedbackInput.text, teacher_comment: null, stamp_url: null } : item

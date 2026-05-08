@@ -5,7 +5,6 @@ import { useAuth } from '@/app/context/AuthContext';
 import { useSettings } from '@/app/context/SettingsContext';
 import { db } from '@/lib/firebase';
 import { doc, updateDoc } from 'firebase/firestore';
-import { updatePassword } from 'firebase/auth';
 import { 
   ArrowLeft, User, Lock, LogOut, ChevronRight, 
   Save, Loader2, Shield, Target, Type, 
@@ -126,12 +125,21 @@ export default function StudentSettingsPage() {
 
   const handleChangePassword = async () => {
     if (!newPassword || newPassword !== confirmPassword) return showMessage('error', 'パスワード不一致');
+    if (newPassword.length < 6) return showMessage('error', 'パスワードは6文字以上で入力してください');
+    if (!user) return showMessage('error', 'ログイン情報を確認できません');
     setLoading(true);
     try {
-      if(user) await updatePassword(user, newPassword);
+      const token = await user.getIdToken();
+      const res = await fetch('/api/auth/change-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ password: newPassword }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'password-change-failed');
       showMessage('success', 'パスワードを変更しました');
       setNewPassword(''); setConfirmPassword(''); setIsPasswordExpanded(false);
-    } catch(e) { showMessage('error', '再ログインが必要です'); }
+    } catch(e) { showMessage('error', 'パスワード変更に失敗しました'); }
     finally { setLoading(false); }
   };
 

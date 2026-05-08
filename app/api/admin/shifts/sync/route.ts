@@ -27,7 +27,7 @@ type SyncShift = {
 };
 
 function syncSecret() {
-  return process.env.SHIFT_SYNC_SECRET || process.env.SECRET_KEY || '';
+  return process.env.SHIFT_SYNC_SECRET || process.env.CLASSBASE_SYNC_SECRET || process.env.SECRET_KEY || '';
 }
 
 function safeEqual(a: string, b: string) {
@@ -41,6 +41,8 @@ async function assertAllowed(request: NextRequest) {
   const configured = syncSecret();
   const requestSecret = request.headers.get('x-shift-sync-secret') || request.nextUrl.searchParams.get('secret') || '';
   if (configured && safeEqual(requestSecret, configured)) return { uid: 'gas-sync', role: 'system' };
+  if (requestSecret && !configured) throw new Error('shift-sync-secret-not-configured');
+  if (configured && requestSecret) throw new Error('shift-sync-secret-mismatch');
 
   const user = await getServerUser(request);
   if (!isAdminLike(user)) throw new Error('forbidden');
@@ -54,6 +56,14 @@ function clean(value: unknown) {
 function periodLabel(period: unknown) {
   const raw = clean(period);
   if (raw.includes('2') || raw.includes('２')) return 2;
+  return 1;
+}
+
+function periodFromShift(data: FirebaseFirestore.DocumentData) {
+  if (data.period) return periodLabel(data.period);
+  if (data.target_period) return periodLabel(data.target_period);
+  const note = String(data.note || '');
+  if (note.includes('2') || note.includes('２')) return 2;
   return 1;
 }
 
@@ -212,6 +222,7 @@ export async function POST(request: NextRequest) {
         user_id: teacher?.id || '',
         teacher_name: teacher?.name || teacherNameRaw || (roleType === 'main' ? '未定' : ''),
         target_date: clean(shift.target_date),
+        period,
         role_type: roleType,
         target_grade: roleType === 'general' ? null : clean(shift.grade),
         target_subject: roleType === 'general' ? null : clean(shift.subject),
@@ -284,10 +295,12 @@ export async function GET(request: NextRequest) {
       return {
         id: doc.id,
         sync_key: data.sync_key || '',
+        source_spreadsheet_id: data.source_spreadsheet_id || '',
+        source_sheet_name: data.source_sheet_name || '',
         source_row: data.source_row || null,
         source_col: data.source_col || null,
         target_date: data.target_date || '',
-        period: String(data.note || '').includes('2') || String(data.note || '').includes('２') ? 2 : 1,
+        period: periodFromShift(data),
         role_type: data.role_type || 'main',
         teacher_name: data.teacher_name || '',
         grade: data.target_grade || '',
@@ -298,6 +311,14 @@ export async function GET(request: NextRequest) {
         meeting_id: data.target_meeting_id || '',
         signin_address: data.target_signin_address || '',
       };
+    }).sort((a, b) => {
+      const dateDiff = String(a.target_date).localeCompare(String(b.target_date));
+      if (dateDiff) return dateDiff;
+      const rowDiff = Number(a.source_row || 0) - Number(b.source_row || 0);
+      if (rowDiff) return rowDiff;
+      const colDiff = Number(a.source_col || 0) - Number(b.source_col || 0);
+      if (colDiff) return colDiff;
+      return String(a.role_type).localeCompare(String(b.role_type));
     });
 
     return NextResponse.json({ ok: true, count: shifts.length, shifts });

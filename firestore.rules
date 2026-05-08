@@ -58,9 +58,7 @@ service cloud.firestore {
     }
 
     function teacherWorkCreate() {
-      return isTeacher() &&
-        request.resource.data.teacher_id == request.auth.uid &&
-        request.resource.data.status == 'pending';
+      return false;
     }
 
     function teacherWorkUpdate() {
@@ -70,7 +68,10 @@ service cloud.firestore {
         resource.data.status != 'approved' &&
         request.resource.data.status == resource.data.status &&
         !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-          'teacher_id', 'teacher_name', 'status', 'approved_at', 'approved_by'
+          'teacher_id', 'teacher_name', 'date', 'start_time', 'end_time',
+          'status', 'approved_at', 'approved_by', 'created_at', 'created_at_server',
+          'created_by_api', 'created_from_correction_request_id',
+          'time_correction_approved_at', 'time_correction_approved_by'
         ]);
     }
 
@@ -168,8 +169,21 @@ service cloud.firestore {
 
     match /submissions/{submissionId} {
       allow read: if signedIn() && (resource.data.student_id == request.auth.uid || isTeacher() || isAdmin() || parentLinkedTo(resource.data.student_id));
-      allow create, update: if isStudent() && request.resource.data.student_id == request.auth.uid;
+      allow create: if isStudent() && request.resource.data.student_id == request.auth.uid;
+      allow update: if isAdmin() ||
+        (isTeacher() && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['student_id', 'assignment_id'])) ||
+        (isStudent() && request.resource.data.student_id == request.auth.uid);
       allow delete: if isAdmin();
+    }
+
+    match /homework_assignments/{assignmentId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isTeacher() || isAdmin();
+    }
+
+    match /assignments/{assignmentId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isTeacher() || isAdmin();
     }
 
     match /class_recordings/{recordingId} {
@@ -186,8 +200,39 @@ service cloud.firestore {
 
     match /chat_logs/{messageId} {
       allow read: if signedIn() && (resource.data.uid == request.auth.uid || isTeacher() || isAdmin() || parentLinkedTo(resource.data.uid));
+      allow create: if isTeacher() || isAdmin() || (isStudent() && request.resource.data.uid == request.auth.uid);
+      allow update, delete: if isAdmin();
+    }
+
+    match /community_topics/{topicId} {
+      allow read: if signedIn();
+      allow create: if isStudent() && request.resource.data.creator_uid == request.auth.uid;
+      allow update: if isAdmin() || signedIn();
+      allow delete: if isAdmin() || (signedIn() && resource.data.creator_uid == request.auth.uid);
+
+      match /comments/{commentId} {
+        allow read: if signedIn();
+        allow create: if isStudent() && request.resource.data.uid == request.auth.uid;
+        allow update, delete: if isAdmin() || (signedIn() && resource.data.uid == request.auth.uid);
+      }
+    }
+
+    match /contact_logs/{logId} {
+      allow read: if isTeacher() || isAdmin();
       allow create: if isTeacher() || isAdmin();
       allow update, delete: if isAdmin();
+    }
+
+    match /pf_records/{recordId} {
+      allow read: if signedIn() && (isTeacher() || isAdmin() || resource.data.student_id == request.auth.uid || parentLinkedTo(resource.data.student_id));
+      allow create, update: if isTeacher() || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    match /pf_resolutions/{resolutionId} {
+      allow read: if isTeacher() || isAdmin();
+      allow create, update: if isTeacher() || isAdmin();
+      allow delete: if isAdmin();
     }
 
     match /work_records/{recordId} {
