@@ -41,12 +41,25 @@ export default function AttendanceCorrectionsPage() {
   const [teachers, setTeachers] = useState<Record<string, TeacherInfo>>({});
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<'pending' | 'all'>('pending');
+  const [showAllHistory, setShowAllHistory] = useState(false);
   const [processingId, setProcessingId] = useState('');
 
+  const isThisMonthRequest = (item: CorrectionRequest) => {
+    const key = item.target_date || item.requested_start_time || item.requested_end_time;
+    if (!key) return true;
+    const date = new Date(key);
+    if (Number.isNaN(date.getTime())) return true;
+    const now = new Date();
+    return date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth();
+  };
+
   const visibleRequests = useMemo(() => {
-    if (filter === 'all') return requests;
-    return requests.filter(item => (item.status || 'pending') === 'pending');
-  }, [filter, requests]);
+    return requests.filter(item => {
+      if (!showAllHistory && !isThisMonthRequest(item)) return false;
+      if (filter !== 'all' && (item.status || 'pending') !== 'pending') return false;
+      return true;
+    });
+  }, [filter, requests, showAllHistory]);
 
   const loadData = async () => {
     setLoading(true);
@@ -130,6 +143,7 @@ export default function AttendanceCorrectionsPage() {
   const statusLabel = (status?: string) => {
     if (status === 'approved') return '承認済み';
     if (status === 'rejected') return '却下済み';
+    if (status === 'superseded') return '再申請により更新済み';
     return '承認待ち';
   };
 
@@ -153,12 +167,17 @@ export default function AttendanceCorrectionsPage() {
         </div>
       </section>
 
-      <div className="flex gap-2">
-        <button onClick={() => setFilter('pending')} className={`rounded-2xl px-4 py-2 text-sm font-black ${filter === 'pending' ? 'bg-amber-500 text-white' : 'bg-white text-slate-500'}`}>
-          承認待ち
-        </button>
-        <button onClick={() => setFilter('all')} className={`rounded-2xl px-4 py-2 text-sm font-black ${filter === 'all' ? 'bg-amber-500 text-white' : 'bg-white text-slate-500'}`}>
-          全て
+      <div className="flex flex-col gap-3 rounded-3xl bg-white p-4 shadow-sm md:flex-row md:items-center md:justify-between">
+        <div className="flex gap-2">
+          <button onClick={() => setFilter('pending')} className={`rounded-2xl px-4 py-2 text-sm font-black ${filter === 'pending' ? 'bg-amber-500 text-white' : 'bg-slate-100 text-slate-500'}`}>
+            承認待ち
+          </button>
+          <button onClick={() => setFilter('all')} className={`rounded-2xl px-4 py-2 text-sm font-black ${filter === 'all' ? 'bg-amber-500 text-white' : 'bg-slate-100 text-slate-500'}`}>
+            全て
+          </button>
+        </div>
+        <button onClick={() => setShowAllHistory(prev => !prev)} className="w-fit rounded-2xl border border-slate-200 px-4 py-2 text-sm font-black text-slate-600 hover:bg-slate-50">
+          {showAllHistory ? '当月だけ表示' : '過去の履歴をすべて見る'}
         </button>
       </div>
 
@@ -170,14 +189,14 @@ export default function AttendanceCorrectionsPage() {
           <p className="mt-3 text-sm font-black text-slate-400">表示する打刻修正依頼はありません</p>
         </div>
       ) : (
-        <div className="grid gap-4 lg:grid-cols-2">
+        <div className="grid gap-3 lg:grid-cols-2">
           {visibleRequests.map(item => {
             const rec = item.work_record_id ? records[item.work_record_id] : undefined;
             const teacher = teachers[item.teacher_id];
             const status = item.status || 'pending';
             const isMissingClock = item.request_type === 'missing_clock' || !item.work_record_id;
             return (
-              <article key={item.id} className="rounded-3xl border border-slate-100 bg-white p-5 shadow-sm">
+              <article key={item.id} className="rounded-3xl border border-slate-100 bg-white p-4 shadow-sm">
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <div className="flex flex-wrap items-center gap-2">
@@ -188,27 +207,27 @@ export default function AttendanceCorrectionsPage() {
                   </div>
                   <span className={`rounded-full px-3 py-1 text-[10px] font-black ${
                     status === 'approved' ? 'bg-emerald-100 text-emerald-700' :
-                    status === 'rejected' ? 'bg-slate-100 text-slate-500' :
+                    status === 'rejected' || status === 'superseded' ? 'bg-slate-100 text-slate-500' :
                     'bg-amber-100 text-amber-700'
                   }`}>
                     {statusLabel(status)}
                   </span>
                 </div>
 
-                <div className="mt-5 grid grid-cols-2 gap-2">
+                <div className="mt-4 grid grid-cols-2 gap-2">
                   <TimeBox label={isMissingClock ? '現在の出勤' : '現在の出勤'} value={isMissingClock ? '記録なし' : formatDateTime(rec?.start_time)} muted />
                   <TimeBox label="修正後の出勤" value={formatDateTime(item.requested_start_time)} />
                   <TimeBox label={isMissingClock ? '現在の退勤' : '現在の退勤'} value={isMissingClock ? '記録なし' : formatDateTime(rec?.end_time)} muted />
                   <TimeBox label="修正後の退勤" value={formatDateTime(item.requested_end_time)} />
                 </div>
 
-                <div className="mt-4 rounded-2xl bg-slate-50 p-4">
+                <div className="mt-3 rounded-2xl bg-slate-50 p-3">
                   <p className="text-[10px] font-black text-slate-400">理由</p>
                   <p className="mt-1 text-sm font-bold leading-relaxed text-slate-700">{item.reason || '理由未入力'}</p>
                 </div>
 
                 {status === 'pending' && (
-                  <div className="mt-5 flex justify-end gap-2">
+                  <div className="mt-4 flex justify-end gap-2">
                     <button onClick={() => review(item.id, 'rejected')} disabled={processingId === item.id} className="flex items-center gap-2 rounded-2xl border border-slate-200 px-4 py-3 text-sm font-black text-slate-500 hover:bg-slate-50 disabled:opacity-50">
                       <XCircle size={16} /> 却下
                     </button>
@@ -228,7 +247,7 @@ export default function AttendanceCorrectionsPage() {
 
 function TimeBox({ label, value, muted = false }: { label: string; value: string; muted?: boolean }) {
   return (
-    <div className={`rounded-2xl p-4 ${muted ? 'bg-slate-50' : 'bg-indigo-50'}`}>
+    <div className={`rounded-2xl p-3 ${muted ? 'bg-slate-50' : 'bg-indigo-50'}`}>
       <p className={`text-[10px] font-black ${muted ? 'text-slate-400' : 'text-indigo-400'}`}>{label}</p>
       <p className={`mt-1 text-sm font-black ${muted ? 'text-slate-700' : 'text-indigo-700'}`}>{value}</p>
     </div>

@@ -1,8 +1,9 @@
 import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminAuth, adminDb } from '@/lib/firebase-admin';
-import { canManageSchool, getServerUser, isAdminLike, jsonError } from '@/lib/server-auth';
+import { canManageSchool, getServerUser, jsonError, requireMaster } from '@/lib/server-auth';
 import { writeLearningEvent } from '@/lib/events';
+import { generateInitialPassword } from '@/lib/password';
 
 export const runtime = 'nodejs';
 
@@ -85,18 +86,18 @@ async function upsertAuthUser(loginId: string, password: string, displayName: st
 export async function POST(request: NextRequest) {
   try {
     const actor = await getServerUser(request);
-    if (!isAdminLike(actor)) throw new Error('forbidden');
+    requireMaster(actor);
 
     const body = await request.json();
     const csvText = String(body.csv_text || '');
     const requestedSchool = String(body.school_id || body.school || '').trim();
     const school = actor.role === 'master' ? requestedSchool : actor.school_ids[0] || actor.school || '';
-    const defaultPassword = String(body.default_password || 'class1234').trim();
+    const requestedDefaultPassword = String(body.default_password || '').trim();
 
     if (!csvText.trim()) return Response.json({ ok: false, error: 'csv_text is required' }, { status: 400 });
     if (!school) return Response.json({ ok: false, error: 'school is required' }, { status: 400 });
     if (!canManageSchool(actor, school)) throw new Error('forbidden');
-    if (defaultPassword.length < 6) return Response.json({ ok: false, error: 'password must be 6+ characters' }, { status: 400 });
+    if (requestedDefaultPassword && requestedDefaultPassword.length < 6) return Response.json({ ok: false, error: 'password must be 6+ characters' }, { status: 400 });
 
     const rows = parseCsv(csvText);
     const headerIndex = findHeaderIndex(rows);
@@ -107,6 +108,14 @@ export async function POST(request: NextRequest) {
       id: indexOf(header, ['生涯番号', 'ログインID', 'ID']),
       grade: indexOf(header, ['学年']),
       classroom: indexOf(header, ['所属教室', '教室', 'クラス']),
+      middleSchool: indexOf(header, ['中学校', '所属中学', '学校名']),
+      courseStartMonth: indexOf(header, ['受講開始月', '開始月']),
+      siblingGroup: indexOf(header, ['兄弟姉妹グループ', '兄弟グループ', '兄弟姉妹ID']),
+      twinFlag: indexOf(header, ['双子', '双子フラグ']),
+      password: indexOf(header, ['初期パスワード', 'パスワード']),
+      parentPassword: indexOf(header, ['保護者初期パスワード', '保護者パスワード']),
+      trialEvents: indexOf(header, ['体験授業', '体験イベント', 'イベント']),
+      trialContinued: indexOf(header, ['継続', '継続フラグ']),
       lastName: header.findIndex(cell => cell === '氏'),
       firstName: header.findIndex(cell => cell === '名'),
       name: indexOf(header, ['氏名', '名前', '生徒名']),
@@ -124,6 +133,7 @@ export async function POST(request: NextRequest) {
     const results: any[] = [];
     const errors: any[] = [];
     const processed = new Set<string>();
+    const siblingGroups = new Map<string, { uid: string; twin: boolean }[]>();
 
     for (let i = headerIndex + 1; i < rows.length; i++) {
       const cols = rows[i].map(cleanCell);
@@ -143,9 +153,24 @@ export async function POST(request: NextRequest) {
           ? cols[idx.parentName]
           : `${studentName} 保護者`;
         const parentLoginId = `${loginId}P`;
+        const siblingGroup = idx.siblingGroup !== -1 ? cleanCell(cols[idx.siblingGroup]) : '';
+        const twin = idx.twinFlag !== -1 && ['1', 'true', 'TRUE', '○', '〇', '有', 'はい', '双子'].includes(cleanCell(cols[idx.twinFlag]));
+        const trialEventIds = idx.trialEvents !== -1
+          ? cleanCell(cols[idx.trialEvents]).split(/[、,／/|]/).map(v => v.trim()).filter(Boolean)
+          : [];
+        const trialContinued = idx.trialContinued !== -1 && ['1', 'true', 'TRUE', '○', '〇', '有', 'はい', '継続'].includes(cleanCell(cols[idx.trialContinued]));
+        const studentPassword = idx.password !== -1 && cleanCell(cols[idx.password])
+          ? cleanCell(cols[idx.password])
+          : requestedDefaultPassword || generateInitialPassword();
+        const parentPassword = idx.parentPassword !== -1 && cleanCell(cols[idx.parentPassword])
+          ? cleanCell(cols[idx.parentPassword])
+          : requestedDefaultPassword || generateInitialPassword();
+        if (studentPassword.length < 6 || parentPassword.length < 6) {
+          throw new Error('初期パスワードは6文字以上にしてください');
+        }
 
-        const studentAuth = await upsertAuthUser(loginId, defaultPassword, studentName);
-        const parentAuth = await upsertAuthUser(parentLoginId, defaultPassword, parentName);
+        const studentAuth = await upsertAuthUser(loginId, studentPassword, studentName);
+        const parentAuth = await upsertAuthUser(parentLoginId, parentPassword, parentName);
         const now = FieldValue.serverTimestamp();
 
         await db.collection('users').doc(studentAuth.uid).set({
@@ -155,13 +180,18 @@ export async function POST(request: NextRequest) {
           email: studentAuth.email,
           lifetime_id: loginId,
           initial_login_id: loginId,
-          initial_password: defaultPassword,
-          raw_password: defaultPassword,
+          initial_password: studentPassword,
+          raw_password: studentPassword,
           student_name: studentName,
           grade: idx.grade !== -1 ? normalizeGrade(cols[idx.grade]) : '',
           school_id: school,
           school,
           classroom: idx.classroom !== -1 ? cols[idx.classroom] || '' : '',
+          middle_school: idx.middleSchool !== -1 ? cols[idx.middleSchool] || '' : '',
+          course_start_month: idx.courseStartMonth !== -1 ? cols[idx.courseStartMonth] || '' : '',
+          sibling_group_key: siblingGroup || null,
+          trial_event_ids: trialEventIds,
+          trial_continued: trialContinued,
           phone_number: idx.phone !== -1 ? cols[idx.phone] || '' : '',
           day_of_week: idx.day !== -1 ? cols[idx.day] || '' : '',
           subject_science: idx.science !== -1 ? cols[idx.science] || '' : '',
@@ -170,6 +200,7 @@ export async function POST(request: NextRequest) {
           parent_uid: parentAuth.uid,
           account_status: 'active',
           status: 'active',
+          isFirstLogin: true,
           created_at: now,
           updated_at: now,
           updated_by: actor.uid,
@@ -182,8 +213,8 @@ export async function POST(request: NextRequest) {
           email: parentAuth.email,
           lifetime_id: parentLoginId,
           initial_login_id: parentLoginId,
-          initial_password: defaultPassword,
-          raw_password: defaultPassword,
+          initial_password: parentPassword,
+          raw_password: parentPassword,
           parent_name: parentName,
           name: parentName,
           phone_number: idx.parentPhone !== -1 ? cols[idx.parentPhone] || '' : '',
@@ -192,6 +223,7 @@ export async function POST(request: NextRequest) {
           school,
           account_status: 'active',
           status: 'active',
+          isFirstLogin: true,
           created_at: now,
           updated_at: now,
           updated_by: actor.uid,
@@ -204,21 +236,43 @@ export async function POST(request: NextRequest) {
           grade: idx.grade !== -1 ? normalizeGrade(cols[idx.grade]) : '',
           school_id: school,
           classroom: idx.classroom !== -1 ? cols[idx.classroom] || '' : '',
+          middle_school: idx.middleSchool !== -1 ? cols[idx.middleSchool] || '' : '',
+          course_start_month: idx.courseStartMonth !== -1 ? cols[idx.courseStartMonth] || '' : '',
+          sibling_group_key: siblingGroup || '',
+          trial_event_ids: trialEventIds,
+          trial_continued: trialContinued,
           day_of_week: idx.day !== -1 ? cols[idx.day] || '' : '',
           subject_science: idx.science !== -1 ? cols[idx.science] || '' : '',
           subject_social: idx.social !== -1 ? cols[idx.social] || '' : '',
           phone_number: idx.phone !== -1 ? cols[idx.phone] || '' : '',
           lifetime_id: loginId,
-          initial_password: defaultPassword,
+          initial_password: studentPassword,
           parent_uid: parentAuth.uid,
           parent_name: parentName,
           parent_login_id: parentLoginId,
-          parent_initial_password: defaultPassword,
+          parent_initial_password: parentPassword,
           account_status: 'active',
         });
+        if (siblingGroup) {
+          siblingGroups.set(siblingGroup, [...(siblingGroups.get(siblingGroup) || []), { uid: studentAuth.uid, twin }]);
+        }
       } catch (error: any) {
         errors.push({ row: i + 1, login_id: loginId, error: error.message || String(error) });
       }
+    }
+
+    for (const group of siblingGroups.values()) {
+      if (group.length < 2) continue;
+      await Promise.all(group.map(member => {
+        const siblingIds = group.map(item => item.uid).filter(uid => uid !== member.uid);
+        const twinSiblingIds = member.twin ? group.filter(item => item.twin && item.uid !== member.uid).map(item => item.uid) : [];
+        return db.collection('users').doc(member.uid).set({
+          sibling_ids: siblingIds,
+          twin_sibling_ids: twinSiblingIds,
+          updated_at: FieldValue.serverTimestamp(),
+          updated_by: actor.uid,
+        }, { merge: true });
+      }));
     }
 
     const eventId = await writeLearningEvent({

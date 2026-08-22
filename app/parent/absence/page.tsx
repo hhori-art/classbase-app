@@ -3,8 +3,8 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { addDoc, collection, doc, getDoc, serverTimestamp } from 'firebase/firestore';
-import { ArrowLeft, CalendarCheck, CheckCircle, Clock, Loader2, MessageSquare, Send } from 'lucide-react';
+import { doc, getDoc } from 'firebase/firestore';
+import { ArrowLeft, CalendarCheck, CheckCircle, Clock, Loader2, MessageSquare, Repeat, Send } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
 
@@ -18,6 +18,7 @@ export default function ParentAbsencePage() {
   const [type, setType] = useState<'absent' | 'late'>('absent');
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
   const [reason, setReason] = useState('');
+  const [studentSelectsTransfer, setStudentSelectsTransfer] = useState(true);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
@@ -46,23 +47,23 @@ export default function ParentAbsencePage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user || !studentId) return;
-    const student = students.find(s => s.id === studentId);
     setSubmitting(true);
     try {
-      const contentPrefix = type === 'late' ? '【遅刻連絡】' : '【欠席連絡】';
-      await addDoc(collection(db, 'requests'), {
-        user_id: studentId,
-        student_id: studentId,
-        student_name: student?.student_name || '生徒',
-        parent_id: user.uid,
-        parent_name: profile?.parent_name || profile?.name || '保護者',
-        type: 'absence',
-        absence_type: type,
-        target_date: date,
-        content: `${contentPrefix}\n${reason}`,
-        status: 'pending',
-        created_at: serverTimestamp(),
+      const token = await user.getIdToken();
+      const res = await fetch('/api/parent/absence-requests', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          student_id: studentId,
+          type: 'absence',
+          absence_type: type,
+          target_date: date,
+          reason,
+          student_selects_transfer: type === 'absent' && studentSelectsTransfer,
+        }),
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) throw new Error(data.error || 'failed');
       setDone(true);
       setTimeout(() => router.push('/parent'), 1800);
     } catch (e) {
@@ -131,6 +132,21 @@ export default function ParentAbsencePage() {
             <label className="mb-2 flex items-center gap-2 text-xs font-black text-slate-500"><MessageSquare size={14} /> 理由</label>
             <textarea value={reason} onChange={e => setReason(e.target.value)} required className="min-h-36 w-full resize-none rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100" placeholder="理由や連絡事項を入力してください" />
           </div>
+
+          {type === 'absent' && (
+            <label className={`flex cursor-pointer items-start gap-3 rounded-2xl border-2 p-4 transition ${studentSelectsTransfer ? 'border-indigo-200 bg-indigo-50 text-indigo-700' : 'border-slate-100 bg-slate-50 text-slate-500'}`}>
+              <input
+                type="checkbox"
+                checked={studentSelectsTransfer}
+                onChange={e => setStudentSelectsTransfer(e.target.checked)}
+                className="mt-1 h-4 w-4 accent-indigo-600"
+              />
+              <span>
+                <span className="flex items-center gap-2 text-sm font-black"><Repeat size={16} /> 振替先はお子様が選択する</span>
+                <span className="mt-1 block text-xs font-bold opacity-75">送信後、生徒画面に振替選択ポップアップを表示します。</span>
+              </span>
+            </label>
+          )}
 
           <button disabled={submitting} className="flex w-full items-center justify-center gap-2 rounded-2xl bg-slate-900 py-4 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-60">
             <Send size={18} /> {submitting ? '送信中...' : '連絡する'}

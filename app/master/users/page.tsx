@@ -2,16 +2,20 @@
 
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { db } from '@/lib/firebase';
-import { collection, getDocs, doc, setDoc, deleteDoc, query, orderBy, writeBatch } from 'firebase/firestore';
-import { Users, Search, Plus, Edit, Trash2, ArrowLeft, GraduationCap, UserCheck, Save, X, Loader2, FileUp, AlertTriangle, Shield, Printer, CheckCircle } from 'lucide-react';
+import { auth, db } from '@/lib/firebase';
+import { collection, getDocs, doc, deleteDoc, query, orderBy, writeBatch } from 'firebase/firestore';
+import { Users, Search, Plus, Edit, Trash2, ArrowLeft, GraduationCap, UserCheck, Save, X, Loader2, FileUp, Shield, Printer } from 'lucide-react';
 import Link from 'next/link';
+import CsvSampleDownload from '@/app/components/CsvSampleDownload';
+import LastLoginCell from '@/app/components/LastLoginCell';
+import AccountGuideSheet, { ACCOUNT_GUIDE_PRINT_CSS } from '@/app/components/AccountGuideSheet';
+import { EMPLOYMENT_CATEGORY_LABELS, normalizeEmploymentCategory } from '@/lib/employment-category';
 
 // ユーザー型定義
 interface UserData {
   id: string; // Firestore Doc ID
   uid?: string;
-  role: 'student' | 'teacher' | 'master';
+  role: 'student' | 'teacher' | 'master' | 'attendance_admin';
   student_name?: string; 
   name?: string;         
   lifetime_id: string;   // ログインID
@@ -22,8 +26,29 @@ interface UserData {
   subject_social?: string;
   day_of_week?: string;
   initial_password?: string;
+  isFirstLogin?: boolean;
+  last_login?: unknown;
+  last_login_at?: unknown;
   created_at?: string;
+  parent_uid?: string;
+  parent_name?: string;
+  parent_login_id?: string;
+  parent_initial_password?: string;
+  parent_email?: string;
+  student_ids?: string[];
+  school_id?: string;
+  school?: string;
+  middle_school?: string;
+  course_start_month?: string;
+  employment_category?: 'dedicated' | 'semi_dedicated';
+  enabled_programs?: string[];
+  prescribed_work_start?: string;
+  prescribed_work_end?: string;
+  prescribed_break_minutes?: number;
+  prescribed_work_days?: number[];
 }
+
+const normalizedUserRole = (role: unknown) => ['attendance_admin', 'attendance_only', 'attendance_manager'].includes(String(role || '').toLowerCase()) ? 'teacher' : String(role || 'student');
 
 export default function UserManagementPage() {
   const [users, setUsers] = useState<UserData[]>([]);
@@ -36,25 +61,59 @@ export default function UserManagementPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [isBulkDeleting, setIsBulkDeleting] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  const [isPasswordSyncing, setIsPasswordSyncing] = useState(false);
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingUser, setEditingUser] = useState<UserData | null>(null);
   
   // ★書面印刷用のState
   const [isPrintModalOpen, setIsPrintModalOpen] = useState(false);
+  const [printAccounts, setPrintAccounts] = useState<UserData[]>([]);
   const [qrBaseUrl, setQrBaseUrl] = useState('');
 
   const [formData, setFormData] = useState<Partial<UserData> & { displayName: string }>({
     role: 'student',
     displayName: '',
     lifetime_id: '',
-    initial_password: 'class1234',
+    initial_password: '',
     grade: '',
     classroom: '',
     subject_science: '',
     subject_social: '',
-    day_of_week: ''
+    day_of_week: '',
+    employment_category: 'semi_dedicated',
+    enabled_programs: [],
+    prescribed_work_start: '09:00',
+    prescribed_work_end: '18:00',
+    prescribed_break_minutes: 60,
+    prescribed_work_days: [1, 2, 3, 4, 5],
   });
+
+  const csvSample = activeTab === 'student'
+    ? {
+        filename: 'ユーザー管理_生徒登録CSV例.csv',
+        headers: ['氏名', 'ID', 'パスワード', '理科', '社会'],
+        rows: [
+          ['山田 太郎', '100001', '', '物理', '地理'],
+          ['佐藤 花子', '100002', '', '化学', '歴史'],
+        ],
+      }
+    : activeTab === 'teacher'
+      ? {
+          filename: 'ユーザー管理_講師登録CSV例.csv',
+          headers: ['氏名', 'ID', 'パスワード', '専任区分', '理社講座'],
+          rows: [
+            ['鈴木 一郎', 'T1001', '', '準専任', 'あり'],
+            ['田中 花子', 'T1002', '', '専任', 'なし'],
+          ],
+        }
+      : {
+          filename: 'ユーザー管理_管理者登録CSV例.csv',
+          headers: ['氏名', 'ID', 'パスワード'],
+          rows: [
+            ['管理 太郎', 'M1001', ''],
+          ],
+        };
 
   // URLの取得 (QRコード用) と マウント確認
   useEffect(() => {
@@ -79,7 +138,7 @@ export default function UserManagementPage() {
 
   // フィルタリング
   useEffect(() => {
-    let result = users.filter(u => u.role === activeTab);
+    let result = users.filter(u => normalizedUserRole(u.role) === activeTab);
     if (searchQuery) {
       const lower = searchQuery.toLowerCase();
       result = result.filter(u => 
@@ -92,7 +151,8 @@ export default function UserManagementPage() {
       );
     }
     setFilteredUsers(result);
-    setSelectedIds(new Set());
+    const visibleIds = new Set(result.map(user => user.id));
+    setSelectedIds(current => new Set(Array.from(current).filter(id => visibleIds.has(id))));
   }, [users, activeTab, searchQuery]);
 
   // ▼▼▼ 重複削除機能 ▼▼▼
@@ -130,6 +190,105 @@ export default function UserManagementPage() {
     }
   };
 
+  const syncPrintedPasswords = async (ids: string[]) => {
+    const uniqueIds = Array.from(new Set(ids.filter(Boolean)));
+    if (uniqueIds.length === 0) return { synced_count: 0, error_count: 0, errors: [] };
+    const token = await auth.currentUser?.getIdToken();
+    if (!token) throw new Error('ログイン情報を確認できませんでした。再ログインしてください。');
+
+    const res = await fetch('/api/admin/accounts/sync-printed-password', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ user_ids: uniqueIds }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || 'パスワード同期に失敗しました');
+    }
+    return data;
+  };
+
+  const handleOpenPrintModal = async () => {
+    const requestedIds = Array.from(selectedIds);
+    if (requestedIds.length === 0) return alert('印刷するユーザーを選択してください。');
+    const selectedUsers = users.filter(user => selectedIds.has(user.id));
+    const linkedParentIds = selectedUsers
+      .filter(user => user.role === 'student')
+      .map(user => user.parent_uid || users.find(candidate => Array.isArray(candidate.student_ids) && candidate.student_ids.includes(user.id))?.id || '')
+      .filter(Boolean);
+    const syncIds = Array.from(new Set([...requestedIds, ...linkedParentIds]));
+
+    setIsPasswordSyncing(true);
+    try {
+      const result = await syncPrintedPasswords(syncIds);
+      if (result.error_count > 0) {
+        const details = (result.errors || [])
+          .slice(0, 5)
+          .map((item: any) => `${item.login_id || item.user_id}: ${item.error}`)
+          .join('\n');
+        throw new Error(`書面とログインのパスワードを同期できないアカウントがあります。\n${details}`);
+      }
+      const resultByOldId = new Map((result.results || []).map((item: any) => [String(item.old_user_id || ''), item]));
+      const resultByNewId = new Map((result.results || []).map((item: any) => [String(item.user_id || ''), item]));
+      const migratedId = new Map<string, string>((result.results || []).map((item: any) => [
+        String(item.old_user_id || ''),
+        String(item.user_id || ''),
+      ] as [string, string]));
+      const updatedUsers = users.map(user => {
+        const synced: any = resultByOldId.get(user.id) || resultByNewId.get(user.id);
+        const updated = synced ? {
+          ...user,
+          id: synced.user_id,
+          uid: synced.user_id,
+          email: synced.email,
+          initial_password: synced.initial_password,
+          isFirstLogin: true,
+        } : { ...user };
+        if (updated.parent_uid && migratedId.has(updated.parent_uid)) {
+          updated.parent_uid = migratedId.get(updated.parent_uid) || updated.parent_uid;
+        }
+        if (Array.isArray(updated.student_ids)) {
+          updated.student_ids = updated.student_ids.map(id => migratedId.get(id) || id);
+        }
+        return updated;
+      });
+      const syncedSelectedIds = requestedIds.map(id => {
+        const synced: any = resultByOldId.get(id) || resultByNewId.get(id);
+        return String(synced?.user_id || id);
+      });
+      const syncedSelectedSet = new Set(syncedSelectedIds);
+      const preparedPrintAccounts = updatedUsers
+        .filter(user => syncedSelectedSet.has(user.id))
+        .map(user => {
+          const linkedParent = updatedUsers.find(candidate => (
+            candidate.id === user.parent_uid ||
+            (Array.isArray(candidate.student_ids) && candidate.student_ids.includes(user.id))
+          ));
+          return {
+            ...user,
+            parent_name: linkedParent?.name || linkedParent?.parent_name || user.parent_name || '',
+            parent_login_id: linkedParent?.lifetime_id || linkedParent?.email || user.parent_login_id || '',
+            parent_initial_password: linkedParent?.initial_password || user.parent_initial_password || '',
+            parent_email: linkedParent?.email || user.parent_email || '',
+          };
+        });
+      if (preparedPrintAccounts.length === 0) {
+        throw new Error('印刷対象のアカウント情報を作成できませんでした。');
+      }
+      setUsers(updatedUsers);
+      setSelectedIds(new Set(syncedSelectedIds));
+      setPrintAccounts(preparedPrintAccounts);
+      setIsPrintModalOpen(true);
+    } catch (e: any) {
+      alert(`印刷前のパスワード確認に失敗しました。\n${e.message || e}`);
+    } finally {
+      setIsPasswordSyncing(false);
+    }
+  };
+
   // ▼▼▼ CSVインポート機能 ▼▼▼
   const handleCSVImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -153,13 +312,15 @@ export default function UserManagementPage() {
         const idxPass = headers.findIndex(h => h.includes('パスワード'));
         const idxScience = headers.findIndex(h => h.includes('理科'));
         const idxSocial = headers.findIndex(h => h.includes('社会'));
+        const idxEmployment = headers.findIndex(h => h.includes('専任区分') || h.includes('雇用区分'));
+        const idxScienceSocial = headers.findIndex(h => h.includes('理社講座'));
 
         if (idxName === -1 || idxID === -1) throw new Error('CSVヘッダーに「氏名」「ID」が必要です');
 
-        const batch = writeBatch(db);
         let count = 0;
-
-        const existingUserMap = new Map(users.map(u => [u.lifetime_id || u.email, u.id]));
+        const errors: string[] = [];
+        const token = await auth.currentUser?.getIdToken();
+        if (!token) throw new Error('ログイン情報を確認できませんでした。再ログインしてください。');
 
         for (let i = 1; i < rows.length; i++) {
           const cols = rows[i].split(',');
@@ -167,45 +328,46 @@ export default function UserManagementPage() {
 
           const name = cols[idxName]?.trim();
           const loginId = cols[idxID]?.trim();
-          const pass = idxPass !== -1 ? cols[idxPass]?.trim() : 'class1234';
+          const pass = idxPass !== -1 ? cols[idxPass]?.trim() : '';
           const valScience = idxScience !== -1 ? cols[idxScience]?.trim() : null;
           const valSocial = idxSocial !== -1 ? cols[idxSocial]?.trim() : null;
+          const valEmployment = idxEmployment !== -1 ? cols[idxEmployment]?.trim() : '準専任';
+          const valScienceSocial = idxScienceSocial !== -1 ? cols[idxScienceSocial]?.trim() : '';
 
           if (!name || !loginId) continue;
 
-          const docId = existingUserMap.get(loginId) || doc(collection(db, 'users')).id;
-          const docRef = doc(db, 'users', docId);
-
-          const isStudent = activeTab === 'student';
-          
-          const data: any = {
-            role: activeTab,
-            lifetime_id: loginId, 
-            initial_password: pass,
-            uid: docId,
-            updated_at: new Date().toISOString()
-          };
-
-          if (isStudent) {
-            data.student_name = name;
-            data.name = null;
-            if (valScience) data.subject_science = valScience;
-            if (valSocial) data.subject_social = valSocial;
-          } else {
-            data.name = name;
-            data.student_name = null;
+          const existingUser = users.find(user => user.lifetime_id === loginId || user.email === loginId);
+          const response = await fetch('/api/admin/accounts/create', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              user_id: existingUser?.id,
+              role: activeTab,
+              display_name: name,
+              login_id: loginId,
+              password: pass,
+              subject_science: valScience || '',
+              subject_social: valSocial || '',
+              employment_category: normalizeEmploymentCategory(valEmployment, activeTab),
+              enabled_programs: activeTab === 'teacher' && ['あり', '有', 'yes', 'true', '1', '○'].includes(String(valScienceSocial || '').toLowerCase()) ? ['science_social'] : [],
+              auto_create_parent: false,
+            }),
+          });
+          const result = await response.json().catch(() => ({}));
+          if (!response.ok || !result.ok) {
+            errors.push(`${name}: ${result.error || '登録できませんでした'}`);
+            continue;
           }
-
-          if (!existingUserMap.has(loginId)) {
-            data.created_at = new Date().toISOString();
-          }
-
-          batch.set(docRef, data, { merge: true });
           count++;
         }
 
-        await batch.commit();
-        alert(`${count} 件のユーザーをインポート/更新しました`);
+        const errorText = errors.length > 0
+          ? `\n失敗: ${errors.length}件\n${errors.slice(0, 5).join('\n')}`
+          : '';
+        alert(`${count} 件のユーザーをインポート/更新しました${errorText}`);
         fetchUsers();
       } catch (e: any) {
         alert('インポートエラー: ' + e.message);
@@ -226,40 +388,36 @@ export default function UserManagementPage() {
     }
 
     try {
-      const docId = editingUser ? editingUser.id : doc(collection(db, 'users')).id;
-      const docRef = doc(db, 'users', docId);
-
-      const saveData: any = {
-        role: formData.role,
-        lifetime_id: formData.lifetime_id,
-        initial_password: formData.initial_password,
-        updated_at: new Date().toISOString()
-      };
-
-      if (formData.role === 'student') {
-        saveData.student_name = formData.displayName;
-        saveData.name = null;
-        saveData.grade = formData.grade;
-        saveData.classroom = formData.classroom;
-        saveData.subject_science = formData.subject_science;
-        saveData.subject_social = formData.subject_social;
-        saveData.day_of_week = formData.day_of_week;
-      } else {
-        saveData.name = formData.displayName;
-        saveData.student_name = null;
-        saveData.grade = null;
-        saveData.classroom = null;
-        saveData.subject_science = null;
-        saveData.subject_social = null;
-        saveData.day_of_week = null;
-      }
-      
-      if (!editingUser) {
-        saveData.created_at = new Date().toISOString();
-        saveData.uid = docId; 
-      }
-
-      await setDoc(docRef, saveData, { merge: true });
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) throw new Error('ログイン情報を確認できませんでした。再ログインしてください。');
+      const response = await fetch('/api/admin/accounts/create', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          user_id: editingUser?.id,
+          role: formData.role,
+          display_name: formData.displayName,
+          login_id: formData.lifetime_id,
+          password: formData.initial_password,
+          grade: formData.grade,
+          classroom: formData.classroom,
+          subject_science: formData.subject_science,
+          subject_social: formData.subject_social,
+          day_of_week: formData.day_of_week,
+          employment_category: formData.employment_category || 'semi_dedicated',
+          enabled_programs: formData.enabled_programs || [],
+          prescribed_work_start: formData.prescribed_work_start || '09:00',
+          prescribed_work_end: formData.prescribed_work_end || '18:00',
+          prescribed_break_minutes: Number(formData.prescribed_break_minutes ?? 60),
+          prescribed_work_days: formData.prescribed_work_days || [1, 2, 3, 4, 5],
+          auto_create_parent: false,
+        }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok) throw new Error(result.error || '登録できませんでした');
       alert(editingUser ? '更新しました' : '登録しました');
       setIsModalOpen(false);
       fetchUsers();
@@ -275,20 +433,32 @@ export default function UserManagementPage() {
         displayName: user.student_name || user.name || '',
         lifetime_id: user.lifetime_id || user.email || '', 
         subject_science: user.subject_science || '',
-        subject_social: user.subject_social || ''
+        subject_social: user.subject_social || '',
+        employment_category: normalizeEmploymentCategory(user.employment_category, user.role) || 'semi_dedicated',
+        enabled_programs: Array.isArray(user.enabled_programs) ? user.enabled_programs.filter(value => value === 'science_social') : [],
+        prescribed_work_start: user.prescribed_work_start || '09:00',
+        prescribed_work_end: user.prescribed_work_end || '18:00',
+        prescribed_break_minutes: Number(user.prescribed_break_minutes ?? 60),
+        prescribed_work_days: Array.isArray(user.prescribed_work_days) ? user.prescribed_work_days : [1, 2, 3, 4, 5],
       });
     } else {
       setEditingUser(null);
-      setFormData({ 
+      setFormData({
         role: activeTab,
-        displayName: '', 
-        lifetime_id: '', 
-        initial_password: 'class1234', 
-        grade: activeTab === 'student' ? '中1' : '', 
-        classroom: '', 
+        displayName: '',
+        lifetime_id: '',
+        initial_password: '',
+        grade: activeTab === 'student' ? '中1' : '',
+        classroom: '',
         subject_science: '',
         subject_social: '',
-        day_of_week: '' 
+        day_of_week: '',
+        employment_category: 'semi_dedicated',
+        enabled_programs: [],
+        prescribed_work_start: '09:00',
+        prescribed_work_end: '18:00',
+        prescribed_break_minutes: 60,
+        prescribed_work_days: [1, 2, 3, 4, 5],
       });
     }
     setIsModalOpen(true);
@@ -307,9 +477,6 @@ export default function UserManagementPage() {
     setIsBulkDeleting(false);
   };
   const handleDelete = async (id: string) => { if(confirm('削除しますか？')) { await deleteDoc(doc(db, 'users', id)); setUsers(prev => prev.filter(u => u.id !== id)); }};
-
-  // ★ 印刷対象のユーザーリスト
-  const printUsers = users.filter(u => selectedIds.has(u.id));
 
   // =========================================================================
   // ★ 印刷用のコンポーネント (React Portalでbody直下にレンダリングさせます)
@@ -361,18 +528,19 @@ export default function UserManagementPage() {
             }
             * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
           }
+          ${ACCOUNT_GUIDE_PRINT_CSS}
         `}} />
 
         {/* コントロールバー (印刷時は非表示) */}
         <div className="print-hide sticky top-0 z-50 bg-white border-b border-gray-300 p-4 shadow-sm flex justify-between items-center">
           <h2 className="font-bold text-gray-800 text-lg flex items-center gap-2">
-            <Printer size={20} className="text-indigo-600"/> 印刷プレビュー ({printUsers.length}名分)
+            <Printer size={20} className="text-indigo-600"/> 印刷プレビュー ({printAccounts.length}名分)
           </h2>
           <div className="flex gap-3">
             <button onClick={() => window.print()} className="bg-indigo-600 text-white px-6 py-2 rounded-xl font-bold hover:bg-indigo-700 flex items-center gap-2 shadow-sm transition-transform active:scale-95">
               <Printer size={18}/> 印刷する
             </button>
-            <button onClick={() => setIsPrintModalOpen(false)} className="bg-white text-gray-600 border border-gray-300 px-5 py-2 rounded-xl font-bold hover:bg-gray-50 flex items-center gap-2 transition-colors">
+            <button onClick={() => { setIsPrintModalOpen(false); setPrintAccounts([]); }} className="bg-white text-gray-600 border border-gray-300 px-5 py-2 rounded-xl font-bold hover:bg-gray-50 flex items-center gap-2 transition-colors">
               <X size={18}/> 閉じる
             </button>
           </div>
@@ -380,156 +548,14 @@ export default function UserManagementPage() {
         
         {/* 用紙のコンテナ */}
         <div className="py-8 flex flex-col items-center gap-8 print:block print:p-0 print:gap-0 font-sans">
-          {printUsers.map((user) => {
-            // ★ログインIDを再定義（ここで消えていました）
-            const loginId = user.lifetime_id || user.email || '';
-            
-            // ★ 万が一qrBaseUrlが空でもエラーにならないようフォールバックを設定
-            const safeBaseUrl = qrBaseUrl || 'https://www.edic.jp'; 
-            const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(safeBaseUrl)}`;
-            
-            // ★権限ごとの表示判定
-            const isStudent = user.role === 'student';
-            const isTeacher = user.role === 'teacher';
-            const displayName = user.student_name || user.name || '名称未設定';
-            const nameSuffix = isStudent ? 'さん' : isTeacher ? '先生' : '様';
-
-            const today = new Date();
-            const formattedDate = `${today.getFullYear()}年${today.getMonth() + 1}月${today.getDate()}日`;
-            
+          {printAccounts.map((user) => {
             return (
-              <div 
-                key={user.id} 
-                className="print-page bg-white shadow-lg relative block"
-                style={{ width: '210mm', height: '297mm', padding: '12mm 18mm' }} 
-              >
-                {/* --- 印刷コンテンツ上部 --- */}
-                <div className="block">
-                  
-                  {/* 発行日 */}
-                  <div className="text-right text-sm text-gray-500 font-medium mb-3">
-                    発行日: {formattedDate}
-                  </div>
-
-                  {/* ポップなタイトルバー (アイコン＋システム名) */}
-                  <div className="bg-blue-50 border-2 border-blue-100 rounded-2xl py-3 px-4 mb-5 flex items-center justify-center gap-4 shadow-sm">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src="/icon.png" alt="App Icon" className="w-10 h-10 rounded-xl shadow-sm border border-white" />
-                    <h1 className="text-xl font-black text-blue-800 tracking-wider">
-                      理社講座新システム 初回ログインのご案内
-                    </h1>
-                  </div>
-
-                  {/* 宛名と柔らかい挨拶文 (生徒用と講師用で出し分け) */}
-                  <div className="mb-5 px-2">
-                    {isStudent ? (
-                      <>
-                        <p className="text-lg mb-2 text-gray-800 font-bold">
-                          保護者 様<br/>
-                          <span className="text-2xl tracking-wide ml-4 text-blue-900">{displayName}</span> {nameSuffix}
-                        </p>
-                        <p className="text-[13px] text-gray-700 leading-relaxed mt-2">
-                          いつも当塾の教育活動にご理解とご協力をいただき、ありがとうございます。<br/>
-                          この度、ご家庭と塾をつなぐ「理社講座新システム」のアカウントをご用意いたしました。<br/>
-                          お手持ちのスマートフォンやパソコンから簡単にアクセスできますので、<br/>
-                          下記のアカウント情報を使って、ぜひ最初のログインをお試しくださいませ！
-                        </p>
-                      </>
-                    ) : (
-                      <>
-                        <p className="text-lg mb-2 text-gray-800 font-bold">
-                          <span className="text-2xl tracking-wide text-blue-900">{displayName}</span> {nameSuffix}
-                        </p>
-                        <p className="text-[13px] text-gray-700 leading-relaxed mt-2">
-                          平素は当塾の指導業務にご尽力いただき、誠にありがとうございます。<br/>
-                          この度、業務で使用する「理社講座新システム」の{isTeacher ? '講師' : '管理者'}用アカウントを発行いたしました。<br/>
-                          お手持ちのスマートフォンやパソコンからアクセスできますので、<br/>
-                          下記のアカウント情報を使って、初回ログインを行ってください。
-                        </p>
-                      </>
-                    )}
-                  </div>
-                  
-                  {/* アカウント情報エリア (パスワード変更メモ欄追加) */}
-                  <div className="bg-white border-4 border-blue-50 rounded-3xl p-4 mb-6 flex justify-between items-center shadow-sm">
-                    <div className="flex-1 pl-2 pr-4">
-                      <h2 className="text-md font-black text-blue-800 mb-4 flex items-center gap-2 border-b-2 border-blue-50 pb-1.5 inline-flex">
-                        <Shield size={18} className="text-blue-500"/> あなたの専用アカウント情報
-                      </h2>
-                      <div className="space-y-4">
-                        <div>
-                          <p className="text-[11px] font-bold text-gray-500 mb-1">① ログインID (生涯番号)</p>
-                          <p className="text-xl font-mono font-black tracking-widest text-gray-800 bg-blue-50 px-3 py-1.5 rounded-xl inline-block border border-blue-100">{loginId}</p>
-                        </div>
-                        <div className="flex gap-4 items-end">
-                          <div>
-                            <p className="text-[11px] font-bold text-gray-500 mb-1">② 初期パスワード</p>
-                            <p className="text-lg font-mono font-bold tracking-widest text-gray-800 bg-blue-50 px-3 py-1.5 rounded-xl inline-block border border-blue-100">{user.initial_password || '********'}</p>
-                          </div>
-                          {/* ★新パスワード メモ欄 */}
-                          <div className="flex-1 border-b-2 border-dashed border-gray-300 pb-1 mb-1">
-                            <span className="text-[10px] font-bold text-red-500 mr-2">変更後の新パスワード メモ :</span>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                    
-                    {/* QRコードエリア */}
-                    <div className="text-center ml-2 flex flex-col items-center justify-center bg-blue-50 p-3 rounded-2xl border-2 border-blue-100 w-40 shrink-0">
-                      <p className="text-[11px] font-bold text-blue-800 mb-1.5 bg-white px-3 py-1 rounded-full shadow-sm">ここからログイン！</p>
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src={qrUrl} alt="Login QR Code" className="w-20 h-20 mb-1" crossOrigin="anonymous"/>
-                      <p className="text-[9px] font-bold text-gray-500 leading-tight">カメラで読み取れます</p>
-                    </div>
-                  </div>
-                  
-                  {/* 注意事項 */}
-                  <div className="bg-yellow-50/50 border-2 border-yellow-100 rounded-2xl p-4">
-                    <h3 className="font-bold text-yellow-800 mb-2 flex items-center gap-2 text-[14px]">
-                      <AlertTriangle size={16} className="text-yellow-600"/> ご利用にあたってのお願い
-                    </h3>
-                    <ul className="space-y-2 text-[12px] text-gray-700 leading-relaxed font-medium">
-                      <li className="flex gap-2 items-start">
-                        <CheckCircle size={14} className="text-yellow-500 shrink-0 mt-0.5"/>
-                        <div>
-                          <strong>パスワードの変更について：</strong><br/>
-                          セキュリティ保護のため、初回ログイン後に必ずメニューの「設定」画面から、<span className="text-red-500 font-bold bg-red-50 px-1 rounded">ご自身しか分からない新しいパスワードに変更</span>をお願いいたします。
-                        </div>
-                      </li>
-                      <li className="flex gap-2 items-start">
-                        <CheckCircle size={14} className="text-yellow-500 shrink-0 mt-0.5"/>
-                        <div>
-                          <strong>アカウントの管理について：</strong><br/>
-                          この用紙に記載されているIDとパスワードは、第三者に知られないよう大切に保管してください。
-                        </div>
-                      </li>
-                      <li className="flex gap-2 items-start">
-                        <CheckCircle size={14} className="text-yellow-500 shrink-0 mt-0.5"/>
-                        <div>
-                          <strong>アプリの追加方法：</strong><br/>
-                          SafariやChrome等のブラウザでログイン後、画面の案内に従って「ホーム画面に追加」を行っていただくと、次回以降スマホアプリのように便利にご利用いただけます。
-                        </div>
-                      </li>
-                      <li className="flex gap-2 items-start">
-                        <CheckCircle size={14} className="text-yellow-500 shrink-0 mt-0.5"/>
-                        <div>
-                          <strong>ログインでお困りの場合：</strong><br/>
-                          パスワードを忘れてしまった場合や、ログインができない場合は、当塾の{isStudent ? '担当講師' : 'システム管理者'}までお気軽にお声がけください{isStudent ? '！' : '。'}
-                        </div>
-                      </li>
-                    </ul>
-                  </div>
-                </div>
-
-                {/* === ★フッター (絶対配置で用紙下部に固定) === */}
-                <div className="print-footer flex justify-between items-end border-t-2 border-blue-100 pt-2">
-                  <div className="text-[10px] text-gray-400 font-medium pb-1">※本用紙は大切に保管してください。</div>
-                  <div className="text-xl font-black text-blue-900 tracking-widest">
-                    創造学園エディック
-                  </div>
-                </div>
-
-              </div>
+              <AccountGuideSheet
+                key={user.id}
+                account={user}
+                school={user.school_id || user.school || user.classroom || ''}
+                loginUrl={qrBaseUrl || 'https://classbase-app.vercel.app'}
+              />
             );
           })}
         </div>
@@ -555,20 +581,13 @@ export default function UserManagementPage() {
               </Link>
               <div>
                 <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
-                  <Users className="text-blue-600" /> ユーザー管理
+                  <Users className="text-blue-600" /> ID書面・印刷
                 </h1>
-                <p className="text-xs text-gray-500">生徒・講師・管理者のID発行と編集</p>
+                <p className="text-xs text-gray-500">初期ID・初期パスワード・初回ログイン状態の確認と案内書面の印刷</p>
               </div>
             </div>
 
-            <div className="flex gap-2 w-full md:w-auto items-center">
-               <div className="relative">
-                 <input type="file" accept=".csv" onChange={handleCSVImport} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" disabled={isImporting}/>
-                 <button disabled={isImporting} className="bg-green-600 text-white px-4 py-2 rounded-full font-bold hover:bg-green-700 shadow flex items-center gap-2 text-sm whitespace-nowrap">
-                   {isImporting ? <Loader2 className="animate-spin" size={16}/> : <FileUp size={16}/>} CSV一括登録
-                 </button>
-               </div>
-
+            <div className="flex flex-wrap gap-2 w-full md:w-auto items-center">
                <div className="relative flex-1 md:w-64">
                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={16}/>
                  <input 
@@ -579,47 +598,33 @@ export default function UserManagementPage() {
                    onChange={e => setSearchQuery(e.target.value)}
                  />
                </div>
-               <button 
-                 onClick={() => handleOpenModal()} 
-                 className="bg-blue-600 text-white px-4 py-2 rounded-full font-bold hover:bg-blue-700 shadow flex items-center gap-2 whitespace-nowrap"
-               >
-                 <Plus size={18}/> 新規
-               </button>
             </div>
           </div>
 
           {/* タブ切り替えと操作ボタン */}
           <div className="flex flex-col sm:flex-row justify-between items-end sm:items-center mb-4 gap-4 border-b border-gray-200 pb-2">
-            <div className="flex gap-2">
-              <button onClick={() => setActiveTab('student')} className={`px-6 py-3 font-bold text-sm flex items-center gap-2 border-b-2 -mb-2.5 transition-colors ${activeTab === 'student' ? 'border-blue-600 text-blue-600 bg-blue-50/50' : 'border-transparent text-gray-500'}`}>
+            <div className="flex w-full gap-2 overflow-x-auto sm:w-auto">
+              <button onClick={() => setActiveTab('student')} className={`flex shrink-0 items-center gap-2 whitespace-nowrap border-b-2 px-6 py-3 text-sm font-bold -mb-2.5 transition-colors ${activeTab === 'student' ? 'border-blue-600 text-blue-600 bg-blue-50/50' : 'border-transparent text-gray-500'}`}>
                 <GraduationCap size={18}/> 生徒 ({users.filter(u => u.role === 'student').length})
               </button>
-              <button onClick={() => setActiveTab('teacher')} className={`px-6 py-3 font-bold text-sm flex items-center gap-2 border-b-2 -mb-2.5 transition-colors ${activeTab === 'teacher' ? 'border-purple-600 text-purple-600 bg-purple-50/50' : 'border-transparent text-gray-500'}`}>
-                <UserCheck size={18}/> 講師 ({users.filter(u => u.role === 'teacher').length})
+              <button onClick={() => setActiveTab('teacher')} className={`flex shrink-0 items-center gap-2 whitespace-nowrap border-b-2 px-6 py-3 text-sm font-bold -mb-2.5 transition-colors ${activeTab === 'teacher' ? 'border-purple-600 text-purple-600 bg-purple-50/50' : 'border-transparent text-gray-500'}`}>
+                <UserCheck size={18}/> 講師 ({users.filter(u => normalizedUserRole(u.role) === 'teacher').length})
               </button>
-              <button onClick={() => setActiveTab('master')} className={`px-6 py-3 font-bold text-sm flex items-center gap-2 border-b-2 -mb-2.5 transition-colors ${activeTab === 'master' ? 'border-gray-800 text-gray-800 bg-gray-100' : 'border-transparent text-gray-500'}`}>
+              <button onClick={() => setActiveTab('master')} className={`flex shrink-0 items-center gap-2 whitespace-nowrap border-b-2 px-6 py-3 text-sm font-bold -mb-2.5 transition-colors ${activeTab === 'master' ? 'border-gray-800 text-gray-800 bg-gray-100' : 'border-transparent text-gray-500'}`}>
                 <Shield size={18}/> 管理者 ({users.filter(u => u.role === 'master').length})
               </button>
             </div>
             
             <div className="flex gap-2 flex-wrap justify-end">
-              <button onClick={handleDeduplicate} className="text-orange-600 hover:bg-orange-50 px-3 py-1 rounded text-xs font-bold flex items-center gap-1 border border-orange-200">
-                <AlertTriangle size={14}/> 重複チェック・削除
+              <span className="self-center text-xs font-bold text-slate-400">左端のチェックで印刷対象を選択</span>
+              <button
+                onClick={handleOpenPrintModal}
+                disabled={isPasswordSyncing || selectedIds.size === 0}
+                className="flex items-center gap-2 rounded-full border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-bold text-indigo-600 transition-colors hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                {isPasswordSyncing ? <Loader2 size={16} className="animate-spin" /> : <Printer size={16}/>} {' '}
+                {isPasswordSyncing ? 'パスワード確認中' : `ID書面を印刷（${selectedIds.size}件）`}
               </button>
-              
-              {selectedIds.size > 0 && (
-                <>
-                  <button 
-                    onClick={() => setIsPrintModalOpen(true)} 
-                    className="bg-indigo-50 text-indigo-600 border border-indigo-200 px-4 py-1 rounded-full font-bold text-sm hover:bg-indigo-100 flex items-center gap-2 transition-colors"
-                  >
-                    <Printer size={16}/> {selectedIds.size}件の書面印刷
-                  </button>
-                  <button onClick={handleBulkDelete} disabled={isBulkDeleting} className="bg-red-50 text-red-600 border border-red-200 px-4 py-1 rounded-full font-bold text-sm hover:bg-red-100 flex items-center gap-2 transition-colors">
-                    {isBulkDeleting ? <Loader2 className="animate-spin" size={16}/> : <Trash2 size={16}/>} {selectedIds.size}件削除
-                  </button>
-                </>
-              )}
             </div>
           </div>
 
@@ -630,14 +635,17 @@ export default function UserManagementPage() {
             ) : filteredUsers.length === 0 ? (
               <div className="p-10 text-center text-gray-400">データが見つかりません</div>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm text-left">
+              <div className="overflow-x-auto [scrollbar-gutter:stable]">
+                <table className="w-full min-w-[1180px] whitespace-nowrap text-left text-sm">
                   <thead className="bg-gray-50 text-gray-600 font-bold border-b border-gray-200">
                     <tr>
                       <th className="p-4 w-10"><input type="checkbox" className="w-4 h-4" onChange={(e) => handleSelectAll(e.target.checked)} checked={filteredUsers.length > 0 && selectedIds.size === filteredUsers.length}/></th>
                       <th className="p-4 w-40">氏名</th>
                       <th className="p-4 w-64">ログインID</th>
                       <th className="p-4">パスワード</th>
+                      <th className="p-4">初回ログイン</th>
+                      <th className="p-4">最終ログイン</th>
+                      {activeTab === 'teacher' && <><th className="p-4">専任区分</th><th className="p-4">表示機能</th></>}
                       
                       {activeTab === 'student' && (
                         <>
@@ -648,7 +656,6 @@ export default function UserManagementPage() {
                         </>
                       )}
                       
-                      <th className="p-4 text-center">操作</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
@@ -656,21 +663,37 @@ export default function UserManagementPage() {
                       <tr key={user.id} className={`hover:bg-gray-50 transition-colors ${selectedIds.has(user.id) ? 'bg-blue-50/30' : ''}`}>
                         <td className="p-4"><input type="checkbox" className="w-4 h-4 cursor-pointer" checked={selectedIds.has(user.id)} onChange={(e) => handleSelectOne(user.id, e.target.checked)}/></td>
                         
-                        <td className="p-4 font-bold text-gray-800 flex items-center gap-2">
-                          <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold ${
-                            user.role === 'student' ? 'bg-blue-400' : 
-                            user.role === 'teacher' ? 'bg-purple-400' : 'bg-gray-700'
-                          }`}>
-                            {(user.student_name || user.name || '?')[0]}
+                        <td className="p-4 font-bold text-gray-800">
+                          <div className="flex items-center gap-2">
+                            <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-bold text-white ${
+                              user.role === 'student' ? 'bg-blue-400' :
+                              normalizedUserRole(user.role) === 'teacher' ? 'bg-purple-400' : 'bg-gray-700'
+                            }`}>
+                              {(user.student_name || user.name || '?')[0]}
+                            </div>
+                            <span className="max-w-[180px] truncate" title={user.student_name || user.name || '未設定'}>
+                              {user.student_name || user.name || <span className="text-gray-400">未設定</span>}
+                            </span>
                           </div>
-                          <span className="truncate max-w-[120px]">{user.student_name || user.name || <span className="text-gray-400">未設定</span>}</span>
                         </td>
 
-                        <td className="p-4 font-mono text-gray-700 font-medium break-all">
-                          {user.lifetime_id || user.email || <span className="text-gray-300">-</span>}
+                        <td className="p-4 font-mono font-medium text-gray-700">
+                          <span className="block max-w-[260px] truncate" title={user.lifetime_id || user.email || ''}>
+                            {user.lifetime_id || user.email || <span className="text-gray-300">-</span>}
+                          </span>
                         </td>
 
                         <td className="p-4 text-gray-400 text-xs font-mono">{user.initial_password || '********'}</td>
+                        <td className="p-4">
+                          <FirstLoginBadge value={user.isFirstLogin} />
+                        </td>
+                        <td className="p-4">
+                          <LastLoginCell value={user.last_login_at || user.last_login} />
+                        </td>
+                        {activeTab === 'teacher' && (() => {
+                          const category = normalizeEmploymentCategory(user.employment_category, user.role) || 'semi_dedicated';
+                          return <><td className="p-4"><span className={`rounded-full px-3 py-1 text-xs font-black ${category === 'dedicated' ? 'bg-indigo-100 text-indigo-700' : 'bg-amber-100 text-amber-800'}`}>{EMPLOYMENT_CATEGORY_LABELS[category]}</span></td><td className="p-4 text-xs font-black text-slate-600">{Array.isArray(user.enabled_programs) && user.enabled_programs.includes('science_social') ? '理社講座＋勤怠' : '勤怠のみ'}</td></>;
+                        })()}
                         
                         {activeTab === 'student' && (
                           <>
@@ -681,10 +704,6 @@ export default function UserManagementPage() {
                           </>
                         )}
                         
-                        <td className="p-4 flex justify-center gap-2">
-                          <button onClick={() => handleOpenModal(user)} className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded"><Edit size={16}/></button>
-                          <button onClick={() => handleDelete(user.id)} className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded"><Trash2 size={16}/></button>
-                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -732,8 +751,20 @@ export default function UserManagementPage() {
               
               <div>
                 <label className="text-xs font-bold text-gray-500">パスワード</label>
-                <input className="w-full p-2 border rounded mt-1 font-mono bg-gray-50" value={formData.initial_password} onChange={e => setFormData({...formData, initial_password: e.target.value})}/>
+                <input className="w-full p-2 border rounded mt-1 font-mono bg-gray-50" value={formData.initial_password} onChange={e => setFormData({...formData, initial_password: e.target.value})} placeholder="空欄ならランダム発行"/>
               </div>
+
+              {formData.role === 'teacher' && (
+                <div className="rounded-xl border border-indigo-100 bg-indigo-50 p-4">
+                  <label className="text-xs font-bold text-indigo-700">専任区分</label>
+                  <select className="mt-1 w-full rounded-lg border border-indigo-200 bg-white p-2 font-bold" value={formData.employment_category || 'semi_dedicated'} onChange={e => setFormData({ ...formData, employment_category: e.target.value as 'dedicated' | 'semi_dedicated' })}>
+                    <option value="dedicated">専任</option>
+                    <option value="semi_dedicated">準専任</option>
+                  </select>
+                  <label className="mt-3 flex cursor-pointer items-center gap-3 rounded-lg bg-white p-3 text-sm font-bold text-slate-700"><input type="checkbox" checked={formData.enabled_programs?.includes('science_social') || false} onChange={event => setFormData({ ...formData, enabled_programs: event.target.checked ? ['science_social'] : [] })} className="h-5 w-5 accent-indigo-600" /><span>理社講座を表示する<span className="block text-[10px] text-slate-400">OFFの場合は勤怠だけ表示</span></span></label>
+                  {formData.employment_category === 'dedicated' && <div className="mt-3 rounded-lg bg-white p-3"><div className="grid grid-cols-3 gap-2"><label className="text-[10px] font-black text-slate-500">規定開始<input type="time" value={formData.prescribed_work_start || '09:00'} onChange={event => setFormData({ ...formData, prescribed_work_start: event.target.value })} className="mt-1 w-full rounded border p-2 text-xs" /></label><label className="text-[10px] font-black text-slate-500">規定終了<input type="time" value={formData.prescribed_work_end || '18:00'} onChange={event => setFormData({ ...formData, prescribed_work_end: event.target.value })} className="mt-1 w-full rounded border p-2 text-xs" /></label><label className="text-[10px] font-black text-slate-500">休憩（分）<input type="number" min="0" max="240" step="5" value={formData.prescribed_break_minutes ?? 60} onChange={event => setFormData({ ...formData, prescribed_break_minutes: Number(event.target.value) })} className="mt-1 w-full rounded border p-2 text-xs" /></label></div><div className="mt-2 flex flex-wrap gap-1">{['日', '月', '火', '水', '木', '金', '土'].map((label, day) => <label key={day} className={`cursor-pointer rounded border px-2 py-1 text-[10px] font-black ${(formData.prescribed_work_days || []).includes(day) ? 'bg-indigo-600 text-white' : 'text-slate-500'}`}><input type="checkbox" className="sr-only" checked={(formData.prescribed_work_days || []).includes(day)} onChange={event => setFormData({ ...formData, prescribed_work_days: event.target.checked ? [...(formData.prescribed_work_days || []), day].sort() : (formData.prescribed_work_days || []).filter(value => value !== day) })} />{label}</label>)}</div></div>}
+                </div>
+              )}
               
               {formData.role === 'student' && (
                 <div className="p-4 bg-blue-50/50 rounded-xl space-y-4 border border-blue-100">
@@ -780,5 +811,14 @@ export default function UserManagementPage() {
         </div>
       )}
     </>
+  );
+}
+
+function FirstLoginBadge({ value }: { value: unknown }) {
+  const completed = value === false;
+  return (
+    <span className={`inline-flex items-center rounded-full px-3 py-1 text-[11px] font-black ${completed ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
+      {completed ? '初回ログイン済み' : '初回変更待ち'}
+    </span>
   );
 }

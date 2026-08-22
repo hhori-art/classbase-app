@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
-import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs, orderBy, limit, updateDoc, doc } from 'firebase/firestore';
+import { NextRequest } from 'next/server';
+import { adminDb } from '@/lib/firebase-admin';
+import { getServerUser, isAdminLike, requireRole } from '@/lib/server-auth';
 import OpenAI from 'openai';
 
 const openai = new OpenAI({
@@ -14,20 +15,21 @@ const HOMEWORK_BORDER = 70;   // 宿題提出率70%未満なら要診断
 // 1回の実行で処理する人数
 const DEFAULT_BATCH_SIZE = 10;
 
-export async function POST(req: Request) {
+export async function POST(req: NextRequest) {
   try {
+    const user = await getServerUser(req);
+    if (!isAdminLike(user)) requireRole(user, ['teacher']);
+
     const { batchSize = DEFAULT_BATCH_SIZE } = await req.json();
+    const db = adminDb();
 
     // 1. 分析対象の生徒を取得 (分析日時が古い順に取得してローテーションさせる)
-    const usersRef = collection(db, 'users');
-    const q = query(
-      usersRef, 
-      where('role', '==', 'student'),
-      orderBy('risk_analyzed_at', 'asc'), // ずっと分析されていない人から順に
-      limit(batchSize)
-    );
-    
-    const snapshot = await getDocs(q);
+    const usersRef = db.collection('users');
+    const snapshot = await usersRef
+      .where('role', '==', 'student')
+      .orderBy('risk_analyzed_at', 'asc')
+      .limit(Math.min(Number(batchSize) || DEFAULT_BATCH_SIZE, 50))
+      .get();
     const students = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
 
     if (students.length === 0) {
@@ -42,12 +44,10 @@ export async function POST(req: Request) {
       try {
         // --- A. PFデータ (出席・宿題) の取得と計算 ---
         const currentYear = new Date().getFullYear().toString();
-        const pfQuery = query(
-          collection(db, 'pf_records'),
-          where('student_id', '==', student.id),
-          where('year', '==', currentYear)
-        );
-        const pfSnap = await getDocs(pfQuery);
+        const pfSnap = await db.collection('pf_records')
+          .where('student_id', '==', student.id)
+          .where('year', '==', currentYear)
+          .get();
         
         let totalClasses = 0;
         let absentCount = 0;
@@ -78,12 +78,12 @@ export async function POST(req: Request) {
 
         // 両方クリアしている場合は「低リスク」として即時更新 (API節約)
         if (isAttendanceGood && isHomeworkGood) {
-          await updateDoc(doc(db, 'users', student.id), {
+          await db.collection('users').doc(student.id).set({
             churn_risk: 5, // 最低レベルのリスク
             risk_reason: `出席・提出状況ともに良好です (出席:${attendanceRate}%, 提出:${homeworkRate}%)`,
             risk_action: "現状維持（定期的な承認・声掛け）",
             risk_analyzed_at: new Date().toISOString() // 更新日時を新しくして、次回の分析順位を下げる
-          });
+          }, { merge: true });
           processedCount++;
           return; // ここで終了
         }
@@ -91,13 +91,11 @@ export async function POST(req: Request) {
         // --- C. 要注意生徒のみ: チャット履歴取得 & 詳細AI分析 ---
         aiAnalyzedCount++;
         
-        const chatQuery = query(
-          collection(db, 'chat_logs'),
-          where('uid', '==', student.id),
-          orderBy('created_at', 'desc'),
-          limit(15) // 少し多めに文脈を読む
-        );
-        const chatSnap = await getDocs(chatQuery);
+        const chatSnap = await db.collection('chat_logs')
+          .where('uid', '==', student.id)
+          .orderBy('created_at', 'desc')
+          .limit(15)
+          .get();
         const chatHistory = chatSnap.docs
           .map(d => {
             const c = d.data();
@@ -143,12 +141,12 @@ export async function POST(req: Request) {
         const result = JSON.parse(resultStr);
 
         // --- D. 結果保存 ---
-        await updateDoc(doc(db, 'users', student.id), {
+        await db.collection('users').doc(student.id).set({
           churn_risk: result.risk_score,
           risk_reason: result.reason,
           risk_action: result.action,
           risk_analyzed_at: new Date().toISOString()
-        });
+        }, { merge: true });
 
         processedCount++;
 
@@ -160,13 +158,11 @@ export async function POST(req: Request) {
     await Promise.all(analysisPromises);
 
     // 残り人数チェック
-    const remainingQ = query(
-      usersRef, 
-      where('role', '==', 'student'),
-      orderBy('risk_analyzed_at', 'asc'),
-      limit(1)
-    );
-    const remainingSnap = await getDocs(remainingQ);
+    const remainingSnap = await usersRef
+      .where('role', '==', 'student')
+      .orderBy('risk_analyzed_at', 'asc')
+      .limit(1)
+      .get();
     const remaining = remainingSnap.empty ? 0 : 99;
 
     return NextResponse.json({ 

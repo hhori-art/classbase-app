@@ -26,7 +26,17 @@ service cloud.firestore {
       return role() == 'teacher';
     }
 
-    function isAdmin() {
+    function isAttendanceAdmin() {
+      return role() == 'attendance_admin' ||
+        role() == 'attendance_only' ||
+        role() == 'attendance_manager';
+    }
+
+    function canUseTeacherAttendance() {
+      return isTeacher() || isAttendanceAdmin();
+    }
+
+    function isAdminRole() {
       return role() == 'admin' ||
         role() == 'master' ||
         role() == 'school_admin' ||
@@ -36,6 +46,71 @@ service cloud.firestore {
         role() == 'test_admin' ||
         role() == 'master_admin' ||
         role() == 'super_admin';
+    }
+
+    function isAdmin() {
+      return role() == 'master' ||
+        (isAdminRole() && (
+          !myUser().keys().hasAny(['admin_permissions']) ||
+          myUser().admin_permissions.science_social == true
+        ));
+    }
+
+    function isMaster() {
+      return role() == 'master';
+    }
+
+    function adminSafeUserUpdate() {
+      return isAdmin() &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'role', 'admin', 'admin_permissions', 'eiken_admin', 'enabled_programs',
+          'permissions_updated_at', 'permissions_updated_by',
+          'email', 'lifetime_id', 'initial_login_id',
+          'initial_password', 'raw_password', 'password', 'parent_initial_password',
+          'initial_password_policy', 'isFirstLogin',
+          'account_status', 'status', 'suspended_at', 'withdrawn_at', 'archived_at',
+          'school_ids'
+        ]);
+    }
+
+    function isEikenAdmin() {
+      return role() == 'master' ||
+        (isAdminRole() && (
+          (myUser().keys().hasAny(['admin_permissions']) && myUser().admin_permissions.eiken == true) ||
+          (!myUser().keys().hasAny(['admin_permissions']) &&
+            myUser().keys().hasAny(['eiken_admin']) &&
+            myUser().eiken_admin == true)
+        ));
+    }
+
+    function isEikenCollection(collection) {
+      return collection in [
+        'course_enrollments',
+        'eiken_courses',
+        'eiken_course_units',
+        'eiken_tasks',
+        'eiken_task_progress',
+        'eiken_lessons',
+        'eiken_attendance',
+        'eiken_assignments',
+        'eiken_submissions',
+        'eiken_quizzes',
+        'eiken_quiz_questions',
+        'eiken_quiz_results',
+        'eiken_writing_submissions',
+        'eiken_teacher_assignments',
+        'eiken_announcements',
+        'eiken_follow_up_records'
+      ];
+    }
+
+    function isAttendanceManager() {
+      return role() == 'master' ||
+        isAttendanceAdmin() ||
+        (isAdminRole() && (
+          !myUser().keys().hasAny(['admin_permissions']) ||
+          myUser().admin_permissions.attendance == true
+        ));
     }
 
     function canManageSchool(school) {
@@ -53,8 +128,91 @@ service cloud.firestore {
       return !request.resource.data.diff(resource.data).affectedKeys().hasAny([
         'coins', 'total_coins', 'points', 'total_points', 'risk', 'churn_risk',
         'role', 'admin', 'school_ids', 'account_status', 'status',
-        'earned_badges', 'attendance_count', 'quest_clear_count'
+        'earned_badges', 'attendance_count', 'quest_clear_count',
+        'initial_password', 'raw_password', 'password', 'parent_initial_password',
+        'initial_password_policy', 'isFirstLogin',
+        'enabled_programs', 'eiken_teacher', 'eiken_admin', 'admin_permissions',
+        'permissions_updated_at', 'permissions_updated_by',
+        'parent_uid', 'parent_ids', 'student_ids',
+        'recovery_email', 'recovery_email_verified_at', 'pending_recovery_email',
+        'recovery_email_verification_sent_at'
       ]);
+    }
+
+    function studentOwnedCreate() {
+      return isStudent() && (
+        request.resource.data.user_id == request.auth.uid ||
+        request.resource.data.student_id == request.auth.uid ||
+        request.resource.data.uid == request.auth.uid ||
+        request.resource.data.creator_uid == request.auth.uid
+      );
+    }
+
+    function parentOwnedCreate() {
+      return isParent() &&
+        request.resource.data.parent_id == request.auth.uid &&
+        parentLinkedTo(request.resource.data.student_id);
+    }
+
+    function courseRegistrationOwnerCreate() {
+      return signedIn() &&
+        (
+          (isStudent() && request.resource.data.student_id == request.auth.uid) ||
+          (isParent() && request.resource.data.parent_id == request.auth.uid && parentLinkedTo(request.resource.data.student_id))
+        ) &&
+        request.resource.data.status in ['active', 'submitted'] &&
+        !request.resource.data.keys().hasAny(['approved_by', 'approved_at']);
+    }
+
+    function courseRegistrationOwnerUpdate() {
+      return signedIn() &&
+        (
+          (isStudent() && resource.data.student_id == request.auth.uid && request.resource.data.student_id == request.auth.uid) ||
+          (isParent() && resource.data.parent_id == request.auth.uid && request.resource.data.parent_id == request.auth.uid && parentLinkedTo(resource.data.student_id))
+        ) &&
+        request.resource.data.status in ['active', 'submitted'] &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'student_id', 'parent_id', 'approved_by', 'approved_at'
+        ]);
+    }
+
+    function topicSafeReactionUpdate() {
+      return signedIn() &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'likes', 'liked_by', 'votes', 'voted_by', 'updated_at'
+        ]);
+    }
+
+    function topicOwnerSafeUpdate() {
+      return signedIn() &&
+        resource.data.creator_uid == request.auth.uid &&
+        request.resource.data.creator_uid == request.auth.uid &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'creator_uid', 'created_at', 'is_approved'
+        ]);
+    }
+
+    function teacherOwnAvailabilityCreate() {
+      return isTeacher() &&
+        (
+          request.resource.data.teacher_id == request.auth.uid ||
+          request.resource.data.user_id == request.auth.uid
+        );
+    }
+
+    function teacherOwnAvailabilityUpdate() {
+      return isTeacher() &&
+        (
+          resource.data.teacher_id == request.auth.uid ||
+          resource.data.user_id == request.auth.uid
+        ) &&
+        (
+          request.resource.data.teacher_id == request.auth.uid ||
+          request.resource.data.user_id == request.auth.uid
+        ) &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'teacher_id', 'created_at', 'created_by'
+        ]);
     }
 
     function teacherWorkCreate() {
@@ -62,32 +220,34 @@ service cloud.firestore {
     }
 
     function teacherWorkUpdate() {
-      return isTeacher() &&
+      return canUseTeacherAttendance() &&
         resource.data.teacher_id == request.auth.uid &&
         request.resource.data.teacher_id == request.auth.uid &&
-        resource.data.status != 'approved' &&
-        request.resource.data.status == resource.data.status &&
-        !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-          'teacher_id', 'teacher_name', 'date', 'start_time', 'end_time',
-          'status', 'approved_at', 'approved_by', 'created_at', 'created_at_server',
-          'created_by_api', 'created_from_correction_request_id',
-          'time_correction_approved_at', 'time_correction_approved_by'
+        (!resource.data.keys().hasAny(['status']) || resource.data.status != 'approved') &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'attendance_kind',
+          'work_segments',
+          'transportation',
+          'updated_at',
+          'updated_at_server'
         ]);
     }
 
     match /users/{userId} {
       allow read: if signedIn() && (
         request.auth.uid == userId ||
-        isTeacher() ||
         isAdmin() ||
+        isEikenAdmin() ||
+        isAttendanceManager() ||
         parentLinkedTo(userId)
       );
-      allow create: if isAdmin();
+      allow create: if isMaster();
       allow update: if signedIn() && (
-        isAdmin() ||
+        isMaster() ||
+        adminSafeUserUpdate() ||
         (request.auth.uid == userId && userSafeUpdate())
       );
-      allow delete: if isAdmin();
+      allow delete: if isMaster();
 
       match /chat_history/{messageId} {
         allow read: if signedIn() && (request.auth.uid == userId || isTeacher() || isAdmin() || parentLinkedTo(userId));
@@ -131,6 +291,37 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    match /notification_campaigns/{campaignId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    match /user_notifications/{notificationId} {
+      allow read: if signedIn() && (resource.data.user_id == request.auth.uid || isAdmin());
+      allow write: if false;
+    }
+
+    // 再設定用トークン、送信キュー、試行回数はサーバー(Admin SDK)だけが扱う。
+    match /password_reset_tokens/{tokenId} {
+      allow read, write: if false;
+    }
+
+    match /email_verification_tokens/{tokenId} {
+      allow read, write: if false;
+    }
+
+    match /password_recovery_rate_limits/{limitId} {
+      allow read, write: if false;
+    }
+
+    match /password_recovery_requests/{requestId} {
+      allow read, write: if false;
+    }
+
+    match /mail/{mailId} {
+      allow read, write: if false;
+    }
+
     match /monthly_schedules/{scheduleId} {
       allow read: if signedIn();
       allow write: if false;
@@ -153,17 +344,27 @@ service cloud.firestore {
 
     match /course_registrations/{registrationId} {
       allow read: if signedIn() && (resource.data.parent_id == request.auth.uid || isAdmin() || parentLinkedTo(resource.data.student_id));
-      allow write: if false;
+      allow create: if isAdmin() || courseRegistrationOwnerCreate();
+      allow update: if isAdmin() || courseRegistrationOwnerUpdate();
+      allow delete: if isAdmin();
     }
 
     match /attendance_correction_requests/{requestId} {
-      allow read: if signedIn() && (resource.data.teacher_id == request.auth.uid || isAdmin());
+      allow read: if signedIn() && (resource.data.teacher_id == request.auth.uid || isAttendanceManager());
       allow write: if false;
     }
 
     match /attendance/{attendanceId} {
       allow read: if signedIn() && (resource.data.user_id == request.auth.uid || isTeacher() || isAdmin() || parentLinkedTo(resource.data.user_id));
-      allow create, update: if isAdmin() || (isStudent() && request.resource.data.user_id == request.auth.uid);
+      allow create: if isAdmin() || (isStudent() && request.resource.data.user_id == request.auth.uid);
+      allow update: if isAdmin() ||
+        (isStudent() &&
+          resource.data.user_id == request.auth.uid &&
+          request.resource.data.user_id == request.auth.uid &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+            'user_id', 'approved_at', 'approved_by', 'status', 'points', 'coins'
+          ])
+        );
       allow delete: if isAdmin();
     }
 
@@ -207,13 +408,26 @@ service cloud.firestore {
     match /community_topics/{topicId} {
       allow read: if signedIn();
       allow create: if isStudent() && request.resource.data.creator_uid == request.auth.uid;
-      allow update: if isAdmin() || signedIn();
+      allow update: if isAdmin() || topicOwnerSafeUpdate() || topicSafeReactionUpdate();
       allow delete: if isAdmin() || (signedIn() && resource.data.creator_uid == request.auth.uid);
 
       match /comments/{commentId} {
         allow read: if signedIn();
         allow create: if isStudent() && request.resource.data.uid == request.auth.uid;
         allow update, delete: if isAdmin() || (signedIn() && resource.data.uid == request.auth.uid);
+      }
+    }
+
+    match /teacher_community_topics/{topicId} {
+      allow read: if isTeacher() || isAdmin();
+      allow create: if isTeacher() && request.resource.data.creator_uid == request.auth.uid;
+      allow update: if isAdmin() || topicOwnerSafeUpdate() || topicSafeReactionUpdate();
+      allow delete: if isAdmin() || (isTeacher() && resource.data.creator_uid == request.auth.uid);
+
+      match /comments/{commentId} {
+        allow read: if isTeacher() || isAdmin();
+        allow create: if isTeacher() && request.resource.data.uid == request.auth.uid;
+        allow update, delete: if isAdmin() || (isTeacher() && resource.data.uid == request.auth.uid);
       }
     }
 
@@ -236,15 +450,42 @@ service cloud.firestore {
     }
 
     match /work_records/{recordId} {
-      allow read: if signedIn() && (resource.data.teacher_id == request.auth.uid || isAdmin());
+      allow read: if signedIn() && (resource.data.teacher_id == request.auth.uid || isAttendanceManager());
       allow create: if teacherWorkCreate();
-      allow update: if teacherWorkUpdate() || isAdmin();
-      allow delete: if isAdmin();
+      allow update: if teacherWorkUpdate() || isAttendanceManager();
+      allow delete: if isAttendanceManager();
+    }
+
+    // 給与単価・通常勤怠インポートは機微情報のため、Admin SDK経由の専用APIのみ許可する。
+    match /attendance_payroll_rate_masters/{rateId} {
+      allow read, write: if false;
+    }
+
+    match /attendance_regular_imports/{importId} {
+      allow read, write: if false;
+    }
+
+    match /attendance_import_batches/{batchId} {
+      allow read, write: if false;
     }
 
     match /teacher_availability/{availabilityId} {
-      allow read: if isTeacher() || isAdmin();
-      allow create, update, delete: if isTeacher() || isAdmin();
+      allow read: if isTeacher() || isAttendanceManager();
+      allow create: if teacherOwnAvailabilityCreate() || isAttendanceManager();
+      allow update: if teacherOwnAvailabilityUpdate() || isAttendanceManager();
+      allow delete: if isAttendanceManager() || (isTeacher() && (resource.data.teacher_id == request.auth.uid || resource.data.user_id == request.auth.uid));
+    }
+
+    match /teacher_commuter_passes/{passId} {
+      allow read: if signedIn() && (resource.data.teacher_id == request.auth.uid || isAttendanceManager());
+      allow create: if isAttendanceManager() || (canUseTeacherAttendance() && request.resource.data.teacher_id == request.auth.uid);
+      allow update: if isAttendanceManager() || (
+        canUseTeacherAttendance() &&
+        resource.data.teacher_id == request.auth.uid &&
+        request.resource.data.teacher_id == request.auth.uid &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['teacher_id', 'created_at', 'created_by'])
+      );
+      allow delete: if isAttendanceManager();
     }
 
     match /teacher_substitution_posts/{postId} {
@@ -255,9 +496,164 @@ service cloud.firestore {
     }
 
     match /requests/{requestId} {
-      allow read: if signedIn() && (resource.data.user_id == request.auth.uid || isAdmin() || parentLinkedTo(resource.data.user_id));
-      allow create: if signedIn();
+      allow read: if signedIn() && (
+        resource.data.user_id == request.auth.uid ||
+        resource.data.student_id == request.auth.uid ||
+        resource.data.parent_id == request.auth.uid ||
+        isTeacher() ||
+        isAdmin() ||
+        parentLinkedTo(resource.data.user_id) ||
+        parentLinkedTo(resource.data.student_id)
+      );
+      allow create: if isAdmin() || isTeacher() || studentOwnedCreate() || parentOwnedCreate();
       allow update, delete: if isAdmin();
+    }
+
+    match /announcements/{announcementId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /registration_requests/{requestId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /student_registrations/{registrationId} {
+      allow read: if signedIn() && (
+        resource.data.student_id == request.auth.uid ||
+        isAdmin() ||
+        parentLinkedTo(resource.data.student_id)
+      );
+      allow create: if isStudent() && request.resource.data.student_id == request.auth.uid;
+      allow update, delete: if isAdmin();
+    }
+
+    match /shift_assignments/{shiftId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /settings/{settingId} {
+      allow read: if signedIn();
+      allow write: if isMaster();
+    }
+
+    match /system_status/{statusId} {
+      allow read: if true;
+      allow write: if role() == 'master';
+    }
+
+    match /action_logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin();
+      allow update, delete: if false;
+    }
+
+    match /rewards/{rewardId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /learning_units/{unitId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /lesson_slides/{slideId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /quizzes/{quizId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /quest_results/{resultId} {
+      allow read: if signedIn() && (
+        resource.data.student_id == request.auth.uid ||
+        isTeacher() ||
+        isAdmin() ||
+        parentLinkedTo(resource.data.student_id)
+      );
+      allow write: if isAdmin();
+    }
+
+    match /quest_question_attempts/{attemptId} {
+      allow read: if signedIn() && (
+        resource.data.student_id == request.auth.uid ||
+        isTeacher() ||
+        isAdmin() ||
+        parentLinkedTo(resource.data.student_id)
+      );
+      allow create: if isStudent() && request.resource.data.student_id == request.auth.uid;
+      allow update, delete: if isAdmin();
+    }
+
+    match /quest_question_mastery/{masteryId} {
+      allow read: if signedIn() && (
+        resource.data.student_id == request.auth.uid ||
+        isTeacher() ||
+        isAdmin() ||
+        parentLinkedTo(resource.data.student_id)
+      );
+      allow write: if isAdmin();
+    }
+
+    match /quest_unit_mastery/{masteryId} {
+      allow read: if signedIn() && (
+        resource.data.student_id == request.auth.uid ||
+        isTeacher() ||
+        isAdmin() ||
+        parentLinkedTo(resource.data.student_id)
+      );
+      allow write: if isAdmin();
+    }
+
+    match /subject_urls/{urlId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /survey_templates/{templateId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /survey_responses/{responseId} {
+      allow read: if signedIn() && (
+        resource.data.user_id == request.auth.uid ||
+        resource.data.student_id == request.auth.uid ||
+        isTeacher() ||
+        isAdmin()
+      );
+      allow create: if signedIn() && (
+        request.resource.data.user_id == request.auth.uid ||
+        request.resource.data.student_id == request.auth.uid ||
+        isTeacher() ||
+        isAdmin()
+      );
+      allow update, delete: if isAdmin();
+    }
+
+    match /messages/{messageId} {
+      allow read: if signedIn();
+      allow create: if signedIn() &&
+        request.resource.data.keys().hasOnly(['text', 'uid', 'name', 'role', 'created_at']) &&
+        request.resource.data.uid == request.auth.uid &&
+        request.resource.data.role == role() &&
+        request.resource.data.text is string &&
+        request.resource.data.text.size() > 0 &&
+        request.resource.data.text.size() <= 1000;
+      allow update, delete: if isAdmin();
+    }
+
+    match /activity_logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if signedIn() &&
+        request.resource.data.uid == request.auth.uid;
+      allow update, delete: if false;
     }
 
     match /parent_inquiries/{inquiryId} {
@@ -266,9 +662,81 @@ service cloud.firestore {
       allow update, delete: if isAdmin();
     }
 
-    match /{document=**} {
+    match /course_enrollments/{enrollmentId} {
+      allow read: if signedIn() && (
+        resource.data.user_id == request.auth.uid ||
+        parentLinkedTo(resource.data.user_id) ||
+        isMaster()
+      );
+      allow create, update, delete: if isMaster();
+    }
+
+    match /eiken_courses/{courseId} {
       allow read: if signedIn();
-      allow write: if isAdmin();
+      allow create, update, delete: if isMaster();
+    }
+
+    match /eiken_course_units/{unitId} {
+      allow read, write: if isMaster();
+    }
+
+    match /eiken_tasks/{taskId} {
+      allow read, write: if isMaster();
+    }
+
+    match /eiken_task_progress/{progressId} {
+      allow read, write: if isMaster();
+    }
+
+    match /eiken_lessons/{lessonId} {
+      allow read, write: if isMaster();
+    }
+
+    match /eiken_attendance/{attendanceId} {
+      allow read, write: if isMaster();
+    }
+
+    match /eiken_assignments/{assignmentId} {
+      allow read, write: if isMaster();
+    }
+
+    match /eiken_submissions/{submissionId} {
+      allow read, write: if isMaster();
+    }
+
+    match /eiken_quizzes/{quizId} {
+      allow read, write: if isMaster();
+    }
+
+    match /eiken_quiz_questions/{questionId} {
+      allow read, write: if isMaster();
+    }
+
+    match /eiken_quiz_results/{resultId} {
+      allow read, write: if isMaster();
+    }
+
+    match /eiken_writing_submissions/{submissionId} {
+      allow read, write: if isMaster();
+    }
+
+    match /eiken_teacher_assignments/{assignmentId} {
+      allow read, write: if isMaster();
+    }
+
+    match /eiken_announcements/{announcementId} {
+      allow read, write: if isMaster();
+    }
+
+    match /eiken_follow_up_records/{recordId} {
+      allow read, write: if isMaster();
+    }
+
+    match /{collection}/{document=**} {
+      allow read: if isAdmin() && !isEikenCollection(collection);
+      // 未定義コレクションへの包括的な書き込みはマスターだけに限定する。
+      // 校舎管理者の操作は、上で用途ごとに定義したルールを通す。
+      allow write: if isMaster() && !isEikenCollection(collection);
     }
   }
 }

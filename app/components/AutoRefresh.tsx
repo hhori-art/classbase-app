@@ -13,7 +13,6 @@ export default function AutoRefresh() {
     // リロード実行関数
     const performReload = () => {
       if (typeof window !== 'undefined') {
-        console.log('一定時間操作がなかったため再読み込みします');
         window.location.reload();
       }
     };

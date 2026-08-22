@@ -1,40 +1,24 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { Bell, HelpCircle, Home, LogOut, MessageCircle, UserRound } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
-import { db } from '@/lib/firebase';
-import { doc, getDoc } from 'firebase/firestore';
+import NotificationBell from '@/app/components/NotificationBell';
+import { usePortalVisibility } from '@/app/hooks/usePortalVisibility';
 
 export default function ParentLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const { profile, logout } = useAuth();
-  const [visibility, setVisibility] = useState({
-    aiMessages: true,
-    contact: true,
-    notificationSettings: true,
-  });
-
-  useEffect(() => {
-    const load = async () => {
-      try {
-        const snap = await getDoc(doc(db, 'settings', 'portal_visibility'));
-        if (snap.exists()) setVisibility(prev => ({ ...prev, ...(snap.data().parent || {}) }));
-      } catch (e) {
-        console.warn('Parent layout visibility read failed:', e);
-      }
-    };
-    load();
-  }, []);
+  const { visibility } = usePortalVisibility('parent');
 
   const navItems = [
     { href: '/parent', label: 'ホーム', icon: Home, visible: true },
     { href: '/parent/messages', label: 'AI・連絡', icon: MessageCircle, visible: visibility.aiMessages },
     { href: '/parent/contact', label: '問合せ', icon: HelpCircle, visible: visibility.contact !== false },
-    { href: '/parent/settings', label: '通知設定', icon: Bell, visible: visibility.notificationSettings !== false },
+    { href: '/parent/notifications', label: '通知', icon: Bell, visible: visibility.notifications !== false },
+    { href: '/parent/settings', label: '設定', icon: Bell, visible: visibility.settings !== false && visibility.notificationSettings !== false },
   ].filter(item => item.visible);
 
   const handleLogout = async () => {
@@ -59,6 +43,7 @@ export default function ParentLayout({ children }: { children: React.ReactNode }
             <span className="hidden text-xs font-bold text-slate-500 sm:inline">
               {profile?.parent_name || profile?.name || '保護者'}
             </span>
+            {visibility.notifications !== false && <NotificationBell href="/parent/notifications" />}
             <button onClick={handleLogout} className="rounded-xl bg-slate-100 p-2 text-slate-500 hover:bg-red-50 hover:text-red-500" title="ログアウト">
               <LogOut size={18} />
             </button>

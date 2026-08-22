@@ -6,6 +6,7 @@ import { db } from '@/lib/firebase';
 import { doc, getDoc } from 'firebase/firestore';
 import { Shield, AlertTriangle, CheckCircle, Loader2 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react'; // ★ これで内部でQRコードを作ります
+import ReadablePassword from '@/app/components/ReadablePassword';
 
 export default function PrintPage() {
   const searchParams = useSearchParams();
@@ -108,12 +109,14 @@ export default function PrintPage() {
       <div className="flex flex-col items-center gap-8 print:block print:gap-0 font-sans">
         {users.map((user) => {
           const loginId = user.lifetime_id || user.email || '';
-          const safeBaseUrl = qrBaseUrl || 'https://www.edic.jp'; 
-          
           const isStudent = user.role === 'student';
           const isTeacher = user.role === 'teacher';
+          const isAttendanceOnly = user.role === 'attendance_admin';
+          const accountLabel = isTeacher ? '講師' : '管理者';
           const displayName = user.student_name || user.name || '名称未設定';
           const nameSuffix = isStudent ? 'さん' : isTeacher ? '先生' : '様';
+          const baseUrl = qrBaseUrl || 'https://www.edic.jp';
+          const safeBaseUrl = baseUrl;
           const formattedDate = `${new Date().getFullYear()}年${new Date().getMonth() + 1}月${new Date().getDate()}日`;
           
           return (
@@ -124,23 +127,50 @@ export default function PrintPage() {
                 <div className="bg-blue-50 border-2 border-blue-100 rounded-2xl py-3 px-4 mb-5 flex items-center justify-center gap-4 shadow-sm">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img src="/icon.png" alt="App Icon" className="w-10 h-10 rounded-xl shadow-sm border border-white" />
-                  <h1 className="text-xl font-black text-blue-800 tracking-wider">理社講座新システム 初回ログインのご案内</h1>
+                  <h1 className="text-xl font-black text-blue-800 tracking-wider">
+                    創造学園アプリ 初回ログインのご案内
+                  </h1>
                 </div>
 
                 <div className="mb-5 px-2">
-                  <p className="text-lg mb-2 text-gray-800 font-bold">
-                    {isStudent && "保護者 様"}<br/>
-                    <span className="text-2xl tracking-wide ml-4 text-blue-900">{displayName}</span> {nameSuffix}
-                  </p>
-                  <p className="text-[13px] text-gray-700 leading-relaxed mt-2">
-                    いつも当塾の教育活動にご理解とご協力をいただき、ありがとうございます。<br/>
-                    この度、ご家庭と塾をつなぐ「理社講座新システム」のアカウントをご用意いたしました。<br/>
-                    お手持ちのスマートフォンやパソコンから簡単にアクセスできますので、<br/>
-                    下記のアカウント情報を使って、ぜひ最初のログインをお試しくださいませ！
-                  </p>
+                  {isStudent ? (
+                    <>
+                      <p className="text-lg mb-2 text-gray-800 font-bold">
+                        保護者 様<br/>
+                        <span className="text-2xl tracking-wide ml-4 text-blue-900">{displayName}</span> {nameSuffix}
+                      </p>
+                      <p className="text-[13px] text-gray-700 leading-relaxed mt-2">
+                        いつも当塾の教育活動にご理解とご協力をいただき、ありがとうございます。<br/>
+                        この度、「創造学園アプリ」内のオンライン理社講座をご利用いただくアカウントをご用意いたしました。<br/>
+                        お手持ちのスマートフォンやパソコンから簡単にアクセスできますので、<br/>
+                        下記のアカウント情報を使って、ぜひ最初のログインをお試しくださいませ！
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <p className="text-lg mb-2 text-gray-800 font-bold">
+                        <span className="text-2xl tracking-wide text-blue-900">{displayName}</span> {nameSuffix}
+                      </p>
+                      {isAttendanceOnly ? (
+                        <p className="text-[13px] text-gray-700 leading-relaxed mt-2">
+                          平素は当塾の業務にご協力いただき、誠にありがとうございます。<br/>
+                          この度、「創造学園アプリ」内の勤怠打刻・勤務詳細・交通費登録で使用するアカウントを発行いたしました。<br/>
+                          突破ゼミ勤務がある場合も同じ画面から登録できます。<br/>
+                          下記のアカウント情報を使って、初回ログインを行ってください。
+                        </p>
+                      ) : (
+                        <p className="text-[13px] text-gray-700 leading-relaxed mt-2">
+                          平素は当塾の指導業務にご尽力いただき、誠にありがとうございます。<br/>
+                          この度、業務で使用する「創造学園アプリ」の{accountLabel}用アカウントを発行いたしました。<br/>
+                          お手持ちのスマートフォンやパソコンからアクセスできますので、<br/>
+                          下記のアカウント情報を使って、初回ログインを行ってください。
+                        </p>
+                      )}
+                    </>
+                  )}
                 </div>
                 
-                <div className="bg-white border-4 border-blue-50 rounded-3xl p-4 mb-6 flex justify-between items-center shadow-sm">
+                <div className="bg-white border-4 border-blue-50 rounded-3xl p-4 mb-5 flex justify-between items-center shadow-sm">
                   <div className="flex-1 pl-2 pr-4">
                     <h2 className="text-md font-black text-blue-800 mb-4 flex items-center gap-2 border-b-2 border-blue-50 pb-1.5 inline-flex">
                       <Shield size={18} className="text-blue-500"/> あなたの専用アカウント情報
@@ -153,7 +183,7 @@ export default function PrintPage() {
                       <div className="flex gap-4 items-end">
                         <div>
                           <p className="text-[11px] font-bold text-gray-500 mb-1">② 初期パスワード</p>
-                          <p className="text-lg font-mono font-bold tracking-widest text-gray-800 bg-blue-50 px-3 py-1.5 rounded-xl inline-block border border-blue-100">{user.initial_password || '********'}</p>
+                          <ReadablePassword value={user.initial_password} />
                         </div>
                         <div className="flex-1 border-b-2 border-dashed border-gray-300 pb-1 mb-1">
                           <span className="text-[10px] font-bold text-red-500 mr-2">変更後の新パスワード メモ :</span>
@@ -173,13 +203,23 @@ export default function PrintPage() {
                     <p className="text-[9px] font-bold text-gray-500 leading-tight">カメラで読み取れます</p>
                   </div>
                 </div>
+
+                <div className="mb-5 rounded-2xl border-2 border-indigo-100 bg-indigo-50/70 p-3">
+                  <p className="mb-1 text-[11px] font-black text-indigo-700">ログインURL（手入力する場合）</p>
+                  <div className="rounded-xl border border-indigo-100 bg-white px-3 py-2 font-mono text-[13px] font-black tracking-wide text-indigo-900">
+                    {safeBaseUrl}
+                  </div>
+                  <p className="mt-1 text-[10px] font-bold text-gray-500">
+                    QRコードが読み取れない場合は、上記URLをブラウザのアドレス欄に入力してください。
+                  </p>
+                </div>
                 
                 <div className="bg-yellow-50/50 border-2 border-yellow-100 rounded-2xl p-4">
                   <h3 className="font-bold text-yellow-800 mb-2 flex items-center gap-2 text-[14px]">
                     <AlertTriangle size={16} className="text-yellow-600"/> ご利用にあたってのお願い
                   </h3>
                   <ul className="space-y-2 text-[12px] text-gray-700 leading-relaxed font-medium">
-                    <li className="flex gap-2 items-start"><CheckCircle size={14} className="text-yellow-500 shrink-0 mt-0.5"/><div><strong>パスワードの変更について：</strong><br/>セキュリティ保護のため、初回ログイン後に必ずメニューの「設定」画面から、<span className="text-red-500 font-bold bg-red-50 px-1 rounded">ご自身しか分からない新しいパスワードに変更</span>をお願いいたします。</div></li>
+                    <li className="flex gap-2 items-start"><CheckCircle size={14} className="text-yellow-500 shrink-0 mt-0.5"/><div><strong>パスワードの変更について：</strong><br/>{isAttendanceOnly ? <>セキュリティ保護のため、初回ログイン時の案内に沿って、<span className="text-red-500 font-bold bg-red-50 px-1 rounded">ご自身しか分からない新しいパスワードに変更</span>をお願いいたします。</> : <>セキュリティ保護のため、初回ログイン後に必ずメニューの「設定」画面から、<span className="text-red-500 font-bold bg-red-50 px-1 rounded">ご自身しか分からない新しいパスワードに変更</span>をお願いいたします。</>}</div></li>
                     <li className="flex gap-2 items-start"><CheckCircle size={14} className="text-yellow-500 shrink-0 mt-0.5"/><div><strong>アカウントの管理について：</strong><br/>この用紙に記載されているIDとパスワードは、第三者に知られないよう大切に保管してください。</div></li>
                     <li className="flex gap-2 items-start"><CheckCircle size={14} className="text-yellow-500 shrink-0 mt-0.5"/><div><strong>アプリの追加方法：</strong><br/>SafariやChrome等のブラウザでログイン後、画面の案内に従って「ホーム画面に追加」を行っていただくと、次回以降スマホアプリのように便利にご利用いただけます。</div></li>
                   </ul>
@@ -187,7 +227,10 @@ export default function PrintPage() {
               </div>
 
               <div className="print-footer flex justify-between items-end border-t-2 border-blue-100 pt-2">
-                <div className="text-[10px] text-gray-400 font-medium pb-1">※本用紙は大切に保管してください。</div>
+                <div className="text-[10px] text-gray-500 font-medium pb-1 leading-relaxed">
+                  <p>※本用紙は大切に保管してください。</p>
+                  <p>お問い合わせ先：理社講座サポートセンター（078-321-4123）</p>
+                </div>
                 <div className="text-xl font-black text-blue-900 tracking-widest">創造学園エディック</div>
               </div>
             </div>

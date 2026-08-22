@@ -5,7 +5,7 @@ import { auth } from '@/lib/firebase';
 import { Check, Loader2, MessageCircle } from 'lucide-react';
 
 type Props = {
-  role: 'teacher' | 'student' | 'parent';
+  role: 'teacher' | 'student' | 'parent' | 'admin' | 'master';
   lineUserId?: string | null;
   description: string;
   compact?: boolean;
@@ -29,7 +29,7 @@ export default function LineLinkPanel({ role, lineUserId, description, compact =
       setMessage('LINE連携が完了しました。');
       window.history.replaceState(null, '', window.location.pathname);
     } else if (error) {
-      setMessage('LINE連携に失敗しました。管理者に callback URL と環境変数を確認してください。');
+      setMessage('LINE連携に失敗しました。時間をおいて再度お試しください。解決しない場合はサポートセンターへご連絡ください。');
       window.history.replaceState(null, '', window.location.pathname);
     }
   }, []);

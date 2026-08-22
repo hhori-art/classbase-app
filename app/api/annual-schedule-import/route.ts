@@ -1,4 +1,5 @@
 import { NextRequest } from 'next/server';
+import { revalidateTag } from 'next/cache';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, jsonError } from '@/lib/server-auth';
@@ -24,6 +25,33 @@ type NormalizedRow = {
   schoolId?: string | null;
   notes?: string;
   raw: unknown;
+};
+type CurriculumCourseColumn = {
+  col: number;
+  subject: string;
+  courseName: string;
+};
+type CurriculumBlock = {
+  grade: string;
+  gradeCol: number;
+  monthCol: number;
+  weekCol: number;
+  startCol: number;
+  endCol: number;
+  columns: CurriculumCourseColumn[];
+};
+type CurriculumParseDebug = {
+  mode: 'auto' | 'legacy';
+  subject_row: number;
+  course_header_row: number;
+  detected_blocks: CurriculumBlock[];
+  detected_columns: Array<CurriculumCourseColumn & { grade: string }>;
+  imported_by_grade: Record<string, number>;
+  imported_by_subject: Record<string, number>;
+};
+type CurriculumParseResult = {
+  rows: NormalizedRow[];
+  debug: CurriculumParseDebug;
 };
 
 const DATE_KEYS = ['日付', '授業日', '予定日', '実施日', 'date', 'target_date'];
@@ -79,7 +107,7 @@ const monthNumber = (value: string) => {
 };
 const isYearCell = (value: string) => /^\d{4}$/.test(toAsciiDigits(String(value || '').trim()));
 const weekTerm = (week: string) => {
-  if (week === 'SS') return 'summer_special';
+  if (week === 'SS') return 'term2';
   const no = Number(week);
   if (!Number.isFinite(no)) return 'other';
   if (no <= 16) return 'term1';
@@ -100,12 +128,36 @@ const termStartWeek = (term: string) => (
   term === 'summer_special' ? 'SS' :
   ''
 );
-const resolveConfiguredTerm = (week: string, terms: any[]) => {
+const normalizeGrade = (value: unknown) => {
+  const raw = toAsciiDigits(String(value || ''));
+  if (raw.includes('3')) return '中3';
+  if (raw.includes('2')) return '中2';
+  if (raw.includes('1')) return '中1';
+  return raw.trim();
+};
+const normalizeGrades = (value: unknown) => Array.isArray(value)
+  ? Array.from(new Set(value.map(normalizeGrade).filter(Boolean)))
+  : [];
+const termAppliesToGrade = (term: any, grade: unknown) => {
+  const grades = normalizeGrades(term.grades);
+  if (grades.length === 0) return true;
+  const normalizedGrade = normalizeGrade(grade);
+  return Boolean(normalizedGrade && grades.includes(normalizedGrade));
+};
+const resolveConfiguredTerm = (week: string, terms: any[], grade?: unknown) => {
   if (!terms.length) return null;
-  if (week === 'SS') return terms.find(term => term.id === 'summer_special') || null;
+  const applicableTerms = terms
+    .filter(term => termAppliesToGrade(term, grade))
+    .sort((a, b) => normalizeGrades(b.grades).length - normalizeGrades(a.grades).length);
+  if (week === 'SS') {
+    return applicableTerms.find(term => term.includes_ss === true)
+      || applicableTerms.find(term => term.id === 'term2')
+      || applicableTerms.find(term => term.id === 'summer_special')
+      || null;
+  }
   const no = Number(week);
   if (!Number.isFinite(no)) return null;
-  return terms.find(term => no >= Number(term.start_week || 0) && no <= Number(term.end_week || 0)) || null;
+  return applicableTerms.find(term => no >= Number(term.start_week || 0) && no <= Number(term.end_week || 0)) || null;
 };
 const scheduleCategory = (status: string) => {
   if (/お休み|休館日|休講|調休/.test(status)) return 'closed';
@@ -120,6 +172,58 @@ const scheduleTitle = (status: string) => {
   return status || '年間予定';
 };
 const isMatrix = (value: unknown): value is string[][] => Array.isArray(value) && value.every(row => Array.isArray(row));
+
+const parseCsv = (text: string) => {
+  const csvRows: string[][] = [];
+  let row: string[] = [];
+  let cell = '';
+  let quoted = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    const next = text[i + 1];
+    if (char === '"' && quoted && next === '"') {
+      cell += '"';
+      i += 1;
+    } else if (char === '"') {
+      quoted = !quoted;
+    } else if (char === ',' && !quoted) {
+      row.push(cell.trim());
+      cell = '';
+    } else if ((char === '\n' || char === '\r') && !quoted) {
+      if (char === '\r' && next === '\n') i += 1;
+      row.push(cell.trim());
+      if (row.some(value => value !== '')) csvRows.push(row);
+      row = [];
+      cell = '';
+    } else {
+      cell += char;
+    }
+  }
+
+  row.push(cell.trim());
+  if (row.some(value => value !== '')) csvRows.push(row);
+
+  const [headers = [], ...body] = csvRows;
+  return {
+    matrix: csvRows,
+    rows: body.map(values => Object.fromEntries(headers.map((header, index) => [header.trim(), values[index] || '']))),
+  };
+};
+
+const googleSheetCsvUrl = (value: string) => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  try {
+    const url = new URL(raw);
+    const match = url.pathname.match(/\/spreadsheets\/d\/([^/]+)/);
+    if (!match) return raw;
+    const gid = url.searchParams.get('gid') || '0';
+    return `https://docs.google.com/spreadsheets/d/${match[1]}/export?format=csv&gid=${encodeURIComponent(gid)}`;
+  } catch {
+    return raw;
+  }
+};
 
 const parseLessonCalendarMatrix = (matrix: string[][], defaultYear: number): NormalizedRow[] => {
   const rows: NormalizedRow[] = [];
@@ -168,27 +272,123 @@ const carryHeader = (matrix: string[][], row: number, col: number) => {
   return '';
 };
 
-const parseCurriculumMatrix = (matrix: string[][]): NormalizedRow[] => {
+const isMonthWeekPair = (matrix: string[][], col: number) => {
+  const month = String((matrix[0] || [])[col] || '').trim();
+  const week = String((matrix[0] || [])[col + 1] || '').trim();
+  return month === '月' && /授業週/.test(week);
+};
+
+const curriculumUnitValue = (value: unknown) => String(value || '').trim();
+const isIgnorableCurriculumUnit = (value: string) => {
+  const normalized = toAsciiDigits(value.normalize('NFKC')).trim();
+  return !normalized || normalized === 'SS';
+};
+
+const detectCurriculumBlocks = (matrix: string[][], subjectRow = 1, courseHeaderRow = 5): CurriculumBlock[] => {
+  const header = matrix[0] || [];
+  const grades = header
+    .map((value, col) => ({ grade: normalizeGrade(value), col }))
+    .filter(item => ['中1', '中2', '中3'].includes(item.grade))
+    .sort((a, b) => a.col - b.col);
+  const monthPairs = header
+    .map((_, col) => ({ col, weekCol: col + 1 }))
+    .filter(pair => isMonthWeekPair(matrix, pair.col))
+    .sort((a, b) => a.col - b.col);
+  if (grades.length === 0 || monthPairs.length < grades.length) return [];
+
+  return grades.map((gradeHeader, index) => {
+    const pair = monthPairs[index];
+    const nextGradeCol = grades[index + 1]?.col ?? Number.POSITIVE_INFINITY;
+    const nextMonthCol = monthPairs[index + 1]?.col ?? Number.POSITIVE_INFINITY;
+    const endCandidates = [
+      Number.isFinite(nextGradeCol) ? nextGradeCol - 1 : Number.POSITIVE_INFINITY,
+      Number.isFinite(nextMonthCol) ? nextMonthCol - 1 : Number.POSITIVE_INFINITY,
+      pair.col > gradeHeader.col ? pair.col - 1 : Number.POSITIVE_INFINITY,
+      header.length - 1,
+    ].filter(Number.isFinite);
+    const startCol = gradeHeader.col;
+    const endCol = Math.max(startCol, Math.min(...endCandidates));
+    const columns: CurriculumCourseColumn[] = [];
+    for (let col = startCol; col <= endCol; col += 1) {
+      if (col === pair.col || col === pair.weekCol) continue;
+      const subject = carryHeader(matrix, subjectRow, col);
+      if (!subject || ['月', '授業週', gradeHeader.grade].includes(subject)) continue;
+      const courseName = String((matrix[courseHeaderRow] || [])[col] || '').trim() || subject || '講座';
+      columns.push({ col, subject, courseName });
+    }
+    return {
+      grade: gradeHeader.grade,
+      gradeCol: gradeHeader.col,
+      monthCol: pair.col,
+      weekCol: pair.weekCol,
+      startCol,
+      endCol,
+      columns,
+    };
+  }).filter(block => block.columns.length > 0);
+};
+
+const legacyCurriculumBlocks = (matrix: string[][]): CurriculumBlock[] => {
   const blocks = [
-    { grade: '中1', monthCol: 0, weekCol: 1, start: 2, end: 9 },
-    { grade: '中2', monthCol: 10, weekCol: 11, start: 12, end: 19 },
-    { grade: '中3', monthCol: 25, weekCol: 26, start: 20, end: 24 },
+    { grade: '中1', monthCol: 0, weekCol: 1, startCol: 2, endCol: 9 },
+    { grade: '中2', monthCol: 10, weekCol: 11, startCol: 12, endCol: 19 },
+    { grade: '中3', monthCol: 25, weekCol: 26, startCol: 20, endCol: 24 },
   ];
+  return blocks.map(block => {
+    const columns: CurriculumCourseColumn[] = [];
+    for (let col = block.startCol; col <= block.endCol; col += 1) {
+      const subject = carryHeader(matrix, 1, col);
+      const courseName = String((matrix[5] || [])[col] || '').trim() || subject || '講座';
+      if (subject) columns.push({ col, subject, courseName });
+    }
+    return { ...block, gradeCol: block.startCol, columns };
+  });
+};
+
+const findCurriculumCourseHeaderRow = (matrix: string[][], blocks: CurriculumBlock[]) => {
+  const courseCols = blocks.flatMap(block => block.columns.map(column => column.col));
+  if (courseCols.length === 0) return 5;
+  let best = { row: 5, score: -1 };
+  for (let row = 2; row <= Math.min(8, matrix.length - 1); row += 1) {
+    const score = courseCols.filter(col => {
+      const value = String((matrix[row] || [])[col] || '').trim();
+      return value && !/^(\d+|SS|\d+月)$/.test(toAsciiDigits(value.normalize('NFKC')));
+    }).length;
+    if (score > best.score) best = { row, score };
+    if (score >= Math.ceil(courseCols.length * 0.7)) return row;
+  }
+  return best.row;
+};
+
+const countRowsBy = (rows: NormalizedRow[], key: 'grade' | 'subject') => rows.reduce((acc, row) => {
+  const value = String(row[key] || '未設定');
+  acc[value] = (acc[value] || 0) + 1;
+  return acc;
+}, {} as Record<string, number>);
+
+const parseCurriculumMatrixWithBlocks = (
+  matrix: string[][],
+  blocks: CurriculumBlock[],
+  mode: 'auto' | 'legacy',
+  subjectRow = 1,
+  courseHeaderRow = 5,
+): CurriculumParseResult => {
   const rows: NormalizedRow[] = [];
   for (const block of blocks) {
     for (let r = 2; r < matrix.length; r += 1) {
-      if (r === 5) continue;
+      if (r === courseHeaderRow) continue;
       const monthLabel = String((matrix[r] || [])[block.monthCol] || '').trim();
       const weekNo = toAsciiDigits(String((matrix[r] || [])[block.weekCol] || '').trim());
       if (!monthLabel || !weekNo) continue;
-      for (let c = block.start; c <= block.end; c += 1) {
-        const unit = String((matrix[r] || [])[c] || '').trim();
-        if (!unit) continue;
-        const subject = carryHeader(matrix, 1, c);
-        const courseName = String((matrix[5] || [])[c] || '').trim() || subject || '講座';
+      for (const column of block.columns) {
+        const unit = curriculumUnitValue((matrix[r] || [])[column.col]);
+        if (isIgnorableCurriculumUnit(unit)) continue;
+        const subject = column.subject || carryHeader(matrix, subjectRow, column.col);
+        const courseName = String((matrix[courseHeaderRow] || [])[column.col] || '').trim() || column.courseName || subject || '講座';
         const term = weekTerm(weekNo);
+        const weekLabel = weekNo === 'SS' ? '夏期講習' : `${weekNo}週`;
         rows.push({
-          title: `${block.grade} ${courseName} ${monthLabel} ${weekNo}週`,
+          title: `${block.grade} ${courseName} ${monthLabel} ${weekLabel}`,
           monthLabel,
           weekNo,
           term,
@@ -198,13 +398,51 @@ const parseCurriculumMatrix = (matrix: string[][]): NormalizedRow[] => {
           subject,
           unit,
           courseName,
-          notes: `${termLabel(term)} / ${monthLabel} / ${weekNo}週`,
-          raw: { row: r, col: c, unit },
+          notes: `${termLabel(term)} / ${monthLabel} / ${weekLabel}`,
+          raw: {
+            row: r,
+            col: column.col,
+            unit,
+            parser_mode: mode,
+            month_col: block.monthCol,
+            week_col: block.weekCol,
+          },
         });
       }
     }
   }
-  return rows;
+  const detectedBlocks = blocks.map(block => ({
+    ...block,
+    columns: block.columns.map(column => ({ ...column })),
+  }));
+  const detectedColumns = blocks.flatMap(block => block.columns.map(column => ({
+    ...column,
+    grade: block.grade,
+  })));
+  return {
+    rows,
+    debug: {
+      mode,
+      subject_row: subjectRow,
+      course_header_row: courseHeaderRow,
+      detected_blocks: detectedBlocks,
+      detected_columns: detectedColumns,
+      imported_by_grade: countRowsBy(rows, 'grade'),
+      imported_by_subject: countRowsBy(rows, 'subject'),
+    },
+  };
+};
+
+const parseCurriculumMatrix = (matrix: string[][]): CurriculumParseResult => {
+  const subjectRow = 1;
+  let blocks = detectCurriculumBlocks(matrix, subjectRow, 5);
+  if (blocks.length >= 3) {
+    const courseHeaderRow = findCurriculumCourseHeaderRow(matrix, blocks);
+    blocks = detectCurriculumBlocks(matrix, subjectRow, courseHeaderRow);
+    return parseCurriculumMatrixWithBlocks(matrix, blocks, 'auto', subjectRow, courseHeaderRow);
+  }
+  const legacyBlocks = legacyCurriculumBlocks(matrix);
+  return parseCurriculumMatrixWithBlocks(matrix, legacyBlocks, 'legacy', subjectRow, 5);
 };
 
 const normalizeGenericRows = (type: ImportType, rows: Record<string, unknown>[], defaultYear: number): NormalizedRow[] => {
@@ -238,6 +476,23 @@ const normalizeGenericRows = (type: ImportType, rows: Record<string, unknown>[],
   });
 };
 
+const deleteCollectionQuery = async (
+  query: FirebaseFirestore.Query,
+  shouldDelete: (data: FirebaseFirestore.DocumentData) => boolean = () => true,
+) => {
+  let deleted = 0;
+  const snap = await query.get();
+  const targets = snap.docs.filter(doc => shouldDelete(doc.data()));
+  for (let i = 0; i < targets.length; i += 400) {
+    const chunk = targets.slice(i, i + 400);
+    const batch = adminDb().batch();
+    chunk.forEach(doc => batch.delete(doc.ref));
+    await batch.commit();
+    deleted += chunk.length;
+  }
+  return deleted;
+};
+
 export async function POST(request: NextRequest) {
   try {
     const user = await getServerUser(request);
@@ -245,24 +500,65 @@ export async function POST(request: NextRequest) {
 
     const body = await request.json();
     const type = String(body.type || '') as ImportType;
-    const rows = Array.isArray(body.rows) ? body.rows : [];
-    const matrix = isMatrix(body.matrix) ? body.matrix : [];
+    let rows = Array.isArray(body.rows) ? body.rows : [];
+    let matrix = isMatrix(body.matrix) ? body.matrix : [];
     const defaultYear = Number(body.year || new Date().getFullYear());
     if (!['lesson_schedule', 'curriculum'].includes(type)) {
       return Response.json({ ok: false, error: 'type must be lesson_schedule or curriculum' }, { status: 400 });
     }
+
+    const sheetUrl = String(body.sheet_url || body.sheetUrl || '').trim();
+    if (sheetUrl && rows.length === 0 && matrix.length === 0) {
+      const csvUrl = googleSheetCsvUrl(sheetUrl);
+      const csvRes = await fetch(csvUrl, { redirect: 'follow' });
+      const contentType = csvRes.headers.get('content-type') || '';
+      const text = (await csvRes.text()).replace(/^\uFEFF/, '');
+      if (!csvRes.ok || contentType.includes('text/html') || /accounts\.google\.com|ServiceLogin|InteractiveLogin/i.test(text)) {
+        return Response.json({
+          ok: false,
+          error: 'GoogleシートをCSVとして取得できませんでした。シートの共有設定を「リンクを知っている全員が閲覧可」にするか、CSVとして保存してアップロードしてください。',
+        }, { status: 400 });
+      }
+      const parsed = parseCsv(text);
+      rows = parsed.rows;
+      matrix = parsed.matrix;
+    }
+
     if (rows.length === 0 && matrix.length === 0) return Response.json({ ok: false, error: 'rows is required' }, { status: 400 });
 
     const db = adminDb();
     const collectionName = type === 'lesson_schedule' ? 'annual_lesson_schedules' : 'annual_curriculum_schedules';
-    let normalizedRows = matrix.length > 0
-      ? (type === 'lesson_schedule' ? parseLessonCalendarMatrix(matrix, defaultYear) : parseCurriculumMatrix(matrix))
-      : normalizeGenericRows(type, rows as Record<string, unknown>[], defaultYear);
+    let curriculumDebug: CurriculumParseDebug | null = null;
+    let normalizedRows: NormalizedRow[] = [];
+    if (matrix.length > 0) {
+      if (type === 'lesson_schedule') {
+        normalizedRows = parseLessonCalendarMatrix(matrix, defaultYear);
+      } else {
+        const parsed = parseCurriculumMatrix(matrix);
+        normalizedRows = parsed.rows;
+        curriculumDebug = parsed.debug;
+      }
+    } else {
+      normalizedRows = normalizeGenericRows(type, rows as Record<string, unknown>[], defaultYear);
+    }
     if (normalizedRows.length === 0 && rows.length > 0) {
       normalizedRows = normalizeGenericRows(type, rows as Record<string, unknown>[], defaultYear);
+      curriculumDebug = null;
     }
     if (normalizedRows.length === 0) {
       return Response.json({ ok: false, error: 'CSV形式を判定できませんでした。指定の年間授業予定またはカリキュラム原案CSVを選択してください。' }, { status: 400 });
+    }
+
+    const deletedAnnual = await deleteCollectionQuery(db.collection(collectionName).where('year', '==', defaultYear));
+    let deletedRelated = 0;
+    if (type === 'lesson_schedule') {
+      deletedRelated += await deleteCollectionQuery(
+        db.collection('monthly_schedules').where('year', '==', defaultYear),
+        data => data.schedule_source === type,
+      );
+    } else {
+      deletedRelated += await deleteCollectionQuery(db.collection('course_registration_options')
+        .where('year', '==', defaultYear));
     }
 
     const lessonSnap = type === 'curriculum'
@@ -278,7 +574,7 @@ export async function POST(request: NextRequest) {
       }
     });
     const termStartDates = new Map<string, string>();
-    ['term1', 'term2', 'term3', 'summer_special'].forEach(term => {
+    ['term1', 'term2', 'term3'].forEach(term => {
       const week = termStartWeek(term);
       if (weekStartDates.has(week)) termStartDates.set(term, weekStartDates.get(week)!);
     });
@@ -312,7 +608,7 @@ export async function POST(request: NextRequest) {
       const grade = row.grade || '';
       const unit = row.unit || '';
       const weekNo = row.weekNo || row.lessonNo || '';
-      const configuredTerm = resolveConfiguredTerm(weekNo, configuredTerms);
+      const configuredTerm = resolveConfiguredTerm(weekNo, configuredTerms, grade);
       const term = configuredTerm?.id || row.term || weekTerm(weekNo);
       const title = row.title;
       const schoolId = row.schoolId || null;
@@ -406,10 +702,36 @@ export async function POST(request: NextRequest) {
       type: 'annual_schedule_csv_imported',
       target_type: collectionName,
       school: user.school,
-      metadata: { type, imported, skipped, year: defaultYear },
+      metadata: {
+        type,
+        imported,
+        skipped,
+        year: defaultYear,
+        deleted_annual: deletedAnnual,
+        deleted_related: deletedRelated,
+        replace: true,
+        parser_mode: curriculumDebug?.mode || null,
+        imported_by_grade: curriculumDebug?.imported_by_grade || countRowsBy(normalizedRows, 'grade'),
+        imported_by_subject: curriculumDebug?.imported_by_subject || countRowsBy(normalizedRows, 'subject'),
+      },
     });
 
-    return Response.json({ ok: true, imported, skipped, event_id: eventId });
+    revalidateTag('course-registration-options');
+
+    return Response.json({
+      ok: true,
+      imported,
+      skipped,
+      deleted_annual: deletedAnnual,
+      deleted_related: deletedRelated,
+      replace: true,
+      event_id: eventId,
+      parser_mode: curriculumDebug?.mode || null,
+      detected_blocks: curriculumDebug?.detected_blocks || [],
+      detected_columns: curriculumDebug?.detected_columns || [],
+      imported_by_grade: curriculumDebug?.imported_by_grade || countRowsBy(normalizedRows, 'grade'),
+      imported_by_subject: curriculumDebug?.imported_by_subject || countRowsBy(normalizedRows, 'subject'),
+    });
   } catch (error) {
     return jsonError(error);
   }

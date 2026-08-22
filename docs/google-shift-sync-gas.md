@@ -13,6 +13,8 @@ Google Sheets の講師配置表と、アプリの Firestore `shift_assignments`
 - `シート → アプリ`: シートの講師配置をアプリへ取り込みます。
 - `アプリ → シート`: アプリ側で変更された講師名を、元のシートのセルへ戻します。
 
+`シート → アプリ` は同じシート・同じ期間を既定で上書きします。同期キーから安定した Firestore ドキュメントIDを作るため、同じセルを再同期しても別ドキュメントが増えません。差分追記にしたい場合だけ、API payload に `merge: true` または `replace: false` を指定します。
+
 ## アプリ側 API
 
 本実装で追加した API:
@@ -64,7 +66,9 @@ Firestore rules は Admin/サービスアカウント経由の REST 書き込み
 
 ### 複合インデックス
 
-`Firebaseから反映` では `shift_assignments` を次の条件で検索します。
+Next.js API 経由の `Firebaseから反映` は、複合インデックスなしでも動くように `source_spreadsheet_id` / `source_sheet_name` で取得した後、API側で日付範囲を絞り込みます。
+
+Firestore REST API へ直接同期する版で `shift_assignments` を次の条件で検索する場合は、複合インデックスが必要です。
 
 - `source_spreadsheet_id`
 - `source_sheet_name`

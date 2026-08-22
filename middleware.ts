@@ -65,6 +65,7 @@ export function middleware(request: NextRequest) {
         '/teacher',
         '/teacher/settings',
         '/teacher/work',
+        '/teacher/student-preview',
         '/teacher/attendance',
         '/teacher/chat',
         '/teacher/shifts',

@@ -1,12 +1,13 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { db } from '@/lib/firebase';
+import { auth, db } from '@/lib/firebase';
 import { collection, query, where, getDocs, addDoc, deleteDoc, doc, updateDoc, orderBy, limit, getDoc } from 'firebase/firestore';
-import { Briefcase, Trash2, ArrowLeft, Video, Save, Loader2, Link as LinkIcon, Users, MapPin, User, GripVertical, CheckCircle, HelpCircle, Clock, KeyRound, Zap, BarChart2, X, Settings } from 'lucide-react';
+import { Briefcase, Trash2, ArrowLeft, Video, Save, Loader2, Link as LinkIcon, Users, MapPin, User, GripVertical, CheckCircle, HelpCircle, Clock, KeyRound, Zap, BarChart2, X, Settings, AlertTriangle, Bell } from 'lucide-react';
 import Link from 'next/link';
 import ShiftImportButton from '@/app/components/ShiftImportButton';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, CartesianGrid } from 'recharts';
+import { useAuth } from '@/app/context/AuthContext';
 
 // --- 型定義 ---
 type ShiftAssignment = {
@@ -19,7 +20,9 @@ type ShiftAssignment = {
   target_subject: string | null;
   target_detail_subject: string | null;
   target_place?: string | null;
+  teacher_workplace?: string | null;
   target_meeting_id?: string | null;
+  target_password?: string | null;
   target_signin_address?: string | null;
   unit: string | null;
   note: string;
@@ -35,6 +38,33 @@ type Teacher = {
   lifetime_id?: string;
   role: string;
   survey_url?: string;
+};
+
+type TeacherAvailability = {
+  id: string;
+  teacher_id?: string;
+  user_id?: string;
+  teacher_name?: string;
+  available_date: string;
+  time_range?: string;
+  workplace?: string;
+  location?: string;
+  note?: string;
+  roles?: string[];
+  status?: string;
+};
+
+const normalizeMeetingId = (value?: string | null) =>
+  String(value || '')
+    .normalize('NFKC')
+    .replace(/[^\d]/g, '');
+
+const buildMeetingJoinUrl = (meetingId?: string | null, passcode?: string | null) => {
+  const cleanMeetingId = normalizeMeetingId(meetingId);
+  if (!cleanMeetingId) return null;
+  const url = new URL(`https://zoom.us/j/${cleanMeetingId}`);
+  if (passcode) url.searchParams.set('pwd', passcode);
+  return url.toString();
 };
 
 type ClassGroup = {
@@ -54,16 +84,24 @@ const SUBJECT_DETAILS = {
   '社会': ['地理', '歴史', '公民']
 };
 
+const WORK_LOCATIONS = ['元町', '本山', '西神南', '姫路', '加古川', '明石'];
+
+const teacherIdOfAvailability = (availability: TeacherAvailability) => availability.teacher_id || availability.user_id || '';
+const teacherNameOf = (teacher?: Teacher | null) => teacher?.student_name || teacher?.name || '名称未設定';
+
 export default function MasterShiftPage() {
+  const { user } = useAuth();
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
   const [dayOfWeek, setDayOfWeek] = useState('');
   const [allTeachers, setAllTeachers] = useState<Teacher[]>([]);
-  const [availabilities, setAvailabilities] = useState<any[]>([]);
+  const [availabilities, setAvailabilities] = useState<TeacherAvailability[]>([]);
   const [assignments, setAssignments] = useState<ShiftAssignment[]>([]);
   const [urlMaster, setUrlMaster] = useState<{[key: string]: string}>({});
+  const [unassignedNotice, setUnassignedNotice] = useState<{ count: number; names: string[]; notified: number } | null>(null);
 
   const [editingShift, setEditingShift] = useState<ShiftAssignment | null>(null);
   const [creatingZoom, setCreatingZoom] = useState(false); 
+  const [updatingPasscode, setUpdatingPasscode] = useState(false);
 
   // アンケート関連
   const [surveyQuestions, setSurveyQuestions] = useState<any[]>([]);
@@ -89,6 +127,7 @@ export default function MasterShiftPage() {
     targetClassId: ''
   });
   const [loading, setLoading] = useState(true);
+  const [relinking, setRelinking] = useState(false);
 
   // データ取得
   const fetchData = async () => {
@@ -99,7 +138,13 @@ export default function MasterShiftPage() {
 
       const avQ = query(collection(db, 'teacher_availability'), where('available_date', '==', date));
       const avSnap = await getDocs(avQ);
-      setAvailabilities(avSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+      const availabilityData = avSnap.docs.map(d => ({ id: d.id, ...d.data() } as TeacherAvailability));
+      availabilityData.sort((a, b) => {
+        const aName = a.teacher_name || '';
+        const bName = b.teacher_name || '';
+        return aName.localeCompare(bName, 'ja');
+      });
+      setAvailabilities(availabilityData);
 
       const asQ = query(collection(db, 'shift_assignments'), where('target_date', '==', date));
       const asSnap = await getDocs(asQ);
@@ -118,6 +163,46 @@ export default function MasterShiftPage() {
     } catch (e) { console.error(e); } finally { setLoading(false); }
   };
 
+  const notifyUnassignedTeachers = async () => {
+    try {
+      const token = await user?.getIdToken();
+      if (!token) return;
+      const res = await fetch('/api/admin/shifts/unassigned-notifications', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ target_date: date }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.ok) {
+        setUnassignedNotice({ count: data.unassigned_count || 0, names: data.names || [], notified: data.notified_count || 0 });
+      }
+    } catch (error) {
+      console.error('unassigned notification error:', error);
+    }
+  };
+
+  const relinkShiftTeachers = async () => {
+    if (!confirm(`${date} の講師配置を、講師名から再照合して紐付け直しますか？`)) return;
+    setRelinking(true);
+    try {
+      const token = await user?.getIdToken();
+      if (!token) throw new Error('ログイン情報を確認できません。再ログインしてください。');
+      const res = await fetch('/api/admin/shifts/relink', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ target_date: date }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'relink failed');
+      alert(`再照合しました。\n更新: ${data.updated}件\n未解決: ${data.unresolved}件`);
+      await fetchData();
+    } catch (e: any) {
+      alert(`紐付け再照合に失敗しました: ${e.message || e}`);
+    } finally {
+      setRelinking(false);
+    }
+  };
+
   useEffect(() => {
     setLoading(true);
     const d = new Date(date);
@@ -125,6 +210,10 @@ export default function MasterShiftPage() {
     setDayOfWeek(days[d.getDay()]);
     fetchData();
   }, [date]);
+
+  useEffect(() => {
+    if (user && !loading) notifyUnassignedTeachers();
+  }, [user, loading, date]);
 
   useEffect(() => {
     if (form.subject === '理科' && !SUBJECT_DETAILS['理科'].includes(form.detail_subject)) setForm(prev => ({ ...prev, detail_subject: '物理' }));
@@ -140,7 +229,9 @@ export default function MasterShiftPage() {
   ) => {
     const teacher = allTeachers.find(t => t.id === teacherId);
     if (!teacher) return;
-    const teacherName = teacher.student_name || teacher.name || '不明';
+    const teacherName = teacherNameOf(teacher);
+    const availability = availabilitiesByTeacher.get(teacherId)?.find(a => a.status !== 'impossible');
+    const requestedWorkplace = availability?.workplace || availability?.location || '';
     
     try {
       const shiftData: any = {
@@ -149,6 +240,9 @@ export default function MasterShiftPage() {
         target_date: date,
         role_type: role,
         note: `【${periodStr}】`,
+        teacher_availability_id: availability?.id || null,
+        teacher_workplace: requestedWorkplace || null,
+        requested_time_range: availability?.time_range || null,
         created_at: new Date().toISOString()
       };
 
@@ -162,7 +256,7 @@ export default function MasterShiftPage() {
            shiftData.target_grade = form.grade;
            shiftData.target_subject = form.subject;
            shiftData.target_detail_subject = form.detail_subject;
-           shiftData.target_place = form.studio;
+           shiftData.target_place = form.studio || requestedWorkplace;
            shiftData.unit = form.unit;
            await addDoc(collection(db, 'shift_assignments'), shiftData);
         }
@@ -171,7 +265,7 @@ export default function MasterShiftPage() {
         shiftData.target_grade = targetClass.target_grade;
         shiftData.target_subject = targetClass.target_subject;
         shiftData.target_detail_subject = targetClass.target_detail_subject;
-        shiftData.target_place = targetClass.target_place;
+        shiftData.target_place = targetClass.target_place || requestedWorkplace;
         shiftData.parent_id = targetClass.id;
         await addDoc(collection(db, 'shift_assignments'), shiftData);
       } else {
@@ -242,6 +336,7 @@ export default function MasterShiftPage() {
     try {
       await updateDoc(doc(db, 'shift_assignments', editingShift.id), {
         target_place: editingShift.target_place,
+        teacher_workplace: editingShift.target_place || null,
         unit: editingShift.unit,
         target_meeting_id: editingShift.target_meeting_id,
         target_signin_address: editingShift.target_signin_address,
@@ -251,6 +346,47 @@ export default function MasterShiftPage() {
       setEditingShift(null);
       fetchData();
     } catch (e) { alert('更新エラー'); }
+  };
+
+  const handleUpdateZoomPasscode = async () => {
+    if (!editingShift) return;
+    const meetingId = normalizeMeetingId(editingShift.target_meeting_id);
+    const passcode = String(editingShift.target_password || '').trim();
+    if (!meetingId) return alert('先にZoom IDを入力してください。');
+    if (!passcode) return alert('Zoomパスコードを入力してください。');
+    if (!/^[A-Za-z0-9@_-]{1,10}$/.test(passcode)) {
+      return alert('Zoomパスコードは半角英数字と @ _ - を使い、10文字以内で入力してください。');
+    }
+
+    setUpdatingPasscode(true);
+    try {
+      const token = await user?.getIdToken();
+      if (!token) throw new Error('ログイン情報を確認できません。再ログインしてください。');
+      const response = await fetch(`/api/admin/shifts/${editingShift.id}/passcode`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ passcode }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok) throw new Error(result.error || 'Zoomパスコードを更新できませんでした。');
+
+      setEditingShift(previous => previous ? { ...previous, target_password: result.passcode || passcode } : previous);
+      setAssignments(previous => previous.map(shift => (
+        shift.id === editingShift.id ? { ...shift, target_password: result.passcode || passcode } : shift
+      )));
+      if (result.join_url_ready) {
+        alert('Zoomのパスコードを更新し、暗号化済みの生徒用参加リンクも取得しました。');
+      } else {
+        alert(`Zoomのパスコードは更新しましたが、生徒用参加リンクを取得できませんでした。${result.warning ? `\n${result.warning}` : ''}`);
+      }
+    } catch (error: any) {
+      alert(`パスコードの更新に失敗しました: ${error?.message || '通信エラー'}`);
+    } finally {
+      setUpdatingPasscode(false);
+    }
   };
 
   const handleManualZoomCreate = async () => {
@@ -320,19 +456,16 @@ export default function MasterShiftPage() {
   };
 
   const calculateRatingStats = (questionId: number) => {
-    const counts = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+    const counts: Record<1 | 2 | 3 | 4 | 5, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
     let total = 0;
     let sum = 0;
     surveyResults.forEach((res: any) => {
       const val = res.answers?.[questionId];
-      if (val && typeof val === 'number') {
-        // @ts-ignore
-        if (counts[val] !== undefined) {
-          // @ts-ignore
-          counts[val]++;
-          sum += val;
-          total++;
-        }
+      if (typeof val === 'number' && val >= 1 && val <= 5) {
+        const rating = val as 1 | 2 | 3 | 4 | 5;
+        counts[rating]++;
+        sum += rating;
+        total++;
       }
     });
     const average = total > 0 ? (sum / total).toFixed(1) : '0.0';
@@ -376,10 +509,8 @@ export default function MasterShiftPage() {
         (!sub.parent_id && sub.target_grade === main.target_grade && sub.target_detail_subject === main.target_detail_subject)
       );
       
-      let joinUrl = null;
-      if (main.target_meeting_id) {
-         joinUrl = `https://zoom.us/j/${main.target_meeting_id.replace(/\s/g, '')}`;
-      } else if (main.target_detail_subject && dayOfWeek) {
+      let joinUrl = buildMeetingJoinUrl(main.target_meeting_id, main.target_password);
+      if (!joinUrl && main.target_detail_subject && dayOfWeek) {
          joinUrl = urlMaster[`${main.target_detail_subject}_${dayOfWeek}`];
       }
 
@@ -408,7 +539,22 @@ export default function MasterShiftPage() {
     return assignments.filter(a => a.role_type === 'general' && a.note.includes(`【${time}】`));
   };
 
-  // ★修正: 講師リストのグループ分けロジックを緩和して確実に表示
+  const availabilitiesByTeacher = new Map<string, TeacherAvailability[]>();
+  availabilities.forEach(availability => {
+    const teacherId = teacherIdOfAvailability(availability);
+    if (!teacherId) return;
+    const current = availabilitiesByTeacher.get(teacherId) || [];
+    current.push(availability);
+    availabilitiesByTeacher.set(teacherId, current);
+  });
+
+  const assignedTeacherIds = new Set(assignments.map(a => a.user_id).filter(Boolean));
+  const submittedTeachers = allTeachers
+    .filter(t => (availabilitiesByTeacher.get(t.id) || []).some(a => a.status !== 'impossible'))
+    .sort((a, b) => teacherNameOf(a).localeCompare(teacherNameOf(b), 'ja'));
+  const unassignedSubmittedTeachers = submittedTeachers.filter(t => !assignedTeacherIds.has(t.id));
+
+  // 講師リストのグループ分け
   const groupedTeachers = {
     available: [] as Teacher[],
     maybe: [] as Teacher[],
@@ -416,7 +562,8 @@ export default function MasterShiftPage() {
   };
 
   allTeachers.forEach(t => {
-    const avail = availabilities.find(a => a.user_id === t.id);
+    const teacherAvailabilities = availabilitiesByTeacher.get(t.id) || [];
+    const avail = teacherAvailabilities.find(a => a.status !== 'impossible');
     
     if (!avail) {
       // 完全未提出
@@ -439,12 +586,13 @@ export default function MasterShiftPage() {
     
     return list.map(t => {
       const assignedCount = assignments.filter(a => a.user_id === t.id).length;
-      const avail = availabilities.find(a => a.user_id === t.id); 
+      const teacherAvailabilities = availabilitiesByTeacher.get(t.id) || [];
+      const avail = teacherAvailabilities.find(a => a.status !== 'impossible') || teacherAvailabilities[0]; 
 
-      // ★修正: 提出内容（時間など）の表示用テキスト
-      const shiftNote = avail?.note || (avail?.status === 'possible' ? '〇' : null);
       // 不可で提出されている場合
       const isImpossible = avail?.status === 'impossible';
+      const workplace = avail?.workplace || avail?.location;
+      const roles = Array.isArray(avail?.roles) ? avail?.roles.join(' / ') : '';
 
       return (
         <div 
@@ -461,7 +609,7 @@ export default function MasterShiftPage() {
             <div className="flex items-center gap-2">
               <GripVertical size={14} className="text-gray-300" />
               <div>
-                <span className="font-bold text-slate-700 block">{t.student_name || t.name}</span>
+                <span className="font-bold text-slate-700 block">{teacherNameOf(t)}</span>
               </div>
             </div>
             {type === 'available' && <CheckCircle size={16} className="text-green-500" />}
@@ -469,12 +617,11 @@ export default function MasterShiftPage() {
             {isImpossible && <span className="text-[10px] font-bold text-red-500 bg-red-50 px-2 py-0.5 rounded">不可</span>}
           </div>
           
-          {/* ★修正: 提出された時間やメモを目立つように表示 */}
           <div className="pl-6 mt-1.5 flex flex-wrap gap-2 items-center w-full">
-             {shiftNote && (
+             {avail && (
                <div className="text-[11px] font-bold text-indigo-600 bg-indigo-50 px-2 py-1 rounded border border-indigo-100 w-full truncate">
                  <span className="text-indigo-400 mr-1 text-[9px] uppercase">SHIFT:</span>
-                 {shiftNote}
+                 {[workplace, avail.time_range, roles || avail.note].filter(Boolean).join(' / ')}
                </div>
              )}
              {assignedCount > 0 && (
@@ -502,6 +649,13 @@ export default function MasterShiftPage() {
           </div>
           <div className="flex items-center gap-3">
             <ShiftImportButton onSuccess={fetchData} />
+            <button
+              onClick={relinkShiftTeachers}
+              disabled={relinking}
+              className="text-xs font-bold text-rose-600 hover:bg-rose-50 px-4 py-2 rounded-lg transition-colors flex items-center gap-2 border border-rose-100 disabled:opacity-50"
+            >
+              {relinking ? <Loader2 size={14} className="animate-spin" /> : <Settings size={14}/>} 紐付け再照合
+            </button>
             <Link href="/master/settings" className="text-xs font-bold text-indigo-600 hover:bg-indigo-50 px-4 py-2 rounded-lg transition-colors flex items-center gap-2 border border-indigo-100">
               <LinkIcon size={14}/> URL設定
             </Link>
@@ -510,6 +664,69 @@ export default function MasterShiftPage() {
               <span className="text-xs font-black bg-indigo-600 text-white px-3 py-1.5 rounded-lg">{dayOfWeek}曜日</span>
             </div>
           </div>
+        </div>
+
+        {unassignedSubmittedTeachers.length > 0 && (
+          <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-amber-900 shadow-sm">
+            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <div className="flex items-start gap-3">
+                <AlertTriangle size={20} className="mt-0.5 text-amber-600 shrink-0" />
+                <div>
+                  <p className="text-sm font-black">シフト提出済みで、まだ配置されていない先生がいます</p>
+                  <p className="mt-1 text-xs font-bold text-amber-800">
+                    {unassignedSubmittedTeachers.map(teacherNameOf).slice(0, 8).join('、')}
+                    {unassignedSubmittedTeachers.length > 8 ? ` ほか${unassignedSubmittedTeachers.length - 8}名` : ''}
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 rounded-xl bg-white/70 px-3 py-2 text-xs font-bold text-amber-800">
+                <Bell size={14} />
+                管理者通知 {unassignedNotice?.notified ?? 0}件
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="mb-6 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="flex items-center gap-2 text-sm font-black text-slate-800">
+              <CheckCircle size={16} className="text-emerald-600" /> 本日のシフト提出者一覧
+            </h2>
+            <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-500">
+              {submittedTeachers.length}名提出 / 未配置 {unassignedSubmittedTeachers.length}名
+            </span>
+          </div>
+          {submittedTeachers.length > 0 ? (
+            <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+              {submittedTeachers.map(teacher => {
+                const teacherAvailabilities = availabilitiesByTeacher.get(teacher.id) || [];
+                const assignedCount = assignments.filter(a => a.user_id === teacher.id).length;
+                return (
+                  <div key={teacher.id} className={`rounded-xl border p-3 ${assignedCount > 0 ? 'border-emerald-100 bg-emerald-50/40' : 'border-amber-200 bg-amber-50/70'}`}>
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-sm font-black text-slate-800">{teacherNameOf(teacher)}</p>
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-black ${assignedCount > 0 ? 'bg-emerald-600 text-white' : 'bg-amber-500 text-white'}`}>
+                        {assignedCount > 0 ? `配置済 ${assignedCount}` : '未配置'}
+                      </span>
+                    </div>
+                    <div className="mt-2 space-y-1">
+                      {teacherAvailabilities.map(availability => (
+                        <div key={availability.id} className="flex flex-wrap gap-2 text-[11px] font-bold text-slate-600">
+                          <span className="flex items-center gap-1 rounded bg-white px-2 py-1"><MapPin size={11} className="text-slate-400" />{availability.workplace || availability.location || '勤務地未設定'}</span>
+                          <span className="flex items-center gap-1 rounded bg-white px-2 py-1"><Clock size={11} className="text-slate-400" />{availability.time_range || '時間未設定'}</span>
+                          <span className="rounded bg-white px-2 py-1">{Array.isArray(availability.roles) && availability.roles.length ? availability.roles.join(' / ') : availability.note || '希望未設定'}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="rounded-xl border-2 border-dashed border-slate-100 py-6 text-center text-xs font-bold text-slate-400">
+              この日付のシフト提出はまだありません
+            </div>
+          )}
         </div>
 
         <div className="flex flex-col lg:flex-row gap-6 items-start">
@@ -522,7 +739,7 @@ export default function MasterShiftPage() {
               </div>
               <div className="space-y-3">
                 <div className={`p-2 rounded text-center font-bold text-xs border ${form.userId ? 'bg-indigo-50 border-indigo-300 text-indigo-700' : 'bg-gray-50 text-gray-400 border-dashed'}`}>
-                  {allTeachers.find(t => t.id === form.userId)?.student_name || "先生を選択してください"}
+                  {form.userId ? teacherNameOf(allTeachers.find(t => t.id === form.userId)) : "先生を選択してください"}
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <select className="w-full p-2 border rounded text-xs" value={form.time_slot} onChange={e => setForm({...form, time_slot: e.target.value})}>
@@ -692,8 +909,18 @@ export default function MasterShiftPage() {
             </div>
             <div className="p-6 space-y-4">
               <div>
-                <label className="text-xs font-bold text-gray-500">実施スタジオ</label>
-                <input className="w-full p-2 border rounded mt-1" value={editingShift.target_place || ''} onChange={e => setEditingShift({...editingShift, target_place: e.target.value})} placeholder="例: 元町 6F1"/>
+                <label className="text-xs font-bold text-gray-500">勤務地</label>
+                <select
+                  className="w-full p-2 border rounded mt-1 bg-white"
+                  value={editingShift.target_place || ''}
+                  onChange={e => setEditingShift({...editingShift, target_place: e.target.value})}
+                >
+                  <option value="">未設定</option>
+                  {WORK_LOCATIONS.map(location => <option key={location} value={location}>{location}</option>)}
+                  {editingShift.target_place && !WORK_LOCATIONS.includes(editingShift.target_place) && (
+                    <option value={editingShift.target_place}>{editingShift.target_place}</option>
+                  )}
+                </select>
               </div>
               <div>
                 <label className="text-xs font-bold text-gray-500">単元</label>
@@ -722,6 +949,35 @@ export default function MasterShiftPage() {
                     <CheckCircle size={10}/> ホストURL発行済み
                   </p>
                 )}
+              </div>
+
+              <div className="rounded-xl border border-violet-100 bg-violet-50 p-3">
+                <label className="flex items-center gap-2 text-xs font-black text-violet-900">
+                  <KeyRound size={14} className="text-violet-600" /> Zoomパスコード
+                </label>
+                <p className="mt-1 text-[11px] font-medium leading-relaxed text-violet-700">
+                  Zoomの会議設定と生徒・講師の参加リンクを同じパスコードに更新します。
+                </p>
+                <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                  <input
+                    type="text"
+                    autoComplete="new-password"
+                    maxLength={10}
+                    className="min-w-0 flex-1 rounded-lg border border-violet-200 bg-white p-2 font-mono tracking-wider outline-none focus:border-violet-500"
+                    value={editingShift.target_password || ''}
+                    onChange={event => setEditingShift({ ...editingShift, target_password: event.target.value.replace(/\s/g, '') })}
+                    placeholder="例: Risha2026"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleUpdateZoomPasscode}
+                    disabled={updatingPasscode || !normalizeMeetingId(editingShift.target_meeting_id)}
+                    className="inline-flex shrink-0 items-center justify-center gap-1 rounded-lg bg-violet-600 px-3 py-2 text-xs font-black text-white transition-colors hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {updatingPasscode ? <Loader2 size={14} className="animate-spin" /> : <KeyRound size={14} />}
+                    Zoomに反映して保存
+                  </button>
+                </div>
               </div>
 
               <button onClick={handleUpdate} className="w-full bg-blue-600 text-white py-3 rounded-lg font-bold hover:bg-blue-700 shadow mt-4 flex justify-center items-center gap-2"><Save size={18}/> 保存</button>
@@ -822,7 +1078,7 @@ function ClassCard({ info, allTeachers, onDelete, onEdit, onShowResults, onDragO
   const isEmerald = info.subject === '理科';
 
   const loginEmail = info.main?.target_signin_address?.trim();
-  const hasHostPermission = !!loginEmail && loginEmail.length > 0;
+  const hasHostPermission = !!loginEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(loginEmail);
   const displayLoginId = loginEmail ? loginEmail.split('@')[0] : '';
 
   // 管理者画面なので、名前の指定はそのクラスの担当講師名を使う
@@ -847,12 +1103,15 @@ function ClassCard({ info, allTeachers, onDelete, onEdit, onShowResults, onDragO
     btn: hasHostPermission ? 'bg-rose-600 hover:bg-rose-700 text-white shadow-rose-200' : 'bg-orange-500 hover:bg-orange-600 text-white shadow-orange-200',
   };
 
-  const confno = info.main?.target_meeting_id?.replace(/\s/g, '') || (info.main?.start_url ? info.main.start_url.split('/').pop()?.split('?')[0] : '');
+  const confno = normalizeMeetingId(info.main?.target_meeting_id) || normalizeMeetingId(info.main?.start_url ? info.main.start_url.split('/').pop()?.split('?')[0] : '');
 
-  const launchWebUrl = (url: string) => {
+  const launchWebUrl = (url: string, targetWindow?: Window | null) => {
+    if (targetWindow && !targetWindow.closed) {
+      targetWindow.location.href = url;
+      return;
+    }
     window.open(url, '_blank');
   };
-
   // 管理者用ホスト開始ロジック (先生画面と同じ)
   const handleEnterZoom = async (e: React.MouseEvent) => {
     e.preventDefault();
@@ -866,32 +1125,43 @@ function ClassCard({ info, allTeachers, onDelete, onEdit, onShowResults, onDragO
     if (hasHostPermission) {
       if(!confirm(`「${teacherName}」先生としてホストを開始しますか？\n(ログインID: ${loginEmail})`)) return;
 
+      const popup = window.open('', '_blank');
+      if (popup) {
+        popup.document.write('<p style="font-family: sans-serif; padding: 24px;">Zoomホスト開始を準備しています...</p>');
+      }
       setLoading(true);
       try {
-        console.log(`🚀 ホスト開始試行(Admin): Email=${loginEmail}, Name=${surname}`);
+        const currentUser = auth.currentUser;
+        if (!currentUser) throw new Error('not-authenticated');
+        const token = await currentUser.getIdToken();
         
         const res = await fetch('/api/get-zoom-zak', { 
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
           body: JSON.stringify({ 
             email: loginEmail,
+            meetingId: confno,
+            shiftId: info.main?.id || info.id,
             name: surname // 担当講師の苗字で名前書き換え
           }) 
         });
         const data = await res.json();
         
-        if (data.success && data.zak && data.pmi) {
-          const targetUrl = `https://zoom.us/s/${data.pmi}?zak=${data.zak}`;
-          console.log("✅ Webランチャー起動:", targetUrl);
-          launchWebUrl(targetUrl);
+        if (data.success && (data.zak || data.start_url)) {
+          const displayName = surname || teacherName || '講師';
+          const webUrl = data.start_url || `https://zoom.us/s/${confno}?zak=${encodeURIComponent(data.zak)}&uname=${encodeURIComponent(displayName)}`;
+          const appUrl = data.app_start_url || (data.zak ? `zoommtg://zoom.us/start?confno=${confno}&zak=${encodeURIComponent(data.zak)}` : '');
+          launchWebUrl(webUrl || appUrl, popup);
         } else {
+          if (popup && !popup.closed) popup.close();
           console.error("API Error:", data);
-          alert(`ホスト権限の取得に失敗しました。\n\n理由: ${data.error}`);
+          alert(`ホスト権限の取得に失敗しました。\n\n理由: ${data.error}${data.detail ? `\n詳細: ${data.detail}` : ''}`);
           if(confirm("通常参加で開きますか？")) {
              launchWebUrl(info.url || `https://zoom.us/j/${confno}`);
           }
         }
       } catch (err) {
+        if (popup && !popup.closed) popup.close();
         console.error(err);
         alert('通信エラーが発生しました。');
       } finally {
@@ -909,7 +1179,6 @@ function ClassCard({ info, allTeachers, onDelete, onEdit, onShowResults, onDragO
           targetUrl = `https://zoom.us/j/${confno}?pwd=${pwd || ''}&uname=${encodeURIComponent(zoomDisplayName)}`;
         } catch (e) {}
       }
-      console.log("🚶 通常参加:", targetUrl);
       launchWebUrl(targetUrl);
     }
   };

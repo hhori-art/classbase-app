@@ -3,65 +3,59 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { doc, onSnapshot } from 'firebase/firestore';
 import { 
-  Home, Users, Calendar, Briefcase, Megaphone, CheckSquare, 
+  Bell, Home, Calendar, Briefcase, Megaphone, CheckSquare,
   ClipboardList, FileText, Video, MessageCircle, ShoppingBag, 
-  Activity, Database, Trash2, Settings, Menu, LogOut, 
-  GraduationCap, ListChecks, BookOpen
+  Activity, Database, Settings, Menu, LogOut,
+  GraduationCap, ListChecks, BookOpen, AlertTriangle, BarChart2, Languages, PanelsTopLeft,
+  ShieldCheck, Clock
 } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
+import { usePortalVisibility } from '@/app/hooks/usePortalVisibility';
 import { db } from '@/lib/firebase';
-import { doc, getDoc } from 'firebase/firestore';
-
-const DEFAULT_ADMIN_VISIBILITY: Record<string, boolean> = {
-  users: true,
-  schoolStudents: true,
-  sso: true,
-  shifts: true,
-  monthlySchedules: true,
-  attendance: false,
-  attendanceCorrections: false,
-  substitutions: true,
-  announcements: true,
-  requests: true,
-  parentInquiries: true,
-  registrationTasks: true,
-  curriculum: true,
-  pf: true,
-  recordings: true,
-  community: true,
-  rewards: true,
-  stats: true,
-  surveySettings: true,
-  imports: true,
-  delete: true,
-  line: true,
-  settings: true,
-};
+import {
+  adminAppForPath,
+  hasAdminAppPermission,
+  isMasterOnlyAdminPath,
+  type AdminAppId,
+} from '@/lib/admin-app-permissions';
 
 // メニュー項目の定義
 const MENU_ITEMS = [
   { 
     category: "メイン", 
     items: [
-      { key: 'dashboard', title: 'ダッシュボード', icon: Home, href: '/master' },
+      { key: 'dashboard', title: '管理アプリ選択', icon: Home, href: '/master' },
+      { key: 'appSwitcher', title: 'アプリ一覧', icon: PanelsTopLeft, href: '/apps' },
+      { key: 'scienceSocialHome', title: '理社講座 ダッシュボード', icon: GraduationCap, href: '/master/science-social' },
+      { key: 'eiken', title: '英検 Booster管理', icon: Languages, href: '/master/eiken' },
+      { key: 'notifications', title: '自分の通知', icon: Bell, href: '/master/notifications' },
     ]
+  },
+  {
+    category: "全体アカウント",
+    items: [
+      { key: 'accountManagement', title: '全体アカウント管理', icon: ShieldCheck, href: '/master/accounts' },
+    ],
   },
   { 
     category: "運営・管理", 
     items: [
-      { key: 'users', title: 'ユーザー管理・印刷', icon: Users, href: '/master/users' },
       { key: 'schoolStudents', title: '校舎別 生徒管理', icon: GraduationCap, href: '/master/school-students' },
-      { key: 'sso', title: 'SSO権限・校舎管理', icon: Users, href: '/master/accounts/sso' },
       { key: 'shifts', title: 'シフト管理', icon: Calendar, href: '/master/shifts' },
       { key: 'monthlySchedules', title: '月間予定', icon: Calendar, href: '/master/monthly-schedules' },
-      { key: 'attendance', title: '勤怠管理', icon: Briefcase, href: '/master/attendance' },
+      { key: 'attendance', title: '準専任勤怠', icon: Briefcase, href: '/master/attendance' },
+      { key: 'dedicatedClaims', title: '専任申請', icon: Clock, href: '/master/attendance/dedicated-claims' },
+      { key: 'employeeLessons', title: '専任・授業実績入力', icon: BookOpen, href: '/master/attendance/employee-lessons' },
       { key: 'attendanceCorrections', title: '打刻修正承認', icon: CheckSquare, href: '/master/attendance-corrections' },
+      { key: 'attendanceDiagnostics', title: '勤怠ミス候補', icon: AlertTriangle, href: '/master/attendance/diagnostics' },
       { key: 'substitutions', title: '代行依頼管理', icon: Megaphone, href: '/master/substitutions' },
       { key: 'announcements', title: 'お知らせ配信', icon: Megaphone, href: '/master/announcements' },
       { key: 'requests', title: '承認・申請', icon: CheckSquare, href: '/master/requests' },
       { key: 'parentInquiries', title: '保護者お問い合わせ', icon: MessageCircle, href: '/master/parent-inquiries' },
       { key: 'registrationTasks', title: '登録依頼作成', icon: ClipboardList, href: '/master/registration-tasks' },
+      { key: 'courseAllocation', title: '講座割当管理', icon: BookOpen, href: '/master/course-allocation' },
       { key: 'curriculum', title: 'カリキュラム管理', icon: BookOpen, href: '/master/curriculum' },
     ]
   },
@@ -70,6 +64,7 @@ const MENU_ITEMS = [
     items: [
       { key: 'pf', title: 'PFデータ管理', icon: FileText, href: '/master/pf' },
       { key: 'recordings', title: '授業アーカイブ', icon: Video, href: '/master/recordings' },
+      { key: 'slides', title: '授業スライド', icon: BookOpen, href: '/master/slides' },
       { key: 'community', title: 'コミュニティ', icon: MessageCircle, href: '/master/community' },
       { key: 'rewards', title: '景品・コイン', icon: ShoppingBag, href: '/master/rewards' },
     ]
@@ -78,39 +73,82 @@ const MENU_ITEMS = [
     category: "システム", 
     items: [
       { key: 'stats', title: '統計・分析', icon: Activity, href: '/master/stats' },
+      { key: 'betaAnalytics', title: 'テスト効果検証', icon: BarChart2, href: '/master/stats#beta-analytics' },
       { key: 'surveySettings', title: 'アンケート設定', icon: ListChecks, href: '/master/survey-settings' },
       { key: 'imports', title: 'CSV一括登録', icon: Database, href: '/master/imports' },
-      { key: 'delete', title: '一括削除', icon: Trash2, href: '/master/delete' },
+      { key: 'line', title: '通知・LINE管理', icon: Bell, href: '/master/line' },
       { key: 'settings', title: '設定', icon: Settings, href: '/master/settings' },
     ]
   }
 ];
 
+const itemApp = (key: string): AdminAppId | 'global' => {
+  if (['dashboard', 'appSwitcher', 'accountManagement'].includes(key)) return 'global';
+  if (key === 'eiken') return 'eiken';
+  if (['attendance', 'dedicatedClaims', 'employeeLessons', 'attendanceCorrections', 'attendanceDiagnostics'].includes(key)) return 'attendance';
+  return 'science_social';
+};
+
 export default function MasterLayout({ children }: { children: React.ReactNode }) {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [adminVisibility, setAdminVisibility] = useState(DEFAULT_ADMIN_VISIBILITY);
+  const [currentHash, setCurrentHash] = useState('');
+  const [liveProfile, setLiveProfile] = useState<Record<string, any> | null>(null);
   const pathname = usePathname();
-  const { user, profile, logout } = useAuth();
+  const { user, profile, loading, logout } = useAuth();
+  const { visibility: adminVisibility } = usePortalVisibility('admin');
 
-  useEffect(() => {
-    const loadVisibility = async () => {
-      try {
-        const snap = await getDoc(doc(db, 'settings', 'portal_visibility'));
-        if (snap.exists()) setAdminVisibility(prev => ({ ...prev, ...(snap.data().admin || {}) }));
-      } catch (e) {
-        console.warn('Admin menu visibility read failed:', e);
-      }
-    };
-    loadVisibility();
-  }, []);
-
-  const isMaster = profile?.role === 'master';
-  const schoolIds = Array.isArray(profile?.school_ids) ? profile?.school_ids.filter(Boolean) : [];
-  const currentSchoolLabel = isMaster ? 'マスター管理者' : schoolIds[0] || profile?.school_id || profile?.school || '校舎未設定';
+  const effectiveProfile = liveProfile && profile
+    ? { ...profile, ...liveProfile, role: profile.role }
+    : profile;
+  const isMaster = effectiveProfile?.role === 'master';
+  const isAttendanceAdmin = effectiveProfile?.role === 'attendance_admin';
+  const isMasterOnlyPath = isMasterOnlyAdminPath(pathname);
+  const currentAdminApp = adminAppForPath(pathname);
+  const currentPathAllowed = Boolean(
+    effectiveProfile &&
+    (
+      pathname === '/master' ||
+      (isMasterOnlyPath && isMaster) ||
+      (currentAdminApp && hasAdminAppPermission(effectiveProfile.role, effectiveProfile, currentAdminApp))
+    )
+  );
+  const schoolIds = Array.isArray(effectiveProfile?.school_ids) ? effectiveProfile.school_ids.filter(Boolean) : [];
+  const currentSchoolLabel = isAttendanceAdmin ? '勤怠アプリ' : isMaster ? 'マスター管理者' : schoolIds[0] || effectiveProfile?.school_id || effectiveProfile?.school || '校舎未設定';
   const visibleMenuItems = MENU_ITEMS.map(section => ({
     ...section,
-    items: section.items.filter(item => isMaster || item.key === 'dashboard' || adminVisibility[item.key] !== false),
+    items: section.items.filter(item => {
+      const app = itemApp(item.key);
+      if (isMasterOnlyAdminPath(item.href) && !isMaster) return false;
+      if (app === 'global') return currentAdminApp === null || item.key === 'dashboard' || item.key === 'appSwitcher';
+      if (currentAdminApp !== app) return false;
+      if (!effectiveProfile || !hasAdminAppPermission(effectiveProfile.role, effectiveProfile, app)) return false;
+      return isMaster || adminVisibility[item.key] !== false;
+    }),
   })).filter(section => section.items.length > 0);
+
+  useEffect(() => {
+    if (!user) {
+      setLiveProfile(null);
+      return;
+    }
+    return onSnapshot(doc(db, 'users', user.uid), snapshot => {
+      if (snapshot.exists()) setLiveProfile(snapshot.data());
+    }, error => {
+      console.warn('Admin permission listener failed:', error);
+    });
+  }, [user]);
+
+  useEffect(() => {
+    if (loading || !effectiveProfile || currentPathAllowed) return;
+    window.location.replace('/master');
+  }, [currentPathAllowed, effectiveProfile, loading]);
+
+  useEffect(() => {
+    const syncHash = () => setCurrentHash(window.location.hash || '');
+    syncHash();
+    window.addEventListener('hashchange', syncHash);
+    return () => window.removeEventListener('hashchange', syncHash);
+  }, [pathname]);
 
   // ログアウト処理
   const handleLogout = async () => {
@@ -123,6 +161,14 @@ export default function MasterLayout({ children }: { children: React.ReactNode }
       }
     }
   };
+
+  if (loading || !effectiveProfile || !currentPathAllowed) {
+    return (
+      <div className="flex min-h-dvh items-center justify-center bg-slate-950 text-sm font-bold text-slate-300">
+        管理権限を確認しています
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-dvh w-full bg-[#F0F3FF] font-sans overflow-hidden">
@@ -140,7 +186,7 @@ export default function MasterLayout({ children }: { children: React.ReactNode }
               <div className="bg-indigo-600 p-1.5 rounded-lg text-white shadow-lg shadow-indigo-900/50">
                 <GraduationCap size={20} strokeWidth={2.5} />
               </div>
-              <span className="text-lg font-black text-white tracking-tight">理社講座アプリ</span>
+              <span className="text-lg font-black text-white tracking-tight">創造学園 管理</span>
             </Link>
           ) : (
             <Link href="/master" className="mx-auto bg-indigo-600 p-1.5 rounded-lg text-white shadow-lg shadow-indigo-900/50 hover:bg-indigo-500 transition-colors">
@@ -180,7 +226,14 @@ export default function MasterLayout({ children }: { children: React.ReactNode }
 
                 <ul className="space-y-1">
                   {section.items.map((item) => {
-                    const isActive = pathname === item.href;
+                    const [itemPathWithQuery, itemHash = ''] = item.href.split('#');
+                    const itemPath = itemPathWithQuery.split('?')[0];
+                    const isHashItem = Boolean(itemHash);
+                    const isActive = isHashItem
+                      ? pathname === itemPath && currentHash === `#${itemHash}`
+                      : item.key === 'accountManagement'
+                        ? pathname === itemPath && !currentHash
+                        : (pathname === itemPath && !currentHash) || (itemPath !== '/master' && pathname.startsWith(`${itemPath}/`));
                     const Icon = item.icon;
                     return (
                       <li key={item.href}>

@@ -5,13 +5,14 @@ import { useAuth } from '@/app/context/AuthContext';
 import { BADGES } from '@/lib/gamification';
 import { 
   X, Lock, Star, Coins, Trophy, UserCircle, CheckCircle2, ShoppingBag, 
-  ArrowRight, Calendar, Loader2, Brain 
+  ArrowRight, Calendar, Loader2, Video, MessageCircle
 } from 'lucide-react';
 import { auth, db } from '@/lib/firebase';
 import { 
-  doc, updateDoc, collection, query, orderBy, limit, getDocs, getDoc
+  doc, updateDoc, getDoc, onSnapshot
 } from 'firebase/firestore';
 import Link from 'next/link';
+import { useSound } from '@/lib/sound';
 
 interface UserData {
   uid: string;
@@ -19,30 +20,73 @@ interface UserData {
   points: number;
   coins: number;
   total_coins: number;
+  login_count?: number;
   attendance_count: number;
   login_streak?: number;
   earned_badges: string[];
   selected_badge: string;
+  last_login_bonus_date?: string;
   last_mission_date?: string;
-  last_ai_mission_date?: string;
-  last_ai_learning_date?: string;
+  last_recording_view_date?: string;
+  last_recording_mission_date?: string;
+  last_community_activity_date?: string;
+  last_community_mission_date?: string;
+  custom_mission_dates?: Record<string, string>;
 }
 
 interface Props {
   isOpen: boolean;
   onClose: () => void;
   userData: UserData;
+  canUseShop?: boolean;
 }
 
 const BONUS_PATTERN = [10, 10, 20, 20, 30, 30, 40, 40, 50, 100];
+
+const DEFAULT_MISSION_SETTINGS = {
+  login: true,
+  recording: true,
+  community: false,
+};
+
+type CustomMissionCondition = 'manual' | 'login' | 'recording' | 'community';
+
+type CustomMission = {
+  id: string;
+  title: string;
+  description?: string;
+  reward: number;
+  enabled?: boolean;
+  condition?: CustomMissionCondition;
+  link_url?: string;
+  link_label?: string;
+};
+
+const normalizeCustomMission = (mission: any): CustomMission | null => {
+  const id = String(mission?.id || '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
+  const title = String(mission?.title || '').trim();
+  if (!id || !title) return null;
+  const condition = ['manual', 'login', 'recording', 'community'].includes(mission?.condition) ? mission.condition : 'manual';
+  return {
+    id,
+    title,
+    description: String(mission?.description || ''),
+    reward: Math.max(0, Math.min(500, Number(mission?.reward || 0))),
+    enabled: mission?.enabled !== false,
+    condition,
+    link_url: String(mission?.link_url || ''),
+    link_label: String(mission?.link_label || '開く'),
+  };
+};
 
 const getTodayString = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
-export default function TrophyModal({ isOpen, onClose, userData }: Props) {
+export default function TrophyModal({ isOpen, onClose, userData, canUseShop = true }: Props) {
   const { profile } = useAuth();
+  const { play } = useSound(profile?.settings?.sound_se !== false);
   
   const [activeTab, setActiveTab] = useState<'bonus' | 'quest' | 'badge' | 'ranking'>('bonus'); 
   const [ranking, setRanking] = useState<any[]>([]);
@@ -51,18 +95,54 @@ export default function TrophyModal({ isOpen, onClose, userData }: Props) {
   const [missionClaiming, setMissionClaiming] = useState(false);
   const [isMissionDoneToday, setIsMissionDoneToday] = useState(false);
 
-  const [aiMissionClaiming, setAiMissionClaiming] = useState(false);
-  const [isAiMissionDoneToday, setIsAiMissionDoneToday] = useState(false);
-  const [isAiLearningDoneToday, setIsAiLearningDoneToday] = useState(false);
+  const [recordingMissionClaiming, setRecordingMissionClaiming] = useState(false);
+  const [isRecordingMissionDoneToday, setIsRecordingMissionDoneToday] = useState(false);
+  const [isRecordingWatchedToday, setIsRecordingWatchedToday] = useState(false);
+  const [communityMissionClaiming, setCommunityMissionClaiming] = useState(false);
+  const [isCommunityMissionDoneToday, setIsCommunityMissionDoneToday] = useState(false);
+  const [isCommunityActiveToday, setIsCommunityActiveToday] = useState(false);
+  const [missionSettings, setMissionSettings] = useState(DEFAULT_MISSION_SETTINGS);
+  const [customMissions, setCustomMissions] = useState<CustomMission[]>([]);
+  const [customMissionDates, setCustomMissionDates] = useState<Record<string, string>>(userData?.custom_mission_dates || {});
+  const [customMissionClaiming, setCustomMissionClaiming] = useState<Record<string, boolean>>({});
+  const [lastLoginBonusDate, setLastLoginBonusDate] = useState(userData?.last_login_bonus_date || '');
   
   // データロード中フラグ（チラつき防止）
   const [isDataFetching, setIsDataFetching] = useState(true);
 
   const [currentCoins, setCurrentCoins] = useState(userData?.coins || 0);
-  const [currentLogins, setCurrentLogins] = useState(userData?.attendance_count || 0);
+  const [currentLogins, setCurrentLogins] = useState(userData?.login_count || userData?.attendance_count || 0);
+  const [currentStreak, setCurrentStreak] = useState(userData?.login_streak || 0);
+  const [currentBadges, setCurrentBadges] = useState<string[]>(userData?.earned_badges || []);
+  const [currentSelectedBadge, setCurrentSelectedBadge] = useState(
+    userData?.selected_badge && userData.selected_badge !== 'beginner' ? userData.selected_badge : 'badge_1'
+  );
 
-  const earnedBadges = userData?.earned_badges || [];
-  const selectedBadge = userData?.selected_badge || '';
+  const earnedBadges = currentBadges;
+  const selectedBadge = currentSelectedBadge;
+
+  useEffect(() => {
+    const unsubscribe = onSnapshot(
+      doc(db, 'settings', 'mission_control'),
+      (snapshot) => {
+        const data = snapshot.exists() ? snapshot.data() : {};
+        setMissionSettings(prev => ({
+          ...prev,
+          login: data.login ?? prev.login,
+          recording: data.recording ?? prev.recording,
+          community: data.community ?? prev.community,
+        }));
+        const missions = Array.isArray(data.custom_missions)
+          ? data.custom_missions.map(normalizeCustomMission).filter(Boolean) as CustomMission[]
+          : [];
+        setCustomMissions(missions.filter(mission => mission.enabled !== false && mission.reward > 0));
+      },
+      (error) => {
+        console.warn('Mission control read failed:', error);
+      }
+    );
+    return () => unsubscribe();
+  }, []);
 
   // 初期化 & データ取得
   useEffect(() => {
@@ -71,47 +151,79 @@ export default function TrophyModal({ isOpen, onClose, userData }: Props) {
     // 初期状態セット (プロップスから)
     const today = getTodayString();
     setCurrentCoins(userData?.coins || 0);
-    setCurrentLogins(userData?.attendance_count || 0);
+    setCurrentLogins(userData?.login_count || userData?.attendance_count || 0);
+    setCurrentStreak(userData?.login_streak || 0);
+    setCurrentBadges(userData?.earned_badges || []);
+    setCurrentSelectedBadge(userData?.selected_badge && userData.selected_badge !== 'beginner' ? userData.selected_badge : 'badge_1');
+    setLastLoginBonusDate(userData?.last_login_bonus_date || '');
+    setCustomMissionDates(userData?.custom_mission_dates || {});
     
     // プロップスベースで一旦判定（表示を早くするため）
     setIsMissionDoneToday(userData?.last_mission_date === today);
-    setIsAiMissionDoneToday(userData?.last_ai_mission_date === today);
-    setIsAiLearningDoneToday(userData?.last_ai_learning_date === today);
+    setIsRecordingMissionDoneToday(userData?.last_recording_mission_date === today);
+    setIsRecordingWatchedToday(userData?.last_recording_view_date === today);
+    setIsCommunityMissionDoneToday(userData?.last_community_mission_date === today);
+    setIsCommunityActiveToday(userData?.last_community_activity_date === today);
 
     setIsDataFetching(true);
 
     const fetchData = async () => {
-      // 1. 最新のユーザー状態を取得 (ここが重要！)
-      // クエスト完了直後にモーダルを開いた場合、propsのuserDataは古い可能性があるため
-      if (userData?.uid) {
-        try {
-          const userSnap = await getDoc(doc(db, 'users', userData.uid));
-          if (userSnap.exists()) {
-            const data = userSnap.data();
-            
-            // 最新データで上書き
-            setIsMissionDoneToday(data.last_mission_date === today);
-            setIsAiMissionDoneToday(data.last_ai_mission_date === today);
-            
-            // ★ここが修正ポイント: Firestoreの最新値を確認
-            setIsAiLearningDoneToday(data.last_ai_learning_date === today);
-            
-            setCurrentCoins(data.coins || 0);
-            setCurrentLogins(data.attendance_count || 0);
+      try {
+        // 1. 最新のユーザー状態を取得
+        // クエスト完了直後にモーダルを開いた場合、propsのuserDataは古い可能性があるため
+        if (userData?.uid) {
+          try {
+            const userSnap = await getDoc(doc(db, 'users', userData.uid));
+            if (userSnap.exists()) {
+              const data = userSnap.data();
+              
+              // 最新データで上書き
+              setIsMissionDoneToday(data.last_mission_date === today);
+              setIsRecordingMissionDoneToday(data.last_recording_mission_date === today);
+              setIsRecordingWatchedToday(data.last_recording_view_date === today);
+              setIsCommunityMissionDoneToday(data.last_community_mission_date === today);
+              setIsCommunityActiveToday(data.last_community_activity_date === today);
+              setLastLoginBonusDate(data.last_login_bonus_date || '');
+              setCustomMissionDates(data.custom_mission_dates || {});
+              
+              setCurrentCoins(data.coins || 0);
+              setCurrentLogins(data.login_count || data.attendance_count || 0);
+              setCurrentStreak(data.login_streak || 0);
+              setCurrentBadges(Array.isArray(data.earned_badges) ? data.earned_badges : []);
+              setCurrentSelectedBadge(data.selected_badge && data.selected_badge !== 'beginner' ? data.selected_badge : 'badge_1');
+            }
+          } catch (e) {
+            console.error("User data fetch error:", e);
           }
-        } catch (e) {
-          console.error("User data fetch error:", e);
         }
-      }
 
-      // 2. ランキング取得
-      if (activeTab === 'ranking') {
-        const q = query(collection(db, 'users'), orderBy('total_coins', 'desc'), limit(10));
-        const snap = await getDocs(q);
-        setRanking(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+        // 2. ランキング取得
+        if (activeTab === 'ranking') {
+          try {
+            const token = await auth.currentUser?.getIdToken();
+            if (!token) {
+              setRanking([]);
+              return;
+            }
+
+            const res = await fetch('/api/student/ranking?limit=20', {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || data.ok === false) {
+              console.error('Ranking fetch error:', data.error || res.statusText);
+              setRanking([]);
+              return;
+            }
+            setRanking(Array.isArray(data.ranking) ? data.ranking : []);
+          } catch (e) {
+            console.error('Ranking fetch error:', e);
+            setRanking([]);
+          }
+        }
+      } finally {
+        setIsDataFetching(false);
       }
-      
-      setIsDataFetching(false);
     };
     fetchData();
   }, [isOpen, activeTab, userData]);
@@ -123,8 +235,9 @@ export default function TrophyModal({ isOpen, onClose, userData }: Props) {
     setLoading(true);
     try {
       await updateDoc(doc(db, 'users', userData.uid), { selected_badge: badgeId });
+      setCurrentSelectedBadge(badgeId);
+      window.dispatchEvent(new CustomEvent('classbase:user-profile-updated', { detail: { selected_badge: badgeId } }));
       alert('バッジを設定しました！');
-      window.location.reload(); 
     } catch (e) { alert('設定失敗'); } finally { setLoading(false); }
   };
 
@@ -134,10 +247,16 @@ export default function TrophyModal({ isOpen, onClose, userData }: Props) {
     await processMissionReward('last_mission_date', 10, setIsMissionDoneToday, setMissionClaiming);
   };
 
-  const handleClaimAiMission = async () => {
-    if (!isAiLearningDoneToday || isAiMissionDoneToday || aiMissionClaiming) return;
-    setAiMissionClaiming(true);
-    await processMissionReward('last_ai_mission_date', 20, setIsAiMissionDoneToday, setAiMissionClaiming);
+  const handleClaimRecordingMission = async () => {
+    if (!isRecordingWatchedToday || isRecordingMissionDoneToday || recordingMissionClaiming) return;
+    setRecordingMissionClaiming(true);
+    await processMissionReward('last_recording_mission_date', 15, setIsRecordingMissionDoneToday, setRecordingMissionClaiming);
+  };
+
+  const handleClaimCommunityMission = async () => {
+    if (!isCommunityActiveToday || isCommunityMissionDoneToday || communityMissionClaiming) return;
+    setCommunityMissionClaiming(true);
+    await processMissionReward('last_community_mission_date', 10, setIsCommunityMissionDoneToday, setCommunityMissionClaiming);
   };
 
   const processMissionReward = async (
@@ -158,13 +277,78 @@ export default function TrophyModal({ isOpen, onClose, userData }: Props) {
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.ok === false) throw new Error(data.error || 'reward failed');
       setDoneState(true);
-      if (data.applied) setCurrentCoins(prev => prev + reward);
-      alert(data.applied ? `ミッション達成！ ${reward}コイン獲得！` : '本日のミッション報酬は受取済みです。');
+      if (data.applied) {
+        setCurrentCoins(typeof data.coins === 'number' ? data.coins : prev => prev + (data.amount || reward));
+        window.dispatchEvent(new CustomEvent('classbase:user-profile-updated', {
+          detail: {
+            coins: typeof data.coins === 'number' ? data.coins : undefined,
+            [dateField]: today,
+          },
+        }));
+        play(dateField === 'last_mission_date' ? 'login_bonus' : 'coin_acquired');
+      }
+      alert(data.applied ? `ミッション達成！ ${data.amount || reward}コイン獲得！` : '本日のミッション報酬は受取済みです。');
     } catch (e) {
       console.error(e);
       alert('エラーが発生しました');
     } finally {
       setLoadingState(false);
+    }
+  };
+
+  const isCustomMissionReady = (mission: CustomMission) => {
+    switch (mission.condition || 'manual') {
+      case 'login':
+        return lastLoginBonusDate === getTodayString() || isMissionDoneToday;
+      case 'recording':
+        return isRecordingWatchedToday;
+      case 'community':
+        return isCommunityActiveToday;
+      default:
+        return true;
+    }
+  };
+
+  const getCustomMissionFallbackHref = (mission: CustomMission) => {
+    if (mission.link_url) return mission.link_url;
+    if (mission.condition === 'recording') return '/student/recordings';
+    if (mission.condition === 'community') return '/student/community';
+    return '/student';
+  };
+
+  const handleClaimCustomMission = async (mission: CustomMission) => {
+    const today = getTodayString();
+    if (customMissionDates[mission.id] === today || customMissionClaiming[mission.id] || !isCustomMissionReady(mission)) return;
+    setCustomMissionClaiming(prev => ({ ...prev, [mission.id]: true }));
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) throw new Error('ログイン情報を確認できません');
+      const res = await fetch('/api/coin-transactions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action: 'custom_mission_reward', mission_id: mission.id }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) throw new Error(data.error || 'reward failed');
+
+      const nextDates = { ...customMissionDates, [mission.id]: today };
+      setCustomMissionDates(nextDates);
+      if (data.applied) {
+        setCurrentCoins(typeof data.coins === 'number' ? data.coins : prev => prev + (data.amount || mission.reward));
+        window.dispatchEvent(new CustomEvent('classbase:user-profile-updated', {
+          detail: {
+            coins: typeof data.coins === 'number' ? data.coins : undefined,
+            custom_mission_dates: nextDates,
+          },
+        }));
+        play('coin_acquired');
+      }
+      alert(data.applied ? `ミッション達成！ ${data.amount || mission.reward}コイン獲得！` : '本日のミッション報酬は受取済みです。');
+    } catch (e) {
+      console.error(e);
+      alert('エラーが発生しました');
+    } finally {
+      setCustomMissionClaiming(prev => ({ ...prev, [mission.id]: false }));
     }
   };
 
@@ -200,9 +384,11 @@ export default function TrophyModal({ isOpen, onClose, userData }: Props) {
               <Coins className="fill-yellow-300 text-yellow-500" size={32} />
               {currentCoins.toLocaleString()}
             </div>
-            <Link href="/student/shop" className="mt-2 bg-white/20 hover:bg-white/30 text-white text-xs font-bold px-4 py-2 rounded-full flex items-center gap-2 transition-all active:scale-95 border border-white/20">
-              <ShoppingBag size={14} /> 景品交換へ <ArrowRight size={12} />
-            </Link>
+            {canUseShop && (
+              <Link href="/student/shop" className="mt-2 bg-white/20 hover:bg-white/30 text-white text-xs font-bold px-4 py-2 rounded-full flex items-center gap-2 transition-all active:scale-95 border border-white/20">
+                <ShoppingBag size={14} /> 景品交換へ <ArrowRight size={12} />
+              </Link>
+            )}
           </div>
 
           <div className="flex mt-6 bg-black/20 rounded-xl p-1 text-[10px] font-bold overflow-x-auto gap-1 no-scrollbar">
@@ -228,7 +414,7 @@ export default function TrophyModal({ isOpen, onClose, userData }: Props) {
                <div className="bg-white p-6 rounded-3xl shadow-sm border border-indigo-100">
                  <h3 className="font-black text-indigo-800 text-lg mb-1">ログインスタンプ</h3>
                  <p className="text-xs text-gray-500 mb-6">
-                   現在 <span className="text-lg font-black text-indigo-600">{currentLogins}</span> 回目のログインです！
+                   現在 <span className="text-lg font-black text-indigo-600">{currentLogins}</span> 回目 / 連続 <span className="text-lg font-black text-rose-500">{currentStreak}</span> 日ログイン中です！
                  </p>
                  
                  <div className="flex gap-3 overflow-x-auto pt-6 pb-4 px-2 no-scrollbar justify-start sm:justify-center items-end">
@@ -252,7 +438,7 @@ export default function TrophyModal({ isOpen, onClose, userData }: Props) {
                      </div>
                    ))}
                  </div>
-                 <p className="text-[10px] text-gray-400 mt-2">※日付が変わると次のログインカウントが進みます</p>
+                 <p className="text-[10px] text-gray-400 mt-2">※1日1回、ホーム表示時に自動でログインボーナスが付与されます</p>
                </div>
              </div>
           )}
@@ -263,13 +449,18 @@ export default function TrophyModal({ isOpen, onClose, userData }: Props) {
               
               {/* デイリーミッション */}
               <div>
-                <h4 className="flex items-center gap-2 text-sm font-black text-gray-700 mb-3"><span className="w-1 h-4 bg-orange-500 rounded-full"/> デイリーミッション (毎日0時リセット)</h4>
-                
-                <div className="space-y-3">
-                  {/* ① ログインミッション */}
-                  <div className={`p-4 rounded-xl border shadow-sm flex justify-between items-center transition-all ${isMissionDoneToday ? 'bg-gray-50 border-gray-200' : 'bg-white border-orange-200 shadow-md'}`}>
-                    <div>
-                      <p className="font-bold text-sm text-gray-800">アプリにログインする</p>
+	                <h4 className="flex items-center gap-2 text-sm font-black text-gray-700 mb-3"><span className="w-1 h-4 bg-orange-500 rounded-full"/> デイリーミッション</h4>
+	                
+	                <div className="space-y-3">
+                    {!missionSettings.login && !missionSettings.recording && !missionSettings.community && customMissions.length === 0 && (
+                      <div className="rounded-2xl border border-slate-100 bg-white p-6 text-center text-sm font-bold text-slate-400">
+                        現在利用できるデイリーミッションはありません
+                      </div>
+                    )}
+	                  {/* ① ログインミッション */}
+	                  {missionSettings.login && <div className={`p-4 rounded-xl border shadow-sm flex justify-between items-center transition-all ${isMissionDoneToday ? 'bg-gray-50 border-gray-200' : 'bg-white border-orange-200 shadow-md'}`}>
+	                    <div>
+	                      <p className="font-bold text-sm text-gray-800">アプリにログインする</p>
                       <p className="text-[10px] text-orange-500 font-bold flex items-center gap-1 mt-1">
                         <Coins size={12}/> +10 コイン
                       </p>
@@ -283,48 +474,128 @@ export default function TrophyModal({ isOpen, onClose, userData }: Props) {
                           : 'bg-orange-500 hover:bg-orange-600 text-white shadow-orange-200 shadow-lg active:scale-95'
                       }`}
                     >
-                      {missionClaiming ? <Loader2 className="animate-spin" size={14}/> : isMissionDoneToday ? <CheckCircle2 size={14}/> : <Coins size={14}/>}
-                      {isMissionDoneToday ? '受取済' : '受け取る'}
-                    </button>
-                  </div>
+	                      {missionClaiming ? <Loader2 className="animate-spin" size={14}/> : isMissionDoneToday ? <CheckCircle2 size={14}/> : <Coins size={14}/>}
+	                      {isMissionDoneToday ? '受取済' : '受け取る'}
+	                    </button>
+	                  </div>}
 
-                  {/* ② AIクエストミッション */}
-                  <div className={`p-4 rounded-xl border shadow-sm flex justify-between items-center transition-all ${isAiMissionDoneToday ? 'bg-gray-50 border-gray-200' : 'bg-white border-indigo-200 shadow-md'}`}>
-                    <div>
+	                  {/* ② 録画視聴ミッション */}
+	                  {missionSettings.recording && <div className={`p-4 rounded-xl border shadow-sm flex justify-between items-center transition-all ${isRecordingMissionDoneToday ? 'bg-gray-50 border-gray-200' : 'bg-white border-red-200 shadow-md'}`}>
+	                    <div>
                       <div className="flex items-center gap-1.5 mb-1">
-                        <Brain size={14} className="text-indigo-500"/>
-                        <p className="font-bold text-sm text-gray-800">AI学習クエスト実施</p>
+                        <Video size={14} className="text-red-500"/>
+                        <p className="font-bold text-sm text-gray-800">授業録画を1本見る</p>
                       </div>
                       <p className="text-[10px] text-orange-500 font-bold flex items-center gap-1">
-                        <Coins size={12}/> +20 コイン
+                        <Coins size={12}/> +15 コイン
                       </p>
                     </div>
-                    <button 
-                      onClick={handleClaimAiMission}
-                      // データ取得中はボタンを押させない
-                      disabled={isDataFetching || !isAiLearningDoneToday || isAiMissionDoneToday || aiMissionClaiming}
-                      className={`text-xs font-bold px-4 py-2 rounded-lg flex items-center gap-1 transition-all ${
-                        isAiMissionDoneToday 
+                    {isRecordingWatchedToday ? (
+                      <button 
+                        onClick={handleClaimRecordingMission}
+                        disabled={isDataFetching || isRecordingMissionDoneToday || recordingMissionClaiming}
+                        className={`text-xs font-bold px-4 py-2 rounded-lg flex items-center gap-1 transition-all ${
+                          isRecordingMissionDoneToday 
+                            ? 'bg-gray-200 text-gray-400 cursor-not-allowed' 
+                            : 'bg-red-500 hover:bg-red-600 text-white shadow-red-200 shadow-lg active:scale-95'
+                        }`}
+                      >
+                        {recordingMissionClaiming ? <Loader2 className="animate-spin" size={14}/> : isRecordingMissionDoneToday ? <CheckCircle2 size={14}/> : <Coins size={14}/>}
+                        {isRecordingMissionDoneToday ? '受取済' : '受け取る'}
+                      </button>
+                    ) : (
+                      <Link href="/student/recordings" className="text-xs font-bold px-4 py-2 rounded-lg flex items-center gap-1 bg-red-100 text-red-500">
+	                        見に行く
+	                      </Link>
+	                    )}
+	                  </div>}
+
+	                  {/* ③ コミュニティミッション */}
+	                  {missionSettings.community && <div className={`p-4 rounded-xl border shadow-sm flex justify-between items-center transition-all ${isCommunityMissionDoneToday ? 'bg-gray-50 border-gray-200' : 'bg-white border-sky-200 shadow-md'}`}>
+	                    <div>
+                      <div className="flex items-center gap-1.5 mb-1">
+                        <MessageCircle size={14} className="text-sky-500"/>
+                        <p className="font-bold text-sm text-gray-800">コミュニティに参加する</p>
+                      </div>
+                      <p className="text-[10px] text-orange-500 font-bold flex items-center gap-1">
+                        <Coins size={12}/> +10 コイン
+                      </p>
+                    </div>
+                    {isCommunityActiveToday ? (
+                      <button 
+                        onClick={handleClaimCommunityMission}
+                        disabled={isDataFetching || isCommunityMissionDoneToday || communityMissionClaiming}
+                        className={`text-xs font-bold px-4 py-2 rounded-lg flex items-center gap-1 transition-all ${
+                          isCommunityMissionDoneToday 
                           ? 'bg-gray-200 text-gray-400 cursor-not-allowed' 
-                          : !isAiLearningDoneToday 
-                            ? 'bg-indigo-100 text-indigo-400 cursor-not-allowed' 
-                            : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-200 shadow-lg active:scale-95'
-                      }`}
-                    >
-                      {aiMissionClaiming ? <Loader2 className="animate-spin" size={14}/> 
-                       : isAiMissionDoneToday ? <CheckCircle2 size={14}/> 
-                       : !isAiLearningDoneToday ? <X size={14}/> 
-                       : <Coins size={14}/>}
-                      
-                      {isAiMissionDoneToday ? '受取済' : !isAiLearningDoneToday ? '未達成' : '受け取る'}
-                    </button>
+                          : 'bg-sky-500 hover:bg-sky-600 text-white shadow-sky-200 shadow-lg active:scale-95'
+                        }`}
+                      >
+                        {communityMissionClaiming ? <Loader2 className="animate-spin" size={14}/> : isCommunityMissionDoneToday ? <CheckCircle2 size={14}/> : <Coins size={14}/>}
+                        {isCommunityMissionDoneToday ? '受取済' : '受け取る'}
+                      </button>
+                    ) : (
+                      <Link href="/student/community" className="text-xs font-bold px-4 py-2 rounded-lg flex items-center gap-1 bg-sky-100 text-sky-500">
+	                        参加する
+	                      </Link>
+	                    )}
+	                  </div>}
+
+                    {customMissions.map((mission) => {
+                      const doneToday = customMissionDates[mission.id] === getTodayString();
+                      const ready = isCustomMissionReady(mission);
+                      const href = getCustomMissionFallbackHref(mission);
+                      const isExternal = /^https?:\/\//.test(href);
+                      const actionClass = "text-xs font-bold px-4 py-2 rounded-lg flex items-center gap-1 transition-all";
+                      return (
+                        <div key={mission.id} className={`p-4 rounded-xl border shadow-sm flex justify-between items-center gap-3 transition-all ${doneToday ? 'bg-gray-50 border-gray-200' : 'bg-white border-amber-200 shadow-md'}`}>
+                          <div className="min-w-0">
+                            <p className="font-bold text-sm text-gray-800">{mission.title}</p>
+                            {mission.description && <p className="mt-1 text-[10px] font-bold leading-relaxed text-slate-400">{mission.description}</p>}
+                            <p className="text-[10px] text-orange-500 font-bold flex items-center gap-1 mt-1">
+                              <Coins size={12}/> +{mission.reward} コイン
+                            </p>
+                          </div>
+                          {ready ? (
+                            <button
+                              onClick={() => handleClaimCustomMission(mission)}
+                              disabled={doneToday || customMissionClaiming[mission.id]}
+                              className={`${actionClass} ${doneToday ? 'bg-gray-200 text-gray-400 cursor-not-allowed' : 'bg-amber-500 hover:bg-amber-600 text-white shadow-amber-200 shadow-lg active:scale-95'}`}
+                            >
+                              {customMissionClaiming[mission.id] ? <Loader2 className="animate-spin" size={14}/> : doneToday ? <CheckCircle2 size={14}/> : <Coins size={14}/>}
+                              {doneToday ? '受取済' : '受け取る'}
+                            </button>
+                          ) : isExternal ? (
+                            <a href={href} target="_blank" rel="noreferrer" className={`${actionClass} bg-amber-100 text-amber-600 shrink-0`}>
+                              {mission.link_label || '開く'}
+                            </a>
+                          ) : (
+                            <Link href={href} className={`${actionClass} bg-amber-100 text-amber-600 shrink-0`}>
+                              {mission.link_label || '開く'}
+                            </Link>
+                          )}
+                        </div>
+                      );
+                    })}
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="rounded-xl border border-rose-100 bg-rose-50 p-4">
+                      <p className="text-[10px] font-black text-rose-500">連続ログイン</p>
+                      <p className="mt-1 text-2xl font-black text-rose-700">{currentStreak}日</p>
+                      <p className="mt-1 text-[10px] font-bold text-rose-400">3日/7日で特別バッジ</p>
+                    </div>
+                    <div className="rounded-xl border border-amber-100 bg-amber-50 p-4">
+                      <p className="text-[10px] font-black text-amber-600">次のログボ</p>
+                      <p className="mt-1 text-2xl font-black text-amber-700">+{BONUS_PATTERN[currentLogins % BONUS_PATTERN.length]}</p>
+                      <p className="mt-1 text-[10px] font-bold text-amber-500">明日の初回ログインで付与</p>
+                    </div>
                   </div>
                 </div>
               </div>
 
               {/* 累積ミッション */}
               <div>
-                <h4 className="flex items-center gap-2 text-sm font-black text-gray-700 mb-3"><span className="w-1 h-4 bg-blue-500 rounded-full"/> 授業参加実績 (累計)</h4>
+                <h4 className="flex items-center gap-2 text-sm font-black text-gray-700 mb-3"><span className="w-1 h-4 bg-blue-500 rounded-full"/> 継続実績</h4>
                 <div className="space-y-3">
                   {[1, 3, 5, 10, 20, 50, 100].map((goal) => {
                     const isCleared = currentLogins >= goal;
@@ -332,8 +603,8 @@ export default function TrophyModal({ isOpen, onClose, userData }: Props) {
                       <div key={goal} className={`relative p-3 rounded-2xl border ${isCleared ? 'bg-white border-yellow-400 shadow-sm' : 'bg-gray-50 border-gray-200'}`}>
                         <div className="flex justify-between items-center mb-2">
                           <div>
-                            <div className="flex items-center gap-2"><p className={`text-sm font-bold ${isCleared ? 'text-gray-800' : 'text-gray-500'}`}>授業に{goal}回出席</p>{isCleared && <span className="bg-yellow-400 text-yellow-900 text-[10px] font-black px-2 py-0.5 rounded-full">CLEAR!</span>}</div>
-                            <p className="text-[10px] text-orange-500 font-bold mt-0.5">報酬: {goal * 10} コイン</p>
+                            <div className="flex items-center gap-2"><p className={`text-sm font-bold ${isCleared ? 'text-gray-800' : 'text-gray-500'}`}>{goal}回ログイン</p>{isCleared && <span className="bg-yellow-400 text-yellow-900 text-[10px] font-black px-2 py-0.5 rounded-full">CLEAR!</span>}</div>
+                            <p className="text-[10px] text-orange-500 font-bold mt-0.5">達成バッジ・累計ランキングに反映</p>
                           </div>
                           <div className="text-right">{isCleared ? <CheckCircle2 className="text-green-500" size={24} /> : <span className="text-xs font-bold text-gray-400">{currentLogins} / {goal}</span>}</div>
                         </div>
@@ -369,7 +640,23 @@ export default function TrophyModal({ isOpen, onClose, userData }: Props) {
 
           {/* 4. ランキング */}
           {activeTab === 'ranking' && (
-             <div className="space-y-3">{ranking.map((player: any, index) => (<div key={index} className={`flex items-center gap-3 p-3 rounded-xl border ${player.uid === userData.uid ? 'bg-yellow-50 border-yellow-300' : 'bg-white border-gray-100'}`}><div className={`w-6 text-center font-black ${index < 3 ? 'text-orange-500' : 'text-gray-400'}`}>{index + 1}</div><div className="w-8 h-8 bg-white rounded-full flex items-center justify-center border text-lg">{BADGES.find(b => b.id === player.selected_badge)?.icon || '👤'}</div><div className="flex-1"><p className="text-xs font-bold text-gray-800">{player.student_name || player.name || '名無し'}</p><p className="text-[10px] text-gray-400">{player.total_coins?.toLocaleString()} pt</p></div>{index === 0 && <Trophy className="text-yellow-500 fill-yellow-500" size={20} />}</div>))}</div>
+             <div className="space-y-3">
+               {isDataFetching ? (
+                 <div className="flex items-center justify-center gap-2 rounded-2xl bg-white p-8 text-sm font-bold text-gray-400"><Loader2 className="animate-spin" size={18} /> 読み込み中...</div>
+               ) : ranking.length === 0 ? (
+                 <div className="rounded-2xl bg-white p-8 text-center text-sm font-bold text-gray-400">ランキングを表示できませんでした</div>
+               ) : ranking.map((player: any, index) => (
+                 <div key={player.id || index} className={`flex items-center gap-3 p-3 rounded-xl border ${player.is_me || player.id === userData.uid ? 'bg-yellow-50 border-yellow-300' : 'bg-white border-gray-100'}`}>
+                   <div className={`w-6 text-center font-black ${index < 3 ? 'text-orange-500' : 'text-gray-400'}`}>{player.rank || index + 1}</div>
+                   <div className="w-8 h-8 bg-white rounded-full flex items-center justify-center border text-lg">{BADGES.find(b => b.id === player.selected_badge)?.icon || '👤'}</div>
+                   <div className="flex-1">
+                     <p className="text-xs font-bold text-gray-800">{player.student_name || '生徒'}</p>
+                     <p className="text-[10px] text-gray-400">{Number(player.total_coins || 0).toLocaleString()} pt / {player.login_streak || 0}日連続</p>
+                   </div>
+                   {index === 0 && <Trophy className="text-yellow-500 fill-yellow-500" size={20} />}
+                 </div>
+               ))}
+             </div>
           )}
 
         </div>

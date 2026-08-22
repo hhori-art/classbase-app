@@ -4,6 +4,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { db } from '@/lib/firebase';
 import { collection, query, where, getDocs, doc, getDoc } from 'firebase/firestore';
 import { useAuth } from '@/app/context/AuthContext';
+import { fetchTeacherStudents } from '@/lib/teacher-students-client';
 import { 
   ArrowLeft, AlertTriangle, CheckCircle, Loader2, Search, RefreshCw
 } from 'lucide-react';
@@ -62,9 +63,7 @@ export default function RiskMonitorPage() {
       }
 
       // 2. 生徒全取得
-      const qUsers = query(collection(db, 'users'), where('role', '==', 'student'));
-      const snapUsers = await getDocs(qUsers);
-      const studentList = snapUsers.docs.map(d => ({ id: d.id, ...d.data() } as Student));
+      const studentList = await fetchTeacherStudents() as Student[];
       setStudents(studentList);
 
       // 3. PFレコード取得
@@ -176,9 +175,11 @@ export default function RiskMonitorPage() {
     setAnalyzing(true);
     try {
       // API呼び出し (実装されている前提)
+      const token = await user?.getIdToken();
+      if (!token) throw new Error('not-authenticated');
       const res = await fetch('/api/teacher/analyze-risk', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ batchSize: 50 }), 
       });
       const data = await res.json();

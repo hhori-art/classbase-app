@@ -2,7 +2,15 @@
 import { NextResponse } from 'next/server';
 import { NextRequest } from 'next/server';
 import { adminAuth, adminDb } from '@/lib/firebase-admin';
-import { canManageSchool, getServerUser, isAdminLike, jsonError, ServerUser } from '@/lib/server-auth';
+import { canManageSchool, getServerUser, jsonError, requireMaster, ServerUser } from '@/lib/server-auth';
+import { generateInitialPassword } from '@/lib/password';
+import {
+  findAccountProfileDocs,
+  normalizeAccountLoginId,
+  normalizeInitialPassword,
+  syncAuthAccountCredentials,
+} from '@/lib/server/account-credentials';
+import { normalizeEmploymentCategory } from '@/lib/employment-category';
 
 export const runtime = 'nodejs';
 
@@ -76,7 +84,7 @@ async function deleteUserData(userId: string) {
     // admin SDK は not-found のcodeが環境で変わることがあるので広めに握る
     const msg = String(e?.message || '');
     if (!msg.toLowerCase().includes('not found')) {
-      console.log(`Auth deleteUser warning for ${userId}:`, e?.code || e);
+      console.warn(`Auth deleteUser warning for ${userId}:`, e?.code || e);
     }
   }
 
@@ -97,7 +105,7 @@ async function getTargetUserOrThrow(userId: string, actor: ServerUser) {
 export async function GET(request: NextRequest) {
   try {
     const actor = await getServerUser(request);
-    if (!isAdminLike(actor)) throw new Error('forbidden');
+    requireMaster(actor);
 
     const { searchParams } = request.nextUrl;
     const role = String(searchParams.get('role') || '').trim();
@@ -128,7 +136,7 @@ export async function GET(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   try {
     const actor = await getServerUser(request);
-    if (!isAdminLike(actor)) throw new Error('forbidden');
+    requireMaster(actor);
     const db = adminDb();
 
     const { searchParams } = new URL(request.url);
@@ -170,9 +178,8 @@ export async function DELETE(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const actor = await getServerUser(request);
-    if (!isAdminLike(actor)) throw new Error('forbidden');
+    requireMaster(actor);
     const db = adminDb();
-    const auth = adminAuth();
 
     const body = await request.json();
     const { users } = body as { users: any[] };
@@ -196,14 +203,28 @@ export async function POST(request: NextRequest) {
         continue;
       }
 
-      const strId = String(loginId).trim();
+      const strId = normalizeAccountLoginId(loginId);
       if (processedIds.has(strId)) continue;
       processedIds.add(strId);
 
       // ※ email ルールは要件に合わせているが、本番運用ではドメイン設計を再検討推奨
       const email = `${strId}@classbase.local`;
-      const password = user.password || 'class1234';
-      const role = user.role || 'student';
+      const requestedRole = String(user.role || 'student').toLowerCase();
+      const role = ['attendance_admin', 'attendance_only', 'attendance_manager'].includes(requestedRole)
+        ? 'teacher'
+        : requestedRole;
+      const enabledPrograms = role === 'teacher' && Array.isArray(user.enabled_programs)
+        ? user.enabled_programs.map(String).filter((value: string) => value === 'science_social')
+        : [];
+      const employmentCategory = role === 'teacher' ? normalizeEmploymentCategory(user.employment_category, role) : null;
+      const prescribedWorkStart = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(user.prescribed_work_start || '')) ? String(user.prescribed_work_start) : '09:00';
+      const prescribedWorkEnd = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(user.prescribed_work_end || '')) ? String(user.prescribed_work_end) : '18:00';
+      const prescribedBreakMinutes = Math.max(0, Math.min(240, Math.floor(Number(user.prescribed_break_minutes ?? 60) || 0)));
+      const prescribedWorkDays = Array.isArray(user.prescribed_work_days)
+        ? Array.from(new Set<number>(user.prescribed_work_days.map(Number).filter((value: number) => Number.isInteger(value) && value >= 0 && value <= 6)))
+        : [1, 2, 3, 4, 5];
+      const password = normalizeInitialPassword(user.password || user.initial_password) || generateInitialPassword();
+      const displayName = String(user.student_name || user.name || user.teacher_name || strId).trim();
       const schoolId = String(user.school_id || user.school || actor.school_ids[0] || actor.school || '').trim();
       if (role === 'master' && actor.role !== 'master') {
         errors.push({ name: user.student_name, error: 'masterアカウントは作成できません' });
@@ -233,43 +254,16 @@ export async function POST(request: NextRequest) {
         autoUrl2 = socialRule ? socialRule.zoom_url : null;
       }
 
-      let userId = '';
-
-      // Authでユーザー検索→更新 / いなければ作成
-      try {
-        const existing = await auth.getUserByEmail(email);
-        userId = existing.uid;
-
-        await auth.updateUser(userId, {
-          password,
-          displayName: user.student_name,
-        });
-      } catch (authError: any) {
-        const msg = String(authError?.message || '');
-
-        const isNotFound =
-          authError?.code === 'auth/user-not-found' ||
-          msg.toLowerCase().includes('no user record') ||
-          msg.toLowerCase().includes('not found');
-
-        if (isNotFound) {
-          try {
-            const created = await auth.createUser({
-              email,
-              password,
-              emailVerified: true,
-              displayName: user.student_name,
-            });
-            userId = created.uid;
-          } catch (createError: any) {
-            errors.push({ name: user.student_name, error: createError.message || String(createError) });
-            continue;
-          }
-        } else {
-          errors.push({ name: user.student_name, error: authError.message || String(authError) });
-          continue;
-        }
-      }
+      const matchingProfiles = await findAccountProfileDocs(strId, user.email || email);
+      const authUser = await syncAuthAccountCredentials({
+        loginId: strId,
+        email: user.email || email,
+        password,
+        displayName,
+        disabled: false,
+        preferredUid: matchingProfiles[0]?.id,
+      });
+      const userId = authUser.uid;
 
       // Firestore保存（merge）
       await db.collection('users').doc(userId).set(
@@ -277,23 +271,34 @@ export async function POST(request: NextRequest) {
           id: userId,
           uid: userId,
           role,
-          student_name: user.student_name,
+          student_name: role === 'student' ? displayName : null,
+          name: role === 'student' ? null : displayName,
           name_kana: user.name_kana || '',
           grade: user.grade || '',
           student_id: user.student_id || '',
-          lifetime_id: user.lifetime_id || '',
+          lifetime_id: strId,
+          initial_login_id: strId,
           classroom: user.classroom || '',
           school_id: schoolId || null,
           school: schoolId || null,
           phone_number: user.phone_number || '',
-          email,
+          email: authUser.email,
           day_of_week: user.day_of_week || '',
           science_subject: user.science_subject || '',
           social_subject: user.social_subject || '',
           zoom_url: autoUrl1,
           zoom_url_2: autoUrl2,
+          employment_category: role === 'teacher'
+            ? employmentCategory
+            : null,
+          enabled_programs: role === 'teacher' ? enabledPrograms : [],
+          prescribed_work_start: employmentCategory === 'dedicated' ? prescribedWorkStart : null,
+          prescribed_work_end: employmentCategory === 'dedicated' ? prescribedWorkEnd : null,
+          prescribed_break_minutes: employmentCategory === 'dedicated' ? prescribedBreakMinutes : null,
+          prescribed_work_days: employmentCategory === 'dedicated' ? prescribedWorkDays : null,
 
           // ★要件で必要なら残す。ただしセキュリティ上は非推奨。
+          initial_password: password,
           raw_password: password,
 
           updated_at: new Date(),
@@ -301,7 +306,23 @@ export async function POST(request: NextRequest) {
         { merge: true }
       );
 
-      results.push(user.student_name);
+      if (matchingProfiles.some(profile => profile.id !== userId)) {
+        const batch = db.batch();
+        matchingProfiles
+          .filter(profile => profile.id !== userId)
+          .forEach(profile => {
+            batch.set(profile.ref, {
+              initial_password: password,
+              raw_password: password,
+              credential_primary_uid: userId,
+              credentials_synced_at: new Date(),
+              updated_at: new Date(),
+            }, { merge: true });
+          });
+        await batch.commit();
+      }
+
+      results.push(displayName);
     }
 
     return NextResponse.json({ success: true, createdCount: results.length, results, errors });

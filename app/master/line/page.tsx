@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { auth, db } from '@/lib/firebase';
-import { addDoc, collection, getDocs, query, serverTimestamp, where } from 'firebase/firestore';
+import { collection, getDocs, query, where } from 'firebase/firestore';
 import {
   AlertCircle,
   ArrowLeft,
@@ -250,83 +250,40 @@ export default function MasterLineBroadcastPage() {
     return `${prefix}${title ? `【${title}】\n` : ''}${body}`.trim();
   };
 
-  const createNotificationJobs = async () => {
+  const sendCampaign = async (channels: ChannelKey[]) => {
     const token = await auth.currentUser?.getIdToken();
-    const jobs = selectedChannels.map(async channel => {
-      const res = await fetch('/api/notification-jobs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          target_role: selectedRoles.length === 1 ? selectedRoles[0] : 'custom',
-          channel,
-          title,
-          message: body,
-          period: {
-            source: 'master_line_console',
-            kind,
-            selected_user_ids: selectedIds,
-            selected_roles: selectedRoles,
-            school: school === 'all' ? null : school,
-            grade: grade === 'all' ? null : grade,
-          },
-        }),
-      });
-      if (!res.ok) throw new Error('notification-job-failed');
-      return res.json();
-    });
-    await Promise.all(jobs);
-  };
-
-  const createInAppAnnouncement = async () => {
-    if (!selectedChannels.includes('in_app')) return;
-    await addDoc(collection(db, 'announcements'), {
-      title,
-      content: body,
-      target: selectedRoles.length === 1 ? selectedRoles[0] : 'all',
-      label: kind === 'class_start' || kind === 'registration' ? 'important' : 'info',
-      selected_user_ids: selectedIds,
-      selected_roles: selectedRoles,
-      target_school: school === 'all' ? null : school,
-      target_grade: grade === 'all' ? null : grade,
-      created_at: new Date().toISOString(),
-      created_at_server: serverTimestamp(),
-    });
-  };
-
-  const sendLineNow = async () => {
-    if (!selectedChannels.includes('line')) return 0;
-    if (lineTargets.length === 0) throw new Error('LINE連携済みの送信対象がいません。');
-
-    const token = await auth.currentUser?.getIdToken();
-    const tasks = lineTargets.map(user => ({
-      uid: user.id,
-      userId: user.line_user_id,
-      role: user.role,
-      kind,
-      text: buildText(user),
-    }));
-
-    const res = await fetch('/api/line/push', {
+    const res = await fetch('/api/admin/notifications', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ tasks }),
+      body: JSON.stringify({
+        title,
+        message: body,
+        kind,
+        channels,
+        selected_user_ids: selectedIds,
+        selected_roles: selectedRoles,
+        school: school === 'all' ? '' : school,
+        grade: grade === 'all' ? '' : grade,
+        include_name: includeName,
+      }),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || 'LINE送信に失敗しました。');
-    return data.count ?? tasks.length;
+    if (!res.ok || !data.ok) throw new Error(data.error || '通知作成に失敗しました。');
+    return data;
   };
 
   const handleCreateOnly = async () => {
     if (!title.trim() || !body.trim()) return alert('タイトルと本文を入力してください。');
     if (selectedUsers.length === 0) return alert('送信対象を選択してください。');
+    const channels = selectedChannels.filter(channel => channel !== 'line');
+    if (channels.length === 0) return alert('LINEだけが選択されています。「作成して送信」を使うか、アプリ内・メールを選択してください。');
     if (!confirm(`${selectedUsers.length}名を対象に通知ジョブを作成しますか？`)) return;
 
     setSending(true);
     setResult('');
     try {
-      await createNotificationJobs();
-      await createInAppAnnouncement();
-      setResult('通知ジョブを作成しました。');
+      const data = await sendCampaign(channels);
+      setResult(`通知を作成しました。アプリ内: ${data.in_app_count || 0}件 / メールジョブ: ${data.email_job_count || 0}件`);
     } catch (error: any) {
       alert(error.message || '通知作成に失敗しました。');
     } finally {
@@ -342,10 +299,8 @@ export default function MasterLineBroadcastPage() {
     setSending(true);
     setResult('');
     try {
-      await createNotificationJobs();
-      await createInAppAnnouncement();
-      const lineCount = await sendLineNow();
-      setResult(`通知を作成しました。LINE送信: ${lineCount}名`);
+      const data = await sendCampaign(selectedChannels);
+      setResult(`通知を作成しました。アプリ内: ${data.in_app_count || 0}件 / LINE: ${data.line_sent_count || 0}名 / メールジョブ: ${data.email_job_count || 0}件`);
     } catch (error: any) {
       alert(error.message || '送信に失敗しました。');
     } finally {

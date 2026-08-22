@@ -94,8 +94,6 @@ export default function NextClassWidget({ profile }: { profile: any }) {
       const userId = profile.id || profile.uid;
       const userName = profile.student_name || profile.name || '';
 
-      console.log(`🔍 授業検索開始: User=${userName}, ID=${userId}`);
-
       try {
         const todayStr = getJSTDateStr(0);      
         const tomorrowStr = getJSTDateStr(1);   
@@ -134,11 +132,7 @@ export default function NextClassWidget({ profile }: { profile: any }) {
 
         const results = await Promise.all(promises);
 
-        let totalFetched = 0;
-        let matchedCount = 0;
-
         results.forEach(snap => {
-          totalFetched += snap.size;
           snap.docs.forEach(doc => {
             const data = doc.data() as Omit<ShiftAssignment, 'id'>;
             
@@ -154,13 +148,10 @@ export default function NextClassWidget({ profile }: { profile: any }) {
               if (isUpcomingClass(normalizedDate, data.note)) {
                 // 綺麗な日付でデータを上書きして保存する
                 shiftsMap.set(doc.id, { ...data, id: doc.id, target_date: normalizedDate });
-                matchedCount++;
               }
             }
           });
         });
-
-        console.log(`📊 検索結果: 取得総数=${totalFetched}, ヒット数=${matchedCount}`);
 
         // ソート (日付 > 時間帯)
         const futureShifts = Array.from(shiftsMap.values()).sort((a, b) => {

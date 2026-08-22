@@ -1,15 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-// Firebase関連のインポート
-import { db } from '@/lib/firebase';
-import { 
-  collection, 
-  query, 
-  where, 
-  getDocs, 
-  writeBatch 
-} from 'firebase/firestore';
+import { auth } from '@/lib/firebase';
 
 import { Zap, Clock, Loader2 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
@@ -54,49 +46,28 @@ export default function BulkUrlUpdate() {
 
     setLoading(true);
     try {
-      // 1. クエリの構築 (usersコレクションから生徒を検索)
-      const usersRef = collection(db, 'users');
-      let q = query(usersRef, where('role', '==', 'student'));
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) throw new Error('not-authenticated');
 
-      // 各条件を追加
-      if (filters.grade) q = query(q, where('grade', '==', filters.grade));
-      if (filters.science) q = query(q, where('science_subject', '==', filters.science));
-      if (filters.social) q = query(q, where('social_subject', '==', filters.social));
-      if (filters.day) q = query(q, where('day_of_week', '==', filters.day));
-      if (filters.classroom) q = query(q, where('classroom', '==', filters.classroom));
+      const res = await fetch('/api/teacher/students/bulk-zoom-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          filters,
+          zoom_url: url1,
+          zoom_url_2: url2,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'bulk-update-failed');
 
-      // 2. 検索実行
-      const snapshot = await getDocs(q);
-
-      if (snapshot.empty) {
+      if (!data.updated) {
         alert('条件に一致する生徒が見つかりませんでした');
         setLoading(false);
         return;
       }
 
-      // 3. バッチ処理の準備
-      // 更新内容を作成
-      const updates: any = {};
-      if (url1) updates.zoom_url = url1;
-      if (url2) updates.zoom_url_2 = url2;
-
-      // Firestoreのバッチは一度に500件までしか処理できないため、分割処理する
-      const chunks = [];
-      const docs = snapshot.docs;
-      for (let i = 0; i < docs.length; i += 500) {
-        chunks.push(docs.slice(i, i + 500));
-      }
-
-      // 各チャンクごとにバッチを実行
-      for (const chunk of chunks) {
-        const batch = writeBatch(db);
-        chunk.forEach((doc) => {
-          batch.update(doc.ref, updates);
-        });
-        await batch.commit(); // コミット
-      }
-
-      alert(`${snapshot.size}件のデータを更新しました！`);
+      alert(`${data.updated}件のデータを更新しました！`);
       
       if (url1) setUrl1('');
       if (url2) setUrl2('');

@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
 import { collection, query, where, getDocs, doc, getDoc } from 'firebase/firestore';
+import { fetchTeacherStudents } from '@/lib/teacher-students-client';
 import { 
   Phone, Search, Filter, CheckCircle, PhoneOff, CameraOff,
   ArrowLeft, Loader2, Calendar, Clock, UserX 
@@ -58,9 +59,7 @@ export default function TeacherContactsPage() {
       setCurrentWeek(week);
 
       // 2. 全生徒を取得
-      const qUsers = query(collection(db, 'users'), where('role', '==', 'student'));
-      const userSnap = await getDocs(qUsers);
-      const allStudents = userSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+      const allStudents = await fetchTeacherStudents();
 
       // 3. PFレコード(今週の出席状況)を取得して除外リストを作成
       const pfQ = query(collection(db, 'pf_records'), where('week_number', '==', week));

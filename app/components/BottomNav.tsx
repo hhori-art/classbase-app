@@ -1,27 +1,13 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Home, Users, Settings } from 'lucide-react'; // アイコン変更
-import { db } from '@/lib/firebase';
-import { doc, getDoc } from 'firebase/firestore';
+import { Bell, Home, Users, Settings } from 'lucide-react'; // アイコン変更
+import { usePortalVisibility } from '@/app/hooks/usePortalVisibility';
 
 export default function BottomNav() {
   const pathname = usePathname();
-  const [visibility, setVisibility] = useState({ community: true });
-
-  useEffect(() => {
-    const load = async () => {
-      try {
-        const snap = await getDoc(doc(db, 'settings', 'portal_visibility'));
-        if (snap.exists()) setVisibility(prev => ({ ...prev, ...(snap.data().student || {}) }));
-      } catch (e) {
-        console.warn('Student nav visibility read failed:', e);
-      }
-    };
-    load();
-  }, []);
+  const { visibility } = usePortalVisibility('student');
 
   // ★修正: メニューを3つに厳選
   const navItems = [
@@ -42,12 +28,20 @@ export default function BottomNav() {
       visible: visibility.community !== false,
     },
     { 
+      label: '通知',
+      path: '/student/notifications',
+      icon: <Bell size={24} />,
+      activeColor: 'text-amber-500',
+      bgColor: 'bg-amber-50',
+      visible: visibility.notifications !== false,
+    },
+    {
       label: '設定', 
       path: '/student/settings', 
       icon: <Settings size={24} />, 
       activeColor: 'text-gray-600', 
       bgColor: 'bg-gray-100',
-      visible: true,
+      visible: visibility.settings !== false,
     },
   ].filter(item => item.visible);
 

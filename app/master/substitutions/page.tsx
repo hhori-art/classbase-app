@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
-import { addDoc, collection, doc, getDocs, limit, orderBy, query, serverTimestamp, updateDoc, where } from 'firebase/firestore';
+import { addDoc, collection, doc, getDoc, getDocs, limit, orderBy, query, serverTimestamp, setDoc, updateDoc, where } from 'firebase/firestore';
 import { ArrowLeft, CalendarDays, CheckCircle2, Loader2, Megaphone, Send, UserPlus, XCircle } from 'lucide-react';
 
 type Post = {
@@ -46,6 +46,18 @@ const needsSubstitute = (shift: EmptyShift) => {
   if (!name) return true;
   return substituteMarkers.some(marker => name.includes(marker));
 };
+const postKeyPart = (value: unknown) => String(value || '').trim().replace(/[^\p{Letter}\p{Number}]+/gu, '_').slice(0, 60) || 'none';
+const candidatePostId = (shift: EmptyShift, period: string, title: string) => [
+  'shift',
+  postKeyPart(shift.target_date),
+  postKeyPart(period),
+  postKeyPart(shift.target_grade),
+  postKeyPart(shift.target_subject),
+  postKeyPart(shift.target_detail_subject),
+  postKeyPart(shift.unit),
+  postKeyPart(shift.target_place),
+  postKeyPart(title),
+].join('__').slice(0, 900);
 
 export default function MasterSubstitutionsPage() {
   const { user, profile } = useAuth();
@@ -87,11 +99,13 @@ export default function MasterSubstitutionsPage() {
       ]);
       setPosts(snap.docs.map(d => ({ id: d.id, ...d.data() } as Post)));
       const existingShiftIds = new Set(snap.docs.map(d => String((d.data() as any).shift_assignment_id || '')).filter(Boolean));
+      const existingPostIds = new Set(snap.docs.map(d => d.id));
       setEmptyShifts(shiftSnap.docs
         .map((d: any) => ({ id: d.id, ...d.data() } as EmptyShift))
         .filter((shift: EmptyShift) => needsSubstitute(shift))
         .filter((shift: EmptyShift) => shift.role_type !== 'sub')
         .filter((shift: EmptyShift) => !existingShiftIds.has(shift.id))
+        .filter((shift: EmptyShift) => !existingPostIds.has(candidatePostId(shift, periodFromShift(shift), shiftTitle(shift))))
         .slice(0, 30)
       );
     } catch (e) {
@@ -130,7 +144,7 @@ export default function MasterSubstitutionsPage() {
     if (!targetDate || !title) return alert('日付と件名を入力してください。');
     setSaving(true);
     try {
-      await addDoc(collection(db, 'teacher_substitution_posts'), {
+      const payload = {
         created_by: user.uid,
         teacher_name: adminName,
         target_date: targetDate,
@@ -146,9 +160,30 @@ export default function MasterSubstitutionsPage() {
           target_place: candidate.target_place || '',
         } : null,
         status: 'open',
-        created_at: serverTimestamp(),
         updated_at: serverTimestamp(),
-      });
+      };
+
+      if (candidate) {
+        const postRef = doc(db, 'teacher_substitution_posts', candidatePostId(candidate, period, title));
+        const existing = await getDoc(postRef);
+        if (existing.exists()) {
+          const existingData = existing.data() as Post;
+          if (existingData.status === 'open' || existingData.status === 'claimed') {
+            alert('この講師配置の代行依頼はすでに作成済みです。');
+            return;
+          }
+        }
+        await setDoc(postRef, {
+          ...payload,
+          shift_assignment_id: candidate.id,
+          created_at: existing.exists() ? existing.data().created_at || serverTimestamp() : serverTimestamp(),
+        }, { merge: true });
+      } else {
+        await addDoc(collection(db, 'teacher_substitution_posts'), {
+          ...payload,
+          created_at: serverTimestamp(),
+        });
+      }
       setForm({ target_date: todayString(), period: '1限', title: '', detail: '' });
       await loadData();
     } catch (e: any) {

@@ -5,6 +5,7 @@ import { db } from '@/lib/firebase';
 import { 
   collection, query, where, getDocs, addDoc, onSnapshot, serverTimestamp, limit 
 } from 'firebase/firestore';
+import { fetchTeacherStudents } from '@/lib/teacher-students-client';
 import { useAuth } from '@/app/context/AuthContext';
 import { 
   MessageCircle, ArrowLeft, Search, Send, User, Loader2, Bot, 
@@ -65,9 +66,7 @@ export default function TeacherChatPage() {
   useEffect(() => {
     const fetchList = async () => {
       try {
-        const sQ = query(collection(db, 'users'), where('role', '==', 'student'));
-        const sSnap = await getDocs(sQ);
-        const allStudents = sSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+        const allStudents = await fetchTeacherStudents();
 
         const gradeSet = new Set<string>();
         const classroomSet = new Set<string>();

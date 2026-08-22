@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { db } from '@/lib/firebase';
@@ -19,13 +19,15 @@ import NewsWidget from '@/app/components/NewsWidget';
 import TrophyModal from '@/app/components/TrophyModal';
 import SmartClassButton from '@/app/components/SmartClassButton';
 import ActivityLogger from '@/app/components/ActivityLogger';
+import AppSwitcherLink from '@/app/components/AppSwitcherLink';
 
 import { BADGES } from '@/lib/gamification';
-
-const CLASS_TIMES = {
-  period1: { start: '19:20', end: '20:25' },
-  period2: { start: '20:35', end: '21:40' }
-};
+import { usePortalVisibility } from '@/app/hooks/usePortalVisibility';
+import {
+  DEFAULT_CLASS_BUTTON_SETTINGS,
+  isClassButtonVisible,
+  normalizeClassButtonSettings,
+} from '@/lib/class-button-settings';
 
 const ErrorFallback = ({ message, onRetry }: { message: string, onRetry: () => void }) => (
   <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-slate-50 text-center">
@@ -47,6 +49,7 @@ const ErrorFallback = ({ message, onRetry }: { message: string, onRetry: () => v
 
 export default function StudentDashboard() {
   const { user, profile, loading: authLoading, logout } = useAuth();
+  const { visibility } = usePortalVisibility('student');
   
   const [globalError, setGlobalError] = useState<string | null>(null);
   const [mounted, setMounted] = useState(false);
@@ -55,12 +58,31 @@ export default function StudentDashboard() {
   const [dateStr, setDateStr] = useState('');
   const [greeting, setGreeting] = useState('');
   const [now, setNow] = useState<Date | null>(null);
+  const [classButtonSettings, setClassButtonSettings] = useState(DEFAULT_CLASS_BUTTON_SETTINGS);
   const [isTrophyOpen, setIsTrophyOpen] = useState(false);
   const [popMessage, setPopMessage] = useState<string | null>(null);
   const [nextClassInfo, setNextClassInfo] = useState<{ date: string; status: 'open' | 'closed' | 'checking' } | null>(null);
   const [urgentHomework, setUrgentHomework] = useState<{ title: string; deadline: string; daysLeft: number } | null>(null);
 
   const router = useRouter();
+
+  const mergeUserUpdates = useCallback((updates: Record<string, any>) => {
+    setUserData((prev: any) => {
+      if (!prev) return prev;
+      const cleanedUpdates = Object.fromEntries(
+        Object.entries(updates).filter(([, value]) => value !== undefined)
+      );
+      return { ...prev, ...cleanedUpdates };
+    });
+  }, []);
+
+  useEffect(() => {
+    const handleProfileUpdated = (event: Event) => {
+      mergeUserUpdates((event as CustomEvent<Record<string, any>>).detail || {});
+    };
+    window.addEventListener('classbase:user-profile-updated', handleProfileUpdated);
+    return () => window.removeEventListener('classbase:user-profile-updated', handleProfileUpdated);
+  }, [mergeUserUpdates]);
 
   // ★追加：Cookie（サーバーの記憶）を強制的に消去する強力な関数
   const clearAllCookies = () => {
@@ -106,6 +128,19 @@ export default function StudentDashboard() {
   }, []);
 
   useEffect(() => {
+    const loadClassButtonSettings = async () => {
+      try {
+        const snap = await getDoc(doc(db, 'settings', 'class_button'));
+        setClassButtonSettings(normalizeClassButtonSettings(snap.exists() ? snap.data() : {}));
+      } catch (error) {
+        console.warn('class button settings fetch failed:', error);
+        setClassButtonSettings(DEFAULT_CLASS_BUTTON_SETTINGS);
+      }
+    };
+    loadClassButtonSettings();
+  }, []);
+
+  useEffect(() => {
     if (!mounted || authLoading) return;
     
     // ★無限ループを断ち切る最重要ポイント！
@@ -118,25 +153,83 @@ export default function StudentDashboard() {
     }
     
     setUserData(profile);
-    if (profile.day_of_week) checkNextClass(profile.day_of_week).catch(console.warn);
+    if (profile.day_of_week) checkNextClass(profile).catch(console.warn);
     if (profile.grade) checkUrgentHomework(profile.grade, profile.subjects || []).catch(console.warn);
     
   }, [mounted, authLoading, user, profile]);
 
-  const checkNextClass = async (dayOfWeek: string) => {
+  const checkNextClass = async (studentProfile: any) => {
     const daysMap = ['日','月','火','水','木','金','土'];
-    const targetDayIndex = daysMap.indexOf(dayOfWeek);
-    if (targetDayIndex === -1) return;
-    const d = new Date();
-    let daysUntil = (targetDayIndex + 7 - d.getDay()) % 7;
-    if (daysUntil === 0 && d.getHours() >= 22) daysUntil = 7;
-    d.setDate(d.getDate() + daysUntil);
-    const targetDateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    setNextClassInfo({ date: targetDateStr, status: 'checking' });
+    const classDays = new Set(String(studentProfile.day_of_week || '')
+      .split(/[、,\/]/)
+      .map((value: string) => value.replace('曜日', '').trim())
+      .filter((value: string) => daysMap.includes(value)));
+    if (classDays.size === 0) return;
+
+    const formatDate = (date: Date) => `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    const today = new Date();
+    const rangeEnd = new Date(today);
+    rangeEnd.setDate(rangeEnd.getDate() + 45);
+    const startDate = formatDate(today);
+    const endDate = formatDate(rangeEnd);
+    setNextClassInfo({ date: startDate, status: 'checking' });
+
     try {
-      const q = query(collection(db, 'shift_assignments'), where('target_date', '==', targetDateStr), limit(1));
-      const snap = await getDocs(q);
-      setNextClassInfo({ date: targetDateStr, status: !snap.empty ? 'open' : 'closed' });
+      const [shiftSnap, rangeScheduleSnap, legacyScheduleSnap] = await Promise.all([
+        getDocs(query(
+          collection(db, 'shift_assignments'),
+          where('target_date', '>=', startDate),
+          where('target_date', '<=', endDate),
+          orderBy('target_date', 'asc'),
+          limit(500)
+        )),
+        getDocs(query(collection(db, 'monthly_schedules'), where('start_date', '<=', endDate), orderBy('start_date', 'asc')))
+          .catch(() => ({ docs: [] as any[] })),
+        getDocs(query(
+          collection(db, 'monthly_schedules'),
+          where('target_date', '>=', startDate),
+          where('target_date', '<=', endDate),
+          orderBy('target_date', 'asc')
+        )).catch(() => ({ docs: [] as any[] })),
+      ]);
+
+      const normalizeGrade = (value: unknown) => {
+        const raw = String(value || '').normalize('NFKC');
+        const match = raw.match(/[123]/);
+        return match ? `中${match[0]}` : raw.trim();
+      };
+      const studentGrade = normalizeGrade(studentProfile.grade);
+      const shiftDates = new Set(shiftSnap.docs
+        .map(snapshot => snapshot.data())
+        .filter(data => !studentGrade || !data.target_grade || normalizeGrade(data.target_grade) === studentGrade)
+        .map(data => String(data.target_date || ''))
+        .filter(Boolean));
+      const scheduleMap = new Map<string, any>();
+      [...rangeScheduleSnap.docs, ...legacyScheduleSnap.docs].forEach((snapshot: any) => {
+        scheduleMap.set(snapshot.id, { id: snapshot.id, ...snapshot.data() });
+      });
+      const schedules = Array.from(scheduleMap.values());
+      const isClosedDate = (date: string) => schedules.some((item: any) => {
+        const start = item.start_date || item.target_date || '';
+        const end = item.end_date || item.target_date || start;
+        const appliesToGrade = !Array.isArray(item.grades) || item.grades.length === 0 || item.grades.some((grade: unknown) => normalizeGrade(grade) === studentGrade);
+        const closed = item.category === 'closed' || /お休み|休館日|休講|調休/.test(String(item.title || item.status || ''));
+        return appliesToGrade && closed && start <= date && date <= end;
+      });
+
+      let nextDate = '';
+      for (let offset = 0; offset <= 45; offset += 1) {
+        const candidate = new Date(today);
+        candidate.setDate(candidate.getDate() + offset);
+        if (offset === 0 && candidate.getHours() >= 22) continue;
+        if (!classDays.has(daysMap[candidate.getDay()])) continue;
+        const candidateKey = formatDate(candidate);
+        if (shiftDates.has(candidateKey) && !isClosedDate(candidateKey)) {
+          nextDate = candidateKey;
+          break;
+        }
+      }
+      setNextClassInfo(nextDate ? { date: nextDate, status: 'open' } : null);
     } catch { setNextClassInfo(null); }
   };
 
@@ -162,16 +255,6 @@ export default function StudentDashboard() {
     } catch (e) { console.warn(e); }
   };
 
-  const isClassActive = (start: string, end: string) => {
-    if (!now) return false;
-    const currentMinutes = now.getHours() * 60 + now.getMinutes();
-    const [startH, startM] = start.split(':').map(Number);
-    const [endH, endM] = end.split(':').map(Number);
-    const showStartMinutes = (startH * 60 + startM) - 45; 
-    const endMinutes = (endH * 60 + endM);
-    return currentMinutes >= showStartMinutes && currentMinutes <= endMinutes;
-  };
-
   const safeDateString = (str: string) => {
     if (!str) return '';
     try { return new Date(str.replace(/-/g, '/')).toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' }); } catch { return str; }
@@ -189,13 +272,14 @@ export default function StudentDashboard() {
     );
   }
 
-  const currentBadge = BADGES.find(b => b.id === userData?.selected_badge);
-  const showPeriod1 = isClassActive(CLASS_TIMES.period1.start, CLASS_TIMES.period1.end);
-  const showPeriod2 = isClassActive(CLASS_TIMES.period2.start, CLASS_TIMES.period2.end);
+  const currentBadgeId = userData?.selected_badge === 'beginner' ? 'badge_1' : userData?.selected_badge;
+  const currentBadge = BADGES.find(b => b.id === currentBadgeId);
+  const showPeriod1 = isClassButtonVisible(now, classButtonSettings.period1_start, classButtonSettings.period1_end, classButtonSettings);
+  const showPeriod2 = isClassButtonVisible(now, classButtonSettings.period2_start, classButtonSettings.period2_end, classButtonSettings);
 
   return (
     <div className="min-h-[100dvh] bg-[#F0F4F8] pb-32 font-sans relative overflow-hidden">
-      {userData?.uid && <ActivityLogger uid={userData.uid} />}
+      {userData?.uid && <ActivityLogger uid={userData.uid} onRewardApplied={mergeUserUpdates} />}
       {popMessage && <div className="fixed top-10 left-1/2 transform -translate-x-1/2 bg-yellow-400 text-white px-6 py-3 rounded-full shadow-lg font-black text-lg z-[150] animate-bounce border-4 border-white whitespace-nowrap">✨ {popMessage}</div>}
       <TrophyModal isOpen={isTrophyOpen} onClose={() => setIsTrophyOpen(false)} userData={userData} />
 
@@ -214,6 +298,9 @@ export default function StudentDashboard() {
       </div>
 
       <div className="px-5 -mt-16 relative z-20 space-y-6">
+        <div className="flex justify-end">
+          <AppSwitcherLink className="w-full sm:w-auto" />
+        </div>
         <button onClick={() => setIsTrophyOpen(true)} className="w-full bg-white p-5 rounded-3xl shadow-xl shadow-indigo-100 flex justify-between items-center transform hover:scale-[1.02] active:scale-95 transition-all text-left group">
           <div className="flex items-center gap-4">
             <div className="w-14 h-14 rounded-2xl bg-indigo-50 flex items-center justify-center text-4xl shadow-inner border border-indigo-100">{currentBadge ? currentBadge.icon : '🎓'}</div>
@@ -229,8 +316,8 @@ export default function StudentDashboard() {
         </button>
 
         <div className="space-y-4 animate-in slide-in-from-top-4">
-          {showPeriod1 && <SmartClassButton profile={userData} period={1} startTime={CLASS_TIMES.period1.start} endTime={CLASS_TIMES.period1.end} />}
-          {showPeriod2 && <SmartClassButton profile={userData} period={2} startTime={CLASS_TIMES.period2.start} endTime={CLASS_TIMES.period2.end} />}
+          {showPeriod1 && <SmartClassButton profile={userData} period={1} startTime={classButtonSettings.period1_start} endTime={classButtonSettings.period1_end} allowBetaTransfer={visibility.transfer !== false} />}
+          {showPeriod2 && <SmartClassButton profile={userData} period={2} startTime={classButtonSettings.period2_start} endTime={classButtonSettings.period2_end} allowBetaTransfer={visibility.transfer !== false} />}
           
           {!showPeriod1 && !showPeriod2 && now && (
             <div className="bg-white/60 p-4 rounded-3xl border border-white flex items-center justify-center gap-2 text-gray-400 text-sm font-bold">
@@ -247,21 +334,21 @@ export default function StudentDashboard() {
               <div>{nextClassInfo.status === 'checking' ? <span className="text-xs text-gray-400">確認中...</span> : nextClassInfo.status === 'open' ? <span className="bg-indigo-100 text-indigo-700 text-xs font-bold px-3 py-1.5 rounded-full">実施予定</span> : <span className="bg-red-100 text-red-600 text-xs font-bold px-3 py-1.5 rounded-full">休講 / お休み</span>}</div>
             </div>
           )}
-          {urgentHomework && (
+          {visibility.homework && urgentHomework && (
             <Link href="/student/homework" className="block no-underline"><div className={`p-4 rounded-3xl shadow-sm border flex items-center justify-between transition-transform active:scale-95 ${urgentHomework.daysLeft <= 1 ? 'bg-red-50 border-red-100' : urgentHomework.daysLeft <= 3 ? 'bg-orange-50 border-orange-100' : 'bg-blue-50 border-blue-100'}`}><div><div className={`text-xs font-bold flex items-center gap-1 mb-1 ${urgentHomework.daysLeft <= 1 ? 'text-red-600' : urgentHomework.daysLeft <= 3 ? 'text-orange-600' : 'text-blue-600'}`}>{urgentHomework.daysLeft <= 1 ? <Timer size={14} className="animate-pulse"/> : <ClipboardList size={14}/>}{urgentHomework.daysLeft <= 0 ? '期限切れ間近！' : `提出期限まで あと${urgentHomework.daysLeft}日`}</div><p className="text-sm font-bold text-gray-800 line-clamp-1">{urgentHomework.title}</p></div><div><span className={`text-xs font-black px-3 py-1.5 rounded-full ${urgentHomework.daysLeft <= 1 ? 'bg-red-500 text-white shadow-md shadow-red-200' : urgentHomework.daysLeft <= 3 ? 'bg-orange-400 text-white' : 'bg-white text-blue-500 border border-blue-200'}`}>{urgentHomework.daysLeft <= 0 ? '今日まで' : new Date(urgentHomework.deadline.replace(/-/g, '/')).getDate() + '日提出'}</span></div></div></Link>
           )}
         </div>
 
         <div className="grid grid-cols-2 gap-4">
-           <Link href="/student/homework/adaptive" className="col-span-2 block group"><div className="bg-gradient-to-r from-teal-400 to-emerald-500 p-5 rounded-3xl shadow-lg text-white flex items-center justify-between relative overflow-hidden"><div className="flex items-center gap-4 relative z-10"><div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center"><Brain size={28}/></div><div><div className="flex items-center gap-2 mb-1"><span className="text-lg font-bold">AI学習クエスト</span><span className="bg-yellow-400 text-yellow-900 text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 animate-pulse"><Sparkles size={10} fill="currentColor"/> NEW</span></div><p className="text-xs opacity-90">キミに最適な問題をAIが出題！</p></div></div><ChevronRight size={24} className="opacity-70 group-hover:translate-x-1 transition-transform"/></div></Link>
-           <Link href="/student/chat" className="block group"><div className="bg-white p-5 rounded-3xl shadow-sm border border-indigo-100 hover:border-indigo-300 transition-all flex flex-col items-center text-center h-full"><div className="w-12 h-12 bg-indigo-100 text-indigo-600 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><Bot size={24}/></div><h2 className="font-bold text-gray-800">AIチューター</h2><p className="text-[10px] text-gray-400 mt-1">24時間 質問OK!</p></div></Link>
-           <Link href="/student/homework" className="block group"><div className="bg-white p-5 rounded-3xl shadow-sm border border-gray-100 hover:border-orange-200 transition-all flex flex-col items-center text-center h-full"><div className="w-12 h-12 bg-orange-100 text-orange-500 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><BookOpen size={24}/></div><h2 className="font-bold text-gray-800">宿題提出</h2><p className="text-[10px] text-gray-400 mt-1">写真を送信</p></div></Link>
-           <Link href="/student/recordings" className="block group"><div className="bg-white p-5 rounded-3xl shadow-sm border border-gray-100 hover:border-red-200 transition-all flex flex-col items-center text-center h-full"><div className="w-12 h-12 bg-red-100 text-red-500 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><Video size={24}/></div><h2 className="font-bold text-gray-800">授業録画</h2><p className="text-[10px] text-gray-400 mt-1">見逃し配信</p></div></Link>
-           <Link href="/student/absence" className="block group"><div className="bg-white p-5 rounded-3xl shadow-sm border border-gray-100 hover:border-green-200 transition-all flex flex-col items-center text-center h-full"><div className="w-12 h-12 bg-green-100 text-green-500 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><AlertTriangle size={24}/></div><h2 className="font-bold text-gray-800">欠席連絡</h2><p className="text-[10px] text-gray-400 mt-1">お休み申請</p></div></Link>
+           {visibility.adaptiveQuest && <Link href="/student/homework/adaptive" className="col-span-2 block group"><div className="bg-gradient-to-r from-teal-400 to-emerald-500 p-5 rounded-3xl shadow-lg text-white flex items-center justify-between relative overflow-hidden"><div className="flex items-center gap-4 relative z-10"><div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center"><Brain size={28}/></div><div><div className="flex items-center gap-2 mb-1"><span className="text-lg font-bold">AI学習クエスト</span><span className="bg-yellow-400 text-yellow-900 text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 animate-pulse"><Sparkles size={10} fill="currentColor"/> NEW</span></div><p className="text-xs opacity-90">キミに最適な問題をAIが出題！</p></div></div><ChevronRight size={24} className="opacity-70 group-hover:translate-x-1 transition-transform"/></div></Link>}
+           {visibility.chat && <Link href="/student/chat" className="block group"><div className="bg-white p-5 rounded-3xl shadow-sm border border-indigo-100 hover:border-indigo-300 transition-all flex flex-col items-center text-center h-full"><div className="w-12 h-12 bg-indigo-100 text-indigo-600 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><Bot size={24}/></div><h2 className="font-bold text-gray-800">AIチューター</h2><p className="text-[10px] text-gray-400 mt-1">24時間 質問OK!</p></div></Link>}
+           {visibility.homework && <Link href="/student/homework" className="block group"><div className="bg-white p-5 rounded-3xl shadow-sm border border-gray-100 hover:border-orange-200 transition-all flex flex-col items-center text-center h-full"><div className="w-12 h-12 bg-orange-100 text-orange-500 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><BookOpen size={24}/></div><h2 className="font-bold text-gray-800">宿題提出</h2><p className="text-[10px] text-gray-400 mt-1">写真を送信</p></div></Link>}
+           {visibility.recordings && <Link href="/student/recordings" className="block group"><div className="bg-white p-5 rounded-3xl shadow-sm border border-gray-100 hover:border-red-200 transition-all flex flex-col items-center text-center h-full"><div className="w-12 h-12 bg-red-100 text-red-500 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><Video size={24}/></div><h2 className="font-bold text-gray-800">授業録画</h2><p className="text-[10px] text-gray-400 mt-1">見逃し配信</p></div></Link>}
+           {visibility.absence && <Link href="/student/absence" className="block group"><div className="bg-white p-5 rounded-3xl shadow-sm border border-gray-100 hover:border-green-200 transition-all flex flex-col items-center text-center h-full"><div className="w-12 h-12 bg-green-100 text-green-500 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><AlertTriangle size={24}/></div><h2 className="font-bold text-gray-800">欠席連絡</h2><p className="text-[10px] text-gray-400 mt-1">お休み申請</p></div></Link>}
         </div>
-        <NewsWidget role="student" />
-        <div className="bg-white p-2 rounded-3xl shadow-sm border border-gray-100"><CalendarWidget classDay={userData?.day_of_week} grade={userData?.grade} /></div>
-        <Link href="/student/change-request" className="flex items-center justify-between bg-white p-4 rounded-2xl border border-gray-100 shadow-sm hover:bg-gray-50 transition-colors no-underline mb-8"><div className="flex items-center gap-3"><div className="bg-gray-100 p-2 rounded-lg text-gray-500"><Settings size={18}/></div><span className="text-sm font-bold text-gray-600">科目・曜日の変更申請</span></div><ChevronRight size={20} className="text-gray-400" /></Link>
+        {visibility.news && <NewsWidget role="student" />}
+        {visibility.calendar && <div className="bg-white p-2 rounded-3xl shadow-sm border border-gray-100"><CalendarWidget classDay={userData?.day_of_week} grade={userData?.grade} /></div>}
+        {visibility.changeRequest && <Link href="/student/change-request" className="flex items-center justify-between bg-white p-4 rounded-2xl border border-gray-100 shadow-sm hover:bg-gray-50 transition-colors no-underline mb-8"><div className="flex items-center gap-3"><div className="bg-gray-100 p-2 rounded-lg text-gray-500"><Settings size={18}/></div><span className="text-sm font-bold text-gray-600">受講講座・曜日時間の変更</span></div><ChevronRight size={20} className="text-gray-400" /></Link>}
       </div>
 
       <BottomNav />

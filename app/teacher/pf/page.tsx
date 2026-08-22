@@ -3,6 +3,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { db } from '@/lib/firebase';
 import { collection, query, where, getDocs, doc, writeBatch, getDoc, setDoc } from 'firebase/firestore';
+import { fetchTeacherStudents } from '@/lib/teacher-students-client';
 import { 
   ArrowLeft, Save, Loader2, Search, Download, RefreshCw, 
   ChevronLeft, ChevronRight, Calendar, Filter, AlertCircle, CheckCircle, BookOpen 
@@ -90,14 +91,7 @@ export default function TeacherPFPage() {
         const foundMonth = Object.keys(MONTH_MAP).find(m => m !== '全期間' && MONTH_MAP[m].includes(wNum));
         if (foundMonth) setSelectedMonth(foundMonth);
 
-        const qUsers = query(collection(db, 'users'), where('role', '==', 'student'));
-        const snapUsers = await getDocs(qUsers);
-        
-        const list = snapUsers.docs.map(doc => ({
-          id: doc.id,
-          uid: doc.id,
-          ...doc.data()
-        } as Student));
+        const list = await fetchTeacherStudents() as Student[];
         
         const cls = Array.from(new Set(list.map(s => s.classroom).filter(Boolean))).sort();
         

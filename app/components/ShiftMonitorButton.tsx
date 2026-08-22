@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { db } from '@/lib/firebase';
+import { auth, db } from '@/lib/firebase';
 import { collection, query, where, getDocs } from 'firebase/firestore';
 import { Grid, Loader2 } from 'lucide-react';
 
@@ -20,6 +20,7 @@ type ShiftData = {
   target_grade?: string;
   target_subject?: string;
   target_signin_address?: string;
+  start_url?: string;
 };
 
 export default function ShiftMonitorButton({ currentDate }: Props) {
@@ -46,7 +47,7 @@ export default function ShiftMonitorButton({ currentDate }: Props) {
         where('target_date', '==', todayStr)
       );
       const snap = await getDocs(q);
-      const latestShifts = snap.docs.map(doc => doc.data() as ShiftData);
+      const latestShifts = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }) as ShiftData);
 
       // 2. データ整理（重複排除）
       const uniqueMeetings = new Map<string, ShiftData>();
@@ -93,16 +94,21 @@ export default function ShiftMonitorButton({ currentDate }: Props) {
         // A. APIでZAKトークンを取得 (ホスト権限付与)
         if (email) {
           try {
+            const currentUser = auth.currentUser;
+            if (!currentUser) throw new Error('not-authenticated');
+            const token = await currentUser.getIdToken();
             const res = await fetch('/api/get-zoom-zak', {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ email })
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+              body: JSON.stringify({ email, meetingId, shiftId: shift.id })
             });
             const data = await res.json();
 
-            if (data.success && data.zak) {
+            if (data.success && (data.zak || data.start_url)) {
               // ZAK成功: パスワード不要でホスト開始
-              url = `https://zoom.us/wc/${meetingId}/start?preference=1&zak=${data.zak}&uname=${safeName}`;
+              url = data.start_url || data.app_start_url || (data.zak
+                ? `https://zoom.us/s/${meetingId}?zak=${encodeURIComponent(data.zak)}`
+                : '');
             } else {
               console.warn(`ZAK Error for ${email}:`, data.error);
             }
@@ -114,7 +120,7 @@ export default function ShiftMonitorButton({ currentDate }: Props) {
         // B. ZAK失敗時はパスワード方式 (ホスト開始できない可能性あり)
         if (!url) {
           const pwd = shift.target_password || '';
-          url = `https://zoom.us/wc/${meetingId}/start?preference=1&pwd=${pwd}&uname=${safeName}`;
+          url = shift.start_url || `https://zoom.us/j/${meetingId}?pwd=${pwd}&uname=${safeName}`;
         }
 
         setStatusMessage(`${countStr} 起動中...`);

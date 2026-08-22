@@ -5,6 +5,7 @@ import { auth } from '@/lib/firebase';
 import { ArrowDownUp, BookOpen, CalendarDays, Loader2, Plus, Save, Search, Settings2, Trash2 } from 'lucide-react';
 
 const GRADES = ['全学年', '中1', '中2', '中3'];
+const TERM_GRADES = ['中1', '中2', '中3'];
 const SUBJECTS = ['全科目', '理科', '社会'];
 const SORT_OPTIONS = [
   { key: 'week_no', label: '週' },
@@ -65,8 +66,47 @@ export default function MasterCurriculumPage() {
       });
   }, [curriculum, filterGrade, filterSubject, search, sortKey, sortDir]);
 
-  const updateTerm = (index: number, key: string, value: string) => {
+  const updateTerm = (index: number, key: string, value: any) => {
     setTerms(prev => prev.map((term, i) => i === index ? { ...term, [key]: key.includes('week') ? Number(value) : value } : term));
+  };
+
+  const assignSsToTerm = (index: number) => {
+    setTerms(prev => {
+      const targetGrades = Array.isArray(prev[index]?.grades) ? prev[index].grades : [];
+      const overlapsTarget = (term: any) => {
+        const grades = Array.isArray(term.grades) ? term.grades : [];
+        if (targetGrades.length === 0 || grades.length === 0) return true;
+        return grades.some((grade: string) => targetGrades.includes(grade));
+      };
+      return prev.map((term, i) => ({
+        ...term,
+        includes_ss: i === index ? true : (overlapsTarget(term) ? false : term.includes_ss === true),
+      }));
+    });
+  };
+
+  const toggleTermGrade = (index: number, grade: string) => {
+    setTerms(prev => prev.map((term, i) => {
+      if (i !== index) return term;
+      const current = Array.isArray(term.grades) ? term.grades : [];
+      return {
+        ...term,
+        grades: current.includes(grade)
+          ? current.filter((item: string) => item !== grade)
+          : [...current, grade],
+      };
+    }));
+  };
+
+  const splitTermsByGradePace = () => {
+    if (!confirm('現在のターム設定を「中1・中2用」と「中3用」に分けますか？\n保存するまではFirestoreには反映されません。')) return;
+    setTerms(prev => prev.flatMap(term => {
+      const base = { ...term, grades: [] };
+      return [
+        { ...base, label: `${term.label || term.id}（中1・中2）`, grades: ['中1', '中2'] },
+        { ...base, label: `${term.label || term.id}（中3）`, grades: ['中3'] },
+      ];
+    }));
   };
 
   const addTerm = () => {
@@ -80,6 +120,8 @@ export default function MasterCurriculumPage() {
       start_date: '',
       end_date: '',
       registration_opens_at: '',
+      grades: [],
+      includes_ss: false,
     }]);
   };
 
@@ -114,6 +156,11 @@ export default function MasterCurriculumPage() {
   };
 
   const rowValue = (item: any, key: string) => editingRows[item.id]?.[key] ?? item[key] ?? '';
+
+  const termOptionsForGrade = (grade: string) => {
+    const specific = terms.filter(term => Array.isArray(term.grades) && term.grades.includes(grade));
+    return specific.length > 0 ? specific : terms.filter(term => !Array.isArray(term.grades) || term.grades.length === 0);
+  };
 
   const saveCurriculumRow = async (item: any) => {
     const patch = editingRows[item.id];
@@ -163,9 +210,12 @@ export default function MasterCurriculumPage() {
             <div>
               <p className="flex items-center gap-2 text-xs font-black text-indigo-500"><Settings2 size={15} /> ターム設定</p>
               <h2 className="mt-1 text-lg font-black">授業週からタームを作成</h2>
-              <p className="mt-1 text-xs font-bold text-slate-400">開始日・終了日は年間授業予定から推定されます。必要な場合だけ手で上書きしてください。</p>
+              <p className="mt-1 text-xs font-bold text-slate-400">開始日・終了日は年間授業予定から推定されます。SSは週数に加えず、選択した期の夏期講習として扱います。</p>
             </div>
             <div className="flex flex-wrap gap-2">
+              <button onClick={splitTermsByGradePace} className="inline-flex items-center gap-2 rounded-2xl border border-amber-100 bg-amber-50 px-4 py-3 text-sm font-black text-amber-700 hover:bg-amber-100">
+                中1・中2 / 中3に分ける
+              </button>
               <button onClick={addTerm} className="inline-flex items-center gap-2 rounded-2xl border border-indigo-100 bg-indigo-50 px-4 py-3 text-sm font-black text-indigo-700 hover:bg-indigo-100">
                 <Plus size={16} /> ターム追加
               </button>
@@ -177,12 +227,36 @@ export default function MasterCurriculumPage() {
           </div>
           <div className="grid gap-3 lg:grid-cols-4">
             {terms.map((term, index) => (
-              <div key={term.id || index} className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+              <div key={`${term.id || 'term'}_${(term.grades || []).join('_')}_${index}`} className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
                 <div className="mb-2 flex items-center justify-between gap-2">
-                  <span className="rounded-full bg-white px-2 py-1 text-[10px] font-black text-slate-400">{term.id}</span>
+                  <span className="rounded-full bg-white px-2 py-1 text-[10px] font-black text-slate-400">
+                    {term.id} / {term.grades?.length ? term.grades.join('・') : '全学年'}
+                  </span>
                   <button onClick={() => deleteTerm(index)} className="rounded-lg bg-white p-2 text-slate-300 hover:bg-rose-50 hover:text-rose-500" title="削除">
                     <Trash2 size={14} />
                   </button>
+                </div>
+                <div className="mb-3">
+                  <p className="mb-1 text-[11px] font-black text-slate-400">対象学年</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => updateTerm(index, 'grades', [])}
+                      className={`rounded-lg px-2 py-1 text-[10px] font-black ${!term.grades?.length ? 'bg-slate-900 text-white' : 'bg-white text-slate-400'}`}
+                    >
+                      全学年
+                    </button>
+                    {TERM_GRADES.map(grade => (
+                      <button
+                        key={grade}
+                        type="button"
+                        onClick={() => toggleTermGrade(index, grade)}
+                        className={`rounded-lg px-2 py-1 text-[10px] font-black ${term.grades?.includes(grade) ? 'bg-indigo-600 text-white' : 'bg-white text-slate-400'}`}
+                      >
+                        {grade}
+                      </button>
+                    ))}
+                  </div>
                 </div>
                 <label className="mb-1 block text-[11px] font-black text-slate-400">ターム名</label>
                 <input value={term.label || ''} onChange={e => updateTerm(index, 'label', e.target.value)} className="mb-3 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-black outline-none" />
@@ -193,6 +267,14 @@ export default function MasterCurriculumPage() {
                   <Field label="終了日" type="date" value={term.end_date || ''} onChange={v => updateTerm(index, 'end_date', v)} />
                 </div>
                 <Field label="登録開始日" type="date" value={term.registration_opens_at || ''} onChange={v => updateTerm(index, 'registration_opens_at', v)} />
+                <button
+                  type="button"
+                  onClick={() => assignSsToTerm(index)}
+                  className={`mt-3 w-full rounded-xl border px-3 py-2 text-left text-xs font-black transition ${term.includes_ss ? 'border-amber-300 bg-amber-50 text-amber-800' : 'border-slate-200 bg-white text-slate-500 hover:border-amber-200'}`}
+                >
+                  <span className="block">{term.includes_ss ? 'SS（夏期講習）を含む' : 'SSをこの期に含める'}</span>
+                  <span className="mt-0.5 block text-[10px] font-bold opacity-70">SSは開始週・終了週の数には加算されません</span>
+                </button>
                 <p className="mt-2 text-[10px] font-bold text-slate-400">年間予定連動: {term.linked_lesson_count || 0}件</p>
               </div>
             ))}
@@ -240,11 +322,11 @@ export default function MasterCurriculumPage() {
                       <td className="px-3 py-3"><EditInput value={rowValue(item, 'week_no')} onChange={v => updateEditingRow(item.id, 'week_no', v)} className="w-16" /></td>
                       <td className="px-3 py-3">
                         <select value={rowValue(item, 'term')} onChange={e => {
-                          const term = terms.find(t => t.id === e.target.value);
+                          const term = termOptionsForGrade(item.grade).find(t => t.id === e.target.value);
                           updateEditingRow(item.id, 'term', e.target.value);
                           updateEditingRow(item.id, 'term_label', term?.label || e.target.value);
                         }} className="w-32 rounded-xl border border-slate-200 bg-white px-2 py-2 text-xs font-black outline-none">
-                          {terms.map(term => <option key={term.id} value={term.id}>{term.label}</option>)}
+                          {termOptionsForGrade(item.grade).map((term, index) => <option key={`${term.id}_${index}`} value={term.id}>{term.label}</option>)}
                         </select>
                       </td>
                       <td className="px-3 py-3"><EditInput value={rowValue(item, 'grade')} onChange={v => updateEditingRow(item.id, 'grade', v)} className="w-20" /></td>

@@ -11,14 +11,16 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const password = String(body.password || '');
 
-    if (password.length < 6) {
-      return Response.json({ ok: false, error: 'password-too-short' }, { status: 400 });
+    if (password.length < 10 || password.length > 128) {
+      return Response.json({ ok: false, error: 'password-length' }, { status: 400 });
     }
 
     await adminAuth().updateUser(user.uid, { password });
+    await adminAuth().revokeRefreshTokens(user.uid);
     await adminDb().collection('users').doc(user.uid).set({
-      initial_password: password,
-      raw_password: password,
+      initial_password: FieldValue.delete(),
+      raw_password: FieldValue.delete(),
+      isFirstLogin: false,
       password_changed_at: FieldValue.serverTimestamp(),
       updated_at: FieldValue.serverTimestamp(),
     }, { merge: true });

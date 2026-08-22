@@ -3,8 +3,8 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs, addDoc, deleteDoc, doc, writeBatch } from 'firebase/firestore';
-import { CalendarPlus, Trash2, ArrowLeft, Check, ChevronLeft, ChevronRight, X, Loader2, Clock, User, CheckSquare } from 'lucide-react';
+import { collection, query, where, getDocs, deleteDoc, doc, writeBatch } from 'firebase/firestore';
+import { CalendarPlus, Trash2, ArrowLeft, Check, ChevronLeft, ChevronRight, X, Loader2, Clock, User, CheckSquare, MapPin } from 'lucide-react';
 import Link from 'next/link';
 
 // ロール定義
@@ -14,6 +14,8 @@ const ROLES = [
   { id: 'general', label: '全体サポート' },
   { id: 'office', label: '事務作業' }
 ];
+
+const WORK_LOCATIONS = ['元町', '本山', '西神南', '姫路', '加古川', '明石'];
 
 export default function TeacherShiftSubmissionPage() {
   const { user } = useAuth();
@@ -28,6 +30,7 @@ export default function TeacherShiftSubmissionPage() {
     timePreset: string, 
     timeCustomStart: string,
     timeCustomEnd: string,
+    workplace: string,
     roles: string[] // 複数選択に変更
   }>({ 
     dates: [], 
@@ -35,6 +38,7 @@ export default function TeacherShiftSubmissionPage() {
     timePreset: '19:00 - 22:00',
     timeCustomStart: '18:00',
     timeCustomEnd: '21:00',
+    workplace: '元町',
     roles: ['main'] // デフォルトでメイン講師を選択
   });
   
@@ -49,12 +53,20 @@ export default function TeacherShiftSubmissionPage() {
       const today = new Date().toISOString().split('T')[0];
       const q = query(
         collection(db, 'teacher_availability'),
+        where('teacher_id', '==', user.uid),
+        where('available_date', '>=', today)
+      );
+      const legacyQ = query(
+        collection(db, 'teacher_availability'),
         where('user_id', '==', user.uid),
         where('available_date', '>=', today)
       );
       
-      const snapshot = await getDocs(q);
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      const [snapshot, legacySnapshot] = await Promise.all([getDocs(q), getDocs(legacyQ)]);
+      const byId = new Map<string, any>();
+      snapshot.docs.forEach(doc => byId.set(doc.id, { id: doc.id, ...doc.data() }));
+      legacySnapshot.docs.forEach(doc => byId.set(doc.id, { id: doc.id, ...doc.data() }));
+      const data = Array.from(byId.values());
       data.sort((a: any, b: any) => a.available_date.localeCompare(b.available_date));
       setSubmittedShifts(data);
     } catch (e) {
@@ -94,6 +106,8 @@ export default function TeacherShiftSubmissionPage() {
   const handleSubmit = async () => {
     if (form.dates.length === 0) return alert('日付を1つ以上選択してください');
     if (form.roles.length === 0) return alert('希望役割を1つ以上選択してください');
+    const workplace = form.workplace;
+    if (!workplace) return alert('勤務地を選択または入力してください');
     
     // 時間文字列の生成
     let finalTime = form.timePreset;
@@ -106,7 +120,7 @@ export default function TeacherShiftSubmissionPage() {
     const roleLabels = form.roles.map(r => ROLES.find(item => item.id === r)?.label).filter(Boolean).join(' / ');
     const note = `希望: ${roleLabels}`;
 
-    if (!confirm(`${form.dates.length}件のシフトを一括提出しますか？\n時間: ${finalTime}\n役割: ${roleLabels}`)) return;
+    if (!confirm(`${form.dates.length}件のシフトを一括提出しますか？\n勤務地: ${workplace}\n時間: ${finalTime}\n役割: ${roleLabels}`)) return;
     
     setLoading(true);
     if (!user) return;
@@ -117,12 +131,17 @@ export default function TeacherShiftSubmissionPage() {
       form.dates.forEach(date => {
         const newRef = doc(collection(db, 'teacher_availability'));
         batch.set(newRef, {
+          teacher_id: user.uid,
           user_id: user.uid,
           teacher_name: user.displayName || '講師',
           available_date: date,
           time_range: finalTime,
+          workplace,
+          location: workplace,
           note: note, // 複数役割を結合して保存
           roles: form.roles, // 後で集計しやすいように配列も保存（推奨）
+          status: 'possible',
+          created_by: user.uid,
           created_at: new Date().toISOString()
         });
       });
@@ -278,6 +297,18 @@ export default function TeacherShiftSubmissionPage() {
                   </div>
                 </div>
 
+                {/* 勤務地 */}
+                <div>
+                  <label className="block text-xs font-bold text-gray-500 mb-2 flex items-center gap-1"><MapPin size={12}/> 勤務地</label>
+                  <select
+                    className="w-full p-3 border rounded-xl bg-white font-bold text-gray-700 focus:ring-2 focus:ring-green-500 outline-none text-sm"
+                    value={form.workplace}
+                    onChange={e => setForm({...form, workplace: e.target.value})}
+                  >
+                    {WORK_LOCATIONS.map(location => <option key={location}>{location}</option>)}
+                  </select>
+                </div>
+
                 {/* 時間設定 (タブ切り替え) */}
                 <div>
                   <label className="block text-xs font-bold text-gray-500 mb-2 flex items-center gap-1"><Clock size={12}/> 時間帯</label>
@@ -380,6 +411,9 @@ export default function TeacherShiftSubmissionPage() {
                         <div className="min-w-0">
                            <div className="text-xs font-bold text-gray-800 flex items-center gap-1">
                              <Clock size={10} className="text-gray-400"/> {item.time_range}
+                           </div>
+                           <div className="text-[10px] text-gray-500 flex items-center gap-1 mt-0.5">
+                             <MapPin size={10} className="text-gray-400"/> {item.workplace || item.location || '勤務地未設定'}
                            </div>
                            <div className="text-[10px] text-gray-500 truncate mt-0.5">{item.note}</div>
                         </div>

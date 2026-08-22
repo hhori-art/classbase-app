@@ -39,9 +39,23 @@ export async function POST(request: NextRequest) {
       created_at: FieldValue.serverTimestamp(),
     }, { merge: true });
 
-    return Response.json({ ok: true, event_id: eventId });
+    const twinIds = Array.isArray(user.profile.twin_sibling_ids) ? user.profile.twin_sibling_ids.map(String).filter(Boolean) : [];
+    await Promise.all(twinIds.map(async twinId => {
+      await db.collection('attendance').doc(`${twinId}_${targetDate}`).set({
+        user_id: twinId,
+        target_date: targetDate,
+        type: 'joined',
+        contacted_by: 'twin_auto',
+        reason: '双子連携により片方の出席から自動OK判定',
+        twin_source_student_id: user.uid,
+        participation_event_id: eventId,
+        updated_at: FieldValue.serverTimestamp(),
+        created_at: FieldValue.serverTimestamp(),
+      }, { merge: true });
+    }));
+
+    return Response.json({ ok: true, event_id: eventId, twin_attendance_count: twinIds.length });
   } catch (error) {
     return jsonError(error);
   }
 }
-

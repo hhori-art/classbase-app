@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
-import { collection, getDocs, limit, orderBy, query } from 'firebase/firestore';
+import { collection, getDocs, limit, orderBy, query, where } from 'firebase/firestore';
 import { ArrowLeft, CalendarDays, CheckCircle2, Loader2, Megaphone } from 'lucide-react';
 
 type Post = {
@@ -29,6 +29,13 @@ const dayLabel = (dateStr: string) => {
   return ['日', '月', '火', '水', '木', '金', '土'][date.getDay()];
 };
 
+const todayKeyInJapan = () => new Intl.DateTimeFormat('sv-SE', {
+  timeZone: 'Asia/Tokyo',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+}).format(new Date());
+
 export default function TeacherSubstitutionsPage() {
   const { user } = useAuth();
   const [posts, setPosts] = useState<Post[]>([]);
@@ -38,8 +45,17 @@ export default function TeacherSubstitutionsPage() {
   const loadPosts = async () => {
     setLoading(true);
     try {
-      const snap = await getDocs(query(collection(db, 'teacher_substitution_posts'), orderBy('created_at', 'desc'), limit(80)));
-      setPosts(snap.docs.map(d => ({ id: d.id, ...d.data() } as Post)));
+      const today = todayKeyInJapan();
+      const snap = await getDocs(query(
+        collection(db, 'teacher_substitution_posts'),
+        where('target_date', '>=', today),
+        orderBy('target_date', 'asc'),
+        limit(120)
+      ));
+      setPosts(snap.docs
+        .map(d => ({ id: d.id, ...d.data() } as Post))
+        .filter(post => String(post.target_date || '') >= today)
+      );
     } catch (e) {
       console.error(e);
       setPosts([]);
@@ -99,7 +115,7 @@ export default function TeacherSubstitutionsPage() {
             <div className="rounded-2xl bg-rose-50 p-3 text-rose-600"><Megaphone size={22} /></div>
             <div>
               <h2 className="text-sm font-black text-slate-800">講師は返答のみできます</h2>
-              <p className="mt-1 text-xs font-bold leading-relaxed text-slate-500">代行依頼の作成・締切はマスター管理者または校舎管理者が行います。対応できる募集があれば「代行できます」を押してください。</p>
+              <p className="mt-1 text-xs font-bold leading-relaxed text-slate-500">今日以降の代行依頼だけを表示します。対応できる募集があれば「代行できます」を押してください。</p>
             </div>
           </div>
         </section>
@@ -136,7 +152,7 @@ export default function TeacherSubstitutionsPage() {
                       </div>
                       <h3 className="text-base font-black text-slate-900">{post.title}</h3>
                       <p className="mt-1 text-xs font-bold text-slate-400">依頼元: {post.teacher_name || '管理者'}{post.claimed_by_name ? ` / 返答: ${post.claimed_by_name}` : ''}</p>
-                      {post.shift_assignment_id && <p className="mt-1 text-[11px] font-black text-indigo-500">講師配置と連携しています。返答すると担当講師に反映されます。</p>}
+                      {post.shift_assignment_id && <p className="mt-1 text-[11px] font-black text-indigo-500">授業予定と連携しています。返答すると担当情報に反映されます。</p>}
                       {post.detail && <p className="mt-3 whitespace-pre-wrap text-sm font-bold leading-relaxed text-slate-600">{post.detail}</p>}
                     </div>
                     <div className="flex shrink-0 gap-2">

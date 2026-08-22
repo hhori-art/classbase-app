@@ -11,7 +11,14 @@ type LineState = {
 };
 
 function secret() {
-  return process.env.LINE_LOGIN_STATE_SECRET || process.env.LINE_LOGIN_CHANNEL_SECRET || process.env.NEXTAUTH_SECRET || 'classbase-line-dev-secret';
+  const configured =
+    process.env.LINE_LOGIN_STATE_SECRET ||
+    process.env.LINE_LOGIN_CHANNEL_SECRET ||
+    process.env.NEXTAUTH_SECRET ||
+    '';
+  if (configured) return configured;
+  if (process.env.NODE_ENV !== 'production') return 'classbase-line-dev-secret';
+  throw new Error('missing-line-state-secret');
 }
 
 function base64UrlEncode(value: string) {
@@ -92,6 +99,7 @@ export async function getNotificationSettings() {
     student_line_enabled: data.student_line_enabled !== false,
     parent_line_enabled: data.parent_line_enabled !== false,
     teacher_line_enabled: data.teacher_line_enabled !== false,
+    admin_line_enabled: data.admin_line_enabled !== false,
   };
 }
 
@@ -100,5 +108,6 @@ export function roleLineEnabled(settings: Awaited<ReturnType<typeof getNotificat
   if (role === 'student') return settings.student_line_enabled;
   if (role === 'parent' || role === 'guardian') return settings.parent_line_enabled;
   if (role === 'teacher') return settings.teacher_line_enabled;
+  if (role === 'admin' || role === 'master') return settings.admin_line_enabled;
   return true;
 }

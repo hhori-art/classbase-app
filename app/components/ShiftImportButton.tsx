@@ -179,11 +179,19 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
     if (!clean || ['未', '―', 'Nan', 'nan'].includes(clean) || /^[\d\s]+$/.test(clean)) return null;
     if (clean.includes('⇒')) clean = clean.split('⇒').pop()!.trim();
     if (map.has(clean)) return map.get(clean);
-    for (const [regName, data] of Array.from(map.entries())) {
-      if (regName.length >= 2 && clean.includes(regName)) return data;
-      if (clean.replace(/\s+/g, '') === regName.replace(/\s+/g, '')) return data;
-    }
+    const normalizedClean = normalizeTeacherName(clean);
+    if (map.has(normalizedClean)) return map.get(normalizedClean);
     return null; 
+  };
+
+  const normalizeTeacherName = (rawName: string) => {
+    return rawName
+      .replace(/\r?\n/g, ' ')
+      .replace(/先生(?:\s*)$/g, '')
+      .replace(/様(?:\s*)$/g, '')
+      .replace(/[　\s]/g, '')
+      .replace(/[()（）【】\[\]・･]/g, '')
+      .toLowerCase();
   };
 
   const normalizeSupportName = (rawName: string) => {
@@ -213,9 +221,6 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
   };
 
   const processCSV = async (csvText: string) => {
-    console.clear();
-    console.log("🚀 インポート処理開始");
-    
     setProgress('講師データ照合中...');
     const teacherMap = new Map<string, {id: string, name: string}>();
     const snapUser = await getDocs(query(collection(db, 'users'), where('role', '==', 'teacher')));
@@ -225,6 +230,7 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
       if (name) {
         teacherMap.set(name, { id: d.id, name });
         teacherMap.set(name.replace(/\s+/g, ''), { id: d.id, name });
+        teacherMap.set(normalizeTeacherName(name), { id: d.id, name });
       }
     });
 
@@ -275,8 +281,6 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
     const isListFormat = firstRow.includes('日付') && firstRow.includes('曜日') && firstRow.includes('教科') && firstRow.includes('時限');
 
     if (isListFormat) {
-      console.log("📝 テンプレート(リスト)形式で処理します");
-      
       const colIdx = {
         date: firstRow.indexOf('日付'),
         period: firstRow.indexOf('時限'),
@@ -424,8 +428,6 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
       }
 
     } else {
-      console.log("📊 マトリクス(グリッド)形式で処理します");
-      
       let currentDate = '';
       let currentPeriod = 0;
       type ColInfo = { grade: string, subject: string, detail: string, unit: string, place: string, meetingId: string, signinAddress: string, mainShiftId?: string };
@@ -770,8 +772,6 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
     }
 
     await commitBatch();
-
-    console.log(`🏁 処理完了: ${count}件追加`);
     
     let msg = `完了: ${count}件 追加`;
     if (overwriteCount > 0) msg += `\n(上書き: ${overwriteCount}件)`;

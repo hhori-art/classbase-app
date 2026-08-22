@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { 
   ClipboardList, CalendarPlus, MessageCircle, Users, 
-  Phone, BarChart3, Briefcase, AlertTriangle, Lock, Megaphone
+  Phone, BarChart3, Briefcase, AlertTriangle, Lock, Megaphone, BookOpen, Smartphone
 } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
 
@@ -32,6 +32,22 @@ export default function TeacherWorkMenu({ isInternalNetwork }: Props) {
       icon: <Megaphone size={28}/>,
       color: 'red',
       desc: '代行募集・引受',
+      restricted: false
+    },
+    {
+      title: '生徒画面テスト',
+      href: '/teacher/student-preview',
+      icon: <Smartphone size={28}/>,
+      color: 'green',
+      desc: '生徒画面を確認',
+      restricted: false
+    },
+    {
+      title: '授業PPT',
+      href: '/teacher/slides',
+      icon: <BookOpen size={28}/>,
+      color: 'indigo',
+      desc: '教材ダウンロード',
       restricted: false
     },
     {

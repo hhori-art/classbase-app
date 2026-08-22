@@ -15,6 +15,11 @@ import Link from 'next/link';
 
 // 定数設定
 const LIKE_REWARD_THRESHOLD = 10; 
+const FILTER_ITEMS = [
+  { id: 'all', label: 'すべての投稿', icon: LayoutGrid, color: 'text-gray-600' },
+  { id: 'thread', label: 'スレッド (会話)', icon: MessagesSquare, color: 'text-blue-500' },
+  { id: 'vote', label: '投票アンケート', icon: BarChart2, color: 'text-orange-500' },
+] as const;
 
 export default function CommunityPage() {
   const { user, profile } = useAuth();
@@ -220,14 +225,9 @@ export default function CommunityPage() {
 
             {/* フィルタ (PC用: 縦並び / スマホ用: 横スクロール) */}
             <div className="bg-white p-2 rounded-2xl shadow-sm border border-gray-100 flex lg:flex-col overflow-x-auto lg:overflow-visible gap-2 no-scrollbar">
-              {[
-                { id: 'all', label: 'すべての投稿', icon: LayoutGrid, color: 'text-gray-600' },
-                { id: 'thread', label: 'スレッド (会話)', icon: MessagesSquare, color: 'text-blue-500' },
-                { id: 'vote', label: '投票アンケート', icon: BarChart2, color: 'text-orange-500' },
-              ].map(f => (
+              {FILTER_ITEMS.map(f => (
                 <button
                   key={f.id}
-                  // @ts-ignore
                   onClick={() => setFilterType(f.id)}
                   className={`flex items-center gap-3 px-4 py-3 rounded-xl text-xs font-bold whitespace-nowrap transition-all text-left ${
                     filterType === f.id 

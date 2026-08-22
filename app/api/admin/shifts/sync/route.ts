@@ -26,6 +26,12 @@ type SyncShift = {
   note?: string | null;
 };
 
+type ExistingShiftDoc = {
+  id: string;
+  ref: FirebaseFirestore.DocumentReference;
+  data: FirebaseFirestore.DocumentData;
+};
+
 function syncSecret() {
   return process.env.SHIFT_SYNC_SECRET || process.env.CLASSBASE_SYNC_SECRET || process.env.SECRET_KEY || '';
 }
@@ -68,7 +74,16 @@ function periodFromShift(data: FirebaseFirestore.DocumentData) {
 }
 
 function normalizeName(value: unknown) {
-  return clean(value).replace(/\s+/g, '').replace(/先生$/, '');
+  return clean(value)
+    .replace(/^【遠】/, '')
+    .replace(/^遠隔[:：]?/, '')
+    .replace(/^オンライン[:：]?/, '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/先生(?:\s*)$/g, '')
+    .replace(/様(?:\s*)$/g, '')
+    .replace(/[　\s]/g, '')
+    .replace(/[()（）【】\[\]・･]/g, '')
+    .toLowerCase();
 }
 
 function buildSyncKey(shift: SyncShift) {
@@ -92,34 +107,100 @@ function buildSyncKey(shift: SyncShift) {
   ].map(v => clean(v)).join(':');
 }
 
+function docIdFromSyncKey(syncKey: string) {
+  return crypto.createHash('sha1').update(syncKey).digest('hex');
+}
+
+function periodFromValue(value: unknown) {
+  const raw = clean(value);
+  if (raw) return periodLabel(raw);
+  return 1;
+}
+
+function duplicateKeyForData(data: FirebaseFirestore.DocumentData) {
+  const roleType = clean(data.role_type) || 'main';
+  const period = periodFromShift(data);
+  if (roleType === 'main') {
+    return [
+      clean(data.target_date),
+      period,
+      clean(data.target_grade),
+      clean(data.target_subject),
+      clean(data.target_detail_subject),
+      'main',
+    ].join('_');
+  }
+  if (roleType === 'sub') {
+    return [
+      clean(data.target_date),
+      period,
+      clean(data.user_id || data.teacher_name),
+      'sub',
+    ].join('_');
+  }
+  if (roleType === 'general') {
+    return [
+      clean(data.target_date),
+      period,
+      clean(data.user_id || data.teacher_name),
+      'general',
+    ].join('_');
+  }
+  return '';
+}
+
+function duplicateKeyForShift(shift: SyncShift, teacher?: { id: string; name: string }) {
+  const roleType = shift.role_type || 'main';
+  const period = periodFromValue(shift.period);
+  if (roleType === 'main') {
+    return [
+      clean(shift.target_date),
+      period,
+      clean(shift.grade),
+      clean(shift.subject),
+      clean(shift.detail_subject),
+      'main',
+    ].join('_');
+  }
+  if (roleType === 'sub') {
+    return [
+      clean(shift.target_date),
+      period,
+      clean(teacher?.id || shift.teacher_name),
+      'sub',
+    ].join('_');
+  }
+  if (roleType === 'general') {
+    return [
+      clean(shift.target_date),
+      period,
+      clean(teacher?.id || shift.teacher_name),
+      'general',
+    ].join('_');
+  }
+  return '';
+}
+
 async function teacherMap() {
   const snap = await adminDb().collection('users').where('role', '==', 'teacher').get();
   const map = new Map<string, { id: string; name: string }>();
   snap.docs.forEach(doc => {
     const data = doc.data();
-    const name = clean(data.name || data.display_name || data.teacher_name);
-    if (name) map.set(normalizeName(name), { id: doc.id, name });
+    const names = [
+      data.student_name,
+      data.name,
+      data.display_name,
+      data.displayName,
+      data.teacher_name,
+    ].map(clean).filter(Boolean);
+    const displayName = names[0] || '';
+    names.forEach(name => {
+      map.set(name, { id: doc.id, name: displayName || name });
+      map.set(name.replace(/\s+/g, ''), { id: doc.id, name: displayName || name });
+      map.set(normalizeName(name), { id: doc.id, name: displayName || name });
+    });
   });
   return map;
-}
-
-async function deleteSourceRange(sourceSpreadsheetId: string, sourceSheetName: string, startDate: string, endDate: string) {
-  const db = adminDb();
-  let q: FirebaseFirestore.Query = db.collection('shift_assignments')
-    .where('source_spreadsheet_id', '==', sourceSpreadsheetId)
-    .where('source_sheet_name', '==', sourceSheetName)
-    .where('target_date', '>=', startDate)
-    .where('target_date', '<=', endDate);
-
-  const snap = await q.get();
-  let deleted = 0;
-  for (let i = 0; i < snap.docs.length; i += 400) {
-    const batch = db.batch();
-    snap.docs.slice(i, i + 400).forEach(doc => batch.delete(doc.ref));
-    await batch.commit();
-    deleted += snap.docs.slice(i, i + 400).length;
-  }
-  return deleted;
 }
 
 export async function POST(request: NextRequest) {
@@ -129,7 +210,6 @@ export async function POST(request: NextRequest) {
     const shifts = Array.isArray(body.shifts) ? body.shifts as SyncShift[] : [];
     const sourceSpreadsheetId = clean(body.source_spreadsheet_id);
     const sourceSheetName = clean(body.source_sheet_name);
-    const replace = body.replace === true;
     const dryRun = body.dry_run === true;
 
     if (!sourceSpreadsheetId || !sourceSheetName) {
@@ -153,14 +233,36 @@ export async function POST(request: NextRequest) {
     const existingSnap = await db.collection('shift_assignments')
       .where('source_spreadsheet_id', '==', sourceSpreadsheetId)
       .where('source_sheet_name', '==', sourceSheetName)
+      .get();
+    const rangeSnap = await db.collection('shift_assignments')
       .where('target_date', '>=', startDate)
       .where('target_date', '<=', endDate)
       .get();
 
-    const existingByKey = new Map<string, FirebaseFirestore.QueryDocumentSnapshot>();
+    const existingByKey = new Map<string, ExistingShiftDoc>();
+    const existingByDuplicateKey = new Map<string, ExistingShiftDoc>();
     existingSnap.docs.forEach(doc => {
       const data = doc.data();
-      if (data.sync_key) existingByKey.set(String(data.sync_key), doc);
+      const targetDate = clean(data.target_date);
+      if (targetDate < startDate || targetDate > endDate) return;
+      if (data.sync_key) {
+        const syncKey = String(data.sync_key);
+        if (!existingByKey.has(syncKey)) existingByKey.set(syncKey, { id: doc.id, ref: doc.ref, data });
+      }
+    });
+    rangeSnap.docs.forEach(doc => {
+      const data = doc.data();
+      const duplicateKey = duplicateKeyForData(data);
+      const current = duplicateKey ? existingByDuplicateKey.get(duplicateKey) : null;
+      const currentIsGoogleSync = !!clean(current?.data.source_spreadsheet_id);
+      const nextIsGoogleSync = !!clean(data.source_spreadsheet_id);
+      if (duplicateKey && (!current || (currentIsGoogleSync && !nextIsGoogleSync))) {
+        existingByDuplicateKey.set(duplicateKey, { id: doc.id, ref: doc.ref, data });
+      }
+      if (data.sync_key) {
+        const syncKey = String(data.sync_key);
+        if (!existingByKey.has(syncKey)) existingByKey.set(syncKey, { id: doc.id, ref: doc.ref, data });
+      }
     });
 
     if (dryRun) {
@@ -168,17 +270,14 @@ export async function POST(request: NextRequest) {
         ok: true,
         dry_run: true,
         incoming: validShifts.length,
-        existing: existingSnap.size,
+        existing: rangeSnap.size,
+        existing_google_sheet: existingSnap.size,
         start_date: startDate,
         end_date: endDate,
       });
     }
 
     let deleted = 0;
-    if (replace) {
-      deleted = await deleteSourceRange(sourceSpreadsheetId, sourceSheetName, startDate, endDate);
-      existingByKey.clear();
-    }
 
     let created = 0;
     let updated = 0;
@@ -202,14 +301,20 @@ export async function POST(request: NextRequest) {
         continue;
       }
 
-      const normalizedTeacher = normalizeName(teacherNameRaw);
+      const teacherNameForLookup = teacherNameRaw.includes('⇒') ? clean(teacherNameRaw.split('⇒').pop()) : teacherNameRaw;
+      const normalizedTeacher = normalizeName(teacherNameForLookup);
       const teacher = teachers.get(normalizedTeacher);
-      const unresolvedMain = !teacherNameRaw || ['未', '未定', '―', '-', '⇒'].includes(teacherNameRaw);
+      const unresolvedMain = !teacherNameForLookup ||
+        ['未', '未定', '―', '-', 'ー', '⇒', 'nan', 'Nan'].includes(teacherNameForLookup) ||
+        /^[\d\s]+$/.test(teacherNameForLookup);
       if (teacherNameRaw && !teacher && !unresolvedMain) missingTeacherCount++;
 
       const syncKey = buildSyncKey({ ...shift, source_spreadsheet_id: sourceSpreadsheetId, source_sheet_name: sourceSheetName });
-      const existing = existingByKey.get(syncKey);
-      const ref = existing ? existing.ref : db.collection('shift_assignments').doc();
+      const duplicateKey = duplicateKeyForShift(shift, teacher);
+      const existingBySyncKey = existingByKey.get(syncKey);
+      const existingByCsvKey = existingByDuplicateKey.get(duplicateKey);
+      const existing = existingByCsvKey || existingBySyncKey;
+      const ref = existing ? existing.ref : db.collection('shift_assignments').doc(docIdFromSyncKey(syncKey));
       const period = periodLabel(shift.period);
 
       batch.set(ref, {
@@ -220,7 +325,7 @@ export async function POST(request: NextRequest) {
         source_row: Number(shift.source_row || 0) || null,
         source_col: Number(shift.source_col || 0) || null,
         user_id: teacher?.id || '',
-        teacher_name: teacher?.name || teacherNameRaw || (roleType === 'main' ? '未定' : ''),
+        teacher_name: teacher?.name || teacherNameForLookup || (roleType === 'main' ? '未定' : ''),
         target_date: clean(shift.target_date),
         period,
         role_type: roleType,
@@ -236,11 +341,44 @@ export async function POST(request: NextRequest) {
         synced_by_role: actor.role,
         synced_at: FieldValue.serverTimestamp(),
         updated_at: FieldValue.serverTimestamp(),
-        created_at: existing ? existing.data().created_at || FieldValue.serverTimestamp() : FieldValue.serverTimestamp(),
+        created_at: existing ? existing.data.created_at || FieldValue.serverTimestamp() : FieldValue.serverTimestamp(),
       }, { merge: true });
 
       if (existing) updated++;
       else created++;
+      existingByKey.set(syncKey, {
+        id: ref.id,
+        ref,
+        data: {
+          sync_key: syncKey,
+          target_date: clean(shift.target_date),
+          role_type: roleType,
+          target_grade: roleType === 'general' ? null : clean(shift.grade),
+          target_subject: roleType === 'general' ? null : clean(shift.subject),
+          target_detail_subject: roleType === 'general' ? null : clean(shift.detail_subject),
+          user_id: teacher?.id || '',
+          teacher_name: teacher?.name || teacherNameForLookup || '',
+          period,
+          note: clean(shift.note),
+        },
+      });
+      if (duplicateKey) {
+        existingByDuplicateKey.set(duplicateKey, {
+          id: ref.id,
+          ref,
+          data: {
+            target_date: clean(shift.target_date),
+            role_type: roleType,
+            target_grade: roleType === 'general' ? null : clean(shift.grade),
+            target_subject: roleType === 'general' ? null : clean(shift.subject),
+            target_detail_subject: roleType === 'general' ? null : clean(shift.detail_subject),
+            user_id: teacher?.id || '',
+            teacher_name: teacher?.name || teacherNameForLookup || '',
+            period,
+            note: clean(shift.note),
+          },
+        });
+      }
       batchCount++;
       if (batchCount >= 400) await commit();
     }
@@ -282,15 +420,21 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ ok: false, error: 'start_date and end_date are required' }, { status: 400 });
     }
 
-    let q: FirebaseFirestore.Query = adminDb().collection('shift_assignments')
-      .where('target_date', '>=', startDate)
-      .where('target_date', '<=', endDate);
-
-    if (sourceSpreadsheetId) q = q.where('source_spreadsheet_id', '==', sourceSpreadsheetId);
-    if (sourceSheetName) q = q.where('source_sheet_name', '==', sourceSheetName);
-
+    let q: FirebaseFirestore.Query = adminDb().collection('shift_assignments');
+    if (sourceSpreadsheetId && sourceSheetName) {
+      q = q.where('source_spreadsheet_id', '==', sourceSpreadsheetId).where('source_sheet_name', '==', sourceSheetName);
+    } else {
+      q = q.where('target_date', '>=', startDate).where('target_date', '<=', endDate);
+    }
     const snap = await q.get();
-    const shifts = snap.docs.map(doc => {
+    const shifts = snap.docs.filter(doc => {
+      const data = doc.data();
+      const targetDate = clean(data.target_date);
+      if (targetDate < startDate || targetDate > endDate) return false;
+      if (sourceSpreadsheetId && clean(data.source_spreadsheet_id) !== sourceSpreadsheetId) return false;
+      if (sourceSheetName && clean(data.source_sheet_name) !== sourceSheetName) return false;
+      return true;
+    }).map(doc => {
       const data = doc.data();
       return {
         id: doc.id,

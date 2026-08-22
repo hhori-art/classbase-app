@@ -3,9 +3,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
-import { addDoc, collection, doc, getDoc, getDocs, limit, orderBy, query, serverTimestamp, where } from 'firebase/firestore';
-import CourseRegistrationCalendar from '@/app/components/CourseRegistrationCalendar';
-import { enrichCourseOptionsWithShifts } from '@/lib/course-registration-match';
+import { collection, doc, getDoc, getDocs, limit, orderBy, query, where } from 'firebase/firestore';
+import CourseRegistrationCalendar, { getCourseDay, getCourseSlot, getCourseSubject } from '@/app/components/CourseRegistrationCalendar';
+import { canStudentRegisterCourseOption } from '@/lib/course-registration-rules';
+import { loadCourseRegistrationOptions } from '@/lib/client-course-options';
+import { getCourseSubjectGroup, normalizeCourseText } from '@/lib/course-text';
+import { looksLikeZoomUrl, normalizeZoomMeetingId } from '@/lib/zoom-url';
+import { usePortalVisibility } from '@/app/hooks/usePortalVisibility';
+import AppSwitcherLink from '@/app/components/AppSwitcherLink';
 import {
   AlertCircle,
   Bell,
@@ -25,9 +30,9 @@ import {
   X,
 } from 'lucide-react';
 
-type Student = { id: string; student_name?: string; grade?: string; school?: string; day_of_week?: string };
+type Student = { id: string; student_name?: string; grade?: string; school?: string; school_id?: string; day_of_week?: string; selected_course_ids?: string[] };
 type DetailItem = { id: string; title: string; meta: string; body?: string; status?: string };
-type RequestMode = 'absence' | 'transfer';
+type RequestMode = 'absence' | 'transfer' | 'student_transfer';
 type TransferOption = {
   id: string;
   title: string;
@@ -38,17 +43,6 @@ type TransferOption = {
   meetingId: string;
   targetDate: string;
   matchLabel: string;
-};
-
-const defaultVisibility = {
-  homework: true,
-  attendance: true,
-  absence: true,
-  transfer: true,
-  recordings: true,
-  aiMessages: true,
-  announcements: true,
-  calendar: true,
 };
 
 const toDateLabel = (value: any) => {
@@ -73,17 +67,39 @@ const normalizeGrade = (value: any) => {
   if (raw.includes('1')) return '中1';
   return raw.trim();
 };
-const normalizeText = (value: any) => String(value || '').normalize('NFKC').toLowerCase().replace(/\s+/g, '').replace(/[（）()【】\[\]第・,，、]/g, '');
+const normalizeText = normalizeCourseText;
 const periodFromShift = (shift: any) => {
-  if (shift.period !== undefined && shift.period !== null && shift.period !== '') return Number(shift.period);
-  const raw = `${shift.note || ''} ${shift.time_slot || ''} ${shift.slot || ''} ${shift.target_detail_subject || ''}`.replace(/[０-９]/g, char => String.fromCharCode(char.charCodeAt(0) - 0xfee0));
-  if (raw.includes('1限') || raw.includes('1時間目') || raw.includes('①')) return 1;
-  if (raw.includes('2限') || raw.includes('2時間目') || raw.includes('②')) return 2;
+  const values = [
+    shift.period,
+    shift.target_period,
+    shift.time_period,
+    shift.class_period,
+    shift.period_number,
+    shift.lesson_period,
+    shift.slot,
+    shift.time_slot,
+    shift.note,
+  ];
+  for (const value of values) {
+    const raw = String(value || '').replace(/[０-９]/g, char => String.fromCharCode(char.charCodeAt(0) - 0xfee0)).trim();
+    if (!raw) continue;
+    if (/^1$/.test(raw) || raw.includes('1限') || raw.includes('1時間目') || raw.includes('①')) return 1;
+    if (/^2$/.test(raw) || raw.includes('2限') || raw.includes('2時間目') || raw.includes('②')) return 2;
+  }
   return 0;
 };
 const optionMatchesShift = (option: any, shift: any) => {
   const gradeOk = !option.grade || !shift.target_grade || normalizeGrade(option.grade) === normalizeGrade(shift.target_grade);
-  const subjectOk = !option.subject || !shift.target_subject || normalizeText(option.subject) === normalizeText(shift.target_subject);
+  const optionSubject = normalizeText(option.subject);
+  const shiftSubject = normalizeText([shift.target_subject, shift.target_detail_subject, shift.subject].filter(Boolean).join(' '));
+  const optionSubjectGroup = getCourseSubjectGroup(option.subject);
+  const shiftSubjectGroup = getCourseSubjectGroup([shift.target_subject, shift.target_detail_subject, shift.subject].filter(Boolean).join(' '));
+  const subjectOk = !optionSubject || !shiftSubject ||
+    (optionSubjectGroup && shiftSubjectGroup ? optionSubjectGroup === shiftSubjectGroup : (
+      optionSubject === shiftSubject ||
+      optionSubject.includes(shiftSubject) ||
+      shiftSubject.includes(optionSubject)
+    ));
   const course = normalizeText(option.course_name || option.title);
   const detail = normalizeText(shift.target_detail_subject || shift.target_subject);
   const unit = normalizeText(option.resolved_unit || option.unit || option.matched_units?.[0]);
@@ -93,13 +109,35 @@ const optionMatchesShift = (option: any, shift: any) => {
   return gradeOk && subjectOk && (courseOk || unitOk);
 };
 
+const getShiftMeetingId = (shift: any) => normalizeZoomMeetingId(
+  shift.target_meeting_id ||
+  shift.meeting_id ||
+  shift.zoom_meeting_id ||
+  shift.meetingId ||
+  shift.target_url ||
+  shift.zoom_url ||
+  shift.join_url ||
+  shift.meeting_url ||
+  shift.url ||
+  ''
+);
+
+const hasShiftZoomTarget = (shift: any) => Boolean(
+  getShiftMeetingId(shift) ||
+  looksLikeZoomUrl(shift.target_url) ||
+  looksLikeZoomUrl(shift.zoom_url) ||
+  looksLikeZoomUrl(shift.join_url) ||
+  looksLikeZoomUrl(shift.meeting_url) ||
+  looksLikeZoomUrl(shift.url)
+);
+
 export default function ParentDashboardPage() {
   const { user, profile } = useAuth();
   const [students, setStudents] = useState<Student[]>([]);
   const [selectedId, setSelectedId] = useState('');
   const [loading, setLoading] = useState(true);
   const [detailsLoading, setDetailsLoading] = useState(false);
-  const [visibility, setVisibility] = useState(defaultVisibility);
+  const { visibility } = usePortalVisibility('parent');
   const [details, setDetails] = useState<Record<string, DetailItem[]>>({
     homework: [],
     attendance: [],
@@ -125,18 +163,17 @@ export default function ParentDashboardPage() {
   const [loadingTransferOptions, setLoadingTransferOptions] = useState(false);
 
   const selectedStudent = useMemo(() => students.find(s => s.id === selectedId), [students, selectedId]);
-
-  useEffect(() => {
-    const loadVisibility = async () => {
-      try {
-        const snap = await getDoc(doc(db, 'settings', 'portal_visibility'));
-        if (snap.exists()) setVisibility(prev => ({ ...prev, ...(snap.data().parent || {}) }));
-      } catch (e) {
-        console.warn('Parent visibility settings read failed:', e);
-      }
-    };
-    loadVisibility();
-  }, []);
+  const registeredWeekdays = useMemo(() => {
+    const registeredIds = new Set(selectedCourseIds.map(String));
+    const days = new Set(courseOptions
+      .filter(option => registeredIds.has(String(option.id)) || registeredIds.has(String(option.parent_course_option_id || '')) || registeredIds.has(String(option.fallback_curriculum_option_id || '')))
+      .map(getCourseDay)
+      .filter(Boolean));
+    if (days.size === 0 && selectedStudent?.day_of_week) {
+      String(selectedStudent.day_of_week).split(/[、,\/]/).map(day => day.replace('曜日', '').trim()).filter(Boolean).forEach(day => days.add(day));
+    }
+    return Array.from(days);
+  }, [courseOptions, selectedCourseIds, selectedStudent?.day_of_week]);
 
   useEffect(() => {
     const loadStudents = async () => {
@@ -147,10 +184,10 @@ export default function ParentDashboardPage() {
         const fetched: Student[] = [];
 
         if (linkedIds.length > 0) {
-          for (const sid of linkedIds.slice(0, 10)) {
-            const snap = await getDoc(doc(db, 'users', sid));
+          const snaps = await Promise.all(linkedIds.slice(0, 10).map((sid: string) => getDoc(doc(db, 'users', sid))));
+          snaps.forEach(snap => {
             if (snap.exists()) fetched.push({ id: snap.id, ...snap.data() });
-          }
+          });
         } else {
           const snap = await getDocs(query(collection(db, 'users'), where('parent_uid', '==', profile.uid), limit(10)));
           snap.forEach(d => fetched.push({ id: d.id, ...d.data() }));
@@ -284,30 +321,25 @@ export default function ParentDashboardPage() {
     const loadCourseOptions = async () => {
       if (!user || !selectedStudent) return;
       try {
-        const [optionSnap, registrationSnap, curriculumSnap, shiftSnap] = await Promise.all([
-          getDocs(query(collection(db, 'course_registration_options'), limit(500))).catch(() => ({ docs: [] as any[] })),
+        const [optionData, registrationSnap] = await Promise.all([
+          loadCourseRegistrationOptions({
+            grade: normalizeGrade(selectedStudent.grade),
+            getToken: () => user.getIdToken(),
+          }),
           getDocs(query(collection(db, 'course_registrations'), where('parent_id', '==', user.uid), limit(50))).catch(() => ({ docs: [] as any[] })),
-          getDocs(query(collection(db, 'annual_curriculum_schedules'), limit(1000))).catch(() => ({ docs: [] as any[] })),
-          getDocs(query(collection(db, 'shift_assignments'), orderBy('target_date', 'asc'), limit(1000))).catch(() => ({ docs: [] as any[] })),
         ]);
         const selectedGrade = normalizeGrade(selectedStudent.grade);
-        const rawOptions = optionSnap.docs
-          .map((d: any) => ({ id: d.id, ...d.data() }))
+        const options = (Array.isArray(optionData.options) ? optionData.options : [])
           .filter((item: any) => item.is_active !== false)
-          .filter((item: any) => !selectedGrade || !item.grade || normalizeGrade(item.grade) === selectedGrade)
+          .filter((item: any) => canStudentRegisterCourseOption(selectedGrade, item))
           .sort((a: any, b: any) => `${a.year}_${a.term}_${a.subject}_${a.course_name}`.localeCompare(`${b.year}_${b.term}_${b.subject}_${b.course_name}`));
-        const options = enrichCourseOptionsWithShifts(
-          rawOptions,
-          curriculumSnap.docs.map((d: any) => ({ id: d.id, ...d.data() })),
-          shiftSnap.docs
-            .map((d: any) => ({ id: d.id, ...d.data() }))
-            .filter((item: any) => !selectedGrade || normalizeGrade(item.target_grade) === selectedGrade)
-        );
         const registrations = registrationSnap.docs.map((d: any) => ({ id: d.id, ...d.data() })).filter((item: any) => item.student_id === selectedStudent.id);
         setCourseOptions(options);
         setCourseRegistrations(registrations);
         const latest = registrations.sort((a: any, b: any) => String(b.updated_at?.seconds || 0).localeCompare(String(a.updated_at?.seconds || 0)))[0];
-        setSelectedCourseIds(Array.isArray(latest?.selected_course_ids) ? latest.selected_course_ids : []);
+        setSelectedCourseIds(Array.isArray(latest?.selected_course_ids)
+          ? latest.selected_course_ids.map(String)
+          : Array.isArray(selectedStudent.selected_course_ids) ? selectedStudent.selected_course_ids.map(String) : []);
       } catch (e) {
         console.warn('Course options read failed:', e);
         setCourseOptions([]);
@@ -364,14 +396,23 @@ export default function ParentDashboardPage() {
           .map((d: any) => ({ id: d.id, ...d.data() }))
           .filter((shift: any) => shift.role_type !== 'sub')
           .filter((shift: any) => !String(shift.teacher_name || '').includes('サポート'))
-          .filter((shift: any) => normalizeGrade(shift.target_grade) === normalizeGrade(selectedStudent.grade))
-          .filter((shift: any) => shift.target_meeting_id || shift.zoom_url);
+          .filter((shift: any) => canStudentRegisterCourseOption(selectedStudent.grade, {
+            grade: shift.target_grade,
+            subject: shift.target_subject,
+            course_name: shift.target_detail_subject,
+            unit: shift.unit,
+          }))
+          .filter(hasShiftZoomTarget);
 
         const latestRegistration = [...courseRegistrations]
           .filter((item: any) => item.student_id === selectedStudent.id)
           .sort((a: any, b: any) => Number(b.updated_at?.seconds || b.created_at?.seconds || 0) - Number(a.updated_at?.seconds || a.created_at?.seconds || 0))[0];
         const registeredIds = new Set(Array.isArray(latestRegistration?.selected_course_ids) ? latestRegistration.selected_course_ids.map(String) : selectedCourseIds.map(String));
-        const registeredOptions = courseOptions.filter((option: any) => registeredIds.has(option.id) || registeredIds.has(option.parent_course_option_id));
+        const registeredOptions = courseOptions.filter((option: any) => (
+          registeredIds.has(option.id) ||
+          registeredIds.has(option.parent_course_option_id) ||
+          registeredIds.has(option.fallback_curriculum_option_id)
+        ));
         const registeredShiftIds = new Set<string>();
         registeredOptions.forEach((option: any) => {
           if (Array.isArray(option.matched_shift_ids)) option.matched_shift_ids.forEach((id: any) => registeredShiftIds.add(String(id)));
@@ -394,7 +435,7 @@ export default function ParentDashboardPage() {
               subject: shift.target_subject || '',
               courseName,
               period,
-              meetingId: shift.target_meeting_id || '',
+              meetingId: getShiftMeetingId(shift),
               targetDate: shift.target_date || selectedDate,
               matchLabel: registeredOptions.length > 0 ? '受講登録に紐づく候補' : '同学年の実施講座',
             };
@@ -421,34 +462,36 @@ export default function ParentDashboardPage() {
     }
     setSubmitting(true);
     try {
+      const token = await user.getIdToken();
       const isTransfer = requestMode === 'transfer';
-      await addDoc(collection(db, 'requests'), {
-        user_id: selectedStudent.id,
-        student_id: selectedStudent.id,
-        student_name: selectedStudent.student_name || '生徒',
-        parent_id: user.uid,
-        parent_name: profile?.parent_name || profile?.name || '保護者',
-        type: isTransfer ? 'transfer' : 'absence',
-        absence_type: isTransfer ? null : 'absent',
-        target_date: selectedDate,
-        content: isTransfer
-          ? `【振替希望】${selectedTransfer ? `\n${selectedTransfer.title}${selectedTransfer.unit ? ` / ${selectedTransfer.unit}` : ''}` : ''}\n${requestText}`
-          : `【欠席連絡】\n${requestText}`,
-        reason: requestText,
-        transfer_shift_id: selectedTransfer?.id || null,
-        target_shift_id: selectedTransfer?.id || null,
-        transfer_unit: selectedTransfer?.unit || null,
-        transfer_subject: selectedTransfer?.subject || null,
-        transfer_course_name: selectedTransfer?.courseName || null,
-        transfer_period: selectedTransfer?.period || null,
-        transfer_meeting_id: selectedTransfer?.meetingId || null,
-        status: 'pending',
-        created_at: serverTimestamp(),
+      const isStudentTransfer = requestMode === 'student_transfer';
+      const res = await fetch('/api/parent/absence-requests', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          student_id: selectedStudent.id,
+          type: isTransfer ? 'transfer' : 'absence',
+          absence_type: isTransfer ? null : 'absent',
+          target_date: selectedDate,
+          reason: requestText,
+          student_selects_transfer: isStudentTransfer,
+          transfer_selection_mode: isStudentTransfer ? 'student' : isTransfer ? 'parent' : null,
+          transfer_title: isTransfer ? selectedTransfer?.title || '' : '',
+          transfer_shift_id: isTransfer ? selectedTransfer?.id || '' : '',
+          target_shift_id: isTransfer ? selectedTransfer?.id || '' : '',
+          transfer_unit: isTransfer ? selectedTransfer?.unit || '' : '',
+          transfer_subject: isTransfer ? selectedTransfer?.subject || '' : '',
+          transfer_course_name: isTransfer ? selectedTransfer?.courseName || '' : '',
+          transfer_period: isTransfer ? selectedTransfer?.period || null : null,
+          transfer_meeting_id: isTransfer ? selectedTransfer?.meetingId || '' : '',
+        }),
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) throw new Error(data.error || 'failed');
       setRequestText('');
       setSelectedTransferShiftId('');
       setSelectedDate('');
-      alert(isTransfer ? '振替希望を送信しました。' : '欠席連絡を送信しました。');
+      alert(isTransfer ? '振替を確定しました。' : isStudentTransfer ? '欠席連絡を送信しました。生徒画面に振替選択を表示します。' : '欠席連絡を送信しました。');
     } catch (e) {
       console.error(e);
       alert('送信に失敗しました。');
@@ -496,7 +539,7 @@ export default function ParentDashboardPage() {
       <div className="rounded-2xl bg-white p-8 text-center shadow-sm">
         <AlertCircle className="mx-auto mb-3 text-amber-500" />
         <p className="font-black text-gray-800">紐づく生徒がまだ登録されていません</p>
-        <p className="mt-2 text-sm font-bold text-gray-400">校舎または管理者に保護者アカウントの紐づけをご依頼ください。</p>
+        <p className="mt-2 text-sm font-bold text-gray-400">校舎へ保護者アカウントの紐づけをご依頼ください。</p>
       </div>
     );
   }
@@ -516,6 +559,9 @@ export default function ParentDashboardPage() {
 
   return (
     <div className="space-y-6">
+      <div className="flex justify-end">
+        <AppSwitcherLink className="w-full sm:w-auto" />
+      </div>
       <section className="overflow-hidden rounded-[28px] bg-slate-950 text-white shadow-xl">
         <div className="grid gap-6 p-6 lg:grid-cols-[1.4fr_0.8fr] lg:items-end">
           <div>
@@ -552,6 +598,7 @@ export default function ParentDashboardPage() {
           canAbsence={visibility.absence}
           canTransfer={visibility.transfer}
           schedules={monthlySchedules}
+          registeredWeekdays={registeredWeekdays}
         />
       )}
 
@@ -559,7 +606,7 @@ export default function ParentDashboardPage() {
         request={activeCourseRequest}
         options={courseOptions}
         selectedCourseIds={selectedCourseIds}
-        onToggleCourse={(id) => setSelectedCourseIds(prev => prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id])}
+        onChangeSelectedCourseIds={setSelectedCourseIds}
         onSubmit={(term, year, requestId) => saveCourseRegistration(term, year, requestId)}
         onClose={() => setActiveCourseRequest(null)}
         saving={savingCourses}
@@ -570,16 +617,17 @@ export default function ParentDashboardPage() {
           <div className="mb-4 flex items-start justify-between gap-4">
             <div>
               <p className="text-xs font-black text-indigo-500">{selectedDate}</p>
-              <h3 className="mt-1 text-lg font-black text-slate-900">カレンダーから申請</h3>
+              <h3 className="mt-1 text-lg font-black text-slate-900">欠席・振替を登録</h3>
             </div>
             <button onClick={() => setSelectedDate('')} className="rounded-xl bg-slate-100 p-2 text-slate-400 hover:text-slate-700"><X size={18} /></button>
           </div>
           <div className="grid gap-4 md:grid-cols-[220px_1fr_auto] md:items-end">
             <div>
               <label className="mb-2 block text-xs font-black text-slate-500">種類</label>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid gap-2">
                 {visibility.absence && <button type="button" onClick={() => setRequestMode('absence')} className={`rounded-2xl border-2 px-3 py-3 text-sm font-black ${requestMode === 'absence' ? 'border-orange-300 bg-orange-50 text-orange-600' : 'border-slate-100 bg-slate-50 text-slate-400'}`}>欠席</button>}
-                {visibility.transfer && <button type="button" onClick={() => setRequestMode('transfer')} className={`rounded-2xl border-2 px-3 py-3 text-sm font-black ${requestMode === 'transfer' ? 'border-indigo-300 bg-indigo-50 text-indigo-600' : 'border-slate-100 bg-slate-50 text-slate-400'}`}>振替</button>}
+                {visibility.absence && <button type="button" onClick={() => setRequestMode('student_transfer')} className={`rounded-2xl border-2 px-3 py-3 text-sm font-black ${requestMode === 'student_transfer' ? 'border-sky-300 bg-sky-50 text-sky-600' : 'border-slate-100 bg-slate-50 text-slate-400'}`}>お子様が選択</button>}
+                {visibility.transfer && <button type="button" onClick={() => setRequestMode('transfer')} className={`rounded-2xl border-2 px-3 py-3 text-sm font-black ${requestMode === 'transfer' ? 'border-indigo-300 bg-indigo-50 text-indigo-600' : 'border-slate-100 bg-slate-50 text-slate-400'}`}>保護者が振替確定</button>}
               </div>
             </div>
             <div>
@@ -612,9 +660,14 @@ export default function ParentDashboardPage() {
                   )}
                 </div>
               )}
+              {requestMode === 'student_transfer' && (
+                <div className="mb-3 rounded-2xl border border-sky-100 bg-sky-50 p-4 text-xs font-bold text-sky-700">
+                  欠席連絡後、生徒画面に振替選択ポップアップを表示します。お子様が振替先を選ぶまでホーム画面を進めない設定になります。
+                </div>
+              )}
               <textarea value={requestText} onChange={e => setRequestText(e.target.value)} className="min-h-24 w-full resize-none rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100" placeholder={requestMode === 'transfer' ? '希望時間や補足を入力してください' : '欠席理由を入力してください'} />
             </div>
-            <button onClick={submitCalendarRequest} disabled={submitting || (requestMode === 'absence' && !requestText.trim()) || (requestMode === 'transfer' && !selectedTransferShiftId)} className="rounded-2xl bg-slate-900 px-5 py-4 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-50">
+            <button onClick={submitCalendarRequest} disabled={submitting || ((requestMode === 'absence' || requestMode === 'student_transfer') && !requestText.trim()) || (requestMode === 'transfer' && !selectedTransferShiftId)} className="rounded-2xl bg-slate-900 px-5 py-4 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-50">
               {submitting ? '送信中...' : '送信'}
             </button>
           </div>
@@ -623,8 +676,14 @@ export default function ParentDashboardPage() {
 
       {detailsLoading && <div className="flex justify-center py-4"><Loader2 className="animate-spin text-indigo-500" /></div>}
 
-      <section className="grid gap-4 lg:grid-cols-2">
-        {sections.map(section => {
+      {!detailsLoading && totalItems === 0 ? (
+        <section className="rounded-[28px] bg-white px-6 py-8 text-center shadow-sm">
+          <ClipboardCheck className="mx-auto mb-3 text-slate-300" size={28} />
+          <h3 className="text-sm font-black text-slate-700">学習履歴はまだありません</h3>
+          <p className="mt-1 text-xs font-bold text-slate-400">宿題提出、出席、録画視聴などの記録が入ると、ここにまとめて表示されます。</p>
+        </section>
+      ) : <section className="grid gap-4 lg:grid-cols-2">
+        {sections.filter(section => (details[section.key] || []).length > 0).map(section => {
           const Icon = section.icon;
           const items = details[section.key] || [];
           return (
@@ -640,10 +699,7 @@ export default function ParentDashboardPage() {
                   </div>
                 </div>
               </div>
-              {items.length === 0 ? (
-                <div className="rounded-2xl border-2 border-dashed border-slate-100 py-8 text-center text-sm font-bold text-slate-400">まだ表示できる情報がありません</div>
-              ) : (
-                <div className="max-h-80 space-y-3 overflow-y-auto pr-1">
+              <div className="max-h-80 space-y-3 overflow-y-auto pr-1">
                   {items.map(item => (
                     <div key={item.id} className="rounded-2xl bg-slate-50 p-4">
                       <div className="mb-1 flex items-center justify-between gap-3">
@@ -654,12 +710,11 @@ export default function ParentDashboardPage() {
                       {item.body && <p className="mt-2 line-clamp-4 whitespace-pre-wrap text-sm font-bold leading-relaxed text-slate-600">{item.body}</p>}
                     </div>
                   ))}
-                </div>
-              )}
+              </div>
             </div>
           );
         })}
-      </section>
+      </section>}
     </div>
   );
 }
@@ -670,7 +725,7 @@ function CourseRegistrationPanel({
   selectedCourseIds,
   onToggleCourse,
   onSave,
-  saving,
+	saving,
 }: {
   options: any[];
   registrations: any[];
@@ -737,7 +792,7 @@ function ParentCourseRequestModal({
   request,
   options,
   selectedCourseIds,
-  onToggleCourse,
+  onChangeSelectedCourseIds,
   onSubmit,
   onClose,
   saving,
@@ -745,17 +800,108 @@ function ParentCourseRequestModal({
   request: any;
   options: any[];
   selectedCourseIds: string[];
-  onToggleCourse: (id: string) => void;
+  onChangeSelectedCourseIds: (updater: string[] | ((prev: string[]) => string[])) => void;
   onSubmit: (term: string, year: number, requestId: string) => void;
   onClose: () => void;
   saving: boolean;
 }) {
-  if (!request) return null;
-  const requestOptionIds = Array.isArray(request.course_option_ids) ? request.course_option_ids : [];
+  const requestOptionIds = Array.isArray(request?.course_option_ids) ? request.course_option_ids : [];
   const requestOptions = requestOptionIds.length > 0
     ? options.filter(option => requestOptionIds.includes(option.id) || requestOptionIds.includes(option.parent_course_option_id))
     : options;
   const first = requestOptions[0] || {};
+  const [selectedCourseKeys, setSelectedCourseKeys] = useState<string[]>([]);
+
+  const courseKey = (option: any) => [
+    option.grade || '',
+    getCourseSubject(option) || '',
+    option.course_name || option.title || getCourseSubject(option) || '講座',
+  ].join('__');
+  const timeKey = (option: any) => [
+    getCourseDay(option) || '曜日未設定',
+    getCourseSlot(option) || '時間未設定',
+  ].join('__');
+  const courseChoices = (Object.values(requestOptions.reduce((acc, option: any) => {
+    const key = courseKey(option);
+    if (!acc[key]) acc[key] = { key, option, count: 0, daySlots: new Set<string>(), units: new Set<string>() };
+    acc[key].count += 1;
+    const day = getCourseDay(option);
+    const slot = getCourseSlot(option);
+    if (day || slot) acc[key].daySlots.add([day && `${day}曜`, slot].filter(Boolean).join(' '));
+    [
+      option.resolved_unit,
+      option.unit,
+      ...(Array.isArray(option.matched_units) ? option.matched_units : []),
+      ...(Array.isArray(option.curriculum_units) ? option.curriculum_units : []),
+    ].forEach((unit: any) => {
+      const value = String(unit || '').trim();
+      if (value) acc[key].units.add(value);
+    });
+    return acc;
+  }, {} as Record<string, { key: string; option: any; count: number; daySlots: Set<string>; units: Set<string> }>)) as {
+    key: string;
+    option: any;
+    count: number;
+    daySlots: Set<string>;
+    units: Set<string>;
+  }[]).sort((a, b) => `${getCourseSubject(a.option) || ''}_${a.option.course_name || a.option.title || ''}`.localeCompare(`${getCourseSubject(b.option) || ''}_${b.option.course_name || b.option.title || ''}`, 'ja', { numeric: true }));
+
+  useEffect(() => {
+    const selectedOptionKeys = Array.from(new Set(
+      requestOptions
+        .filter((option: any) => selectedCourseIds.includes(option.id))
+        .map(courseKey)
+    ));
+    setSelectedCourseKeys(prev => {
+      const validKeys = new Set(courseChoices.map(choice => choice.key));
+      const kept = prev.filter(key => validKeys.has(key));
+      const merged = Array.from(new Set([...kept, ...selectedOptionKeys]));
+      return merged.length > 0 ? merged : kept;
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [request?.id, requestOptions.length]);
+
+  const visibleCourseOptions = selectedCourseKeys.length > 0
+    ? requestOptions.filter(option => selectedCourseKeys.includes(courseKey(option)))
+    : [];
+  const visibleOptionIds = new Set(visibleCourseOptions.map(option => option.id));
+  const visibleSelectedIds = selectedCourseIds.filter(id => visibleOptionIds.has(id));
+  const toggleCourseKey = (key: string) => {
+    const targetOptionIds = new Set(requestOptions.filter(option => courseKey(option) === key).map(option => option.id));
+    setSelectedCourseKeys(prev => {
+      const selected = prev.includes(key);
+      const next = selected ? prev.filter(item => item !== key) : [...prev, key];
+      if (selected) {
+        onChangeSelectedCourseIds(current => current.filter(id => !targetOptionIds.has(id)));
+      }
+      return next;
+    });
+  };
+  const toggleCourseGroup = (ids: string[]) => {
+    const cleanIds = Array.from(new Set(ids.filter(Boolean)));
+    if (cleanIds.length === 0) return;
+    onChangeSelectedCourseIds(prev => {
+      const visibleIds = new Set(requestOptions.map(option => option.id));
+      const selectedInRequest = new Set(prev.filter(id => visibleIds.has(id)));
+      const outsideRequest = prev.filter(id => !visibleIds.has(id));
+      const allSelected = cleanIds.every(id => selectedInRequest.has(id));
+      if (allSelected) {
+        cleanIds.forEach(id => selectedInRequest.delete(id));
+        return Array.from(new Set([...outsideRequest, ...Array.from(selectedInRequest)]));
+      }
+
+      const selectedOptions = requestOptions.filter(option => cleanIds.includes(option.id));
+      const conflictKeys = new Set(selectedOptions.map(timeKey));
+      requestOptions
+        .filter(option => conflictKeys.has(timeKey(option)))
+        .forEach(option => selectedInRequest.delete(option.id));
+      cleanIds.forEach(id => selectedInRequest.add(id));
+      return Array.from(new Set([...outsideRequest, ...Array.from(selectedInRequest)]));
+    });
+  };
+  const toggleSingleCourseOption = (id: string) => toggleCourseGroup([id]);
+
+  if (!request) return null;
 
   return (
     <div className="fixed inset-0 z-[240] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm">
@@ -771,17 +917,89 @@ function ParentCourseRequestModal({
           </div>
         </div>
         <div className="overflow-y-auto p-6">
-          <CourseRegistrationCalendar
-            options={requestOptions}
-            selectedIds={selectedCourseIds}
-            onToggle={onToggleCourse}
-            emptyMessage="この登録依頼に紐づく講座が見つかりません。管理者画面でカリキュラムを選択し直してください。"
-          />
+          <div className="space-y-5">
+            <div className="rounded-3xl border border-indigo-100 bg-indigo-50/70 p-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-black text-indigo-500">Step 1</p>
+                  <h3 className="text-base font-black text-slate-900">受講したい科目を選択</h3>
+                </div>
+                <span className="rounded-full bg-white px-3 py-1 text-[11px] font-black text-indigo-600">{selectedCourseKeys.length}科目</span>
+              </div>
+              {courseChoices.length === 0 ? (
+                <div className="rounded-2xl border-2 border-dashed border-indigo-100 bg-white/70 p-5 text-center text-sm font-black text-slate-400">
+                  この登録で選べる講座が見つかりません。時間をおいて再度確認してください。
+                </div>
+              ) : (
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {courseChoices.map(choice => {
+                    const active = selectedCourseKeys.includes(choice.key);
+                    const option = choice.option;
+                    const units = Array.from(choice.units);
+                    const daySlots = Array.from(choice.daySlots);
+                    return (
+                      <button
+                        key={choice.key}
+                        type="button"
+                        onClick={() => toggleCourseKey(choice.key)}
+                        className={`rounded-2xl border-2 p-4 text-left transition ${
+                          active
+                            ? 'border-indigo-500 bg-white text-indigo-700 shadow-sm'
+                            : 'border-white bg-white/80 text-slate-700 hover:border-indigo-200'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-black">{[option.grade, getCourseSubject(option), option.course_name || option.title].filter(Boolean).join(' ')}</p>
+                            <p className="mt-1 text-[11px] font-bold text-slate-400">
+                              {daySlots.slice(0, 4).join(' / ') || '曜日・時間未設定'}
+                              {daySlots.length > 4 ? ` ほか${daySlots.length - 4}件` : ''}
+                            </p>
+                            {units.length > 0 && (
+                              <p className="mt-1 line-clamp-2 text-[11px] font-bold text-emerald-600">
+                                単元: {units.slice(0, 3).join(' / ')}{units.length > 3 ? ` ほか${units.length - 3}件` : ''}
+                              </p>
+                            )}
+                          </div>
+                          {active && <CheckCircle2 size={18} className="shrink-0 text-indigo-600" />}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-3xl border border-slate-100 bg-white p-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-black text-slate-500">Step 2</p>
+                  <h3 className="text-base font-black text-slate-900">開講曜日・時間を選択</h3>
+                  <p className="mt-1 text-xs font-bold text-slate-400">同じ曜日・同じ時限は1つだけ選べます。別の講座を選ぶと前の選択は自動で外れます。</p>
+                </div>
+                <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-black text-slate-600">{visibleSelectedIds.length}件</span>
+              </div>
+              {selectedCourseKeys.length === 0 ? (
+                <div className="rounded-2xl border-2 border-dashed border-slate-200 p-6 text-center text-sm font-black text-slate-400">
+                  先に受講したい科目を選択してください
+                </div>
+              ) : (
+                <CourseRegistrationCalendar
+                  options={visibleCourseOptions}
+                  selectedIds={visibleSelectedIds}
+                  onToggle={toggleSingleCourseOption}
+                  onToggleGroup={toggleCourseGroup}
+                  compact
+                  emptyMessage="選択した科目に開講曜日がありません。別の科目を選択してください。"
+                />
+              )}
+            </div>
+          </div>
         </div>
         <div className="shrink-0 border-t border-slate-100 bg-slate-50 p-5">
           <button
             onClick={() => onSubmit(first.term || request.term || 'term', Number(first.year || request.year || new Date().getFullYear()), request.id)}
-            disabled={saving || requestOptions.length === 0 || selectedCourseIds.length === 0}
+            disabled={saving || requestOptions.length === 0 || visibleSelectedIds.length === 0}
             className="w-full rounded-2xl bg-slate-900 py-4 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-50"
           >
             {saving ? '登録中...' : 'この内容で登録する'}
@@ -810,6 +1028,7 @@ function ParentActionCalendar({
   canAbsence,
   canTransfer,
   schedules,
+  registeredWeekdays,
 }: {
   month: Date;
   onChangeMonth: (value: Date) => void;
@@ -818,6 +1037,7 @@ function ParentActionCalendar({
   canAbsence: boolean;
   canTransfer: boolean;
   schedules: any[];
+  registeredWeekdays: string[];
 }) {
   const year = month.getFullYear();
   const monthIndex = month.getMonth();
@@ -849,18 +1069,25 @@ function ParentActionCalendar({
         {['日', '月', '火', '水', '木', '金', '土'].map(day => <div key={day}>{day}</div>)}
       </div>
       <div className="grid grid-cols-7 gap-1.5">
-        {days.map(day => day.date ? (
-          <button key={day.key} onClick={() => onSelectDate(day.date)} className={`min-h-24 rounded-2xl border p-2 text-left transition ${selectedDate === day.date ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : 'border-slate-100 bg-slate-50 hover:border-slate-200'}`}>
+        {days.map(day => day.date ? (() => {
+          const daySchedules = schedules.filter(item => scheduleCoversDate(item, day.date));
+          const weekday = ['日', '月', '火', '水', '木', '金', '土'][new Date(`${day.date}T12:00:00`).getDay()];
+          const isClosedDay = daySchedules.length === 0 || daySchedules.every(item => /休み|休講|閉室/.test(String(item.title || '')));
+          const isRegisteredDay = registeredWeekdays.includes(weekday);
+          const actionable = !isClosedDay && isRegisteredDay && (canAbsence || canTransfer);
+          return (
+          <button key={day.key} disabled={!actionable} onClick={() => actionable && onSelectDate(day.date)} className={`min-h-24 rounded-2xl border p-2 text-left transition ${selectedDate === day.date ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : actionable ? 'border-slate-100 bg-slate-50 hover:border-slate-200' : 'cursor-default border-slate-100 bg-slate-50/60 text-slate-400'}`}>
             <span className="text-sm font-black">{day.label}</span>
             <div className="mt-2 flex flex-col gap-1">
-              {schedules.filter(item => scheduleCoversDate(item, day.date)).slice(0, 2).map(item => (
+              {daySchedules.slice(0, 2).map(item => (
                 <span key={item.id} className="rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-black text-emerald-700">{item.title}</span>
               ))}
-              {canAbsence && <span className="rounded bg-orange-100 px-1.5 py-0.5 text-[9px] font-black text-orange-600">欠席</span>}
-              {canTransfer && <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[9px] font-black text-indigo-600"><Repeat size={8} className="inline" /> 振替</span>}
+              {actionable && canAbsence && <span className="rounded bg-orange-100 px-1.5 py-0.5 text-[9px] font-black text-orange-600">欠席</span>}
+              {actionable && canTransfer && <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[9px] font-black text-indigo-600"><Repeat size={8} className="inline" /> 振替</span>}
             </div>
           </button>
-        ) : <div key={day.key} className="min-h-20" />)}
+          );
+        })() : <div key={day.key} className="min-h-20" />)}
       </div>
     </section>
   );

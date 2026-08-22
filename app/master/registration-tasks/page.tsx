@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { db } from '@/lib/firebase';
-import { collection, addDoc, query, orderBy, getDocs, updateDoc, doc, deleteDoc, serverTimestamp, limit } from 'firebase/firestore';
+import { collection, addDoc, query, orderBy, getDocs, updateDoc, doc, deleteDoc, serverTimestamp, limit, where } from 'firebase/firestore';
 import { Plus, CheckCircle, StopCircle, Loader2, FileText, X, Trash2, Calendar, BookOpen, Users, UserPlus, GraduationCap, Check } from 'lucide-react';
 import CourseRegistrationCalendar from '@/app/components/CourseRegistrationCalendar';
 import { enrichCourseOptionsWithShifts } from '@/lib/course-registration-match';
@@ -12,6 +12,16 @@ const DEFAULT_SUBJECTS = ['英語', '数学', '国語', '理科', '社会'];
 
 // 学年リスト
 const GRADE_OPTIONS = ['中1', '中2', '中3'];
+
+const currentCourseYear = () => {
+  const now = new Date();
+  return now.getMonth() + 1 >= 4 ? now.getFullYear() : now.getFullYear() - 1;
+};
+
+const courseYearDateRange = (year: number) => ({
+  start: `${year}-04-01`,
+  end: `${year + 1}-03-31`,
+});
 
 // 送信対象のタイプ
 type TargetAudience = 'all' | 'new_only' | 'grade';
@@ -43,11 +53,18 @@ export default function AdminRegistrationTasksPage() {
 
   const fetchRequests = async () => {
     try {
+      const shiftRange = courseYearDateRange(currentCourseYear());
       const [snap, optionSnap, curriculumSnap, shiftSnap] = await Promise.all([
         getDocs(query(collection(db, 'registration_requests'), orderBy('created_at', 'desc'))),
         getDocs(query(collection(db, 'course_registration_options'), orderBy('year', 'desc'))).catch(() => ({ docs: [] as any[] })),
         getDocs(query(collection(db, 'annual_curriculum_schedules'), limit(1000))).catch(() => ({ docs: [] as any[] })),
-        getDocs(query(collection(db, 'shift_assignments'), orderBy('target_date', 'asc'), limit(1000))).catch(() => ({ docs: [] as any[] })),
+        getDocs(query(
+          collection(db, 'shift_assignments'),
+          where('target_date', '>=', shiftRange.start),
+          where('target_date', '<=', shiftRange.end),
+          orderBy('target_date', 'asc'),
+          limit(3000)
+        )).catch(() => ({ docs: [] as any[] })),
       ]);
       setRequests(snap.docs.map(d => ({ id: d.id, ...d.data() })));
       const rawOptions = optionSnap.docs.map((d: any) => ({ id: d.id, ...d.data() })).filter((item: any) => item.is_active !== false);
@@ -129,6 +146,80 @@ export default function AdminRegistrationTasksPage() {
 
   const courseMonths = Array.from(new Set(courseOptions.map((option: any) => String(option.month_label || '')).filter(Boolean)))
     .sort((a, b) => a.localeCompare(b, 'ja', { numeric: true }));
+
+  const visibleCourseOptions = () => Object.values(groupedCourseOptions()).flat() as any[];
+
+  const selectAutoCourseTerm = () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const terms = Array.from(courseOptions.reduce((map: Map<string, any[]>, option: any) => {
+      const key = `${option.year || ''}_${option.term || option.term_label || ''}`;
+      if (!key.replace(/_/g, '').trim()) return map;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(option);
+      return map;
+    }, new Map<string, any[]>()).entries()).map(([key, items]) => {
+      const dates = items
+        .flatMap((option: any) => [option.term_start_date, option.registration_opens_at, ...(option.matched_dates || [])])
+        .map((value: any) => String(value || '').slice(0, 10))
+        .filter(Boolean)
+        .sort();
+      const first = items[0] || {};
+      return {
+        key,
+        items,
+        termLabel: first.term_label || first.term || '次期',
+        startDate: dates.find(date => date >= today) || dates[0] || '',
+      };
+    }).sort((a, b) => {
+      const aFuture = a.startDate && a.startDate >= today ? 0 : 1;
+      const bFuture = b.startDate && b.startDate >= today ? 0 : 1;
+      if (aFuture !== bFuture) return aFuture - bFuture;
+      return `${a.startDate || '9999-99-99'}_${a.key}`.localeCompare(`${b.startDate || '9999-99-99'}_${b.key}`, 'ja', { numeric: true });
+    });
+
+    return terms[0] || null;
+  };
+
+  const openAutoCourseRegistrationModal = () => {
+    if (courseOptions.length === 0) {
+      openCreateModal('次期 受講講座登録', 'course_registration');
+      return;
+    }
+
+    const term = selectAutoCourseTerm();
+    const items = term?.items || courseOptions;
+    const grades = Array.from(new Set(items.map((option: any) => String(option.grade || '').trim()).filter(Boolean)));
+    const termStartDate = items
+      .map((option: any) => String(option.term_start_date || '').slice(0, 10))
+      .filter(Boolean)
+      .sort()[0] || '';
+    const registrationStart = items
+      .map((option: any) => String(option.registration_opens_at || '').slice(0, 10))
+      .filter(Boolean)
+      .sort()[0] || new Date().toISOString().slice(0, 10);
+    const fallbackEnd = (() => {
+      const d = new Date(`${registrationStart}T00:00:00+09:00`);
+      d.setDate(d.getDate() + 14);
+      return d.toISOString().slice(0, 10);
+    })();
+    const registrationEnd = termStartDate && termStartDate >= registrationStart ? termStartDate : fallbackEnd;
+
+    setFormData({
+      title: `${term?.termLabel || '次期'} 受講講座登録`,
+      type: 'course_registration',
+      deadline: registrationEnd,
+      subjects: [...DEFAULT_SUBJECTS],
+      newSubject: '',
+      targetAudience: 'grade',
+      targetGrades: grades.length ? grades : [...GRADE_OPTIONS],
+      periodStart: registrationStart,
+      periodEnd: registrationEnd,
+      termFilter: term?.key || 'all',
+      monthFilter: 'all',
+      courseOptionIds: items.map((option: any) => option.id),
+    });
+    setIsModalOpen(true);
+  };
 
   // 科目の追加
   const addSubject = () => {
@@ -260,7 +351,7 @@ export default function AdminRegistrationTasksPage() {
         </button>
 
         <button 
-          onClick={() => openCreateModal('次期 受講講座登録', 'course_registration')}
+          onClick={openAutoCourseRegistrationModal}
           className="bg-white border-2 border-amber-100 hover:border-amber-500 text-amber-700 p-6 rounded-2xl shadow-sm hover:shadow-md transition-all text-left group"
         >
           <div className="flex items-center justify-between mb-2">
@@ -269,7 +360,7 @@ export default function AdminRegistrationTasksPage() {
               <Plus size={20}/>
             </div>
           </div>
-          <p className="text-xs text-gray-400 font-bold">CSVカリキュラムから講座を選択 / 保護者向け</p>
+          <p className="text-xs text-gray-400 font-bold">年間カリキュラム・授業予定から自動作成 / 保護者向け</p>
         </button>
 
         <button 
@@ -490,13 +581,13 @@ export default function AdminRegistrationTasksPage() {
                     <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
                       <div>
                         <label className="block text-xs font-bold text-gray-500">CSV登録済みカリキュラム</label>
-                        <p className="mt-1 text-[11px] font-bold text-gray-400">カリキュラムのターム設定と連動し、1つのターム内の同じ単元は代表曜日1つだけを表示します。</p>
+                        <p className="mt-1 text-[11px] font-bold text-gray-400">年間カリキュラム・講師配置と連動し、曜日・時限ごとに受講候補を表示します。</p>
                       </div>
                       <button
                         type="button"
                         onClick={() => setFormData(prev => ({
                           ...prev,
-                          courseOptionIds: Object.values(groupedCourseOptions()).flat().map((option: any) => option.id),
+                          courseOptionIds: visibleCourseOptions().map((option: any) => option.id),
                         }))}
                         className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-black text-amber-700 hover:bg-amber-100"
                       >

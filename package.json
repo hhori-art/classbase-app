@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "eiken:seed": "node --env-file=.env.local scripts/seed-eiken-booster.mjs",
+    "transport:generate-fares": "node scripts/generate-transport-fares-from-stations.mjs"
   },
   "dependencies": {
     "@ai-sdk/openai": "^0.0.44",
@@ -23,7 +25,8 @@
     "react-calendar": "^5.0.0",
     "react-dom": "^18.3.1",
     "recharts": "^2.12.7",
-    "server-only": "^0.0.1"
+    "server-only": "^0.0.1",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/node": "^20.14.15",

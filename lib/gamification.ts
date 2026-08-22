@@ -20,30 +20,21 @@ export const getRank = (points: number) => {
 
 // バッジ定義
 export const BADGES = [
-  // --- 基本バッジ（最初から見える） ---
-  { id: 'badge_1', name: 'はじまりの葉', icon: '🌱', description: '最初の授業に参加した証', secret: false },
-  { id: 'badge_pencil', name: '学習家', icon: '✏️', description: '宿題を提出した証', secret: false },
-  { id: 'badge_book', name: '本の虫', icon: '📚', description: 'アーカイブを視聴した証', secret: false },
-  { id: 'badge_sun', name: '早起き', icon: '☀️', description: '午前の授業に参加した', secret: false },
-  
-  // --- 継続・回数バッジ（見える） ---
-  { id: 'badge_fire_3', name: '三日熱中', icon: '🔥', description: '3回連続で出席した', secret: false },
-  { id: 'badge_star_10', name: 'スター生徒', icon: '⭐️', description: '累計10回出席した', secret: false },
-  { id: 'badge_medal', name: '継続の達人', icon: '🏅', description: '宿題を5回提出した', secret: false },
-  
-  // --- 実力バッジ（見える） ---
-  { id: 'badge_brain', name: '博識博士', icon: '🧠', description: '理科と社会の両方を受けた', secret: false },
-  { id: 'badge_rocket', name: '急成長', icon: '🚀', description: '1週間で100ポイント獲得', secret: false },
+  // --- すぐ分かる基本バッジ ---
+  { id: 'badge_1', name: 'スタート', icon: '🌱', description: '初回ログインで獲得', secret: false },
+  { id: 'badge_pencil', name: '宿題提出', icon: '✏️', description: '宿題を提出すると獲得', secret: false },
+  { id: 'badge_book', name: '録画視聴', icon: '📚', description: '授業アーカイブを最後まで見ると獲得', secret: false },
+  { id: 'badge_social', name: '発信者', icon: '💬', description: 'コミュニティに投稿・コメントすると獲得', secret: false },
 
-  // --- シークレットバッジ（獲得するまで「???」になる） ---
-  { id: 'badge_owl', name: '夜更かしフクロウ', icon: '🦉', description: '夜20時以降にログインした', secret: true },
-  { id: 'badge_ninja', name: '忍びの者', icon: '🥷', description: 'カメラオフで授業に参加', secret: true },
-  { id: 'badge_king', name: '富豪王', icon: '💰', description: '所持コインが1000枚を超えた', secret: true },
-  { id: 'badge_robot', name: 'メカニック', icon: '🤖', description: 'システム設定を変更した', secret: true },
-  { id: 'badge_alien', name: '宇宙人', icon: '👽', description: '誰もいない教室に入った', secret: true },
-  { id: 'badge_dragon', name: '伝説の龍', icon: '🐉', description: '全種類の授業を制覇した', secret: true },
-  { id: 'badge_rainbow', name: '虹色気分', icon: '🌈', description: '7日間連続ログイン達成', secret: true },
-  { id: 'badge_gem', name: 'トレジャーハンター', icon: '💎', description: '隠しページを見つけた', secret: true },
+  // --- 継続バッジ ---
+  { id: 'badge_fire_3', name: '3日連続', icon: '🔥', description: '3日連続ログインで獲得', secret: false },
+  { id: 'badge_rainbow', name: '7日連続', icon: '🌈', description: '7日連続ログインで獲得', secret: false },
+  { id: 'badge_star_10', name: '10回ログイン', icon: '⭐️', description: '累計10回ログインで獲得', secret: false },
+  { id: 'badge_medal', name: '継続の達人', icon: '🏅', description: '学習行動を積み重ねると獲得', secret: false },
+
+  // --- 特別バッジ ---
+  { id: 'badge_king', name: 'コインマスター', icon: '💰', description: '所持コインが1000枚を超えると獲得', secret: true },
+  { id: 'badge_dragon', name: 'レジェンド', icon: '🐉', description: '特別な達成で獲得', secret: true },
 ];
 
 /**

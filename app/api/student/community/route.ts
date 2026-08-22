@@ -37,6 +37,11 @@ export async function POST(request: NextRequest) {
         created_at: FieldValue.serverTimestamp(),
         reward_given: false,
       });
+      await db.collection('users').doc(user.uid).set({
+        last_community_activity_date: new Date().toISOString().split('T')[0],
+        earned_badges: FieldValue.arrayUnion('badge_social'),
+        updated_at: FieldValue.serverTimestamp(),
+      }, { merge: true });
       return Response.json({ ok: true, id: ref.id });
     }
 
@@ -52,6 +57,11 @@ export async function POST(request: NextRequest) {
         name: user.profile.student_name || user.profile.name || user.email || '名無し',
         created_at: FieldValue.serverTimestamp(),
       });
+      await db.collection('users').doc(user.uid).set({
+        last_community_activity_date: new Date().toISOString().split('T')[0],
+        earned_badges: FieldValue.arrayUnion('badge_social'),
+        updated_at: FieldValue.serverTimestamp(),
+      }, { merge: true });
       return Response.json({ ok: true, id: ref.id });
     }
 
@@ -67,6 +77,11 @@ export async function POST(request: NextRequest) {
           liked_by: FieldValue.arrayUnion(user.uid),
         });
       });
+      await db.collection('users').doc(user.uid).set({
+        last_community_activity_date: new Date().toISOString().split('T')[0],
+        earned_badges: FieldValue.arrayUnion('badge_social'),
+        updated_at: FieldValue.serverTimestamp(),
+      }, { merge: true });
       return Response.json({ ok: true });
     }
 
@@ -84,6 +99,11 @@ export async function POST(request: NextRequest) {
           voted_by: FieldValue.arrayUnion(user.uid),
         });
       });
+      await db.collection('users').doc(user.uid).set({
+        last_community_activity_date: new Date().toISOString().split('T')[0],
+        earned_badges: FieldValue.arrayUnion('badge_social'),
+        updated_at: FieldValue.serverTimestamp(),
+      }, { merge: true });
       return Response.json({ ok: true });
     }
 

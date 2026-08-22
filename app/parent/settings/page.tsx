@@ -5,6 +5,7 @@ import { auth } from '@/lib/firebase';
 import { Bell, Mail, MessageCircle, Save, Smartphone } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
 import LineLinkPanel from '@/app/components/LineLinkPanel';
+import RecoveryEmailSettings from '@/app/components/RecoveryEmailSettings';
 
 export default function ParentSettingsPage() {
   const { profile } = useAuth();
@@ -63,6 +64,13 @@ export default function ParentSettingsPage() {
         description="連携すると、授業開始・欠席連絡・登録依頼・お知らせなどをLINEでも受け取れます。"
         compact
       />
+      <div className="rounded-2xl bg-white p-4 shadow-sm">
+        <RecoveryEmailSettings
+          currentEmail={profile?.recovery_email}
+          verified={Boolean(profile?.recovery_email_verified_at)}
+          compact
+        />
+      </div>
       <div className="rounded-2xl bg-white p-4 shadow-sm">
         {items.map(item => {
           const Icon = item.icon;

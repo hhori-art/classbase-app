@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
-import { canManageSchool, getServerUser, isAdminLike, jsonError } from '@/lib/server-auth';
+import { canManageSchool, getServerUser, jsonError, requireMaster } from '@/lib/server-auth';
 import { writeLearningEvent } from '@/lib/events';
 
 const STATUSES = ['active', 'suspended', 'withdrawn', 'archived'];
@@ -9,7 +9,7 @@ const STATUSES = ['active', 'suspended', 'withdrawn', 'archived'];
 export async function POST(request: NextRequest) {
   try {
     const user = await getServerUser(request);
-    if (!isAdminLike(user)) throw new Error('forbidden');
+    requireMaster(user);
 
     const body = await request.json();
     const userId = String(body.user_id || '');
@@ -52,4 +52,3 @@ export async function POST(request: NextRequest) {
     return jsonError(error);
   }
 }
-

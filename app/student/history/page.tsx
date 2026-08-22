@@ -99,6 +99,16 @@ export default function StudentHistoryPage() {
                     </span>
                   </div>
                   <h3 className="font-bold text-gray-800">{log.unit_name}</h3>
+                  {log.unit_stage_label && (
+                    <p className="mt-1 text-[11px] font-black text-indigo-500">
+                      到達段階: {log.unit_stage_label}
+                      {Number(log.target_question_count || 0) > 0 && (
+                        <span className="ml-2 text-slate-400">
+                          {log.mastered_question_count || 0}/{log.target_question_count}問 定着
+                        </span>
+                      )}
+                    </p>
+                  )}
                 </div>
                 
                 <div className="text-right">

@@ -57,12 +57,11 @@ export default function StudentChat() {
         
         const history = snapshot.docs.map(doc => ({
           id: doc.id,
-          role: doc.data().role,
-          content: doc.data().content,
+          role: doc.data().role === 'assistant' ? 'assistant' as const : 'user' as const,
+          content: String(doc.data().content || ''),
         }));
 
         if (history.length > 0) {
-          // @ts-ignore: 型エラー回避
           setMessages(history);
         }
       } catch (e) {
@@ -144,7 +143,6 @@ export default function StudentChat() {
         message_type: 'stamp',
         createdAt: serverTimestamp(),
       });
-      // @ts-ignore
       setMessages(current => [...current, { id: `stamp-${Date.now()}`, role: 'user', content: `[スタンプ] ${stamp}` }]);
     } catch (e) {
       console.error(e);

@@ -1,7 +1,8 @@
 import { NextRequest } from 'next/server';
 import { adminAuth, adminDb } from '@/lib/firebase-admin';
+import { canManageAdminApp } from '@/lib/admin-app-access';
 
-export type AppRole = 'student' | 'teacher' | 'master' | 'admin' | 'parent';
+export type AppRole = 'student' | 'teacher' | 'master' | 'admin' | 'parent' | 'attendance_admin';
 
 export type ServerUser = {
   uid: string;
@@ -23,6 +24,7 @@ const ADMIN_ROLE_ALIASES = [
   'master_admin',
   'super_admin',
 ];
+const ATTENDANCE_ADMIN_ALIASES = ['attendance_admin', 'attendance_only', 'attendance_manager'];
 
 export async function getServerUser(request: NextRequest): Promise<ServerUser> {
   const authHeader = request.headers.get('authorization') || '';
@@ -59,6 +61,8 @@ export function normalizeRole(role: unknown): AppRole {
   const r = String(role || '').toLowerCase();
   if (r === 'teacher') return 'teacher';
   if (r === 'master') return 'master';
+  // 旧勤怠管理者は講師へ統合する。
+  if (ATTENDANCE_ADMIN_ALIASES.includes(r)) return 'teacher';
   if (ADMIN_ROLE_ALIASES.includes(r)) return 'admin';
   if (r === 'parent' || r === 'guardian') return 'parent';
   return 'student';
@@ -70,13 +74,27 @@ export function requireRole(user: ServerUser, allowed: AppRole[]) {
   }
 }
 
+export function requireMaster(user: ServerUser) {
+  if (user.role !== 'master') {
+    throw new Error('forbidden');
+  }
+}
+
 export function isAdminLike(user: ServerUser) {
-  return ADMIN_ROLES.includes(user.role);
+  return ADMIN_ROLES.includes(user.role) && canManageAdminApp(user, 'science_social');
+}
+
+export function canManageAttendance(user: ServerUser) {
+  return canManageAdminApp(user, 'attendance');
+}
+
+export function canUseTeacherAttendance(user: ServerUser) {
+  return user.role === 'teacher';
 }
 
 export function canManageSchool(user: ServerUser, targetSchool?: string | null) {
   if (user.role === 'master') return true;
-  if (user.role !== 'admin') return false;
+  if (user.role !== 'admin' || !canManageAdminApp(user, 'science_social')) return false;
   if (!targetSchool) return true;
   return user.school_ids.includes(targetSchool);
 }

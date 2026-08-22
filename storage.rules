@@ -1,0 +1,39 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function role() {
+      return signedIn()
+        ? firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.role
+        : null;
+    }
+
+    function isAdmin() {
+      return role() in ['master', 'admin', 'school_admin', 'branch_admin', 'campus_admin', 'classroom_admin', 'test_admin'];
+    }
+
+    match /lesson_slides/{allPaths=**} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /attendance_imports/{uid}/{fileName} {
+      allow read: if false;
+      allow create: if signedIn()
+        && request.auth.uid == uid
+        && role() in ['master', 'admin', 'school_admin', 'branch_admin', 'campus_admin', 'classroom_admin', 'test_admin', 'master_admin', 'super_admin', 'attendance_admin', 'attendance_only', 'attendance_manager']
+        && request.resource.size <= 12 * 1024 * 1024
+        && fileName.matches('.*\\.xls');
+      allow delete: if signedIn() && request.auth.uid == uid;
+      allow update: if false;
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

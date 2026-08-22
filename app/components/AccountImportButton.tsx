@@ -4,6 +4,8 @@ import { useState, useRef } from 'react';
 import { Upload, Loader2, FileUp, CheckCircle, AlertCircle } from 'lucide-react';
 import { db } from '@/lib/firebase';
 import { collection, query, where, getDocs, writeBatch, doc } from 'firebase/firestore';
+import CsvSampleDownload from '@/app/components/CsvSampleDownload';
+import { generateInitialPassword } from '@/lib/password';
 
 interface Props {
   role: 'student' | 'teacher';
@@ -68,6 +70,7 @@ export default function AccountImportButton({ role, onSuccess }: Props) {
         // ヘッダーチェック（簡易）
         const staffIdIndex = headers.indexOf('職員番号');
         const nameIndex = headers.indexOf('氏名');
+        const passIndex = headers.findIndex(h => h.includes('パスワード'));
         
         // ヘッダーが見つからない場合は固定インデックスで試行
         const staffId = staffIdIndex > -1 ? cols[staffIdIndex] : cols[1];
@@ -75,6 +78,7 @@ export default function AccountImportButton({ role, onSuccess }: Props) {
         const schoolId = headers.indexOf('校舎番号') > -1 ? cols[headers.indexOf('校舎番号')] : cols[0];
         const schoolName = headers.indexOf('所属校') > -1 ? cols[headers.indexOf('所属校')] : cols[2];
         const contractType = headers.indexOf('契約書種別') > -1 ? cols[headers.indexOf('契約書種別')] : cols[3];
+        const pass = passIndex > -1 ? cols[passIndex] : '';
 
         if (!staffId || !name) continue; // 必須項目なし
 
@@ -86,28 +90,42 @@ export default function AccountImportButton({ role, onSuccess }: Props) {
           school_id: schoolId,
           school_name: schoolName,
           contract_type: contractType,
-          initial_password: staffId, // 初期パスワードはIDと同じ
+          initial_password: pass || generateInitialPassword(),
           email: `${staffId}@sozogakuen.co.jp`, // ダミーメール（Auth用）
           updated_at: new Date().toISOString()
         };
 
       } else {
-        // 生徒用ロジック（既存想定: 氏名, ID, パスワード...）
-        // ※生徒用CSVの仕様に合わせて適宜調整してください。ここでは簡易実装です。
-        const name = cols[0];
-        const id = cols[1];
-        const pass = cols[2];
+        const nameIndex = headers.findIndex(h => h.includes('氏名') || h.includes('名前') || h.includes('生徒名'));
+        const idIndex = headers.findIndex(h => h.includes('ID') || h.includes('生涯番号') || h.includes('ログインID'));
+        const passIndex = headers.findIndex(h => h.includes('パスワード'));
+        const gradeIndex = headers.findIndex(h => h.includes('学年'));
+        const classroomIndex = headers.findIndex(h => h.includes('教室') || h.includes('クラス'));
+        const dayIndex = headers.findIndex(h => h.includes('曜日'));
+        const scienceIndex = headers.findIndex(h => h.includes('理科'));
+        const socialIndex = headers.findIndex(h => h.includes('社会'));
+
+        const name = nameIndex > -1 ? cols[nameIndex] : cols[0];
+        const id = idIndex > -1 ? cols[idIndex] : cols[1];
+        const pass = passIndex > -1 ? cols[passIndex] : cols[2];
         
         if (!name || !id) continue;
 
         lifetimeId = id;
         userData = {
           role: 'student',
+          student_name: name,
           name: name,
           lifetime_id: id,
-          initial_password: pass || id,
+          initial_password: pass || generateInitialPassword(),
           updated_at: new Date().toISOString()
         };
+
+        if (gradeIndex > -1 && cols[gradeIndex]) userData.grade = cols[gradeIndex];
+        if (classroomIndex > -1 && cols[classroomIndex]) userData.classroom = cols[classroomIndex];
+        if (dayIndex > -1 && cols[dayIndex]) userData.day_of_week = cols[dayIndex];
+        if (scienceIndex > -1 && cols[scienceIndex]) userData.subject_science = cols[scienceIndex];
+        if (socialIndex > -1 && cols[socialIndex]) userData.subject_social = cols[socialIndex];
       }
 
       if (userData && lifetimeId) {
@@ -157,7 +175,7 @@ export default function AccountImportButton({ role, onSuccess }: Props) {
   };
 
   return (
-    <div>
+    <div className="flex flex-col items-end gap-2">
       <input
         type="file"
         accept=".csv"
@@ -166,6 +184,26 @@ export default function AccountImportButton({ role, onSuccess }: Props) {
         onChange={handleFileUpload}
         disabled={loading}
       />
+
+      {role === 'student' ? (
+        <CsvSampleDownload
+          filename="生徒アカウント登録CSV例.csv"
+          headers={['氏名', 'ID', 'パスワード', '学年', '教室', '曜日', '理科', '社会']}
+          rows={[
+            ['山田 太郎', '100001', '', '中1', '本山', '月', '物理', '地理'],
+            ['佐藤 花子', '100002', '', '中2', '元町', '水', '化学', '歴史'],
+          ]}
+        />
+      ) : (
+        <CsvSampleDownload
+          filename="講師アカウント登録CSV例.csv"
+          headers={['校舎番号', '職員番号', '所属校', '契約書種別', '氏名']}
+          rows={[
+            ['001', 'T1001', '元町', '通常', '鈴木 一郎'],
+            ['002', 'T1002', '本山', '通常', '田中 花子'],
+          ]}
+        />
+      )}
       
       {status === 'idle' && (
         <button

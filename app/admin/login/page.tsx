@@ -1,12 +1,17 @@
 'use client';
 
 import { useState } from 'react';
-import { signInWithEmailAndPassword } from 'firebase/auth';
-import { auth, db } from '@/lib/firebase';
+import { User as FirebaseUser, signInWithEmailAndPassword } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
+import { auth, db } from '@/lib/firebase';
 import { Lock, Loader2, Wrench, ArrowLeft } from 'lucide-react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+
+const normalizeLoginInput = (value: string) =>
+  value.trim().normalize('NFKC').replace(/\s+/g, '').toLowerCase();
+
+const LOGIN_CREDENTIAL_ERROR_MESSAGE =
+  'ログインIDまたはパスワードが一致しません。\n案内書面に記載されているID・初期パスワードをもう一度確認してください。\n英数字は半角で入力し、余分なスペースが入っていないかも確認してください。';
 
 const ADMIN_ROLE_ALIASES = [
   'admin',
@@ -19,15 +24,13 @@ const ADMIN_ROLE_ALIASES = [
   'super_admin',
 ];
 
-const normalizeLoginInput = (value: string) =>
-  value.trim().normalize('NFKC').replace(/\s+/g, '').toLowerCase();
-
 const buildLoginCandidates = (value: string) => {
   const normalized = normalizeLoginInput(value);
   if (!normalized) return [];
 
-  const candidates = [normalized];
+  const candidates: string[] = [];
   if (normalized.includes('@')) {
+    candidates.push(normalized);
     const [localPart] = normalized.split('@');
     if (localPart) {
       candidates.push(`${localPart}@classbase.local`);
@@ -51,10 +54,16 @@ const adminFirstLogin = async (login: string, pass: string) => {
   if (!res.ok || data.ok === false) {
     if (data.error === 'not-registered') throw new Error('管理者登録データが見つかりません。');
     if (data.error === 'not-admin') throw new Error('このアカウントは管理者権限ではありません。');
-    if (data.error === 'wrong-password') throw new Error('ログインIDまたはパスワードが違います。');
+    if (data.error === 'wrong-password') throw new Error(LOGIN_CREDENTIAL_ERROR_MESSAGE);
     throw new Error(data.error || '管理者Auth復旧に失敗しました。');
   }
   return data as { ok: true; email: string };
+};
+
+const cacheProfileForAuthContext = (uid: string, profile: Record<string, any>) => {
+  try {
+    sessionStorage.setItem(`classbase_profile_cache:${uid}`, JSON.stringify({ profile, cachedAt: Date.now() }));
+  } catch {}
 };
 
 const repairProfile = async () => {
@@ -69,8 +78,25 @@ const repairProfile = async () => {
   return data;
 };
 
+const loadAdminProfile = async (firebaseUser: FirebaseUser) => {
+  let snap = await getDoc(doc(db, 'users', firebaseUser.uid));
+  if (!snap.exists()) {
+    await repairProfile();
+    snap = await getDoc(doc(db, 'users', firebaseUser.uid));
+  }
+  if (!snap.exists()) throw new Error('管理者プロフィールが見つかりません。');
+
+  const data = snap.data();
+  const role = String(data.role || '').toLowerCase();
+  if (role !== 'master' && !ADMIN_ROLE_ALIASES.includes(role)) {
+    throw new Error('このアカウントは管理者権限ではありません。');
+  }
+  const normalizedRole = role === 'master' ? 'master' : 'admin';
+  cacheProfileForAuthContext(firebaseUser.uid, { ...data, uid: firebaseUser.uid, role: normalizedRole });
+  return normalizedRole;
+};
+
 export default function AutoFixLoginPage() {
-  const router = useRouter();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -104,76 +130,20 @@ export default function AutoFixLoginPage() {
         const restored = await adminFirstLogin(email, password);
         userCredential = await signInWithEmailAndPassword(auth, restored.email, password);
       }
-      const user = userCredential.user;
-      setStatus(`✅ 2/3: 認証成功! データベースを確認中...`); // ★ ここで止まるならFirestoreへの接続に問題あり
-
-      // 2. Firestoreデータ確認
-      let userDoc;
-      try {
-        const userDocRef = doc(db, 'users', user.uid);
-        userDoc = await getDoc(userDocRef);
-      } catch (dbError: any) {
-        throw new Error(`Firestore読込エラー: ${dbError.message}`);
-      }
-      
-      if (!userDoc.exists()) {
-        setStatus('⚠️ データ欠落。既存プロフィールを自動修復中...');
-        try {
-          await repairProfile();
-          const repairedSnap = await getDoc(doc(db, 'users', user.uid));
-          if (repairedSnap.exists()) userDoc = repairedSnap;
-        } catch (repairError) {
-          console.warn('Generic profile repair failed:', repairError);
-        }
-      }
-
-      if (!userDoc.exists()) {
-        setStatus('⚠️ 管理者データ欠落。サーバーAPIで自動修復中...');
-        try {
-          const token = await user.getIdToken();
-          const res = await fetch('/api/admin/bootstrap-profile', {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          const data = await res.json().catch(() => ({}));
-          if (!res.ok || data.ok === false) {
-            const message = data.error === 'bootstrap-not-allowed'
-              ? '管理者プロフィールを自動作成できません。このメールアドレスは許可対象外です。'
-              : data.error || 'bootstrap failed';
-            throw new Error(message);
-          }
-        } catch (repairError: any) {
-          throw new Error(`Firestore自動修復エラー: ${repairError.message}`);
-        }
-        
-        setStatus('✨ 3/3: 修復完了！画面を移動します...');
-        router.push('/master');
-        // ★ ルーターがフリーズした場合の強制移動（フェイルセーフ）
-        setTimeout(() => { window.location.href = '/master'; }, 1500); 
-        return;
-      }
-
-      const userData = userDoc.data();
-      setStatus(`✅ 3/3: 権限確認OK (${userData?.role})。画面を移動します...`);
-
-      const role = String(userData?.role || '').toLowerCase();
-      if (role === 'master' || ADMIN_ROLE_ALIASES.includes(role)) {
-        router.push('/master');
-        // ★ ルーターがフリーズした場合の強制移動（フェイルセーフ）
-        setTimeout(() => { window.location.href = '/master'; }, 1500);
-      } else {
-        alert('ここは管理者専用です。生徒・講師画面へ移動します。');
-        router.push('/');
-        setTimeout(() => { window.location.href = '/'; }, 1500);
-      }
+      setStatus('✅ 2/3: 認証成功。権限を確認中...');
+      const role = await loadAdminProfile(userCredential.user);
+      setStatus('✅ 3/3: 権限確認OK。画面を移動します...');
+      window.location.replace('/master');
 
     } catch (error: any) {
       console.error('Login Error:', error);
       
       if (error.code === 'auth/invalid-credential' || error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password') {
-        setStatus('❌ ログインIDまたはパスワードが違います');
+        setStatus(`❌ ${LOGIN_CREDENTIAL_ERROR_MESSAGE}`);
       } else if (error.code === 'auth/user-disabled') {
         setStatus('❌ このアカウントは停止中です。管理者に確認してください');
+      } else if (error.code === 'auth/network-request-failed') {
+        setStatus('❌ 通信に失敗しました。通信環境を確認して、もう一度お試しください。');
       } else {
         setStatus(`❌ エラー: ${error.message || '不明なエラーが発生しました'}`);
       }
@@ -188,10 +158,10 @@ export default function AutoFixLoginPage() {
           <div className="bg-blue-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
             <Lock className="text-blue-600" size={32} />
           </div>
-          <h1 className="text-2xl font-bold text-gray-800">システム管理者</h1>
+          <h1 className="text-2xl font-bold text-gray-800">管理者ログイン</h1>
           <p className="text-xs text-blue-600 font-bold mt-2 bg-blue-50 py-1 px-2 rounded inline-block">
             <Wrench className="inline w-3 h-3 mr-1"/>
-            Master Login
+            校舎管理者・マスター管理者
           </p>
         </div>
 
@@ -237,7 +207,7 @@ export default function AutoFixLoginPage() {
 
         <div className="mt-6 text-center pt-6 border-t border-gray-100">
           <Link href="/" className="text-sm text-gray-400 hover:text-gray-600 flex items-center justify-center gap-1 font-bold">
-            <ArrowLeft size={16}/> 生徒・講師ログインへ戻る
+            <ArrowLeft size={16}/> ログイン画面へ戻る
           </Link>
         </div>
       </div>

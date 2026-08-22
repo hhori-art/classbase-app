@@ -1,38 +1,13 @@
 'use client';
 
-import { useState } from 'react';
-import { User, MapPin, Hash, KeyRound, Mail, RefreshCw } from 'lucide-react';
+import { User, MapPin, Hash, Mail } from 'lucide-react';
 
 interface StudentRowProps {
   student: any;
 }
 
 export default function StudentRow({ student }: StudentRowProps) {
-  const [displayPass, setDisplayPass] = useState(student.raw_password || '不明');
   const displayId = student.email ? student.email.split('@')[0] : '未設定';
-
-  const handleChangePassword = async () => {
-    const newPass = prompt(`「${student.student_name}」さんの新しいパスワードを入力してください:`, "class1234");
-    if (!newPass) return;
-    if (newPass.length < 6) return alert('パスワードは6文字以上で設定してください');
-
-    try {
-      const res = await fetch('/api/teacher/password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: student.id, newPassword: newPass }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        alert('パスワードを変更しました！');
-        setDisplayPass(newPass);
-      } else {
-        alert('変更失敗: ' + data.error);
-      }
-    } catch (e) {
-      alert('通信エラー');
-    }
-  };
 
   return (
     <div className="flex flex-col p-4 hover:bg-gray-50 border-b border-gray-100 transition-colors group">
@@ -78,19 +53,7 @@ export default function StudentRow({ student }: StudentRowProps) {
               <Mail size={12} className="text-gray-400"/>
               ID: <span className="select-all cursor-text text-blue-600 text-base">{displayId}</span>
             </span>
-            <span className="text-gray-300">|</span>
-            <span className="flex items-center gap-1 font-bold text-gray-700">
-              <KeyRound size={12} className="text-gray-400"/>
-              PASS: <span className="select-all cursor-text text-red-500 text-base">{displayPass}</span>
-            </span>
           </div>
-          <button 
-            onClick={handleChangePassword}
-            className="bg-gray-100 hover:bg-gray-200 text-gray-600 p-1.5 rounded border border-gray-300 transition-colors"
-            title="パスワードを変更"
-          >
-            <RefreshCw size={14} />
-          </button>
         </div>
       </div>
     </div>

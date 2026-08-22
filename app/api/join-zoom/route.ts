@@ -1,14 +1,21 @@
 import { NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
 import { adminDb } from '@/lib/firebase-admin';
+import { getServerUser, isAdminLike } from '@/lib/server-auth';
 
 export const runtime = 'nodejs';
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
   try {
+    const currentUser = await getServerUser(request);
     const { meetingId, userId } = await request.json();
 
     if (!meetingId || !userId) {
       return NextResponse.json({ success: false, error: 'Parameters missing' }, { status: 400 });
+    }
+
+    if (currentUser.uid !== userId && currentUser.role !== 'teacher' && !isAdminLike(currentUser)) {
+      return NextResponse.json({ success: false, error: 'forbidden' }, { status: 403 });
     }
 
     const db = adminDb();

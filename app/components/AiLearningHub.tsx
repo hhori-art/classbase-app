@@ -144,8 +144,6 @@ export default function AiLearningHub({ userId }: { userId: string }) {
           await setDoc(doc(db, 'users', userId), {
             last_ai_learning_date: today 
           }, { merge: true });
-          
-          console.log("AI学習完了を記録しました:", today);
         } catch (e) {
           console.error("ミッション記録エラー", e);
         }

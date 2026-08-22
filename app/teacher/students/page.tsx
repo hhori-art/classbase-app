@@ -1,8 +1,9 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { db } from '@/lib/firebase';
+import { auth, db } from '@/lib/firebase';
 import { collection, query, where, getDocs } from 'firebase/firestore';
+import { fetchTeacherStudents } from '@/lib/teacher-students-client';
 import { 
   Users, ArrowLeft, Download, Filter, X, Loader2, MapPin, 
   GraduationCap, BookOpen, Clock, Trophy, 
@@ -37,9 +38,7 @@ export default function TeacherStudentsPage() {
       setLoading(true);
       try {
         // A. 生徒データ取得
-        const usersQ = query(collection(db, 'users'), where('role', '==', 'student'));
-        const usersSnap = await getDocs(usersQ);
-        const list = usersSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        const list = await fetchTeacherStudents();
         // 学年順でソート
         list.sort((a: any, b: any) => (a.grade || '').localeCompare(b.grade || ''));
         setStudents(list);
@@ -124,9 +123,12 @@ export default function TeacherStudentsPage() {
     setMonitorLoading(true);
     try {
       // Zoom APIから参加者リストを取得
+      const currentUser = auth.currentUser;
+      if (!currentUser) throw new Error('not-authenticated');
+      const token = await currentUser.getIdToken();
       const res = await fetch('/api/get-zoom-live-status', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ meetingId: cleanId })
       });
       const data = await res.json();

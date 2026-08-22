@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { db } from '@/lib/firebase';
+import { auth } from '@/lib/firebase';
 import { collection, query, orderBy, limit, getDocs, where } from 'firebase/firestore';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer,
@@ -15,6 +16,7 @@ import Link from 'next/link';
 export default function StatisticsPage() {
   const [dailyStats, setDailyStats] = useState<any[]>([]);
   const [allStudents, setAllStudents] = useState<any[]>([]);
+  const [betaAnalytics, setBetaAnalytics] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   
   // フィルタ・検索用
@@ -59,6 +61,15 @@ export default function StatisticsPage() {
 
         studentsData.sort((a, b) => b.login_count - a.login_count);
         setAllStudents(studentsData);
+
+        const token = await auth.currentUser?.getIdToken();
+        if (token) {
+          const betaRes = await fetch('/api/admin/beta-analytics?days=30', {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          const betaData = await betaRes.json().catch(() => ({}));
+          if (betaRes.ok && betaData.ok !== false) setBetaAnalytics(betaData);
+        }
 
       } catch (error) {
         console.error(error);
@@ -118,6 +129,28 @@ export default function StatisticsPage() {
     link.click();
   };
 
+  const handleDownloadBetaCSV = () => {
+    if (!betaAnalytics) return;
+    const header = '日付,アクティブユーザー,生徒,講師,PV,クリック,エラー,平均滞在分,総イベント\n';
+    const rows = betaAnalytics.daily.map((row: any) => [
+      row.date,
+      row.active_users,
+      row.student_users,
+      row.teacher_users,
+      row.page_views,
+      row.clicks,
+      row.errors,
+      row.avg_minutes,
+      row.total_events,
+    ].join(',')).join('\n');
+    const blob = new Blob(['\uFEFF' + header + rows], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'beta_test_effectiveness.csv';
+    link.click();
+    URL.revokeObjectURL(link.href);
+  };
+
   const COLORS = ['#6366F1', '#EC4899', '#10B981', '#F59E0B', '#8B5CF6'];
 
   return (
@@ -173,6 +206,99 @@ export default function StatisticsPage() {
             </div>
           </div>
         </div>
+
+        {/* βテスト効果検証 */}
+        {betaAnalytics && (
+          <div id="beta-analytics" className="mb-8 scroll-mt-6 rounded-[32px] border border-violet-100 bg-white p-6 shadow-sm">
+            <div className="mb-6 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+              <div>
+                <p className="text-xs font-black uppercase tracking-wider text-violet-500">Beta Test Effectiveness</p>
+                <h2 className="mt-1 text-xl font-black text-gray-800">テスト利用の効果検証</h2>
+                <p className="mt-2 text-sm font-bold text-gray-400">利用率、機能別利用、学習行動、録画視聴、アンケート、エラーを30日単位で集計します。</p>
+              </div>
+              <button onClick={handleDownloadBetaCSV} className="w-fit rounded-2xl bg-violet-600 px-4 py-3 text-xs font-black text-white shadow-sm transition-colors hover:bg-violet-700">
+                β集計CSV
+              </button>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              {[
+                { label: '有用性スコア', value: `${betaAnalytics.kpis.evidence_score}`, unit: '/100', color: 'text-violet-700 bg-violet-50' },
+                { label: '生徒アクティブ率', value: `${betaAnalytics.kpis.activation_rate}`, unit: '%', color: 'text-indigo-700 bg-indigo-50' },
+                { label: '平均滞在時間', value: `${betaAnalytics.kpis.avg_minutes}`, unit: '分', color: 'text-emerald-700 bg-emerald-50' },
+                { label: 'エラー件数', value: `${betaAnalytics.kpis.errors}`, unit: '件', color: 'text-rose-700 bg-rose-50' },
+                { label: '録画視聴', value: `${betaAnalytics.kpis.recording_views}`, unit: '回', color: 'text-red-700 bg-red-50' },
+                { label: 'クエスト実施', value: `${betaAnalytics.kpis.quest_count}`, unit: '回', color: 'text-blue-700 bg-blue-50' },
+                { label: 'クエスト合格率', value: `${betaAnalytics.kpis.quest_pass_rate}`, unit: '%', color: 'text-sky-700 bg-sky-50' },
+                { label: 'アンケート回答', value: `${betaAnalytics.kpis.survey_count}`, unit: '件', color: 'text-amber-700 bg-amber-50' },
+              ].map(item => (
+                <div key={item.label} className={`rounded-3xl p-5 ${item.color}`}>
+                  <p className="text-[10px] font-black uppercase tracking-wider opacity-70">{item.label}</p>
+                  <p className="mt-2 text-3xl font-black">{item.value}<span className="ml-1 text-sm font-bold opacity-60">{item.unit}</span></p>
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-6 grid gap-6 xl:grid-cols-3">
+              <div className="rounded-3xl border border-gray-100 bg-gray-50/70 p-5 xl:col-span-2">
+                <h3 className="mb-4 text-sm font-black text-gray-700">日別のテスト利用推移</h3>
+                <div className="h-[260px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={betaAnalytics.daily}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E5E7EB" />
+                      <XAxis dataKey="date" tickFormatter={(value) => String(value).slice(5)} tick={{ fontSize: 11, fill: '#94A3B8', fontWeight: 'bold' }} axisLine={false} tickLine={false} />
+                      <YAxis tick={{ fontSize: 11, fill: '#94A3B8' }} axisLine={false} tickLine={false} />
+                      <RechartsTooltip contentStyle={{ borderRadius: 16, border: 'none', boxShadow: '0 10px 20px rgba(15,23,42,.12)' }} />
+                      <Bar name="生徒利用" dataKey="student_users" fill="#8B5CF6" radius={[6, 6, 0, 0]} />
+                      <Bar name="クリック" dataKey="clicks" fill="#A7F3D0" radius={[6, 6, 0, 0]} />
+                      <Bar name="エラー" dataKey="errors" fill="#FDA4AF" radius={[6, 6, 0, 0]} />
+                      <Legend />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+
+              <div className="rounded-3xl border border-gray-100 bg-gray-50/70 p-5">
+                <h3 className="mb-4 text-sm font-black text-gray-700">よく使われた機能</h3>
+                <div className="space-y-3">
+                  {betaAnalytics.top_features.length === 0 ? (
+                    <p className="rounded-2xl bg-white p-5 text-center text-xs font-bold text-gray-400">データなし</p>
+                  ) : betaAnalytics.top_features.slice(0, 8).map((item: any) => (
+                    <div key={item.name} className="rounded-2xl bg-white p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="truncate text-xs font-black text-gray-700">{item.name}</span>
+                        <span className="text-xs font-black text-violet-600">{item.count}</span>
+                      </div>
+                      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-gray-100">
+                        <div className="h-full rounded-full bg-violet-500" style={{ width: `${Math.min(100, item.count / Math.max(1, betaAnalytics.top_features[0]?.count || 1) * 100)}%` }} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-6 rounded-3xl border border-amber-100 bg-amber-50 p-5">
+              <h3 className="mb-3 text-sm font-black text-amber-800">フォローが必要な可能性がある生徒</h3>
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {betaAnalytics.follow_up.length === 0 ? (
+                  <p className="rounded-2xl bg-white p-5 text-center text-xs font-bold text-amber-500 md:col-span-2 xl:col-span-3">現在、優先フォロー候補はありません</p>
+                ) : betaAnalytics.follow_up.slice(0, 9).map((item: any) => (
+                  <div key={item.uid} className="rounded-2xl bg-white p-4 shadow-sm">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-black text-gray-800">{item.name}</p>
+                        <p className="mt-1 text-[10px] font-bold text-gray-400">{item.grade || '学年未設定'} / 最終: {item.last_path || '-'}</p>
+                      </div>
+                      <span className="rounded-full bg-amber-100 px-2 py-1 text-[10px] font-black text-amber-700">{item.days_since}日前</span>
+                    </div>
+                    <p className="mt-2 text-[11px] font-bold text-gray-500">イベント数: {item.event_count}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* グラフエリア */}
         <div className="grid lg:grid-cols-3 gap-8 mb-8">

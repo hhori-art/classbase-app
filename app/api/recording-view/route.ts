@@ -61,6 +61,11 @@ export async function POST(request: NextRequest) {
         event_id: eventId,
         metadata: { recording_id: recordingId },
       });
+      await db.collection('users').doc(user.uid).set({
+        last_recording_view_date: new Date().toISOString().split('T')[0],
+        earned_badges: FieldValue.arrayUnion('badge_book'),
+        updated_at: FieldValue.serverTimestamp(),
+      }, { merge: true });
       rewarded = true;
     }
 
@@ -69,4 +74,3 @@ export async function POST(request: NextRequest) {
     return jsonError(error);
   }
 }
-

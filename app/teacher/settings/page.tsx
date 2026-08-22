@@ -10,6 +10,13 @@ import {
   Smartphone, Download, Share, PlusSquare, HelpCircle, Briefcase, Check
 } from 'lucide-react';
 import LineLinkPanel from '@/app/components/LineLinkPanel';
+import RecoveryEmailSettings from '@/app/components/RecoveryEmailSettings';
+
+const NOTIFICATION_ITEMS = [
+  { key: 'notification_shift', label: 'シフト提出のリマインド' },
+  { key: 'notification_student', label: '生徒からの連絡' },
+  { key: 'notification_admin', label: '運営からのお知らせ' },
+] as const;
 
 export default function TeacherSettingsPage() {
   const { user, profile, logout } = useAuth();
@@ -66,7 +73,7 @@ export default function TeacherSettingsPage() {
     return () => window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
   }, [profile, user]);
 
-  const handleChange = (key: string, value: any) => {
+  const handleChange = (key: keyof typeof settings, value: boolean) => {
     setSettings(prev => ({ ...prev, [key]: value }));
     setHasChanges(true);
   };
@@ -84,6 +91,14 @@ export default function TeacherSettingsPage() {
       const userRef = doc(db, 'users', user.uid);
       await updateDoc(userRef, { 
         settings: settings,
+        notification_preferences: {
+          ...(profile?.notification_preferences || {}),
+          in_app: true,
+          line: profile?.notification_preferences?.line !== false,
+          shift: settings.notification_shift,
+          student_contact: settings.notification_student,
+          announcements: settings.notification_admin,
+        },
         updated_at: new Date().toISOString()
       });
       
@@ -116,7 +131,7 @@ export default function TeacherSettingsPage() {
 
   const handleChangePassword = async () => {
     if (!newPassword || newPassword !== confirmPassword) return showMessage('error', 'パスワード不一致');
-    if (newPassword.length < 6) return showMessage('error', 'パスワードは6文字以上で入力してください');
+    if (newPassword.length < 10) return showMessage('error', 'パスワードは10文字以上で入力してください');
     if (!user) return showMessage('error', 'ログイン情報を確認できません');
     setLoading(true);
     try {
@@ -285,20 +300,13 @@ export default function TeacherSettingsPage() {
             <Bell size={18}/> アプリ内通知設定
           </h2>
           <div className="space-y-4">
-            {[
-              { key: 'notification_shift', label: 'シフト提出のリマインド' },
-              { key: 'notification_student', label: '生徒からの連絡' },
-              { key: 'notification_admin', label: '運営からのお知らせ' },
-            ].map((item) => (
+            {NOTIFICATION_ITEMS.map((item) => (
               <div key={item.key} className="flex items-center justify-between">
                 <span className="font-bold text-gray-700 text-sm">{item.label}</span>
                 <button 
-                  // @ts-ignore
                   onClick={() => handleChange(item.key, !settings[item.key])}
-                  // @ts-ignore
                   className={`w-11 h-6 rounded-full p-1 transition-colors duration-300 flex items-center ${settings[item.key] ? 'bg-indigo-500' : 'bg-gray-200'}`}
                 >
-                  {/* @ts-ignore */}
                   <div className={`w-4 h-4 bg-white rounded-full shadow-sm transition-transform duration-300 ${settings[item.key] ? 'translate-x-5' : 'translate-x-0'}`} />
                 </button>
               </div>
@@ -335,6 +343,13 @@ export default function TeacherSettingsPage() {
               </div>
             </div>
           )}
+          <div className="mt-5 border-t border-gray-100 pt-5">
+            <RecoveryEmailSettings
+              currentEmail={profile?.recovery_email}
+              verified={Boolean(profile?.recovery_email_verified_at)}
+              compact
+            />
+          </div>
         </section>
 
         <div className="pt-4 pb-10">

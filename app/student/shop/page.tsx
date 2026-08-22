@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
 import { collection, query, orderBy, getDocs, doc, getDoc } from 'firebase/firestore';
-import { ArrowLeft, ShoppingBag, Coins, Lock, Loader2, CheckCircle } from 'lucide-react';
+import { ArrowLeft, ShoppingBag, Coins, Lock, Loader2, AlertTriangle } from 'lucide-react';
 // import Image from 'next/image'; // ★削除
 import Link from 'next/link';
 
@@ -13,12 +13,18 @@ export default function StudentShopPage() {
   const [rewards, setRewards] = useState<any[]>([]);
   const [userCoins, setUserCoins] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [shopEnabled, setShopEnabled] = useState(true);
   const [processingId, setProcessingId] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchData = async () => {
       if (!user) return;
       try {
+        const visibilitySnap = await getDoc(doc(db, 'settings', 'portal_visibility')).catch(() => null);
+        const enabled = visibilitySnap?.exists() ? visibilitySnap.data().student?.shop !== false : true;
+        setShopEnabled(enabled);
+        if (!enabled) return;
+
         // 1. 景品リスト取得
         const q = query(collection(db, 'rewards'), orderBy('required_coins', 'asc'));
         const rewardSnap = await getDocs(q);
@@ -77,6 +83,19 @@ export default function StudentShopPage() {
   };
 
   if (loading) return <div className="min-h-screen flex items-center justify-center bg-yellow-50"><Loader2 className="animate-spin text-yellow-500" size={40}/></div>;
+
+  if (!shopEnabled) {
+    return (
+      <div className="min-h-screen bg-slate-50 p-6 font-sans flex items-center justify-center">
+        <div className="max-w-sm rounded-[32px] bg-white p-8 text-center shadow-sm">
+          <AlertTriangle className="mx-auto mb-4 text-slate-400" size={36} />
+          <h1 className="text-xl font-black text-slate-800">景品交換は現在利用できません</h1>
+          <p className="mt-2 text-sm font-bold text-slate-400">管理者設定で非表示になっています。</p>
+          <Link href="/student" className="mt-6 inline-flex rounded-2xl bg-slate-900 px-5 py-3 text-sm font-black text-white">ホームへ戻る</Link>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-yellow-50/50 p-4 pb-24 font-sans sm:p-8">

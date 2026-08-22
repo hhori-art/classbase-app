@@ -1,11 +1,12 @@
 import './globals.css';
 import { AuthProvider } from '@/app/context/AuthContext';
 import { SettingsProvider } from '@/app/context/SettingsContext';
+import SoundEffectsBootstrap from '@/app/components/SoundEffectsBootstrap';
+import BetaAnalyticsTracker from '@/app/components/BetaAnalyticsTracker';
 
 export const metadata = {
-  // ★ここを変更
-  title: '理社講座アプリ', 
-  description: '生徒管理・学習支援システム',
+  title: '創造学園アプリ',
+  description: '創造学園の講座・学習・勤怠をまとめた共通アプリ',
   manifest: '/manifest.json',
   icons: {
     icon: '/icon.png',
@@ -23,6 +24,8 @@ export default function RootLayout({
       <body className="bg-gray-50 text-gray-900 font-sans">
         <AuthProvider>
           <SettingsProvider>
+            <SoundEffectsBootstrap />
+            <BetaAnalyticsTracker />
             {children}
           </SettingsProvider>
         </AuthProvider>

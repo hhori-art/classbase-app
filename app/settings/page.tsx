@@ -50,7 +50,7 @@ export default function StudentSettingsPage() {
 
   const handleSubmit = async () => {
     if (!form.reason) return alert('変更理由を入力してください');
-    if (!confirm('変更申請を送信しますか？')) return;
+    if (!confirm('受講設定の変更を送信しますか？')) return;
     
     setLoading(true);
 
@@ -74,7 +74,7 @@ export default function StudentSettingsPage() {
         created_at: new Date().toISOString()
       });
 
-      alert('変更申請を送信しました。\n先生の承認をお待ちください。');
+      alert('受講設定の変更を送信しました。');
       // 生徒用ダッシュボードへ戻る (パスは環境に合わせて調整してください。通常は /student)
       router.push('/student'); 
 
@@ -95,8 +95,8 @@ export default function StudentSettingsPage() {
         <Link href="/student" className="flex items-center text-gray-500 mb-6 hover:text-gray-800 transition-colors">
           <ArrowLeft size={18} /> ホームに戻る
         </Link>
-        <h1 className="text-2xl font-bold text-gray-800 mb-2">受講クラス変更申請</h1>
-        <p className="text-sm text-gray-500 mb-6">曜日や科目を変更したい場合、ここから申請してください。</p>
+        <h1 className="text-2xl font-bold text-gray-800 mb-2">受講講座・曜日時間の変更</h1>
+        <p className="text-sm text-gray-500 mb-6">曜日・時間・科目を変更したい場合、ここから送信してください。</p>
 
         <div className="bg-white p-6 rounded-2xl shadow-sm space-y-4 border border-gray-100">
           <div>
@@ -133,7 +133,7 @@ export default function StudentSettingsPage() {
             className="w-full bg-blue-600 text-white py-3 rounded-lg font-bold flex items-center justify-center gap-2 hover:bg-blue-700 transition-all shadow-md shadow-blue-200 active:scale-95 disabled:opacity-50"
           >
             {loading ? <Loader2 className="animate-spin" size={18} /> : <Send size={18} />} 
-            申請を送信
+            変更を送信
           </button>
         </div>
       </div>

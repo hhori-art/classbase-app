@@ -1,10 +1,10 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { 
   Calendar as CalendarIcon, MonitorPlay, MapPin, User, Star,
   ChevronLeft, ChevronRight, LayoutList, Layout, Maximize2, Minimize2,
-  Briefcase, Clock, KeyRound, ExternalLink,
+  Briefcase, Clock, KeyRound, ExternalLink, Smartphone,
   Video, Loader2, Zap,
   LogOut, Sparkles, Megaphone
 } from 'lucide-react';
@@ -15,6 +15,8 @@ import ShiftMonitorButton from '@/app/components/ShiftMonitorButton';
 import NextClassWidget from '@/app/components/NextClassWidget';
 import FutureClassesModal from '@/app/components/FutureClassesModal'; // ★カレンダーモーダル
 import CalendarWidget from '@/app/components/CalendarWidget';
+import { usePortalVisibility } from '@/app/hooks/usePortalVisibility';
+import AppSwitcherLink from '@/app/components/AppSwitcherLink';
 
 // --- 型定義 ---
 type ShiftAssignment = {
@@ -28,6 +30,7 @@ type ShiftAssignment = {
   target_detail_subject: string | null;
   target_place?: string | null;
   target_meeting_id?: string | null; 
+  target_password?: string | null;
   target_signin_address?: string | null;
   unit: string | null;
   note: string;
@@ -62,6 +65,19 @@ type Props = {
   onExpandChange: (expanded: boolean) => void;
 };
 
+const normalizeMeetingId = (value?: string | null) =>
+  String(value || '')
+    .normalize('NFKC')
+    .replace(/[^\d]/g, '');
+
+const buildMeetingJoinUrl = (meetingId?: string | null, passcode?: string | null) => {
+  const cleanMeetingId = normalizeMeetingId(meetingId);
+  if (!cleanMeetingId) return null;
+  const url = new URL(`https://zoom.us/j/${cleanMeetingId}`);
+  if (passcode) url.searchParams.set('pwd', passcode);
+  return url.toString();
+};
+
 const EmptyState = ({ text }: { text: string }) => (
   <div className="h-full min-h-[60px] border border-dashed border-slate-200 rounded-xl flex items-center justify-center bg-slate-50/50">
     <span className="text-[10px] font-bold text-slate-400 flex items-center gap-1">
@@ -73,12 +89,13 @@ const EmptyState = ({ text }: { text: string }) => (
 // --- クラスカード ---
 const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { info: ClassGroup, color: 'emerald' | 'orange', currentUserProfile: any, isExpanded: boolean }) => {
   const [loading, setLoading] = useState(false);
+  const { user } = useAuth();
   
   const currentUserId = currentUserProfile?.id || currentUserProfile?.uid || '';
   const isMyClass = (info.main?.user_id === currentUserId) || info.subs.some(s => s.user_id === currentUserId);
 
   const loginEmail = info.signin_address?.trim();
-  const hasHostPermission = !!loginEmail && loginEmail.length > 0;
+  const hasHostPermission = !!loginEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(loginEmail);
   
   const displayLoginId = loginEmail ? loginEmail.split('@')[0] : '';
 
@@ -100,12 +117,15 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
   };
 
   const myName = currentUserProfile?.student_name || currentUserProfile?.name || '講師';
-  const confno = info.meeting_id?.replace(/\s/g, '') || (info.url ? info.url.split('/').pop()?.split('?')[0] : '');
+  const confno = normalizeMeetingId(info.meeting_id) || normalizeMeetingId(info.url ? info.url.split('/').pop()?.split('?')[0] : '');
 
-  const launchWebUrl = (url: string) => {
+  const launchWebUrl = (url: string, targetWindow?: Window | null) => {
+    if (targetWindow && !targetWindow.closed) {
+      targetWindow.location.href = url;
+      return;
+    }
     window.open(url, '_blank');
   };
-
   const handleEnterZoom = async (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -116,28 +136,35 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
     }
 
     if (hasHostPermission) {
+      const popup = window.open('', '_blank');
+      if (popup) {
+        popup.document.write('<p style="font-family: sans-serif; padding: 24px;">Zoomホスト開始を準備しています...</p>');
+      }
       setLoading(true);
       try {
-        console.log(`🚀 ホスト開始試行: Email=${loginEmail}`);
+        if (!user) throw new Error('not-authenticated');
+        const token = await user.getIdToken();
         const res = await fetch('/api/get-zoom-zak', { 
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: loginEmail }) 
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ email: loginEmail, meetingId: confno, shiftId: info.main?.id || info.id, name: myName })
         });
         const data = await res.json();
         
-        if (data.success && data.zak && data.pmi) {
-          const targetUrl = `https://zoom.us/s/${data.pmi}?zak=${data.zak}`;
-          console.log("✅ Webランチャー起動:", targetUrl);
-          launchWebUrl(targetUrl);
+        if (data.success && (data.zak || data.start_url)) {
+          const webUrl = data.start_url || `https://zoom.us/s/${confno}?zak=${encodeURIComponent(data.zak)}&uname=${encodeURIComponent(myName)}`;
+          const appUrl = data.app_start_url || (data.zak ? `zoommtg://zoom.us/start?confno=${confno}&zak=${encodeURIComponent(data.zak)}` : '');
+          launchWebUrl(webUrl || appUrl, popup);
         } else {
+          if (popup && !popup.closed) popup.close();
           console.error("API Error:", data);
-          alert(`ホスト権限の取得に失敗しました。\n\n理由: ${data.error}`);
+          alert(`ホスト権限の取得に失敗しました。\n\n理由: ${data.error}${data.detail ? `\n詳細: ${data.detail}` : ''}`);
           if(confirm("通常参加で開きますか？")) {
              launchWebUrl(info.url || `https://zoom.us/j/${confno}`);
           }
         }
       } catch (err) {
+        if (popup && !popup.closed) popup.close();
         console.error(err);
         alert('通信エラーが発生しました。');
       } finally {
@@ -152,7 +179,6 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
           targetUrl = `https://zoom.us/j/${confno}?pwd=${pwd || ''}&uname=${encodeURIComponent(myName)}`;
         } catch (e) {}
       }
-      console.log("🚶 通常参加:", targetUrl);
       launchWebUrl(targetUrl);
     }
   };
@@ -262,7 +288,7 @@ const DailyShiftViewer = ({ assignments, currentUserProfile, isExpanded, date }:
       return { 
         id: main.id, main, subs: relatedSubs, subject: main.target_subject, 
         grade: main.target_grade, unit: main.unit, place: main.target_detail_subject, 
-        studio: main.target_place || null, url: main.target_meeting_id ? `https://zoom.us/j/${main.target_meeting_id.replace(/\s/g, '')}` : null, 
+        studio: main.target_place || null, url: buildMeetingJoinUrl(main.target_meeting_id, main.target_password),
         signin_address: main.target_signin_address || null, meeting_id: main.target_meeting_id || null, start_url: main.start_url || null
       };
     });
@@ -322,6 +348,7 @@ const DailyShiftViewer = ({ assignments, currentUserProfile, isExpanded, date }:
 // --- メインコンポーネント ---
 export default function TeacherDashboard({ profile, allAssignments, pendingCount, currentDate, onDateChange, viewMode, onViewModeChange, isExpanded, onExpandChange }: Props) {
   const { logout } = useAuth();
+  const { visibility } = usePortalVisibility('teacher');
   const days = ['日', '月', '火', '水', '木', '金', '土'];
   const dayOfWeek = days[new Date(currentDate).getDay()];
   const teacherName = profile?.student_name || profile?.name || '講師';
@@ -343,9 +370,14 @@ export default function TeacherDashboard({ profile, allAssignments, pendingCount
           <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
             <div className="flex items-center gap-2"><div className="bg-slate-900 p-2 rounded-xl text-white shadow-lg shadow-indigo-500/20"><Briefcase size={20} /></div><span className="font-black text-lg tracking-tight text-slate-800 hidden md:inline">講師ポータル</span></div>
             <div className="flex items-center gap-4">
-              <Link href="/teacher/attendance" className="p-2 bg-indigo-50 hover:bg-indigo-100 rounded-full text-indigo-600 transition-colors shadow-sm" title="勤怠打刻">
-                <Clock size={20} />
+              <Link href="/teacher/student-preview" className="hidden items-center gap-2 rounded-full bg-emerald-50 px-3 py-2 text-xs font-black text-emerald-700 shadow-sm transition-colors hover:bg-emerald-100 sm:flex" title="生徒画面プレビュー">
+                <Smartphone size={16} /> 生徒画面
               </Link>
+              {visibility.attendance !== false && (
+                <Link href="/teacher/attendance" className="p-2 bg-indigo-50 hover:bg-indigo-100 rounded-full text-indigo-600 transition-colors shadow-sm" title="勤怠打刻">
+                  <Clock size={20} />
+                </Link>
+              )}
 
               <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 bg-slate-50 rounded-full border border-slate-100">
                 <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></div>
@@ -387,7 +419,12 @@ export default function TeacherDashboard({ profile, allAssignments, pendingCount
         
         {/* ホーム上部: 挨拶と日付操作 */}
         {!isExpanded && (
-          <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 flex flex-col md:flex-row items-center justify-between gap-4">
+          <div className="flex justify-end">
+            <AppSwitcherLink className="w-full md:w-auto" />
+          </div>
+        )}
+        {!isExpanded && (
+          <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 flex flex-col lg:flex-row items-center justify-between gap-4">
             <div className="w-full md:w-auto text-center md:text-left">
                <div className="flex items-center justify-center md:justify-start gap-2 text-indigo-600 mb-1">
                  <Sparkles size={14} className="animate-pulse"/>
@@ -399,12 +436,15 @@ export default function TeacherDashboard({ profile, allAssignments, pendingCount
             </div>
 
             <div className="grid w-full gap-2 md:w-auto md:grid-cols-2">
-              <Link href="/teacher/attendance" className="flex items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-3 text-sm font-black text-white shadow-sm hover:bg-slate-800">
+              <Link href="/teacher/student-preview" className="flex items-center justify-center gap-2 rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm font-black text-emerald-700 hover:bg-emerald-100 md:col-span-2">
+                <Smartphone size={18} /> 生徒画面をテスト
+              </Link>
+              {visibility.attendance !== false && <Link href="/teacher/attendance" className="flex items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-3 text-sm font-black text-white shadow-sm hover:bg-slate-800">
                 <Clock size={18} /> 打刻する
-              </Link>
-              <Link href="/teacher/substitutions" className="flex items-center justify-center gap-2 rounded-xl border border-rose-100 bg-rose-50 px-4 py-3 text-sm font-black text-rose-700 hover:bg-rose-100">
+              </Link>}
+              {visibility.substitutions !== false && <Link href="/teacher/substitutions" className="flex items-center justify-center gap-2 rounded-xl border border-rose-100 bg-rose-50 px-4 py-3 text-sm font-black text-rose-700 hover:bg-rose-100">
                 <Megaphone size={18} /> 代行掲示板
-              </Link>
+              </Link>}
             </div>
 
             <div className="flex items-center bg-slate-50 rounded-xl p-1.5 border border-slate-100 shadow-inner w-full md:w-auto justify-between md:justify-start">
@@ -426,19 +466,19 @@ export default function TeacherDashboard({ profile, allAssignments, pendingCount
           </div>
         )}
         
-        {!isExpanded && <NewsWidget role="teacher" />}
-        {!isExpanded && <NextClassWidget profile={profile} />}
-        {!isExpanded && (
+        {!isExpanded && visibility.shifts !== false && <NextClassWidget profile={profile} />}
+        {!isExpanded && visibility.news !== false && <NewsWidget role="teacher" />}
+        {!isExpanded && visibility.calendar !== false && (
           <section className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="mb-3 flex items-center gap-2">
               <CalendarIcon className="text-indigo-600" size={18} />
               <h3 className="text-sm font-black text-slate-800">年間予定カレンダー</h3>
             </div>
-            <CalendarWidget role="teacher" />
+            <CalendarWidget role="teacher" profile={profile} />
           </section>
         )}
 
-        <div className={`space-y-4 ${isExpanded ? 'h-full flex flex-col' : ''}`}>
+        {visibility.shifts !== false ? <div className={`space-y-4 ${isExpanded ? 'h-full flex flex-col' : ''}`}>
           <div className="flex items-center justify-between px-1 shrink-0">
             <div className="flex items-center gap-3">
               {/* ★修正: カレンダーアイコンをクリック可能に */}
@@ -483,7 +523,11 @@ export default function TeacherDashboard({ profile, allAssignments, pendingCount
             })}
             {allAssignments.length === 0 && (<div className="text-center py-10 bg-white rounded-xl border border-dashed border-slate-200"><p className="text-xs font-bold text-slate-400">シフトデータがありません</p></div>)}
           </div>
-        </div>
+        </div> : (
+          <div className="rounded-3xl border border-dashed border-slate-200 bg-white p-8 text-center text-sm font-bold text-slate-400">
+            講師配置表示は現在OFFです
+          </div>
+        )}
       </div>
 
       {/* ★追加: カレンダーモーダル */}

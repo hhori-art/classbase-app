@@ -4,8 +4,41 @@ import { useState, useEffect } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
 import { collection, query, orderBy, getDocs, where, doc, getDoc } from 'firebase/firestore';
-import { ArrowLeft, BookOpen, Clock, CheckCircle, ChevronRight, AlertCircle, Loader2, Calendar, FileText } from 'lucide-react';
+import { ArrowLeft, BookOpen, Clock, CheckCircle, ChevronRight, AlertCircle, Loader2, Calendar, FileText, ExternalLink, Smartphone, Monitor } from 'lucide-react';
 import Link from 'next/link';
+
+const MONOXER_WEB_URL = process.env.NEXT_PUBLIC_MONOXER_WEB_URL || 'https://app.monoxer.com/';
+const MONOXER_APP_URL = process.env.NEXT_PUBLIC_MONOXER_APP_URL || 'monoxer://';
+const MONOXER_APP_URLS = (process.env.NEXT_PUBLIC_MONOXER_APP_URLS || MONOXER_APP_URL)
+  .split(',')
+  .map(url => url.trim())
+  .filter(Boolean);
+
+const isMobileOrTablet = () => {
+  if (typeof navigator === 'undefined') return false;
+  return /iPhone|iPad|iPod|Android|Mobile|Tablet|Line|CriOS|FxiOS|EdgiOS/i.test(navigator.userAgent);
+};
+
+const openAppThenFallback = (appUrls: string[], webUrl: string) => {
+  let completed = false;
+  let timer: number;
+  const cleanup = () => {
+    completed = true;
+    window.clearTimeout(timer);
+    window.removeEventListener('pagehide', cleanup);
+    document.removeEventListener('visibilitychange', handleVisibilityChange);
+  };
+  const handleVisibilityChange = () => {
+    if (document.hidden) cleanup();
+  };
+  timer = window.setTimeout(() => {
+    if (!completed && !document.hidden) window.location.href = webUrl;
+  }, 1600);
+
+  window.addEventListener('pagehide', cleanup, { once: true });
+  document.addEventListener('visibilitychange', handleVisibilityChange);
+  window.location.href = appUrls[0] || webUrl;
+};
 
 export default function StudentHomeworkListPage() {
   const { user } = useAuth();
@@ -15,6 +48,14 @@ export default function StudentHomeworkListPage() {
   
   // 自分の提出状況 {課題ID: true/false}
   const [submissionStatus, setSubmissionStatus] = useState<{[key:string]: boolean}>({});
+
+  const openMonoxer = () => {
+    if (isMobileOrTablet()) {
+      openAppThenFallback(MONOXER_APP_URLS, MONOXER_WEB_URL);
+      return;
+    }
+    window.open(MONOXER_WEB_URL, '_blank', 'noopener,noreferrer');
+  };
 
   useEffect(() => {
     const fetchData = async () => {
@@ -97,9 +138,42 @@ export default function StudentHomeworkListPage() {
               <span className="bg-orange-100 text-orange-500 p-2 rounded-xl">
                 <BookOpen size={24} strokeWidth={3} />
               </span>
-              宿題クエスト
+              Monoxer宿題
             </h1>
             <p className="text-xs font-bold text-gray-400 mt-1 pl-1">
+              メインの宿題はMonoxerで取り組みます
+            </p>
+          </div>
+        </div>
+
+        <section className="mb-6 overflow-hidden rounded-[32px] bg-slate-950 text-white shadow-xl">
+          <div className="p-6">
+            <div className="flex items-start gap-4">
+              <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-white/10">
+                {typeof window !== 'undefined' && isMobileOrTablet() ? <Smartphone size={28} /> : <Monitor size={28} />}
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-black uppercase tracking-[0.2em] text-orange-200">Main Homework</p>
+                <h2 className="mt-1 text-2xl font-black">Monoxerで宿題を進める</h2>
+                <p className="mt-2 text-sm font-bold leading-relaxed text-slate-300">
+                  スマホ・タブレットではMonoxerアプリ、PCではブラウザ版を開きます。
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={openMonoxer}
+              className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-white px-5 py-4 text-sm font-black text-slate-950 transition active:scale-[0.99]"
+            >
+              <ExternalLink size={18} /> Monoxerを開く
+            </button>
+          </div>
+        </section>
+
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-black text-slate-700">画像提出が必要な宿題</h2>
+            <p className="text-xs font-bold text-slate-400">
               {studentInfo ? `${studentInfo.grade}の受講科目のみ表示中` : '全ての課題を表示中'}
             </p>
           </div>

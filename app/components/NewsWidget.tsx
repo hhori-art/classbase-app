@@ -21,6 +21,15 @@ interface Props {
   onOpenRequest?: (req: any) => void;
 }
 
+const newsPreview = (value: string) => {
+  const text = String(value || '')
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return text.length > 120 ? `${text.slice(0, 120)}...` : text;
+};
+
 export default function NewsWidget({ role, pendingRequests = [], onOpenRequest }: Props) {
   const [news, setNews] = useState<NewsItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -143,7 +152,7 @@ export default function NewsWidget({ role, pendingRequests = [], onOpenRequest }
           ))}
 
           {/* お知らせ一覧 */}
-          {news.map((item) => {
+          {news.slice(0, 3).map((item) => {
             const style = getBadgeStyle(item.label);
             const dateLabel = item.created_at ? new Date(item.created_at).toLocaleDateString() : '-';
 
@@ -168,7 +177,7 @@ export default function NewsWidget({ role, pendingRequests = [], onOpenRequest }
                       </span>
                     </div>
                     <p className="text-xs text-gray-500 line-clamp-2 leading-relaxed">
-                      {item.content}
+                      {newsPreview(item.content) || '詳細を開いて内容を確認してください。'}
                     </p>
                   </div>
                 </div>
@@ -183,7 +192,7 @@ export default function NewsWidget({ role, pendingRequests = [], onOpenRequest }
             href={listPagePath} 
             className="mt-2 flex items-center justify-center w-full py-2.5 text-xs font-bold text-gray-500 bg-gray-50 hover:bg-gray-100 hover:text-indigo-600 rounded-xl transition-colors gap-2 no-underline"
           >
-            <List size={14} /> すべてのお知らせを見る
+            <List size={14} /> すべてのお知らせを見る{news.length > 3 ? `（ほか${news.length - 3}件）` : ''}
           </Link>
         )}
       </div>

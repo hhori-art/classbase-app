@@ -1,8 +1,8 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs, orderBy, limit } from 'firebase/firestore';
+import { fetchTeacherStudents } from '@/lib/teacher-students-client';
+import { auth } from '@/lib/firebase';
 import { AlertTriangle, RefreshCw, CheckCircle, TrendingUp, Play } from 'lucide-react';
 
 export default function RiskMonitorWidget() {
@@ -13,10 +13,8 @@ export default function RiskMonitorWidget() {
   const fetchRiskyStudents = async () => {
     try {
       // 既に分析済みの生徒の中からリスク高い順に表示
-      const q = query(collection(db, 'users'), where('role', '==', 'student'));
-      const snap = await getDocs(q);
-      const list = snap.docs
-        .map(d => ({ id: d.id, ...d.data() }))
+      const students = await fetchTeacherStudents();
+      const list = students
         .filter((d: any) => (d.churn_risk || 0) >= 30) // リスク30%以上のみ表示
         .sort((a: any, b: any) => b.churn_risk - a.churn_risk)
         .slice(0, 5);
@@ -32,9 +30,11 @@ export default function RiskMonitorWidget() {
     
     try {
       // 5人ずつ分析 APIを呼ぶ
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) throw new Error('not-authenticated');
       const res = await fetch('/api/teacher/analyze-risk', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ batchSize: 5 }), 
       });
       const data = await res.json();

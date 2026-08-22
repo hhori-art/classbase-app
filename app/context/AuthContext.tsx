@@ -9,13 +9,14 @@ import {
   setPersistence,
   browserLocalPersistence,
 } from 'firebase/auth';
-import { doc, getDoc, getDocFromCache } from 'firebase/firestore';
+import { doc, getDoc, getDocFromCache, serverTimestamp, updateDoc } from 'firebase/firestore';
 import { usePathname } from 'next/navigation';
 import { auth, db } from '@/lib/firebase';
+import { passwordChangePathForRole, shouldRedirectToPasswordChange } from '@/lib/first-login-guard';
 
 export interface UserProfile {
   uid: string;
-  role: 'student' | 'teacher' | 'master' | 'admin' | 'parent';
+  role: 'student' | 'teacher' | 'master' | 'admin' | 'parent' | 'attendance_admin';
   [key: string]: any;
 }
 
@@ -46,6 +47,7 @@ const isLoginLikePath = (path: string) =>
 
 const isDeniedPath = (path: string) => path === '/403' || path.startsWith('/403');
 const FORCE_LOGOUT_KEY = 'classbase_force_logout';
+const LOGIN_FLOW_LOCK_KEY = 'classbase_login_flow_lock';
 const ADMIN_ROLE_ALIASES = [
   'admin',
   'school_admin',
@@ -57,27 +59,29 @@ const ADMIN_ROLE_ALIASES = [
   'super_admin',
 ];
 
-const normalizeRole = (role: any): 'student' | 'teacher' | 'master' | 'admin' | 'parent' => {
+const isAttendanceAdminRole = (role: any) => ['attendance_admin', 'attendance_only', 'attendance_manager'].includes(String(role || '').toLowerCase());
+
+const normalizeRole = (role: any): 'student' | 'teacher' | 'master' | 'admin' | 'parent' | 'attendance_admin' => {
   const r = String(role || '').toLowerCase();
   if (r === 'teacher') return 'teacher';
   if (r === 'master') return 'master';
+  if (isAttendanceAdminRole(r)) return 'teacher';
   if (ADMIN_ROLE_ALIASES.includes(r)) return 'admin';
   if (r === 'parent' || r === 'guardian') return 'parent';
   return 'student';
 };
 
-const targetPathByRole = (role: 'student' | 'teacher' | 'master' | 'admin' | 'parent') => {
-  if (role === 'teacher') return '/teacher';
-  if (role === 'master' || role === 'admin') return '/master';
-  if (role === 'parent') return '/parent';
-  return '/student';
+const targetPathByRole = (role: 'student' | 'teacher' | 'master' | 'admin' | 'parent' | 'attendance_admin') => {
+  return '/apps';
 };
 
-const roleMatchesPath = (role: 'student' | 'teacher' | 'master' | 'admin' | 'parent', path: string) => {
-  if (role === 'teacher') return path.startsWith('/teacher');
+const roleMatchesPath = (role: 'student' | 'teacher' | 'master' | 'admin' | 'parent' | 'attendance_admin', path: string) => {
+  if (path.startsWith('/zoom-meeting')) return true;
+  if (path === '/apps' || path.startsWith('/apps/')) return true;
+  if (role === 'teacher') return path.startsWith('/teacher') || path.startsWith('/eiken/teacher');
   if (role === 'master' || role === 'admin') return path.startsWith('/master') || path.startsWith('/admin');
-  if (role === 'parent') return path.startsWith('/parent');
-  return path.startsWith('/student');
+  if (role === 'parent') return path.startsWith('/parent') || path.startsWith('/eiken/parent');
+  return path.startsWith('/student') || path.startsWith('/eiken/student');
 };
 
 const isChunkLoadError = (value: unknown) => {
@@ -94,6 +98,10 @@ const isChunkLoadError = (value: unknown) => {
 
 const AUTH_INIT_TIMEOUT_MS = 12000;
 const PROFILE_FETCH_TIMEOUT_MS = 9000;
+const PROFILE_CACHE_TTL_MS = 60 * 1000;
+const LAST_LOGIN_TOUCH_INTERVAL_MS = 15 * 60 * 1000;
+const profileCacheKey = (uid: string) => `classbase_profile_cache:${uid}`;
+const lastLoginTouchKey = (uid: string) => `classbase_last_login_touch:${uid}`;
 
 const timeoutAfter = (ms: number, message: string) =>
   new Promise<never>((_, reject) => {
@@ -103,6 +111,50 @@ const timeoutAfter = (ms: number, message: string) =>
 const getBrowserPath = () =>
   typeof window === 'undefined' ? null : window.location.pathname;
 
+const readCachedProfile = (uid: string): UserProfile | null => {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = sessionStorage.getItem(profileCacheKey(uid));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed?.profile || Date.now() - Number(parsed.cachedAt || 0) > PROFILE_CACHE_TTL_MS) return null;
+    return parsed.profile as UserProfile;
+  } catch {
+    return null;
+  }
+};
+
+const writeCachedProfile = (profile: UserProfile) => {
+  if (typeof window === 'undefined') return;
+  try {
+    sessionStorage.setItem(profileCacheKey(profile.uid), JSON.stringify({ profile, cachedAt: Date.now() }));
+  } catch {}
+};
+
+const clearProfileCache = (uid?: string | null) => {
+  if (typeof window === 'undefined' || !uid) return;
+  try {
+    sessionStorage.removeItem(profileCacheKey(uid));
+  } catch {}
+};
+
+const touchLastLogin = async (uid: string) => {
+  if (typeof window === 'undefined' || !uid) return;
+  try {
+    const key = lastLoginTouchKey(uid);
+    const lastTouched = Number(sessionStorage.getItem(key) || 0);
+    if (Date.now() - lastTouched < LAST_LOGIN_TOUCH_INTERVAL_MS) return;
+    sessionStorage.setItem(key, String(Date.now()));
+
+    await updateDoc(doc(db, 'users', uid), {
+      last_login_at: serverTimestamp(),
+      last_login: serverTimestamp(),
+    });
+  } catch (error) {
+    console.warn('Last login timestamp update failed:', error);
+  }
+};
+
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const pathname = usePathname();
   const [user, setUser] = useState<User | null>(null);
@@ -111,6 +163,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [connectionIssue, setConnectionIssue] = useState(false);
   const [profileMissing, setProfileMissing] = useState(false);
   const [clientPath, setClientPath] = useState<string | null>(null);
+  const [authWaitTooLong, setAuthWaitTooLong] = useState(false);
 
   const redirectingRef = useRef(false);
   const lastPathRef = useRef<string>('');
@@ -123,6 +176,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     setProfile(null);
     setConnectionIssue(false);
     setProfileMissing(false);
+    setAuthWaitTooLong(false);
     setLoading(false);
   };
 
@@ -144,6 +198,51 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       }
     }, 2500);
     return () => window.clearTimeout(failSafe);
+  }, [loading]);
+
+  useEffect(() => {
+    if (!loading) {
+      setAuthWaitTooLong(false);
+      return;
+    }
+
+    const hintTimer = window.setTimeout(() => {
+      setAuthWaitTooLong(true);
+    }, 7000);
+
+    const releaseTimer = window.setTimeout(() => {
+      if (logoutInProgressRef.current) return;
+
+      const currentPath = getBrowserPath() || '/';
+      console.warn('Auth loading watchdog released the checking screen.');
+
+      if (isLoginLikePath(currentPath)) {
+        setConnectionIssue(false);
+        setProfileMissing(false);
+        setLoading(false);
+        return;
+      }
+
+      if (!auth.currentUser) {
+        setUser(null);
+        setProfile(null);
+        setConnectionIssue(false);
+        setProfileMissing(false);
+        setLoading(false);
+        if (!isDeniedPath(currentPath)) window.location.replace('/');
+        return;
+      }
+
+      setUser(auth.currentUser);
+      setProfileMissing(false);
+      setConnectionIssue(true);
+      setLoading(false);
+    }, AUTH_INIT_TIMEOUT_MS + PROFILE_FETCH_TIMEOUT_MS + 3000);
+
+    return () => {
+      window.clearTimeout(hintTimer);
+      window.clearTimeout(releaseTimer);
+    };
   }, [loading]);
 
   useEffect(() => {
@@ -186,6 +285,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     if (typeof window !== 'undefined') {
       sessionStorage.setItem(FORCE_LOGOUT_KEY, 'true');
     }
+    clearProfileCache(user?.uid || auth.currentUser?.uid);
     clearAuthUiState();
 
     try {
@@ -208,6 +308,54 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.ok === false) throw new Error(data.error || 'profile-repair-failed');
     return data;
+  };
+
+  const finishAuthWithProfile = (
+    normalizedProfile: UserProfile,
+    currentPath: string,
+    options: { cache?: boolean } = {},
+  ) => {
+    if (options.cache !== false) writeCachedProfile(normalizedProfile);
+    setProfile(normalizedProfile);
+
+    if (isDeniedPath(currentPath)) {
+      setLoading(false);
+      return true;
+    }
+
+    if (
+      typeof window !== 'undefined' &&
+      isLoginLikePath(currentPath) &&
+      sessionStorage.getItem(LOGIN_FLOW_LOCK_KEY) === 'true'
+    ) {
+      setLoading(false);
+      return true;
+    }
+
+    if (roleMatchesPath(normalizedProfile.role, currentPath)) {
+      if (shouldRedirectToPasswordChange(normalizedProfile, currentPath)) {
+        const passwordPath = passwordChangePathForRole(normalizedProfile.role);
+        if (!redirectingRef.current && currentPath !== passwordPath) {
+          redirectingRef.current = true;
+          setLoading(false);
+          window.location.replace(passwordPath);
+          return true;
+        }
+      }
+      setLoading(false);
+      return true;
+    }
+
+    const target = targetPathByRole(normalizedProfile.role);
+    if (!redirectingRef.current) {
+      redirectingRef.current = true;
+      setLoading(false);
+      window.location.replace(target);
+      return true;
+    }
+
+    setLoading(false);
+    return true;
   };
 
   useEffect(() => {
@@ -268,6 +416,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       if (!currentUser) {
         if (typeof window !== 'undefined') sessionStorage.removeItem(FORCE_LOGOUT_KEY);
         logoutInProgressRef.current = false;
+        clearProfileCache(user?.uid);
         setUser(null);
         setProfile(null);
         setConnectionIssue(false);
@@ -292,6 +441,13 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       setProfileMissing(false);
 
       try {
+        const cachedProfile = readCachedProfile(currentUser.uid);
+        if (cachedProfile) {
+          void touchLastLogin(currentUser.uid);
+          finishAuthWithProfile(cachedProfile, currentPath, { cache: false });
+          return;
+        }
+
         const profileRef = doc(db, 'users', currentUser.uid);
         let snap;
         try {
@@ -337,33 +493,9 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
         const data = snap.data() as UserProfile;
         const role = normalizeRole(data.role);
-        setProfile({ ...data, uid: currentUser.uid, role });
-
-        // ★403中は引き戻さない（ループ防止）
-        if (isDeniedPath(currentPath)) {
-          setLoading(false);
-          return;
-        }
-
-        // 正しい画面なら表示
-        if (roleMatchesPath(role, currentPath)) {
-          setLoading(false);
-          return;
-        }
-
-        // 適切な画面へ誘導
-        const target = targetPathByRole(role);
-        if (!redirectingRef.current) {
-          redirectingRef.current = true;
-          setLoading(false);
-          window.location.replace(target);
-          window.setTimeout(() => {
-            if (window.location.pathname !== target) window.location.href = target;
-          }, 1200);
-          return;
-        }
-
-        setLoading(false);
+        const normalizedProfile = { ...data, uid: currentUser.uid, role };
+        void touchLastLogin(currentUser.uid);
+        finishAuthWithProfile(normalizedProfile, currentPath);
       } catch (err: any) {
         console.error('Profile fetch error:', err);
 
@@ -395,17 +527,40 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   };
 
   const renderPath = clientPath || pathname || '';
+  const isAuthScreenPath = Boolean(renderPath && isLoginLikePath(renderPath));
   const shouldShowLoading =
-    loading && !(renderPath && isLoginLikePath(renderPath));
+    loading && !isAuthScreenPath;
 
   return (
     <AuthContext.Provider value={{ user, profile, loading, connectionIssue, profileMissing, login, logout }}>
       {shouldShowLoading ? (
-        <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50">
+        <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 px-6 text-center">
           <div className="animate-spin h-10 w-10 border-4 border-indigo-500 rounded-full border-t-transparent"></div>
           <p className="mt-4 text-sm font-bold text-gray-400">アカウントを確認中...</p>
+          {authWaitTooLong ? (
+            <div className="mt-5 max-w-sm">
+              <p className="text-xs leading-6 text-gray-500">
+                確認に時間がかかっています。通信またはユーザーデータの取得で止まっている可能性があります。
+              </p>
+              <button
+                onClick={async () => {
+                  sessionStorage.setItem(FORCE_LOGOUT_KEY, 'true');
+                  try {
+                    await firebaseSignOut(auth);
+                  } catch (error) {
+                    console.error('Sign out from stalled auth screen failed:', error);
+                  } finally {
+                    window.location.replace('/');
+                  }
+                }}
+                className="mt-4 rounded-lg bg-slate-900 px-4 py-2 text-xs font-bold text-white hover:bg-slate-800"
+              >
+                ログイン画面に戻る
+              </button>
+            </div>
+          ) : null}
         </div>
-      ) : connectionIssue ? (
+      ) : connectionIssue && !isAuthScreenPath ? (
         <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 px-6 text-center">
           <div className="h-12 w-12 rounded-full border-4 border-gray-300 border-t-transparent animate-spin"></div>
           <p className="mt-4 text-sm font-bold text-gray-600">接続が不安定です</p>
@@ -414,7 +569,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
             リロード
           </button>
         </div>
-      ) : profileMissing ? (
+      ) : profileMissing && !isAuthScreenPath ? (
         <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 px-6 text-center">
           <p className="text-sm font-bold text-gray-700">ユーザーデータが見つかりません</p>
           <p className="mt-2 text-xs text-gray-500">初回登録が未完了、または users/{`{uid}`} が存在しません。</p>

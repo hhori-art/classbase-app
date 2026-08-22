@@ -6,8 +6,56 @@ import { writeLearningEvent } from '@/lib/events';
 
 const MISSION_CONFIG: Record<string, { amount: number; label: string }> = {
   last_mission_date: { amount: 10, label: 'ログインミッション' },
-  last_ai_mission_date: { amount: 20, label: 'AI学習ミッション' },
+  last_recording_mission_date: { amount: 15, label: '録画視聴ミッション' },
+  last_community_mission_date: { amount: 10, label: 'コミュニティ参加ミッション' },
 };
+
+const LOGIN_BONUS_PATTERN = [10, 10, 20, 20, 30, 30, 40, 40, 50, 100];
+
+const MISSION_FIELD_TO_SETTING: Record<string, 'login' | 'recording' | 'community'> = {
+  last_mission_date: 'login',
+  last_recording_mission_date: 'recording',
+  last_community_mission_date: 'community',
+};
+
+const DEFAULT_MISSION_SETTINGS: Record<'login' | 'recording' | 'community', boolean> = {
+  login: true,
+  recording: true,
+  community: false,
+};
+
+type CustomMissionCondition = 'manual' | 'login' | 'recording' | 'community';
+
+type CustomMission = {
+  id: string;
+  title: string;
+  description: string;
+  reward: number;
+  enabled: boolean;
+  condition: CustomMissionCondition;
+  link_url: string;
+  link_label: string;
+};
+
+function normalizeCustomMission(raw: any): CustomMission | null {
+  const id = String(raw?.id || '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
+  const title = String(raw?.title || '').trim();
+  const reward = Math.max(0, Math.min(500, Number(raw?.reward || 0)));
+  if (!id || !title || reward <= 0) return null;
+  const condition = ['manual', 'login', 'recording', 'community'].includes(raw?.condition)
+    ? raw.condition as CustomMissionCondition
+    : 'manual';
+  return {
+    id,
+    title,
+    description: String(raw?.description || ''),
+    reward,
+    enabled: raw?.enabled !== false,
+    condition,
+    link_url: String(raw?.link_url || ''),
+    link_label: String(raw?.link_label || '開く'),
+  };
+}
 
 async function applyCoinOnce(input: {
   userId: string;
@@ -57,6 +105,84 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const action = String(body.action || '');
 
+    if (action === 'daily_login') {
+      requireRole(user, ['student']);
+      const today = new Date().toISOString().split('T')[0];
+      const db = adminDb();
+      const userRef = db.collection('users').doc(user.uid);
+      const txRef = db.collection('coin_transactions').doc(`${user.uid}_daily_login_${today}`);
+
+      const result = await db.runTransaction(async tx => {
+        const [userSnap, txSnap] = await Promise.all([tx.get(userRef), tx.get(txRef)]);
+        const profile = userSnap.data() || {};
+        if (txSnap.exists || profile.last_login_bonus_date === today) {
+          return {
+            applied: false,
+            coins: Number(profile.coins || 0),
+            login_count: Number(profile.login_count || profile.attendance_count || 0),
+            login_streak: Number(profile.login_streak || 0),
+            amount: 0,
+            earned_badges: Array.isArray(profile.earned_badges) ? profile.earned_badges : [],
+            selected_badge: profile.selected_badge || '',
+          };
+        }
+
+        const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        const currentCount = Number(profile.login_count || profile.attendance_count || 0);
+        const nextCount = currentCount + 1;
+        const previousStreak = Number(profile.login_streak || 0);
+        const nextStreak = profile.last_login_bonus_date === yesterday ? previousStreak + 1 : 1;
+        const amount = LOGIN_BONUS_PATTERN[(nextCount - 1) % LOGIN_BONUS_PATTERN.length];
+        const earnedBadges: string[] = ['badge_1'];
+        if (nextStreak >= 3) earnedBadges.push('badge_fire_3');
+        if (nextStreak >= 7) earnedBadges.push('badge_rainbow');
+        if (nextCount >= 10) earnedBadges.push('badge_star_10');
+        if (Number(profile.coins || 0) + amount >= 1000) earnedBadges.push('badge_king');
+        const currentBadges = Array.isArray(profile.earned_badges) ? profile.earned_badges : [];
+        const nextBadges = Array.from(new Set([...currentBadges, ...earnedBadges]));
+        const currentSelectedBadge = String(profile.selected_badge || '');
+        const selectedBadge = currentSelectedBadge && currentSelectedBadge !== 'beginner'
+          ? currentSelectedBadge
+          : 'badge_1';
+
+        tx.set(txRef, {
+          user_id: user.uid,
+          amount,
+          reason: 'ログインボーナス',
+          actor_id: user.uid,
+          source: 'daily_login',
+          source_id: today,
+          metadata: { login_count: nextCount, login_streak: nextStreak },
+          created_at: FieldValue.serverTimestamp(),
+        });
+        tx.set(userRef, {
+          coins: FieldValue.increment(amount),
+          total_coins: FieldValue.increment(amount),
+          login_count: FieldValue.increment(1),
+          attendance_count: FieldValue.increment(1),
+          login_streak: nextStreak,
+          last_login_bonus_date: today,
+          last_active_date: today,
+          last_login_at: FieldValue.serverTimestamp(),
+          earned_badges: FieldValue.arrayUnion(...earnedBadges),
+          selected_badge: selectedBadge,
+          updated_at: FieldValue.serverTimestamp(),
+        }, { merge: true });
+
+        return {
+          applied: true,
+          coins: Number(profile.coins || 0) + amount,
+          login_count: nextCount,
+          login_streak: nextStreak,
+          amount,
+          earned_badges: nextBadges,
+          selected_badge: selectedBadge,
+        };
+      });
+
+      return Response.json({ ok: true, ...result });
+    }
+
     if (action === 'homework_submission_reward') {
       requireRole(user, ['student']);
       const assignmentId = String(body.assignment_id || '');
@@ -100,9 +226,23 @@ export async function POST(request: NextRequest) {
       const config = MISSION_CONFIG[dateField];
       if (!config) return Response.json({ ok: false, error: 'invalid mission' }, { status: 400 });
       const today = new Date().toISOString().split('T')[0];
-      const userRef = adminDb().collection('users').doc(user.uid);
+      const db = adminDb();
+      const userRef = db.collection('users').doc(user.uid);
+      const missionSettingKey = MISSION_FIELD_TO_SETTING[dateField];
+      const missionSnap = await db.collection('settings').doc('mission_control').get();
+      const missionSettings = { ...DEFAULT_MISSION_SETTINGS, ...(missionSnap.data() || {}) };
+      if (missionSettingKey && missionSettings[missionSettingKey] === false) {
+        return Response.json({ ok: false, error: 'mission is disabled' }, { status: 403 });
+      }
       const snap = await userRef.get();
-      if (snap.data()?.[dateField] === today) return Response.json({ ok: true, applied: false, already_claimed: true, coins: snap.data()?.coins || 0 });
+      const profile = snap.data() || {};
+      if (profile[dateField] === today) return Response.json({ ok: true, applied: false, already_claimed: true, coins: profile.coins || 0 });
+      if (dateField === 'last_recording_mission_date' && profile.last_recording_view_date !== today) {
+        return Response.json({ ok: false, error: 'recording mission is not completed' }, { status: 400 });
+      }
+      if (dateField === 'last_community_mission_date' && profile.last_community_activity_date !== today) {
+        return Response.json({ ok: false, error: 'community mission is not completed' }, { status: 400 });
+      }
       const result = await applyCoinOnce({
         userId: user.uid,
         amount: config.amount,
@@ -116,6 +256,62 @@ export async function POST(request: NextRequest) {
         await userRef.set({ [dateField]: today, updated_at: FieldValue.serverTimestamp() }, { merge: true });
       }
       return Response.json({ ok: true, amount: config.amount, ...result });
+    }
+
+    if (action === 'custom_mission_reward') {
+      requireRole(user, ['student']);
+      const missionId = String(body.mission_id || '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
+      if (!missionId) return Response.json({ ok: false, error: 'mission_id is required' }, { status: 400 });
+
+      const today = new Date().toISOString().split('T')[0];
+      const db = adminDb();
+      const missionSnap = await db.collection('settings').doc('mission_control').get();
+      const customMissions = Array.isArray(missionSnap.data()?.custom_missions)
+        ? missionSnap.data()?.custom_missions.map(normalizeCustomMission).filter(Boolean) as CustomMission[]
+        : [];
+      const mission = customMissions.find(item => item.id === missionId && item.enabled !== false);
+      if (!mission) return Response.json({ ok: false, error: 'mission not found or disabled' }, { status: 404 });
+
+      const userRef = db.collection('users').doc(user.uid);
+      const snap = await userRef.get();
+      const profile = snap.data() || {};
+      const customMissionDates = profile.custom_mission_dates || {};
+      if (customMissionDates[missionId] === today) {
+        return Response.json({ ok: true, applied: false, already_claimed: true, coins: profile.coins || 0, amount: mission.reward });
+      }
+
+      if (mission.condition === 'login' && profile.last_login_bonus_date !== today && profile.last_mission_date !== today) {
+        return Response.json({ ok: false, error: 'login mission is not completed' }, { status: 400 });
+      }
+      if (mission.condition === 'recording' && profile.last_recording_view_date !== today) {
+        return Response.json({ ok: false, error: 'recording mission is not completed' }, { status: 400 });
+      }
+      if (mission.condition === 'community' && profile.last_community_activity_date !== today) {
+        return Response.json({ ok: false, error: 'community mission is not completed' }, { status: 400 });
+      }
+
+      const result = await applyCoinOnce({
+        userId: user.uid,
+        amount: mission.reward,
+        reason: `デイリーミッション: ${mission.title}`,
+        actorId: user.uid,
+        source: 'custom_mission',
+        sourceId: `${missionId}_${today}`,
+        metadata: {
+          mission_id: missionId,
+          condition: mission.condition,
+          title: mission.title,
+        },
+      });
+
+      if (result.applied) {
+        await userRef.set({
+          custom_mission_dates: { [missionId]: today },
+          updated_at: FieldValue.serverTimestamp(),
+        }, { merge: true });
+      }
+
+      return Response.json({ ok: true, amount: mission.reward, mission_id: missionId, ...result });
     }
 
     if (action === 'reward_exchange') {

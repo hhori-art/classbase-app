@@ -12,21 +12,57 @@ import {
   Leaf, Mountain, Globe, ScrollText, Landmark, X, Search, Coins, Layers
 } from 'lucide-react';
 import Link from 'next/link';
+import {
+  getRecordingYearScope,
+  isZoomRecordingShareUrl,
+  normalizeRecordingType,
+  normalizeSchoolYear,
+  recordingTypeLabel,
+  type RecordingType,
+  type RecordingYearScope,
+} from '@/lib/recordings';
+
+type RecordingItem = {
+  id: string;
+  target_date: string;
+  grade: string;
+  subject: string;
+  title: string;
+  video_url: string;
+  original_shift_id?: string;
+  zoom_recording_file_id?: string;
+  target_recording_file_id?: string;
+  unit: string;
+  detail_subject: string;
+  trim_start_seconds?: number;
+  trim_end_seconds?: number | null;
+  recording_type: RecordingType;
+  recording_type_label: string;
+  school_year: number;
+  year_scope: RecordingYearScope;
+  searchText: string;
+};
 
 export default function StudentRecordingsPage() {
   const { user } = useAuth();
   
   // データ管理
-  const [allRecordings, setAllRecordings] = useState<any[]>([]);
-  const [filteredRecordings, setFilteredRecordings] = useState<any[]>([]);
+  const [allRecordings, setAllRecordings] = useState<RecordingItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [processingId, setProcessingId] = useState<string | null>(null);
+  const [activeRecording, setActiveRecording] = useState<RecordingItem | null>(null);
+  const [watchStartedAt, setWatchStartedAt] = useState<number | null>(null);
+  const [videoToken, setVideoToken] = useState('');
+  const [videoLoading, setVideoLoading] = useState(false);
+  const [videoError, setVideoError] = useState('');
   
   // UI状態
   const [searchMode, setSearchMode] = useState<'calendar' | 'unit'>('calendar'); 
   const [gradeFilter, setGradeFilter] = useState('all');
   const [unitFilter, setUnitFilter] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [yearScopeFilter, setYearScopeFilter] = useState<'all' | RecordingYearScope>('current');
+  const [typeFilter, setTypeFilter] = useState<'all' | RecordingType>('all');
   
   // カレンダー用
   const [currentDate, setCurrentDate] = useState(new Date()); 
@@ -45,23 +81,38 @@ export default function StudentRecordingsPage() {
 
         const data = snapshot.docs.map(doc => {
           const d = doc.data();
+          const targetDate = d.target_date || '2024-01-01';
+          const schoolYear = normalizeSchoolYear(targetDate, d.school_year);
+          const recordingType = normalizeRecordingType(d.recording_type || d.recording_type_label);
+          const typeLabel = recordingTypeLabel(recordingType);
           return { 
             id: doc.id,
-            target_date: d.target_date || '2024-01-01',
+            target_date: targetDate,
             grade: d.grade || 'その他',
             subject: d.subject || '全科目',
             title: d.title || 'タイトルなし',
             video_url: d.video_url || d.url,
-            searchText: `${d.title} ${d.subject} ${d.grade} ${d.target_date}`.toLowerCase()
+            original_shift_id: d.original_shift_id || '',
+            zoom_recording_file_id: d.zoom_recording_file_id || d.target_recording_file_id || '',
+            target_recording_file_id: d.target_recording_file_id || d.zoom_recording_file_id || '',
+            unit: d.unit || '',
+            detail_subject: d.detail_subject || '',
+            trim_start_seconds: Number(d.trim_start_seconds || 0),
+            trim_end_seconds: d.trim_end_seconds ? Number(d.trim_end_seconds) : null,
+            recording_type: recordingType,
+            recording_type_label: typeLabel,
+            school_year: schoolYear,
+            year_scope: getRecordingYearScope(schoolYear),
+            searchText: `${d.title} ${d.subject} ${d.grade} ${d.target_date} ${d.unit || ''} ${d.detail_subject || ''} ${typeLabel} ${schoolYear}年度`.toLowerCase()
           };
         });
 
         setAllRecordings(data);
-        setFilteredRecordings(data);
 
         if (data.length > 0) {
-          setSelectedDate(data[0].target_date);
-          setCurrentDate(new Date(data[0].target_date));
+          const initial = data.find(rec => rec.year_scope === 'current') || data[0];
+          setSelectedDate(initial.target_date);
+          setCurrentDate(new Date(initial.target_date));
         }
 
       } catch (error) {
@@ -86,6 +137,14 @@ export default function StudentRecordingsPage() {
   const displayVideos = (() => {
     let list = allRecordings;
 
+    if (yearScopeFilter !== 'all') {
+      list = list.filter(rec => rec.year_scope === yearScopeFilter);
+    }
+
+    if (typeFilter !== 'all') {
+      list = list.filter(rec => rec.recording_type === typeFilter);
+    }
+
     // 1. 学年フィルタ
     if (gradeFilter !== 'all') {
       list = list.filter(rec => rec.grade === gradeFilter);
@@ -101,7 +160,7 @@ export default function StudentRecordingsPage() {
     if (searchMode === 'unit') {
       if (unitFilter !== 'all') {
         return list.filter(rec => {
-          const target = (rec.title + rec.subject).toLowerCase();
+          const target = `${rec.title} ${rec.subject} ${rec.unit} ${rec.detail_subject}`.toLowerCase();
           return target.includes(unitFilter);
         });
       }
@@ -120,7 +179,25 @@ export default function StudentRecordingsPage() {
   for (let i = 0; i < getFirstDayOfMonth(year, month); i++) days.push(null);
   for (let i = 1; i <= getDaysInMonth(year, month); i++) days.push(i);
   
-  const recordingDates = new Set(allRecordings.map(r => r.target_date));
+  const calendarRecordings = allRecordings.filter(rec => {
+    const matchesYearScope = yearScopeFilter === 'all' || rec.year_scope === yearScopeFilter;
+    const matchesType = typeFilter === 'all' || rec.recording_type === typeFilter;
+    const matchesGrade = gradeFilter === 'all' || rec.grade === gradeFilter;
+    return matchesYearScope && matchesType && matchesGrade;
+  });
+  const recordingDates = new Set(calendarRecordings.map(r => r.target_date));
+  const currentYearCount = allRecordings.filter(rec => rec.year_scope === 'current').length;
+  const pastYearCount = allRecordings.filter(rec => rec.year_scope === 'past').length;
+  const testPrepCount = allRecordings.filter(rec => rec.recording_type === 'test_prep').length;
+
+  useEffect(() => {
+    if (searchMode !== 'calendar' || searchQuery || calendarRecordings.length === 0) return;
+    const selectedStillVisible = calendarRecordings.some(rec => rec.target_date === selectedDate);
+    if (!selectedStillVisible) {
+      setSelectedDate(calendarRecordings[0].target_date);
+      setCurrentDate(new Date(calendarRecordings[0].target_date));
+    }
+  }, [allRecordings, gradeFilter, typeFilter, yearScopeFilter, searchMode, searchQuery, selectedDate]);
 
   const SCIENCE_UNITS = [
     { label: '物理', icon: <Atom size={16}/>, color: 'text-blue-500', bg: 'bg-blue-50', border: 'border-blue-200' },
@@ -134,32 +211,123 @@ export default function StudentRecordingsPage() {
     { label: '公民', icon: <Landmark size={16}/>, color: 'text-indigo-500', bg: 'bg-indigo-50', border: 'border-indigo-200' },
   ];
 
-  const handleWatchVideo = async (e: React.MouseEvent, rec: any) => {
+  const postRecordingView = async (recordingId: string, eventType: 'start' | 'progress' | 'complete', watchedSeconds: number) => {
+    if (!user) return;
+    const token = await user.getIdToken();
+    await fetch('/api/recording-view', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        recording_id: recordingId,
+        event_type: eventType,
+        watched_seconds: watchedSeconds,
+      }),
+    });
+  };
+
+  const handleWatchVideo = async (e: React.MouseEvent, rec: RecordingItem) => {
     e.preventDefault(); 
     if (processingId) return;
-    window.open(rec.video_url, '_blank');
+    const token = user ? await user.getIdToken() : '';
+    setVideoLoading(true);
+    setVideoError('');
+    setVideoToken(token);
+    setActiveRecording(rec);
+    setWatchStartedAt(Date.now());
     setProcessingId(rec.id);
     try {
-      if (user) {
-        const token = await user.getIdToken();
-        await fetch('/api/recording-view', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({
-            recording_id: rec.id,
-            event_type: 'start',
-            watched_seconds: 0,
-          }),
-        });
-      }
+      await postRecordingView(rec.id, 'start', 0);
     } catch (err) { console.error(err); } 
     finally { setTimeout(() => setProcessingId(null), 1000); }
   };
+
+  const closeRecordingModal = async () => {
+    if (!activeRecording) return;
+    const watchedSeconds = watchStartedAt ? Math.max(1, Math.round((Date.now() - watchStartedAt) / 1000)) : 0;
+    const eventType = watchedSeconds >= 900 ? 'complete' : 'progress';
+    const recordingId = activeRecording.id;
+    setActiveRecording(null);
+    setWatchStartedAt(null);
+    setVideoToken('');
+    setVideoLoading(false);
+    setVideoError('');
+    try {
+      await postRecordingView(recordingId, eventType, watchedSeconds);
+    } catch (err) {
+      console.warn('recording progress log failed:', err);
+    }
+  };
+
+  const activeRecordingSrc = activeRecording
+    ? ((activeRecording.zoom_recording_file_id || activeRecording.target_recording_file_id || activeRecording.original_shift_id || isZoomRecordingShareUrl(activeRecording.video_url))
+      ? `/api/zoom/recordings/file?recording_id=${encodeURIComponent(activeRecording.id)}&token=${encodeURIComponent(videoToken)}`
+      : activeRecording.video_url)
+    : '';
 
   if (loading) return <div className="min-h-screen flex items-center justify-center bg-[#F0F4F8]"><Loader2 className="animate-spin text-red-400" size={40}/></div>;
 
   return (
     <div className="min-h-screen bg-[#F0F4F8] p-4 pb-24 font-sans sm:p-8">
+      {activeRecording && (
+        <div className="fixed inset-0 z-[200] bg-slate-950/80 p-3 sm:p-6">
+          <div className="mx-auto flex h-full max-w-6xl flex-col overflow-hidden rounded-3xl bg-white shadow-2xl">
+            <div className="flex items-center justify-between gap-3 border-b border-slate-100 p-4">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-black text-slate-900">{activeRecording.title}</p>
+                <p className="text-xs font-bold text-slate-400">視聴時間を記録しています</p>
+              </div>
+              <button onClick={closeRecordingModal} className="rounded-xl bg-slate-900 px-4 py-2 text-xs font-black text-white">閉じる</button>
+            </div>
+            <div className="relative min-h-0 flex-1 bg-slate-900">
+              <video
+                src={activeRecordingSrc}
+                title={activeRecording.title}
+                className="h-full w-full bg-slate-900"
+                controls
+                autoPlay
+                controlsList="nodownload noremoteplayback"
+                disablePictureInPicture
+                playsInline
+                preload="metadata"
+                onContextMenu={(event) => event.preventDefault()}
+                onLoadStart={() => { setVideoLoading(true); setVideoError(''); }}
+                onCanPlay={() => setVideoLoading(false)}
+                onPlaying={() => setVideoLoading(false)}
+                onError={() => {
+                  setVideoLoading(false);
+                  setVideoError('録画を読み込めませんでした。少し待ってからもう一度お試しください。');
+                }}
+                onLoadedMetadata={(event) => {
+                  const start = activeRecording.trim_start_seconds || 0;
+                  if (start > 0) event.currentTarget.currentTime = start;
+                }}
+                onTimeUpdate={(event) => {
+                  const end = activeRecording.trim_end_seconds;
+                  if (end && event.currentTarget.currentTime >= end) {
+                    event.currentTarget.pause();
+                  }
+                }}
+              />
+              {videoLoading && !videoError && (
+                <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-slate-950/70 text-white">
+                  <div className="text-center">
+                    <Loader2 className="mx-auto animate-spin" size={32}/>
+                    <p className="mt-3 text-xs font-black">録画を準備しています</p>
+                  </div>
+                </div>
+              )}
+              {videoError && (
+                <div className="absolute inset-0 flex items-center justify-center bg-slate-950 p-6 text-center text-sm font-bold text-white">
+                  {videoError}
+                </div>
+              )}
+            </div>
+            <p className="border-t border-amber-100 bg-amber-50 px-4 py-2 text-xs font-bold text-amber-700">
+              ダウンロードはできません。再生速度などの操作は動画プレイヤーのメニューから利用できます。
+            </p>
+          </div>
+        </div>
+      )}
       <div className="max-w-6xl mx-auto">
         
         {/* ヘッダー */}
@@ -290,6 +458,41 @@ export default function StudentRecordingsPage() {
             {/* 共通フィルター (学年) */}
             <div className="bg-white p-6 rounded-[32px] shadow-sm border border-gray-100 space-y-3">
               <div className="flex items-center gap-2 text-xs font-black text-gray-400 uppercase tracking-wider"><Filter size={14}/> 絞り込み</div>
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { key: 'current', label: '今年度', count: currentYearCount },
+                  { key: 'past', label: '過去', count: pastYearCount },
+                  { key: 'all', label: '全年度', count: allRecordings.length },
+                ].map(item => (
+                  <button
+                    key={item.key}
+                    onClick={() => setYearScopeFilter(item.key as 'all' | RecordingYearScope)}
+                    className={`rounded-xl border-2 px-2 py-3 text-center transition-all ${
+                      yearScopeFilter === item.key ? 'border-gray-800 bg-gray-800 text-white' : 'border-gray-100 bg-white text-gray-500'
+                    }`}
+                  >
+                    <span className="block text-[10px] font-black">{item.label}</span>
+                    <span className="text-xs font-black">{item.count}</span>
+                  </button>
+                ))}
+              </div>
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { key: 'all', label: '全種別' },
+                  { key: 'regular', label: '通常授業' },
+                  { key: 'test_prep', label: `テスト対策 ${testPrepCount}` },
+                ].map(item => (
+                  <button
+                    key={item.key}
+                    onClick={() => setTypeFilter(item.key as 'all' | RecordingType)}
+                    className={`rounded-xl border-2 px-2 py-3 text-xs font-black transition-all ${
+                      typeFilter === item.key ? 'border-red-500 bg-red-500 text-white' : 'border-gray-100 bg-white text-gray-500'
+                    }`}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
               <div className="flex flex-wrap gap-2">
                 {['all', '中1', '中2', '中3'].map(g => (
                   <button key={g} onClick={() => setGradeFilter(g)} className={`flex-1 min-w-[60px] px-3 py-3 rounded-xl text-xs font-bold transition-all border-2 ${gradeFilter === g ? 'bg-gray-800 text-white border-gray-800' : 'bg-white text-gray-500 border-gray-100'}`}>{g === 'all' ? '全学年' : g}</button>
@@ -309,7 +512,7 @@ export default function StudentRecordingsPage() {
                   {searchQuery ? (
                     <span>検索結果</span>
                   ) : searchMode === 'unit' ? (
-                    <span>{unitFilter === 'all' ? 'すべての動画' : `${unitFilter}の動画`} <span className="text-xs bg-gray-100 text-gray-500 px-2 py-1 rounded ml-1">全期間</span></span>
+                    <span>{unitFilter === 'all' ? 'すべての動画' : `${unitFilter}の動画`} <span className="text-xs bg-gray-100 text-gray-500 px-2 py-1 rounded ml-1">{yearScopeFilter === 'current' ? '今年度' : yearScopeFilter === 'past' ? '過去' : '全年度'}</span></span>
                   ) : (
                     <span>{new Date(selectedDate).toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' })}<span className="text-sm font-medium text-gray-400 ml-2">の授業</span></span>
                   )}
@@ -332,12 +535,18 @@ export default function StudentRecordingsPage() {
                       <div className="relative z-10 flex-1 min-w-0">
                         <div className="flex flex-wrap items-center gap-2 mb-3">
                           <span className="text-[10px] font-black px-3 py-1 rounded-full bg-gray-100 text-gray-600 border border-gray-200">{rec.grade} | {rec.subject}</span>
+                          <span className={rec.year_scope === 'current' ? 'text-[10px] font-black px-3 py-1 rounded-full bg-green-100 text-green-700 border border-green-200' : 'text-[10px] font-black px-3 py-1 rounded-full bg-gray-100 text-gray-500 border border-gray-200'}>{rec.school_year}年度</span>
+                          <span className={rec.recording_type === 'test_prep' ? 'text-[10px] font-black px-3 py-1 rounded-full bg-amber-100 text-amber-800 border border-amber-200' : 'text-[10px] font-black px-3 py-1 rounded-full bg-blue-50 text-blue-600 border border-blue-100'}>{rec.recording_type_label}</span>
                           {(searchMode === 'unit' || searchQuery) && <span className="text-[10px] font-bold text-gray-400 bg-gray-50 px-2 py-1 rounded-lg">{rec.target_date}</span>}
                           <span className="text-[10px] font-bold bg-yellow-100 text-yellow-800 px-2 py-1 rounded-full flex items-center gap-1 shadow-sm"><Coins size={10} /> 完了時に記録</span>
                         </div>
                         {/* ★変更: タイトルホバー色を赤に */}
                         <h4 className="text-lg font-black text-gray-800 group-hover:text-red-600 transition-colors line-clamp-2">{rec.title}</h4>
-                        <div className="flex items-center gap-2 mt-2 text-xs font-bold text-gray-400"><span className="w-1.5 h-1.5 rounded-full bg-green-400"></span>{processingId === rec.id ? '視聴開始を記録中...' : '視聴開始を記録して開く'}</div>
+                        {rec.unit && <p className="mt-1 line-clamp-1 text-xs font-bold text-gray-400">{rec.unit}</p>}
+                        <div className="flex items-center gap-2 mt-2 text-xs font-bold text-gray-400">
+                          <span className="w-1.5 h-1.5 rounded-full bg-green-400"></span>
+                          {processingId === rec.id ? '視聴開始を記録中...' : '視聴開始を記録して開く'}
+                        </div>
                       </div>
                       
                       {/* ★変更: 再生ボタンを赤に */}

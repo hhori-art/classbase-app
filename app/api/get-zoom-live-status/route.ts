@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
 import { adminDb } from '@/lib/firebase-admin';
+import { getServerUser, isAdminLike, requireRole } from '@/lib/server-auth';
 
 export const runtime = 'nodejs';
 
@@ -7,8 +9,11 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const fetchCache = 'force-no-store';
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
   try {
+    const user = await getServerUser(request);
+    if (!isAdminLike(user)) requireRole(user, ['teacher']);
+
     const { meetingId } = await request.json();
 
     if (!meetingId) {
@@ -91,8 +96,6 @@ export async function POST(request: Request) {
 
     const matchedStudentIds = new Set<string>();
 
-    console.log(`\n=== 🔍 判定ログ (在室: ${participants.length}名) ===`);
-
     const results = participants.map((p: any) => {
       const zoomName = p.user_name || 'Unknown';
       const nZoomName = normalize(zoomName);
@@ -147,8 +150,6 @@ export async function POST(request: Request) {
 
       if (matchedStudent) {
         matchedStudentIds.add(matchedStudent.id);
-      } else {
-        console.log(`❌ 未登録: "${zoomName}" (Email: ${p.email || 'なし'})`);
       }
 
       return {
@@ -162,8 +163,6 @@ export async function POST(request: Request) {
         join_time: p.join_time,
       };
     });
-
-    console.log(`=================================================\n`);
 
     return NextResponse.json({
       success: true,

@@ -16,10 +16,11 @@ const unique = <T>(items: T[]) => Array.from(new Set(items.filter(Boolean)));
 const loginCandidatesFromEmail = (email?: string | null) => {
   const normalizedEmail = clean(email).toLowerCase();
   const local = emailLocalPart(normalizedEmail);
+  const localVariants = unique([local, local.toLowerCase(), local.toUpperCase()]);
   return unique([
     normalizedEmail,
-    local,
-    ...EMAIL_DOMAINS.map(domain => local ? `${local}@${domain}` : ''),
+    ...localVariants,
+    ...localVariants.flatMap(candidate => EMAIL_DOMAINS.map(domain => candidate ? `${candidate}@${domain}` : '')),
   ]);
 };
 

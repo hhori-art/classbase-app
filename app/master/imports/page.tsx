@@ -1,13 +1,20 @@
 'use client';
 
 import Link from 'next/link';
-import { ArrowLeft, Database, FileText, UserPlus, Calendar, AlertTriangle, Users, Presentation } from 'lucide-react';
+import { ArrowLeft, Database, FileText, UserPlus, Calendar, AlertTriangle, Users, Presentation, Train, Download, BookOpen } from 'lucide-react';
 import AccountImportButton from '@/app/components/AccountImportButton';
 import AnnualScheduleImportButton from '@/app/components/AnnualScheduleImportButton';
+import CourseRegistrationCsvImportButton from '@/app/components/CourseRegistrationCsvImportButton';
 import PfImportButton from '@/app/components/PfImportButton';
 import ShiftImportButton from '@/app/components/ShiftImportButton';
+import TransportFareImportButton from '@/app/components/TransportFareImportButton';
+import TransportStationImportButton from '@/app/components/TransportStationImportButton';
+import { useAuth } from '@/app/context/AuthContext';
 
 export default function ImportCenterPage() {
+  const { profile } = useAuth();
+  const isMaster = profile?.role === 'master';
+
   return (
     <div className="min-h-screen bg-gray-50 p-8 pb-32 font-sans text-gray-800">
       <div className="max-w-5xl mx-auto">
@@ -37,8 +44,8 @@ export default function ImportCenterPage() {
 
         <div className="grid gap-8">
           
-          {/* 1. 生徒アカウント */}
-          <section className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+          {/* アカウント作成は全体アカウント管理に属するためマスターのみ */}
+          {isMaster && <section className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
             <div className="bg-green-50 p-5 border-b border-green-100 flex items-center gap-4">
               <div className="bg-white p-3 rounded-xl text-green-600 shadow-sm">
                 <UserPlus size={28} />
@@ -51,7 +58,8 @@ export default function ImportCenterPage() {
             <div className="p-6">
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
                 <div className="text-sm text-gray-600 space-y-1 flex-1">
-                  <p><strong>必須項目:</strong> 氏名, ID(生涯番号), パスワード</p>
+                  <p><strong>必須項目:</strong> 氏名, ID(生涯番号)</p>
+                  <p><strong>初期パスワード:</strong> CSVで空欄の場合はランダムに発行されます。</p>
                   <p><strong>自動登録:</strong> 学年, 教室, 曜日も同時に設定されます。</p>
                   <p className="text-xs text-gray-400 mt-1">※ IDが一致する生徒は情報が上書きされます。</p>
                 </div>
@@ -60,10 +68,9 @@ export default function ImportCenterPage() {
                 </div>
               </div>
             </div>
-          </section>
+          </section>}
 
-          {/* 2. 講師アカウント */}
-          <section className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+          {isMaster && <section className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
             <div className="bg-purple-50 p-5 border-b border-purple-100 flex items-center gap-4">
               <div className="bg-white p-3 rounded-xl text-purple-600 shadow-sm">
                 <Users size={28} />
@@ -82,7 +89,7 @@ export default function ImportCenterPage() {
                   </div>
                   <ul className="list-disc list-inside pl-1 space-y-0.5">
                     <li><strong>ログインID:</strong> 「職員番号」が使用されます。</li>
-                    <li><strong>初期パスワード:</strong> 「職員番号」と同じ値が設定されます。</li>
+                    <li><strong>初期パスワード:</strong> CSVで空欄の場合はランダムに発行されます。</li>
                     <li><strong>所属校:</strong> 「校舎番号」と「所属校」の両方が登録されます。</li>
                   </ul>
                   <p className="text-xs text-gray-400 mt-1">※ 職員番号が一致する講師は情報が上書きされます。</p>
@@ -92,7 +99,7 @@ export default function ImportCenterPage() {
                 </div>
               </div>
             </div>
-          </section>
+          </section>}
 
           {/* 3. PFデータ */}
           <section className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
@@ -158,13 +165,18 @@ export default function ImportCenterPage() {
                 <div className="text-sm text-gray-600 space-y-1 flex-1">
                   <p><strong>対応列:</strong> 日付/開始日/終了日, 学年, 科目, 単元, 回, 授業内容, 校舎, 備考</p>
                   <p>日付は「2026/4/1」「4/1」「4月1日」やExcel日付シリアルを受け付けます。</p>
-                  <p className="text-xs text-gray-400">※ 2026_OL理社講座カリキュラム原案の列に寄せ、列名の揺れを吸収します。</p>
+                  <p className="text-xs text-gray-400">※ GoogleシートURLからの直接読込、またはCSVアップロードに対応します。</p>
                 </div>
                 <div className="shrink-0 md:w-[360px]">
                   <AnnualScheduleImportButton
                     type="lesson_schedule"
                     label="授業予定CSVを取り込む"
                     sample="日付,学年,科目,回,単元,授業内容,校舎,備考"
+                    sampleFilename="年間授業予定CSV例.csv"
+                    sampleRows={[
+                      ['2026/4/6', '中1', '理科', '1', '植物の分類', '春期第1回', '元町', '通常授業'],
+                      ['2026/4/13', '中1', '社会', '2', '世界の地域区分', '春期第2回', '元町', '通常授業'],
+                    ]}
                   />
                 </div>
               </div>
@@ -187,7 +199,7 @@ export default function ImportCenterPage() {
                 <div className="text-sm text-gray-600 space-y-1 flex-1">
                   <p><strong>対応列:</strong> 開始日/終了日, 学年, 科目, 単元, カリキュラム, 内容, 備考</p>
                   <p>複数日に跨る単元予定は、開始日と終了日の両方を指定してください。</p>
-                  <p className="text-xs font-bold text-cyan-700">取り込み後は「カリキュラム管理」でターム設定を保存すると、講座登録用の候補に反映されます。</p>
+                  <p className="text-xs font-bold text-cyan-700">取り込み後は「カリキュラム管理」でターム設定を保存すると、講座登録用の候補に反映されます。GoogleシートURLからの直接読込も可能です。</p>
                 </div>
                 <div className="shrink-0 md:w-[360px]">
                   <Link href="/master/curriculum" className="mb-3 inline-flex w-full items-center justify-center rounded-xl border border-cyan-200 bg-cyan-50 px-4 py-2 text-sm font-bold text-cyan-700 hover:bg-cyan-100">
@@ -197,20 +209,50 @@ export default function ImportCenterPage() {
                     type="curriculum"
                     label="カリキュラムCSVを取り込む"
                     sample="開始日,終了日,学年,科目,単元,内容,備考"
+                    sampleFilename="年間カリキュラムCSV例.csv"
+                    sampleRows={[
+                      ['2026/4/1', '2026/4/30', '中1', '理科', '植物の世界', '植物の分類とつくり', '4月単元'],
+                      ['2026/5/1', '2026/5/31', '中1', '社会', '世界の姿', '世界地図と地域区分', '5月単元'],
+                    ]}
                   />
                 </div>
               </div>
             </div>
           </section>
 
-          {/* 5. スライド・教材データ管理 */}
+          {/* 7. 受講講座CSV登録 */}
           <section className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
-            <div className="bg-teal-50 p-5 border-b border-teal-100 flex items-center gap-4">
+            <div className="bg-indigo-50 p-5 border-b border-indigo-100 flex items-center gap-4">
+              <div className="bg-white p-3 rounded-xl text-indigo-600 shadow-sm">
+                <BookOpen size={28} />
+              </div>
+              <div>
+                <h2 className="text-xl font-bold text-gray-800">7. 受講講座CSV登録</h2>
+                <p className="text-sm text-gray-500">MemberMaster形式のCSVから、生徒ごとの受講講座を一括登録します。</p>
+              </div>
+            </div>
+            <div className="p-6">
+              <div className="flex flex-col gap-6 md:flex-row md:items-start md:justify-between">
+                <div className="text-sm text-gray-600 space-y-1 flex-1">
+                  <p><strong>対応列:</strong> id, name, grade, 次期月〜次期土</p>
+                  <p>「1限:中3生物Ⅱ, 2限:中3公民②Ⅱ」のような入力を、指定した年度・期の講座候補と照合して登録します。</p>
+                  <p className="text-xs text-gray-400">※ id は登録済み生徒のログインID/生涯番号と一致している必要があります。</p>
+                </div>
+                <div className="shrink-0 md:w-[430px]">
+                  <CourseRegistrationCsvImportButton />
+                </div>
+              </div>
+            </div>
+          </section>
+
+          {/* 5. スライド・教材データ管理 */}
+	          <section className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+	            <div className="bg-teal-50 p-5 border-b border-teal-100 flex items-center gap-4">
               <div className="bg-white p-3 rounded-xl text-teal-600 shadow-sm">
                 <Presentation size={28} />
               </div>
               <div>
-                <h2 className="text-xl font-bold text-gray-800">7. スライド・教材データ登録</h2>
+                <h2 className="text-xl font-bold text-gray-800">8. スライド・教材データ登録</h2>
                 <p className="text-sm text-gray-500">AI問題生成の元となる学習単元データを登録します。</p>
               </div>
             </div>
@@ -230,10 +272,59 @@ export default function ImportCenterPage() {
                   </Link>
                 </div>
               </div>
-            </div>
-          </section>
+	            </div>
+	          </section>
 
-        </div>
+	          <section className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+	            <div className="bg-emerald-50 p-5 border-b border-emerald-100 flex items-center gap-4">
+	              <div className="bg-white p-3 rounded-xl text-emerald-600 shadow-sm">
+	                <Train size={28} />
+	              </div>
+	              <div>
+	                <h2 className="text-xl font-bold text-gray-800">9. 交通費マスタ登録</h2>
+	                <p className="text-sm text-gray-500">主要交通機関の区間運賃を登録します。</p>
+	              </div>
+	            </div>
+	            <div className="p-6">
+	              <div className="flex flex-col gap-6 md:flex-row md:items-start md:justify-between">
+	                <div className="text-sm text-gray-600 space-y-3 flex-1">
+	                  <p><strong>対応列:</strong> 交通機関, 出発, 到着, 金額, 参照元, 備考</p>
+	                  <p>駅名マスタを先に登録すると、「三宮」「JR三ノ宮」「阪急神戸三宮」などの表記揺れを正式駅名に寄せて、登録済み運賃と照合できます。</p>
+	                  <p className="text-xs text-gray-400">※ 正確な金額は各交通機関の公式運賃表、または駅すぱあと/NAVITIMEの回答に合わせて入力してください。</p>
+                    <div className="flex flex-wrap gap-2 pt-2">
+                      <a
+                        href="/templates/transport-stations-major-hyogo.csv"
+                        download
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-xs font-black text-sky-700 hover:bg-sky-100"
+                      >
+                        <Download size={14} />
+                        駅名マスタCSV
+                      </a>
+                      <a
+                        href="/templates/transport-fares-major-hyogo.csv"
+                        download
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-black text-emerald-700 hover:bg-emerald-100"
+                      >
+                        <Download size={14} />
+                        主要運賃CSV
+                      </a>
+                    </div>
+	                </div>
+	                <div className="grid shrink-0 gap-4 md:w-[380px]">
+                    <div className="rounded-2xl border border-sky-100 bg-sky-50/50 p-4">
+                      <p className="mb-3 text-sm font-black text-sky-900">駅名・停留所名マスタ</p>
+	                    <TransportStationImportButton />
+                    </div>
+                    <div className="rounded-2xl border border-emerald-100 bg-emerald-50/50 p-4">
+                      <p className="mb-3 text-sm font-black text-emerald-900">区間運賃マスタ</p>
+	                    <TransportFareImportButton />
+                    </div>
+	                </div>
+	              </div>
+	            </div>
+	          </section>
+
+	        </div>
       </div>
     </div>
   );

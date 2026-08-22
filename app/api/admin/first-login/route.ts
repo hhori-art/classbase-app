@@ -124,6 +124,7 @@ export async function POST(req: Request) {
       uid,
       id: uid,
       email,
+      isFirstLogin: profile.isFirstLogin ?? true,
       migrated_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     }, { merge: true });
