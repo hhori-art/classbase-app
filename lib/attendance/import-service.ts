@@ -6,7 +6,10 @@ import { validateRecord } from "./validation";
 export class BatchConflictError extends Error {}
 export class BatchProcessingError extends Error {}
 
-const IMPORT_CONCURRENCY = 20;
+// A Windows sync request contains at most 100 records. Process one request in
+// a single bounded wave so a full-month replay completes before the function
+// URL can be displaced by an unrelated production deployment.
+const IMPORT_CONCURRENCY = 100;
 
 export async function importAttendance(input: {
   envelope: ImportEnvelope;
