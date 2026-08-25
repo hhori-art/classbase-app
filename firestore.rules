@@ -462,11 +462,26 @@ service cloud.firestore {
     }
 
     match /attendance_regular_imports/{importId} {
-      allow read, write: if false;
+      allow read: if isAttendanceManager();
+      allow write: if false;
     }
 
     match /attendance_import_batches/{batchId} {
       allow read, write: if false;
+    }
+
+    match /attendance_integration_alerts/{alertId} {
+      allow read: if isAttendanceManager();
+      allow write: if false;
+    }
+
+    match /attendance_integration_batches/{batchId} {
+      allow read, write: if false;
+    }
+
+    match /attendance_integration_history/{historyId} {
+      allow read: if isAttendanceManager();
+      allow write: if false;
     }
 
     match /teacher_availability/{availabilityId} {
