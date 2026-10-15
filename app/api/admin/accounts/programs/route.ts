@@ -6,7 +6,7 @@ import { isAttendanceUserRole } from '@/lib/employment-category';
 
 export const runtime = 'nodejs';
 
-const SUPPORTED_PROGRAMS = ['science_social'];
+const SUPPORTED_PROGRAMS = ['science_social', 'online_school'];
 const LEGACY_TEACHER_ROLES = ['attendance_admin', 'attendance_only', 'attendance_manager'];
 
 export async function POST(request: NextRequest) {
@@ -21,12 +21,17 @@ export async function POST(request: NextRequest) {
     const enabled = body.enabled === true;
 
     if (!userIds.length || userIds.length > 5000 || !SUPPORTED_PROGRAMS.includes(program)) {
-      return Response.json({ ok: false, error: '対象の講師または講座指定が不正です。' }, { status: 400 });
+      return Response.json({ ok: false, error: '対象アカウントまたはアプリ指定が不正です。' }, { status: 400 });
     }
 
     const db = adminDb();
     const snapshots = await db.getAll(...userIds.map(userId => db.collection('users').doc(userId)));
-    const targets = snapshots.filter(snapshot => snapshot.exists && isAttendanceUserRole(snapshot.data()?.role));
+    const targets = snapshots.filter(snapshot => {
+      if (!snapshot.exists) return false;
+      return program === 'science_social'
+        ? isAttendanceUserRole(snapshot.data()?.role)
+        : String(snapshot.data()?.role || '') === 'student';
+    });
 
     for (let offset = 0; offset < targets.length; offset += 400) {
       const batch = db.batch();

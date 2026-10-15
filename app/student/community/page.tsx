@@ -13,8 +13,6 @@ import {
 } from 'lucide-react';
 import Link from 'next/link';
 
-// 定数設定
-const LIKE_REWARD_THRESHOLD = 10; 
 const FILTER_ITEMS = [
   { id: 'all', label: 'すべての投稿', icon: LayoutGrid, color: 'text-gray-600' },
   { id: 'thread', label: 'スレッド (会話)', icon: MessagesSquare, color: 'text-blue-500' },
@@ -116,16 +114,6 @@ export default function CommunityPage() {
 
     try {
       await postCommunityAction({ action: 'like', topic_id: topic.id });
-      if (!topic.reward_given && (topic.likes || 0) + 1 >= LIKE_REWARD_THRESHOLD) {
-        const token = await user?.getIdToken();
-        if (token) {
-          await fetch('/api/coin-transactions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ action: 'community_like_reward', collection_name: 'community_topics', topic_id: topic.id }),
-          });
-        }
-      }
     } catch (e) { console.error(e); }
   };
 
@@ -167,9 +155,11 @@ export default function CommunityPage() {
                 <ArrowLeft size={20} className="text-gray-600" />
               </Link>
               <h1 className="text-xl font-extrabold text-gray-800 flex items-center gap-2">
-                <MessageCircle className="text-pink-500" fill="currentColor" /> みんなの広場
+                <MessageCircle className="text-pink-500" fill="currentColor" /> 交流掲示板
               </h1>
             </div>
+
+            <p className="rounded-2xl bg-pink-50 p-3 text-xs font-bold leading-5 text-pink-700">ここは参加者同士に公開される交流の場です。運営からの正式連絡は「お知らせ」、教室への個別連絡は専用画面で確認してください。</p>
 
             {/* 投稿作成カード */}
             {!isPosting ? (

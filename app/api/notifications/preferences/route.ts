@@ -8,19 +8,16 @@ export async function POST(request: NextRequest) {
   try {
     const user = await getServerUser(request);
     const body = await request.json();
-    const preferences = {
-      email: !!body.email,
-      line: !!body.line,
-      in_app: body.in_app !== false,
-      class_start: body.class_start !== false,
-      homework: body.homework !== false,
-      announcements: body.announcements !== false,
-    };
+    const allowedKeys = ['email', 'line', 'in_app', 'class_start', 'homework', 'announcements', 'shift', 'student_contact'] as const;
+    const suppliedKeys = allowedKeys.filter(key => Object.hasOwn(body, key));
+    if (suppliedKeys.length === 0 || suppliedKeys.some(key => typeof body[key] !== 'boolean')) {
+      return Response.json({ ok: false, error: 'invalid-notification-preferences' }, { status: 400 });
+    }
+    const preferences = Object.fromEntries(suppliedKeys.map(key => [key, body[key]])) as Record<string, boolean>;
+    const updates: Record<string, unknown> = { updated_at: FieldValue.serverTimestamp() };
+    for (const [key, value] of Object.entries(preferences)) updates[`notification_preferences.${key}`] = value;
 
-    await adminDb().collection('users').doc(user.uid).set({
-      notification_preferences: preferences,
-      updated_at: FieldValue.serverTimestamp(),
-    }, { merge: true });
+    await adminDb().collection('users').doc(user.uid).set(updates, { merge: true });
 
     const eventId = await writeLearningEvent({
       actor_id: user.uid,
@@ -37,4 +34,3 @@ export async function POST(request: NextRequest) {
     return jsonError(error);
   }
 }
-

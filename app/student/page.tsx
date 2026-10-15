@@ -2,14 +2,14 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { db } from '@/lib/firebase';
 import { doc, getDoc, collection, query, where, getDocs, orderBy, limit } from 'firebase/firestore';
 import { useAuth } from '@/app/context/AuthContext';
 import { 
   Video, BookOpen, AlertTriangle, 
   ChevronRight, Calendar, Trophy, Settings,
-  Bot, Brain, Sparkles, Clock, Coffee, CalendarCheck, ClipboardList, Timer, Loader2, LogOut, FileImage, Repeat, CheckCircle
+  Bot, Brain, Sparkles, Clock, Coffee, CalendarCheck, ClipboardList, Timer, Loader2, LogOut, FileImage, Repeat, CheckCircle, X, BookOpenCheck
 } from 'lucide-react';
 
 import CalendarWidget from '@/app/components/CalendarWidget';
@@ -17,6 +17,7 @@ import NewsWidget from '@/app/components/NewsWidget';
 import TrophyModal from '@/app/components/TrophyModal';
 import SmartClassButton from '@/app/components/SmartClassButton';
 import ActivityLogger from '@/app/components/ActivityLogger';
+import StudentCourseRegistrationPrompt from '@/app/components/StudentCourseRegistrationPrompt';
 
 import { BADGES } from '@/lib/gamification';
 import {
@@ -36,10 +37,15 @@ import { usePortalVisibility } from '@/app/hooks/usePortalVisibility';
 import { loadCourseRegistrationOptions } from '@/lib/client-course-options';
 import { getCourseDay } from '@/app/components/CourseRegistrationCalendar';
 import { formatClassDays, parseClassDays } from '@/lib/class-days';
+import { loadAppAvailability } from '@/lib/client-app-availability';
+import { jstDateKey } from '@/lib/date-key';
+import { loadStudentHomework } from '@/lib/client-student-homework';
+import { courseOptionMatchesSelection } from '@/lib/course-registration-selection';
 
 export default function StudentDashboard() {
   const { user, profile: authProfile, loading: authLoading, logout } = useAuth();
   const pathname = usePathname();
+  const router = useRouter();
   const isTeacherPreview = pathname.startsWith('/teacher/student-preview');
   
   const [mounted, setMounted] = useState(false);
@@ -51,6 +57,7 @@ export default function StudentDashboard() {
   const [classButtonSettings, setClassButtonSettings] = useState(DEFAULT_CLASS_BUTTON_SETTINGS);
   const [registeredClassDays, setRegisteredClassDays] = useState<string[]>([]);
   const [registeredShiftIds, setRegisteredShiftIds] = useState<string[] | null>(null);
+  const [registeredShiftDates, setRegisteredShiftDates] = useState<string[] | null>(null);
 
   const [dateStr, setDateStr] = useState('');
   const [greeting, setGreeting] = useState('');
@@ -58,10 +65,29 @@ export default function StudentDashboard() {
   const [nextClassInfo, setNextClassInfo] = useState<{ date: string; status: 'open' | 'closed' | 'checking' } | null>(null);
   const [urgentHomework, setUrgentHomework] = useState<{ title: string; deadline: string; daysLeft: number } | null>(null);
   const [requiredTransfer, setRequiredTransfer] = useState<any | null>(null);
+  const [requiredTransferError, setRequiredTransferError] = useState(false);
+  const [requiredTransferReload, setRequiredTransferReload] = useState(0);
   const [selectedTransferId, setSelectedTransferId] = useState('');
   const [transferSubmitting, setTransferSubmitting] = useState(false);
+  const [onlineSchoolEnabled, setOnlineSchoolEnabled] = useState(false);
 
   const { visibility, loaded: visibilityLoaded } = usePortalVisibility('student');
+
+  useEffect(() => {
+    if (mounted && !authLoading && !user && !isTeacherPreview) router.replace('/');
+  }, [authLoading, isTeacherPreview, mounted, router, user]);
+
+  useEffect(() => {
+    if (!user || isTeacherPreview) {
+      setOnlineSchoolEnabled(false);
+      return;
+    }
+    let active = true;
+    loadAppAvailability(user.uid, () => user.getIdToken())
+      .then(data => { if (active) setOnlineSchoolEnabled(data?.apps?.online_school === true); })
+      .catch(() => { if (active) setOnlineSchoolEnabled(false); });
+    return () => { active = false; };
+  }, [isTeacherPreview, user]);
 
   const mergeUserUpdates = useCallback((updates: Record<string, any>) => {
     setUserData((prev: any) => {
@@ -115,9 +141,8 @@ export default function StudentDashboard() {
   useEffect(() => {
     if (!user?.uid) return;
     if (authProfile) {
-      setUserData(authProfile);
+      setUserData({ ...authProfile, uid: user.uid });
       setRegisteredClassDays(parseClassDays(authProfile.day_of_week));
-      if (authProfile.day_of_week) checkNextClass(authProfile.day_of_week);
       if (authProfile.grade) checkUrgentHomework(authProfile.grade, authProfile.subjects);
       return;
     }
@@ -129,9 +154,8 @@ export default function StudentDashboard() {
         if (cancelled) return;
         if (snap.exists()) {
           const data = snap.data();
-          setUserData(data);
+          setUserData({ ...data, uid: user.uid });
           setRegisteredClassDays(parseClassDays(data.day_of_week));
-          if (data.day_of_week) checkNextClass(data.day_of_week);
           if (data.grade) checkUrgentHomework(data.grade, data.subjects);
         } else {
           setUserData({
@@ -157,12 +181,13 @@ export default function StudentDashboard() {
     return () => {
       cancelled = true;
     };
-  }, [user?.uid, authProfile]);
+  }, [user?.uid, user?.displayName, authProfile]);
 
   useEffect(() => {
     if (!user?.uid || isTeacherPreview) return;
     let cancelled = false;
     const loadRequiredTransfer = async () => {
+      setRequiredTransferError(false);
       try {
         const token = await user.getIdToken();
         const res = await fetch('/api/student/transfer-options?required_only=1', {
@@ -170,7 +195,8 @@ export default function StudentDashboard() {
         });
         const data = await res.json().catch(() => ({}));
         if (cancelled) return;
-        if (res.ok && data.ok !== false && Array.isArray(data.absences) && data.absences.length > 0) {
+        if (!res.ok || data.ok === false) throw new Error(data.error || 'required transfer fetch failed');
+        if (Array.isArray(data.absences) && data.absences.length > 0) {
           setRequiredTransfer(data);
           setSelectedTransferId(data.options?.[0]?.id || '');
         } else {
@@ -179,42 +205,53 @@ export default function StudentDashboard() {
         }
       } catch (error) {
         console.warn('required transfer fetch failed:', error);
+        if (!cancelled) setRequiredTransferError(true);
       }
     };
     loadRequiredTransfer();
     return () => {
       cancelled = true;
     };
-  }, [user?.uid, isTeacherPreview]);
+  }, [user, isTeacherPreview, requiredTransferReload]);
 
   useEffect(() => {
     if (!user || !userData?.grade || isTeacherPreview) return;
     const prefetch = () => {
       loadCourseRegistrationOptions({
         grade: String(userData.grade),
-        getToken: () => user.getIdToken(),
+        getToken: forceRefresh => user.getIdToken(forceRefresh),
       }).then(payload => {
         const selectedIds = new Set(
-          (Array.isArray(userData.selected_course_ids) ? userData.selected_course_ids : [])
+          [
+            ...(Array.isArray(userData.selected_course_ids) ? userData.selected_course_ids : []),
+            ...(Array.isArray(userData.selected_course_keys) ? userData.selected_course_keys : []),
+          ]
             .map((id: unknown) => String(id))
         );
         if (selectedIds.size === 0) {
           setRegisteredShiftIds([]);
+          setRegisteredShiftDates([]);
           return;
         }
-        const selectedOptions = (Array.isArray(payload.options) ? payload.options : []).filter((option: any) => (
-          selectedIds.has(String(option.id || '')) ||
-          selectedIds.has(String(option.parent_course_option_id || '')) ||
-          selectedIds.has(String(option.fallback_curriculum_option_id || ''))
-        ));
+        const selectedOptions = (Array.isArray(payload.options) ? payload.options : [])
+          .filter((option: any) => courseOptionMatchesSelection(option, selectedIds));
         const resolvedShiftIds = Array.from(new Set(selectedOptions.flatMap((option: any) => (
           Array.isArray(option.matched_shift_ids) ? option.matched_shift_ids.map(String) : []
         ))));
         setRegisteredShiftIds(resolvedShiftIds);
+        setRegisteredShiftDates(Array.from(new Set(selectedOptions.flatMap((option: any) => (
+          Array.isArray(option.matched_dates) ? option.matched_dates.map((date: unknown) => String(date).slice(0, 10)) : []
+        )))).filter(date => /^\d{4}-\d{2}-\d{2}$/.test(date)));
         const resolvedDays = parseClassDays(selectedOptions.map(getCourseDay));
-        if (resolvedDays.length === 0) return;
-        setRegisteredClassDays(resolvedDays);
-        checkNextClass(resolvedDays);
+        if (resolvedDays.length > 0) setRegisteredClassDays(resolvedDays);
+        const today = jstDateKey();
+        const jstHour = Number(new Intl.DateTimeFormat('en-GB', {
+          timeZone: 'Asia/Tokyo', hour: '2-digit', hourCycle: 'h23',
+        }).format(new Date()));
+        const nextDate = Array.from(new Set(selectedOptions.flatMap((option: any) => (
+          Array.isArray(option.matched_dates) ? option.matched_dates.map((date: unknown) => String(date).slice(0, 10)) : []
+        )))).filter(date => /^\d{4}-\d{2}-\d{2}$/.test(date) && (jstHour >= 22 ? date > today : date >= today)).sort()[0];
+        setNextClassInfo(nextDate ? { date: nextDate, status: 'open' } : null);
       }).catch(error => console.warn('course options prefetch failed:', error));
     };
     const idleWindow = window as typeof window & {
@@ -227,7 +264,7 @@ export default function StudentDashboard() {
     }
     const timer = window.setTimeout(prefetch, 1200);
     return () => window.clearTimeout(timer);
-  }, [isTeacherPreview, user, userData?.grade, userData?.selected_course_ids]);
+  }, [isTeacherPreview, user, userData?.grade, userData?.selected_course_ids, userData?.selected_course_keys]);
 
   const handleLogout = async () => {
     if (isTeacherPreview) return;
@@ -241,49 +278,11 @@ export default function StudentDashboard() {
     }
   };
 
-  const checkNextClass = async (dayOfWeek: unknown) => {
-    const classDays = parseClassDays(dayOfWeek);
-    if (classDays.length === 0) return;
-    const dayOrder = ['日','月','火','水','木','金','土'];
-    const today = new Date();
-    const candidates = classDays.map(day => {
-      const targetDayIndex = dayOrder.indexOf(day);
-      let daysUntil = (targetDayIndex + 7 - today.getDay()) % 7;
-      if (daysUntil === 0 && today.getHours() >= 22) daysUntil = 7;
-      const date = new Date(today);
-      date.setDate(date.getDate() + daysUntil);
-      return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-    }).sort();
-
-    setNextClassInfo({ date: candidates[0], status: 'checking' });
-    try {
-      const results = await Promise.all(candidates.map(async date => {
-        const q = query(collection(db, 'shift_assignments'), where('target_date', '==', date), limit(1));
-        const snap = await getDocs(q);
-        return { date, open: !snap.empty };
-      }));
-      const nextOpen = results.find(result => result.open);
-      setNextClassInfo(nextOpen
-        ? { date: nextOpen.date, status: 'open' }
-        : { date: candidates[0], status: 'closed' });
-    } catch (e) {
-      // エラー時は非表示にせず、とりあえず開催扱いで表示しておく(安全策)
-      setNextClassInfo({ date: candidates[0], status: 'open' });
-    }
-  };
-
   const checkUrgentHomework = async (grade: string, subjects: string[] = []) => {
     if (!grade) return;
-    const d = new Date();
-    const todayStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const todayStr = jstDateKey();
     try {
-      const q = query(collection(db, 'homework_assignments'), where('target_grade', '==', grade), where('deadline', '>=', todayStr), orderBy('deadline', 'asc'), limit(5));
-      const snap = await getDocs(q);
-      let foundHw = null;
-      for (const doc of snap.docs) {
-        const data = doc.data();
-        if (!data.subject || subjects.length === 0 || subjects.includes(data.subject)) { foundHw = data; break; }
-      }
+      const foundHw = (await loadStudentHomework({ start: todayStr, limit: 5 }))[0] || null;
       if (foundHw && foundHw.deadline) {
         const deadlineDate = new Date(foundHw.deadline.replace(/-/g, '/'));
         const nowTime = new Date();
@@ -310,6 +309,7 @@ export default function StudentDashboard() {
         body: JSON.stringify({
           absence_id: requiredTransfer.selected_absence.id,
           transfer_shift_id: selectedTransferId,
+          transfer_token: requiredTransfer.options?.find((option: any) => option.id === selectedTransferId)?.transfer_token || '',
           note: '生徒画面の必須振替選択から登録',
         }),
       });
@@ -338,12 +338,14 @@ export default function StudentDashboard() {
 
   // --- Render ---
 
-  if (!mounted || authLoading || !userData || !visibilityLoaded) {
+  if (!mounted || authLoading || !visibilityLoaded) {
     return <div className="min-h-screen flex items-center justify-center bg-[#F0F4F8]"><Loader2 className="animate-spin text-indigo-500" size={32} /></div>;
   }
   if (!user) {
-    if (typeof window !== 'undefined') window.location.href = '/';
-    return null;
+    return <div className="min-h-screen flex items-center justify-center bg-[#F0F4F8]"><Loader2 className="animate-spin text-indigo-500" size={32} /></div>;
+  }
+  if (!userData) {
+    return <div className="min-h-screen flex items-center justify-center bg-[#F0F4F8]"><Loader2 className="animate-spin text-indigo-500" size={32} /></div>;
   }
 
   const displayProfile = userData;
@@ -357,6 +359,7 @@ export default function StudentDashboard() {
       
       {/* ユーザーIDがあればログ出力 (なければスキップ) */}
       {!isTeacherPreview && displayProfile?.uid && <ActivityLogger uid={displayProfile.uid} onRewardApplied={mergeUserUpdates} />}
+      {!isTeacherPreview && <StudentCourseRegistrationPrompt />}
 
       {popMessage && (
         <div className="fixed top-10 left-1/2 transform -translate-x-1/2 bg-yellow-400 text-white px-6 py-3 rounded-full shadow-lg font-black text-lg z-[150] animate-bounce border-4 border-white whitespace-nowrap">
@@ -366,9 +369,44 @@ export default function StudentDashboard() {
 
       <TrophyModal isOpen={isTrophyOpen} onClose={() => setIsTrophyOpen(false)} userData={displayProfile} canUseShop={visibility.shop !== false} />
 
+      {requiredTransferError && !isTeacherPreview && (
+        <div className="fixed inset-0 z-[270] flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-[32px] bg-white p-6 text-center shadow-2xl">
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-red-100 text-red-600">
+              <AlertTriangle size={28} />
+            </div>
+            <h2 className="mt-4 text-xl font-black text-slate-900">振替情報を確認できません</h2>
+            <p className="mt-2 text-sm font-bold leading-relaxed text-slate-500">
+              必須の振替選択が残っている可能性があるため、確認が完了するまで操作を停止しています。
+            </p>
+            <button
+              type="button"
+              onClick={() => setRequiredTransferReload(value => value + 1)}
+              className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-slate-900 py-4 text-sm font-black text-white"
+            >
+              <Repeat size={18} />
+              もう一度確認する
+            </button>
+          </div>
+        </div>
+      )}
+
       {requiredTransfer && !isTeacherPreview && (
         <div className="fixed inset-0 z-[260] flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
-          <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-[32px] bg-white p-6 shadow-2xl">
+          <div className="relative max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-[32px] bg-white p-6 shadow-2xl">
+            {(!Array.isArray(requiredTransfer.options) || requiredTransfer.options.length === 0) && (
+              <button
+                type="button"
+                aria-label="振替先選択を閉じる"
+                onClick={() => {
+                  setRequiredTransfer(null);
+                  setSelectedTransferId('');
+                }}
+                className="absolute right-4 top-4 grid h-10 w-10 place-items-center rounded-full bg-slate-100 text-slate-500 hover:bg-slate-200 hover:text-slate-800"
+              >
+                <X size={19} />
+              </button>
+            )}
             <div className="mb-5 flex items-start gap-3">
               <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-indigo-100 text-indigo-600">
                 <Repeat size={26} />
@@ -377,7 +415,9 @@ export default function StudentDashboard() {
                 <p className="text-xs font-black uppercase tracking-wider text-indigo-500">Transfer Required</p>
                 <h2 className="mt-1 text-xl font-black text-slate-900">振替先を選択してください</h2>
                 <p className="mt-2 text-sm font-bold text-slate-500">
-                  保護者から欠席連絡が届いています。振替先を選ぶまで、この画面を閉じることはできません。
+                  {Array.isArray(requiredTransfer.options) && requiredTransfer.options.length > 0
+                    ? '保護者から欠席連絡が届いています。振替先を選ぶまで、この画面を閉じることはできません。'
+                    : '保護者から欠席連絡が届いています。現在は候補がないため、閉じて後から振替登録できます。'}
                 </p>
               </div>
             </div>
@@ -397,7 +437,17 @@ export default function StudentDashboard() {
                 </button>
               )) : (
                 <div className="rounded-2xl bg-amber-50 p-4 text-sm font-bold text-amber-700">
-                  同じ単元の振替候補がまだありません。校舎へお問い合わせください。
+                  <p>同じ単元の振替候補がまだありません。校舎へお問い合わせください。</p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRequiredTransfer(null);
+                      setSelectedTransferId('');
+                    }}
+                    className="mt-3 w-full rounded-xl border border-amber-300 bg-white px-4 py-3 text-amber-800 hover:bg-amber-100"
+                  >
+                    閉じて後で選択する
+                  </button>
                 </div>
               )}
             </div>
@@ -490,12 +540,25 @@ export default function StudentDashboard() {
         </div>
 
         <div className="grid grid-cols-2 gap-4">
+          <Link href="/student/test-prep" className="col-span-2 block group">
+            <div className="rounded-3xl border border-amber-200 bg-gradient-to-r from-amber-50 to-orange-50 p-5 shadow-sm transition-all active:scale-[0.99]">
+              <div className="flex items-center justify-between gap-4">
+                <div className="flex min-w-0 items-center gap-4">
+                  <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-amber-500 text-white shadow-md shadow-amber-200"><BookOpenCheck size={26}/></div>
+                  <div className="min-w-0"><h2 className="text-base font-black text-slate-900">テスト期間一覧</h2><p className="mt-1 text-xs font-bold text-amber-800">期間・受付状況・科目・受講日時を確認</p></div>
+                </div>
+                <ChevronRight size={24} className="shrink-0 text-amber-500 transition-transform group-hover:translate-x-1"/>
+              </div>
+            </div>
+          </Link>
+          {onlineSchoolEnabled && <Link href="/student/online-school" className="col-span-2 block group"><div className="rounded-3xl bg-gradient-to-br from-indigo-600 to-violet-700 p-5 text-white shadow-lg transition-all active:scale-[0.99] flex items-center justify-between"><div className="flex items-center gap-4"><div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white/15"><BookOpen size={26}/></div><div><div className="flex items-center gap-2"><span className="text-lg font-bold">オンライン校</span><span className="rounded-full bg-yellow-300 px-2 py-0.5 text-[10px] font-black text-yellow-950">10分学習</span></div><p className="text-xs text-white/75">算数・数学と国語をLevel別に学習</p></div></div><ChevronRight size={24} className="text-white/60 group-hover:translate-x-1 transition-transform"/></div></Link>}
           {visibility.adaptiveQuest && <Link href="/student/homework/adaptive" className="col-span-2 block group"><div className={`${theme.questBg} ${density.featurePadding} rounded-3xl shadow-lg text-white flex items-center justify-between relative overflow-hidden`}><div className="flex items-center gap-4 relative z-10"><div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center"><Brain size={28}/></div><div><div className="flex items-center gap-2 mb-1"><span className="text-lg font-bold">AI学習クエスト</span><span className="bg-yellow-400 text-yellow-900 text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 animate-pulse"><Sparkles size={10} fill="currentColor"/> NEW</span></div><p className="text-xs opacity-90">キミに最適な問題をAIが出題！</p></div></div><ChevronRight size={24} className="opacity-70 group-hover:translate-x-1 transition-transform"/></div></Link>}
           {visibility.ocrQuiz && <Link href="/student/ocr-quiz" className="col-span-2 block group"><div className="rounded-3xl bg-slate-900 p-5 text-white shadow-lg transition-all active:scale-[0.99] flex items-center justify-between"><div className="flex items-center gap-4"><div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white/15"><FileImage size={26}/></div><div><div className="flex items-center gap-2"><span className="text-lg font-bold">OCR問題作成</span><span className="rounded-full bg-emerald-300 px-2 py-0.5 text-[10px] font-black text-emerald-950">私用限定</span></div><p className="text-xs text-white/70">手元の画像から、自分だけの類題を作成</p></div></div><ChevronRight size={24} className="text-white/60 group-hover:translate-x-1 transition-transform"/></div></Link>}
           {visibility.chat && <Link href="/student/chat" className="block group"><div className={`${cardStyle.feature} ${theme.ring} ${density.featurePadding} transition-all flex flex-col items-center text-center h-full`}><div className={`w-12 h-12 ${theme.badgeBg} ${theme.badgeText} rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform`}><Bot size={24}/></div><h2 className="font-bold text-gray-800">AIチューター</h2><p className="text-[10px] text-gray-400 mt-1">24時間 質問OK!</p></div></Link>}
           {visibility.homework && <Link href="/student/homework" className="block group"><div className={`${cardStyle.feature} ${theme.ring} ${density.featurePadding} transition-all flex flex-col items-center text-center h-full`}><div className="w-12 h-12 bg-orange-100 text-orange-500 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><BookOpen size={24}/></div><h2 className="font-bold text-gray-800">Monoxer</h2><p className="text-[10px] text-gray-400 mt-1">宿題に取り組む</p></div></Link>}
           {visibility.recordings && <Link href="/student/recordings" className="block group"><div className={`${cardStyle.feature} ${theme.ring} ${density.featurePadding} transition-all flex flex-col items-center text-center h-full`}><div className="w-12 h-12 bg-red-100 text-red-500 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><Video size={24}/></div><h2 className="font-bold text-gray-800">授業録画</h2><p className="text-[10px] text-gray-400 mt-1">見逃し配信</p></div></Link>}
           {visibility.absence && <Link href="/student/absence" className="block group"><div className={`${cardStyle.feature} ${theme.ring} ${density.featurePadding} transition-all flex flex-col items-center text-center h-full`}><div className="w-12 h-12 bg-green-100 text-green-500 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><AlertTriangle size={24}/></div><h2 className="font-bold text-gray-800">欠席連絡</h2><p className="text-[10px] text-gray-400 mt-1">お休み申請</p></div></Link>}
+          {visibility.transfer && <Link href="/student/absence?mode=transfer" className="block group"><div className={`${cardStyle.feature} ${theme.ring} ${density.featurePadding} transition-all flex flex-col items-center text-center h-full`}><div className="w-12 h-12 bg-indigo-100 text-indigo-600 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><Repeat size={24}/></div><h2 className="font-bold text-gray-800">振替登録</h2><p className="text-[10px] text-gray-400 mt-1">候補から直接選択</p></div></Link>}
         </div>
 
         {visibility.news && <NewsWidget role="student" />}
@@ -505,12 +568,13 @@ export default function StudentDashboard() {
             classDay={displayClassDays}
             grade={displayProfile.grade}
             studentShiftIds={registeredShiftIds}
+            studentShiftDates={registeredShiftDates}
           />
         </div>}
         
-        {visibility.changeRequest && <Link href="/student/change-request" className={`flex items-center justify-between ${cardStyle.panel} p-4 hover:bg-gray-50 transition-colors no-underline mb-8`}>
-          <div className="flex items-center gap-3"><div className="bg-gray-100 p-2 rounded-lg text-gray-500"><Settings size={18}/></div><span className="text-sm font-bold text-gray-600">受講講座・曜日時間の変更</span></div><ChevronRight size={20} className="text-gray-400" />
-        </Link>}
+        <Link href="/student/change-request" className={`flex items-center justify-between ${cardStyle.panel} p-4 hover:bg-gray-50 transition-colors no-underline mb-8`}>
+          <div className="flex items-center gap-3"><div className="bg-indigo-100 p-2 rounded-lg text-indigo-600"><Settings size={18}/></div><span className="text-sm font-bold text-gray-700">受講講座を登録・変更</span></div><ChevronRight size={20} className="text-gray-400" />
+        </Link>
       </div>
     </div>
   );

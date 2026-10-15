@@ -1,6 +1,6 @@
 'use client';
 
-import { Check, Info } from 'lucide-react';
+import { CalendarDays, Check, Info } from 'lucide-react';
 import { getCourseSubjectGroup, normalizeCourseText } from '@/lib/course-text';
 
 const DAYS = ['月', '火', '水', '木', '金', '土'];
@@ -147,6 +147,121 @@ const courseFullDisplayLabel = (option: any) => compactLabelParts(
   option.course_name || option.title || getCourseSubject(option) || '講座',
 ).join(' ') || '講座';
 
+type CourseOpeningMapProps = {
+  options: any[];
+  selectedIds?: string[];
+  title?: string;
+  description?: string;
+};
+
+type OpeningItem = { label: string; subject: string; selected: boolean };
+
+const openingTone = (subject: string, selected: boolean) => {
+  if (selected) return 'border-indigo-300 bg-indigo-600 text-white shadow-sm';
+  if (subject === '理科') return 'border-emerald-200 bg-emerald-50 text-emerald-800';
+  if (subject === '社会') return 'border-orange-200 bg-orange-50 text-orange-800';
+  return 'border-slate-200 bg-slate-50 text-slate-700';
+};
+
+export function CourseOpeningMap({
+  options,
+  selectedIds = [],
+  title = '週間開講マップ',
+  description = '曜日と時限ごとの開講状況を一覧で確認できます。',
+}: CourseOpeningMapProps) {
+  const selectedSet = new Set(selectedIds.map(String));
+  const mapDays = options.some(option => getCourseDay(option) === '日') ? [...DAYS, '日'] : DAYS;
+  const openings = options.reduce((map, option) => {
+    const day = getCourseDay(option);
+    const slot = getCourseSlot(option);
+    if (!day || !slot) return map;
+    const subject = getCourseSubject(option) || 'その他';
+    const course = String(option.course_name || option.title || subject || '講座').trim();
+    const label = compactLabelParts(option.grade, subject, course).join(' ') || '講座';
+    const cellKey = `${day}__${slot}`;
+    const itemKey = `${subject}__${normalizeLabelText(label)}`;
+    if (!map[cellKey]) map[cellKey] = {};
+    const current = map[cellKey][itemKey];
+    map[cellKey][itemKey] = {
+      label,
+      subject,
+      selected: Boolean(current?.selected || selectedSet.has(String(option.id))),
+    };
+    return map;
+  }, {} as Record<string, Record<string, OpeningItem>>);
+  const itemsFor = (day: string, slot: string) => (Object.values(openings[`${day}__${slot}`] || {}) as OpeningItem[])
+    .sort((a, b) => subjectOrder(a.subject) - subjectOrder(b.subject) || a.label.localeCompare(b.label, 'ja', { numeric: true }));
+  const activeDays = mapDays.filter(day => ['1時間目', '2時間目'].some(slot => itemsFor(day, slot).length > 0));
+
+  return (
+    <section aria-labelledby="course-opening-map-title" className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+      <div className="flex flex-col gap-3 border-b border-slate-100 bg-slate-50/80 p-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="rounded-xl bg-indigo-100 p-2 text-indigo-600"><CalendarDays size={18} aria-hidden="true" /></span>
+            <h3 id="course-opening-map-title" className="text-base font-black text-slate-900">{title}</h3>
+          </div>
+          <p className="mt-2 text-xs font-bold text-slate-500">{description}</p>
+        </div>
+        <div className="flex flex-wrap gap-2 text-[11px] font-black" aria-label="色分け">
+          <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-emerald-700">理科</span>
+          <span className="rounded-full border border-orange-200 bg-orange-50 px-3 py-1 text-orange-700">社会</span>
+          {selectedIds.length > 0 && <span className="rounded-full bg-indigo-600 px-3 py-1 text-white">選択中</span>}
+        </div>
+      </div>
+
+      {activeDays.length === 0 ? (
+        <div className="p-8 text-center text-sm font-black text-slate-400">曜日・時間が設定された講座はありません</div>
+      ) : (
+        <>
+          <div className="space-y-3 p-4 sm:hidden">
+            {activeDays.map(day => (
+              <article key={day} className="overflow-hidden rounded-2xl border border-slate-200">
+                <h4 className="bg-slate-900 px-4 py-2 text-sm font-black text-white">{day}曜日</h4>
+                {['1時間目', '2時間目'].map(slot => {
+                  const items = itemsFor(day, slot);
+                  return (
+                    <div key={slot} className="grid grid-cols-[3.75rem_minmax(0,1fr)] gap-3 border-t border-slate-100 p-3 first:border-t-0">
+                      <p className="pt-1 text-xs font-black text-slate-500">{slotLabel(slot)}</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {items.length > 0 ? items.map(item => <span key={item.label} className={`rounded-lg border px-2.5 py-1.5 text-xs font-black ${openingTone(item.subject, item.selected)}`}>{item.selected && <Check className="mr-1 inline" size={12} aria-hidden="true" />}{item.label}</span>) : <span className="py-1 text-xs font-bold text-slate-300">開講なし</span>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </article>
+            ))}
+          </div>
+
+          <div className="hidden overflow-x-auto sm:block">
+            <table className="w-full min-w-[820px] table-fixed border-collapse">
+              <caption className="sr-only">曜日と時限別の開講講座一覧</caption>
+              <thead><tr className="bg-white"><th scope="col" className="w-20 border-b border-r border-slate-100 p-3 text-xs font-black text-slate-400">時限</th>{mapDays.map(day => <th key={day} scope="col" className="border-b border-r border-slate-100 p-3 text-sm font-black text-slate-800 last:border-r-0">{day}曜日</th>)}</tr></thead>
+              <tbody>
+                {['1時間目', '2時間目'].map(slot => (
+                  <tr key={slot}>
+                    <th scope="row" className="border-b border-r border-slate-100 bg-slate-50 p-3 text-xs font-black text-slate-600 last:border-b-0">{slotLabel(slot)}</th>
+                    {mapDays.map(day => {
+                      const items = itemsFor(day, slot);
+                      return (
+                        <td key={day} className="h-28 border-b border-r border-slate-100 p-2 align-top last:border-r-0">
+                          <div className="space-y-1.5">
+                            {items.length > 0 ? items.map(item => <div key={item.label} className={`rounded-xl border px-2 py-2 text-[11px] font-black leading-snug ${openingTone(item.subject, item.selected)}`}>{item.selected && <Check className="mr-1 inline" size={12} aria-hidden="true" />}{item.label}</div>) : <p className="pt-7 text-center text-xs font-bold text-slate-300">—</p>}
+                          </div>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
 type CourseRegistrationCalendarProps = {
   options: any[];
   selectedIds: string[];
@@ -245,6 +360,7 @@ export default function CourseRegistrationCalendar({
         type="button"
         onClick={() => !disabled && onToggle(option.id)}
         disabled={disabled}
+        aria-pressed={selected}
         className={`group relative w-full rounded-md border px-2 py-2 text-left text-[11px] font-black leading-snug transition ${
           selected
             ? 'border-indigo-400 bg-indigo-50 text-indigo-700 shadow-sm'
@@ -287,6 +403,8 @@ export default function CourseRegistrationCalendar({
                 key={`${option.id}_${getCourseDay(option)}_${getCourseSlot(option)}`}
                 type="button"
                 onClick={() => toggleGroup(group.ids)}
+                aria-pressed="true"
+                aria-label={`${courseFullDisplayLabel(option)}の選択を解除`}
                 className="inline-flex items-center gap-1 rounded-full bg-white px-3 py-1.5 text-xs font-black text-indigo-700 shadow-sm ring-1 ring-indigo-100"
               >
                 <Check size={12} strokeWidth={4} />
@@ -379,6 +497,7 @@ export default function CourseRegistrationCalendar({
                               type="button"
                               onClick={() => !disabled && toggleGroup(ids)}
                               disabled={disabled}
+                              aria-pressed={selected}
                               className={`rounded-xl border-2 px-3 py-2 text-left transition ${
                                 selected
                                   ? 'border-indigo-500 bg-white text-indigo-700 shadow-sm'

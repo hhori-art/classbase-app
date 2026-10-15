@@ -32,7 +32,7 @@
 |---|---|---|
 | `science_social` | 理社講座 管理 | `/master/science-social` および勤怠・英検以外の `/master/*` |
 | `eiken` | Booster 管理 | `/master/eiken*` |
-| `attendance` | 勤怠 管理 | `/master/attendance*`, `/master/attendance-corrections` |
+| `attendance` | 勤怠 管理 | `/master/attendance*`, `/master/attendance-approvals` |
 
 ## 画面権限マトリクス
 
@@ -53,7 +53,7 @@
 | マスター専用管理画面 | × | × | × | × | ○ | × | 下表参照 |
 | `/zoom-meeting` | △ | △ | △ | △ | △ | × | 認証済み。参加対象の検証はAPI側 |
 | `/403` | ○ | ○ | ○ | ○ | ○ | ○ | リダイレクトループ防止のため常時許可 |
-| `/tmp-register`, `/fix-db` | 実装要確認 | 実装要確認 | 実装要確認 | 実装要確認 | 実装要確認 | 実装要確認 | 保守画面。明示的な共通ルートガード外 |
+| `/tmp-register`, `/fix-db` | × | × | × | × | × | × | 開発用クライアント操作を削除し、常時404を返す |
 
 ### マスター専用画面
 

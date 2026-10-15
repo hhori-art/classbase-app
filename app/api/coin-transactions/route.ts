@@ -3,6 +3,7 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, jsonError, requireRole } from '@/lib/server-auth';
 import { writeLearningEvent } from '@/lib/events';
+import { jstDateKey } from '@/lib/date-key';
 
 const MISSION_CONFIG: Record<string, { amount: number; label: string }> = {
   last_mission_date: { amount: 10, label: 'ログインミッション' },
@@ -37,6 +38,24 @@ type CustomMission = {
   link_label: string;
 };
 
+function previousJstDateKey(date = new Date()) {
+  return jstDateKey(new Date(date.getTime() - 24 * 60 * 60 * 1000));
+}
+
+function normalizeSurveyAnswers(raw: unknown) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {} as Record<string, number | string>;
+  const entries = Object.entries(raw as Record<string, unknown>).slice(0, 30);
+  const answers: Record<string, number | string> = {};
+  for (const [key, value] of entries) {
+    const normalizedKey = String(key).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40);
+    if (!normalizedKey) continue;
+    answers[normalizedKey] = typeof value === 'number' && Number.isFinite(value)
+      ? Math.max(0, Math.min(5, value))
+      : String(value || '').trim().slice(0, 2000);
+  }
+  return answers;
+}
+
 function normalizeCustomMission(raw: any): CustomMission | null {
   const id = String(raw?.id || '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
   const title = String(raw?.title || '').trim();
@@ -65,6 +84,7 @@ async function applyCoinOnce(input: {
   source: string;
   sourceId: string;
   metadata?: Record<string, unknown>;
+  allowedUserRoles?: string[];
 }) {
   const db = adminDb();
   const txId = `${input.userId}_${input.source}_${input.sourceId}`.replace(/[\/\s#?]/g, '_');
@@ -73,6 +93,10 @@ async function applyCoinOnce(input: {
 
   return db.runTransaction(async tx => {
     const [txSnap, userSnap] = await Promise.all([tx.get(txRef), tx.get(userRef)]);
+    const targetRole = String(userSnap.data()?.role || '').toLowerCase();
+    if (!userSnap.exists || (input.allowedUserRoles && !input.allowedUserRoles.includes(targetRole))) {
+      throw new Error('reward-user-not-eligible');
+    }
     if (txSnap.exists) return { applied: false, transaction_id: txId, coins: userSnap.data()?.coins || 0 };
     const currentCoins = Number(userSnap.data()?.coins || 0);
     if (input.amount < 0 && currentCoins + input.amount < 0) {
@@ -107,7 +131,7 @@ export async function POST(request: NextRequest) {
 
     if (action === 'daily_login') {
       requireRole(user, ['student']);
-      const today = new Date().toISOString().split('T')[0];
+      const today = jstDateKey();
       const db = adminDb();
       const userRef = db.collection('users').doc(user.uid);
       const txRef = db.collection('coin_transactions').doc(`${user.uid}_daily_login_${today}`);
@@ -127,7 +151,7 @@ export async function POST(request: NextRequest) {
           };
         }
 
-        const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        const yesterday = previousJstDateKey();
         const currentCount = Number(profile.login_count || profile.attendance_count || 0);
         const nextCount = currentCount + 1;
         const previousStreak = Number(profile.login_streak || 0);
@@ -187,6 +211,26 @@ export async function POST(request: NextRequest) {
       requireRole(user, ['student']);
       const assignmentId = String(body.assignment_id || '');
       if (!assignmentId) return Response.json({ ok: false, error: 'assignment_id is required' }, { status: 400 });
+      const db = adminDb();
+      const [assignmentSnapshot, submissionSnapshot] = await db.getAll(
+        db.collection('homework_assignments').doc(assignmentId),
+        db.collection('submissions').doc(`${assignmentId}_${user.uid}`),
+      );
+      const assignment = assignmentSnapshot.data() || {};
+      const submission = submissionSnapshot.data() || {};
+      const grade = String(user.profile.grade || '').trim();
+      const subjects = Array.isArray(user.profile.subjects)
+        ? user.profile.subjects.map((item: unknown) => String(item || '').trim()).filter(Boolean)
+        : [];
+      const subject = String(assignment.subject || '').trim();
+      if (!assignmentSnapshot.exists || !submissionSnapshot.exists ||
+          assignment.archived === true || assignment.status === 'archived' ||
+          submission.student_id !== user.uid || submission.assignment_id !== assignmentId ||
+          !['submitted', 'checked'].includes(String(submission.status || '')) ||
+          !grade || String(assignment.target_grade || '').trim() !== grade ||
+          (subject && subjects.length > 0 && !subjects.includes(subject))) {
+        return Response.json({ ok: false, error: 'eligible submission not found' }, { status: 404 });
+      }
       const result = await applyCoinOnce({
         userId: user.uid,
         amount: 50,
@@ -196,7 +240,7 @@ export async function POST(request: NextRequest) {
         sourceId: assignmentId,
         metadata: { assignment_id: assignmentId },
       });
-      await adminDb().collection('users').doc(user.uid).set({
+      await db.collection('users').doc(user.uid).set({
         homework_count: FieldValue.increment(result.applied ? 1 : 0),
         earned_badges: FieldValue.arrayUnion('badge_pencil'),
         updated_at: FieldValue.serverTimestamp(),
@@ -206,16 +250,65 @@ export async function POST(request: NextRequest) {
 
     if (action === 'survey_reward') {
       requireRole(user, ['student']);
-      const shiftId = String(body.shift_id || '');
-      if (!shiftId) return Response.json({ ok: false, error: 'shift_id is required' }, { status: 400 });
-      const result = await applyCoinOnce({
-        userId: user.uid,
-        amount: 10,
-        reason: '授業アンケート回答',
-        actorId: user.uid,
-        source: 'survey_response',
-        sourceId: shiftId,
-        metadata: { shift_id: shiftId },
+      const shiftId = String(body.shift_id || '').trim();
+      if (!/^[^/]{1,160}$/.test(shiftId)) return Response.json({ ok: false, error: 'shift_id is required' }, { status: 400 });
+      const answers = normalizeSurveyAnswers(body.answers);
+      const today = jstDateKey();
+      const db = adminDb();
+      const shiftRef = db.collection('shift_assignments').doc(shiftId);
+      const responseRef = db.collection('survey_responses').doc(`${shiftId}_${user.uid}`);
+      const transactionRef = db.collection('coin_transactions').doc(`${user.uid}_survey_response_${shiftId}`);
+      const userRef = db.collection('users').doc(user.uid);
+      const templateRef = db.collection('survey_templates').doc('default');
+
+      const templateSnap = await templateRef.get();
+      const questions = Array.isArray(templateSnap.data()?.questions) ? templateSnap.data()!.questions.slice(0, 30) : [];
+      const missingRequired = questions.some((question: any) => question?.type === 'rating' && !Number(answers[String(question.id)]));
+      if (missingRequired) return Response.json({ ok: false, error: 'required survey answers are missing' }, { status: 400 });
+
+      const result = await db.runTransaction(async tx => {
+        const [shiftSnap, existingResponse, existingTransaction, userSnap] = await Promise.all([
+          tx.get(shiftRef), tx.get(responseRef), tx.get(transactionRef), tx.get(userRef),
+        ]);
+        const shift = shiftSnap.data() || {};
+        const studentGrade = String(user.profile.grade || '').trim();
+        const targetGrade = String(shift.target_grade || '').trim();
+        const shiftSchool = String(shift.school_id || shift.target_school_id || shift.school || '').trim();
+        const allowedSchools = new Set([user.school, ...user.school_ids].map(value => String(value || '').trim()).filter(Boolean));
+        if (!shiftSnap.exists || String(shift.target_date || '') !== today || String(shift.role_type || 'main') !== 'main' ||
+            !studentGrade || !targetGrade || studentGrade !== targetGrade || (shiftSchool && !allowedSchools.has(shiftSchool))) {
+          throw new Error('survey-shift-not-eligible');
+        }
+        if (existingResponse.exists || existingTransaction.exists) {
+          return { applied: false, coins: Number(userSnap.data()?.coins || 0) };
+        }
+        tx.set(responseRef, {
+          student_id: user.uid,
+          student_name: user.profile.student_name || user.profile.name || user.email || '名前未設定',
+          teacher_id: String(shift.user_id || ''),
+          teacher_name: String(shift.teacher_name || ''),
+          shift_id: shiftId,
+          target_date: today,
+          subject: String(shift.target_subject || ''),
+          answers,
+          created_at: FieldValue.serverTimestamp(),
+        });
+        tx.set(transactionRef, {
+          user_id: user.uid,
+          amount: 10,
+          reason: '授業アンケート回答',
+          actor_id: user.uid,
+          source: 'survey_response',
+          source_id: shiftId,
+          metadata: { shift_id: shiftId },
+          created_at: FieldValue.serverTimestamp(),
+        });
+        tx.set(userRef, {
+          coins: FieldValue.increment(10),
+          total_coins: FieldValue.increment(10),
+          updated_at: FieldValue.serverTimestamp(),
+        }, { merge: true });
+        return { applied: true, coins: Number(userSnap.data()?.coins || 0) + 10 };
       });
       return Response.json({ ok: true, ...result });
     }
@@ -225,7 +318,7 @@ export async function POST(request: NextRequest) {
       const dateField = String(body.date_field || '');
       const config = MISSION_CONFIG[dateField];
       if (!config) return Response.json({ ok: false, error: 'invalid mission' }, { status: 400 });
-      const today = new Date().toISOString().split('T')[0];
+      const today = jstDateKey();
       const db = adminDb();
       const userRef = db.collection('users').doc(user.uid);
       const missionSettingKey = MISSION_FIELD_TO_SETTING[dateField];
@@ -263,7 +356,7 @@ export async function POST(request: NextRequest) {
       const missionId = String(body.mission_id || '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
       if (!missionId) return Response.json({ ok: false, error: 'mission_id is required' }, { status: 400 });
 
-      const today = new Date().toISOString().split('T')[0];
+      const today = jstDateKey();
       const db = adminDb();
       const missionSnap = await db.collection('settings').doc('mission_control').get();
       const customMissions = Array.isArray(missionSnap.data()?.custom_missions)
@@ -305,10 +398,10 @@ export async function POST(request: NextRequest) {
       });
 
       if (result.applied) {
-        await userRef.set({
-          custom_mission_dates: { [missionId]: today },
+        await userRef.update({
+          [`custom_mission_dates.${missionId}`]: today,
           updated_at: FieldValue.serverTimestamp(),
-        }, { merge: true });
+        });
       }
 
       return Response.json({ ok: true, amount: mission.reward, mission_id: missionId, ...result });
@@ -316,35 +409,53 @@ export async function POST(request: NextRequest) {
 
     if (action === 'reward_exchange') {
       requireRole(user, ['student']);
-      const rewardId = String(body.reward_id || '');
-      if (!rewardId) return Response.json({ ok: false, error: 'reward_id is required' }, { status: 400 });
+      const rewardId = String(body.reward_id || '').trim();
+      const exchangeId = String(body.exchange_id || '').trim();
+      if (!rewardId || !/^[a-zA-Z0-9_-]{8,80}$/.test(exchangeId)) {
+        return Response.json({ ok: false, error: 'reward_id and exchange_id are required' }, { status: 400 });
+      }
       const db = adminDb();
-      const rewardSnap = await db.collection('rewards').doc(rewardId).get();
-      if (!rewardSnap.exists) return Response.json({ ok: false, error: 'reward not found' }, { status: 404 });
-      const reward = rewardSnap.data() || {};
-      const cost = Math.max(0, Number(reward.required_coins || 0));
-      const result = await applyCoinOnce({
-        userId: user.uid,
-        amount: -cost,
-        reason: `景品交換: ${reward.name || rewardId}`,
-        actorId: user.uid,
-        source: 'reward_exchange',
-        sourceId: rewardId,
-        metadata: { reward_id: rewardId, reward_name: reward.name || '', cost },
-      });
-      if (result.applied) {
-        await db.collection('requests').add({
+      const rewardRef = db.collection('rewards').doc(rewardId);
+      const userRef = db.collection('users').doc(user.uid);
+      const requestRef = db.collection('requests').doc(`exchange_${user.uid}_${exchangeId}`);
+      const transactionRef = db.collection('coin_transactions').doc(`${user.uid}_reward_exchange_${exchangeId}`);
+      const result = await db.runTransaction(async tx => {
+        const [rewardSnap, userSnap, existingRequest] = await Promise.all([
+          tx.get(rewardRef), tx.get(userRef), tx.get(requestRef),
+        ]);
+        if (existingRequest.exists) {
+          return { applied: false, cost: Number(existingRequest.data()?.cost || 0), coins: Number(userSnap.data()?.coins || 0) };
+        }
+        const reward = rewardSnap.data() || {};
+        const cost = Number(reward.required_coins);
+        const rewardName = String(reward.name || '').trim();
+        if (!rewardSnap.exists || reward.archived === true || reward.active === false || !rewardName || !Number.isInteger(cost) || cost <= 0 || cost > 1_000_000) {
+          throw new Error('reward-not-available');
+        }
+        const currentCoins = Number(userSnap.data()?.coins || 0);
+        if (!userSnap.exists || currentCoins < cost) throw new Error('insufficient-coins');
+        tx.set(transactionRef, {
+          user_id: user.uid, amount: -cost, reason: `景品交換: ${rewardName}`,
+          actor_id: user.uid, source: 'reward_exchange', source_id: exchangeId,
+          metadata: { reward_id: rewardId, reward_name: rewardName, cost },
+          created_at: FieldValue.serverTimestamp(),
+        });
+        tx.set(userRef, {
+          coins: FieldValue.increment(-cost), updated_at: FieldValue.serverTimestamp(),
+        }, { merge: true });
+        tx.set(requestRef, {
           type: 'exchange',
           userId: user.uid,
           userName: user.profile.student_name || user.profile.name || user.email || '生徒',
           rewardId,
-          rewardName: reward.name || '',
+          rewardName,
           cost,
           status: 'pending',
           created_at: FieldValue.serverTimestamp(),
         });
-      }
-      return Response.json({ ok: true, cost, ...result });
+        return { applied: true, cost, coins: currentCoins - cost };
+      });
+      return Response.json({ ok: true, ...result });
     }
 
     if (action === 'community_like_reward') {
@@ -354,6 +465,7 @@ export async function POST(request: NextRequest) {
       if (!['community_topics', 'teacher_community_topics'].includes(collectionName)) {
         return Response.json({ ok: false, error: 'invalid collection_name' }, { status: 400 });
       }
+      if (collectionName === 'teacher_community_topics') requireRole(user, ['teacher', 'admin', 'master']);
       if (!topicId) return Response.json({ ok: false, error: 'topic_id is required' }, { status: 400 });
       const db = adminDb();
       const topicRef = db.collection(collectionName).doc(topicId);
@@ -364,14 +476,18 @@ export async function POST(request: NextRequest) {
       if (topic.reward_given || likes < 10 || !topic.creator_uid) {
         return Response.json({ ok: true, applied: false });
       }
+      const creatorId = String(topic.creator_uid);
       const result = await applyCoinOnce({
-        userId: String(topic.creator_uid),
+        userId: creatorId,
         amount: 5,
         reason: 'コミュニティいいね報酬',
         actorId: user.uid,
         source: 'community_like_reward',
         sourceId: `${collectionName}_${topicId}`,
         metadata: { topic_id: topicId, collection_name: collectionName, likes },
+        allowedUserRoles: collectionName === 'community_topics'
+          ? ['student']
+          : ['teacher', 'admin', 'master', 'school_admin', 'branch_admin', 'campus_admin', 'classroom_admin'],
       });
       if (result.applied) {
         await topicRef.set({ reward_given: true, reward_given_at: FieldValue.serverTimestamp() }, { merge: true });

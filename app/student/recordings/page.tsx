@@ -2,10 +2,6 @@
 
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
-import { db } from '@/lib/firebase';
-import { 
-  collection, query, orderBy, getDocs
-} from 'firebase/firestore';
 import { 
   ArrowLeft, Video, Calendar as CalendarIcon, PlayCircle, Loader2, 
   ChevronLeft, ChevronRight, MonitorPlay, Filter, Atom, FlaskConical, 
@@ -14,7 +10,6 @@ import {
 import Link from 'next/link';
 import {
   getRecordingYearScope,
-  isZoomRecordingShareUrl,
   normalizeRecordingType,
   normalizeSchoolYear,
   recordingTypeLabel,
@@ -41,6 +36,13 @@ type RecordingItem = {
   school_year: number;
   year_scope: RecordingYearScope;
   searchText: string;
+  zoom_share: boolean;
+};
+
+type PlaybackOption = {
+  key: string;
+  label: string;
+  playback_url: string;
 };
 
 export default function StudentRecordingsPage() {
@@ -55,6 +57,9 @@ export default function StudentRecordingsPage() {
   const [videoToken, setVideoToken] = useState('');
   const [videoLoading, setVideoLoading] = useState(false);
   const [videoError, setVideoError] = useState('');
+  const [videoRetry, setVideoRetry] = useState(0);
+  const [recordingSessionId, setRecordingSessionId] = useState('');
+  const [playbackChoices, setPlaybackChoices] = useState<{ recording: RecordingItem; options: PlaybackOption[] } | null>(null);
   
   // UI状態
   const [searchMode, setSearchMode] = useState<'calendar' | 'unit'>('calendar'); 
@@ -75,23 +80,22 @@ export default function StudentRecordingsPage() {
       setLoading(true);
 
       try {
-        const ref = collection(db, 'class_recordings');
-        const q = query(ref, orderBy('target_date', 'desc'));
-        const snapshot = await getDocs(q);
-
-        const data = snapshot.docs.map(doc => {
-          const d = doc.data();
+        const token = await user.getIdToken();
+        const response = await fetch('/api/student/recordings', { headers: { Authorization: `Bearer ${token}` } });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || result.ok === false) throw new Error(result.error || '録画一覧を取得できません');
+        const data: RecordingItem[] = (Array.isArray(result.recordings) ? result.recordings : []).map((d: any) => {
           const targetDate = d.target_date || '2024-01-01';
           const schoolYear = normalizeSchoolYear(targetDate, d.school_year);
           const recordingType = normalizeRecordingType(d.recording_type || d.recording_type_label);
           const typeLabel = recordingTypeLabel(recordingType);
           return { 
-            id: doc.id,
+            id: d.id,
             target_date: targetDate,
             grade: d.grade || 'その他',
             subject: d.subject || '全科目',
             title: d.title || 'タイトルなし',
-            video_url: d.video_url || d.url,
+            video_url: '',
             original_shift_id: d.original_shift_id || '',
             zoom_recording_file_id: d.zoom_recording_file_id || d.target_recording_file_id || '',
             target_recording_file_id: d.target_recording_file_id || d.zoom_recording_file_id || '',
@@ -103,6 +107,7 @@ export default function StudentRecordingsPage() {
             recording_type_label: typeLabel,
             school_year: schoolYear,
             year_scope: getRecordingYearScope(schoolYear),
+            zoom_share: d.zoom_share === true,
             searchText: `${d.title} ${d.subject} ${d.grade} ${d.target_date} ${d.unit || ''} ${d.detail_subject || ''} ${typeLabel} ${schoolYear}年度`.toLowerCase()
           };
         });
@@ -211,32 +216,91 @@ export default function StudentRecordingsPage() {
     { label: '公民', icon: <Landmark size={16}/>, color: 'text-indigo-500', bg: 'bg-indigo-50', border: 'border-indigo-200' },
   ];
 
-  const postRecordingView = async (recordingId: string, eventType: 'start' | 'progress' | 'complete', watchedSeconds: number) => {
+  const postRecordingView = async (recordingId: string, eventType: 'start' | 'progress' | 'complete', watchedSeconds: number, sessionId = '') => {
     if (!user) return;
     const token = await user.getIdToken();
-    await fetch('/api/recording-view', {
+    const response = await fetch('/api/recording-view', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify({
         recording_id: recordingId,
         event_type: eventType,
         watched_seconds: watchedSeconds,
+        session_id: sessionId,
       }),
     });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.ok === false) throw new Error(data.error || '視聴記録の保存に失敗しました');
+    return data;
+  };
+
+  const createZoomPlaybackOptions = async (recordingId: string) => {
+    if (!user) throw new Error('ログイン情報を確認できません。');
+    const token = await user.getIdToken();
+    const response = await fetch('/api/zoom/recordings/file', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ recording_id: recordingId }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.playback_url) throw new Error(data.error || '録画を開けませんでした。');
+    const options = Array.isArray(data.playback_options) ? data.playback_options.filter((option: any) => (
+      option && typeof option.playback_url === 'string' && typeof option.label === 'string'
+    )) : [];
+    return options.length > 0 ? options : [{ key: 'default', label: '録画を開く', playback_url: String(data.playback_url) }];
+  };
+
+  const openZoomRecording = async (rec: RecordingItem, playbackWindow: Window | null) => {
+    try {
+      const options = await createZoomPlaybackOptions(rec.id);
+      if (options.length > 1) {
+        if (playbackWindow) playbackWindow.close();
+        setPlaybackChoices({ recording: rec, options });
+        return false;
+      }
+      if (playbackWindow) playbackWindow.location.href = options[0].playback_url;
+      return true;
+    } catch (error) {
+      if (playbackWindow) playbackWindow.close();
+      setVideoError(error instanceof Error ? error.message : '録画を開けませんでした。');
+      return false;
+    }
   };
 
   const handleWatchVideo = async (e: React.MouseEvent, rec: RecordingItem) => {
     e.preventDefault(); 
     if (processingId) return;
+    const zoomSharePlayback = rec.zoom_share;
+    if (zoomSharePlayback) {
+      const playbackWindow = window.open('', '_blank');
+      if (playbackWindow) playbackWindow.opener = null;
+      setProcessingId(rec.id);
+      try {
+        const opened = playbackWindow ? await openZoomRecording(rec, playbackWindow) : false;
+        if (opened) await postRecordingView(rec.id, 'start', 0);
+      } catch (err) {
+        console.warn('recording start log failed:', err);
+      } finally {
+        window.setTimeout(() => setProcessingId(null), 1000);
+      }
+      if (!playbackWindow) {
+        setActiveRecording(rec);
+        setVideoLoading(false);
+        setVideoError('ブラウザで新しいタブがブロックされました。下のボタンから録画を開いてください。');
+      }
+      return;
+    }
     const token = user ? await user.getIdToken() : '';
     setVideoLoading(true);
     setVideoError('');
+    setVideoRetry(0);
     setVideoToken(token);
     setActiveRecording(rec);
     setWatchStartedAt(Date.now());
     setProcessingId(rec.id);
     try {
-      await postRecordingView(rec.id, 'start', 0);
+      const view = await postRecordingView(rec.id, 'start', 0);
+      setRecordingSessionId(String(view?.session_id || ''));
     } catch (err) { console.error(err); } 
     finally { setTimeout(() => setProcessingId(null), 1000); }
   };
@@ -251,23 +315,68 @@ export default function StudentRecordingsPage() {
     setVideoToken('');
     setVideoLoading(false);
     setVideoError('');
+    setVideoRetry(0);
+    setRecordingSessionId('');
     try {
-      await postRecordingView(recordingId, eventType, watchedSeconds);
+      await postRecordingView(recordingId, eventType, watchedSeconds, recordingSessionId);
     } catch (err) {
       console.warn('recording progress log failed:', err);
     }
   };
 
   const activeRecordingSrc = activeRecording
-    ? ((activeRecording.zoom_recording_file_id || activeRecording.target_recording_file_id || activeRecording.original_shift_id || isZoomRecordingShareUrl(activeRecording.video_url))
-      ? `/api/zoom/recordings/file?recording_id=${encodeURIComponent(activeRecording.id)}&token=${encodeURIComponent(videoToken)}`
-      : activeRecording.video_url)
+    ? (activeRecording.zoom_share
+      ? ''
+      : `/api/zoom/recordings/file?recording_id=${encodeURIComponent(activeRecording.id)}&token=${encodeURIComponent(videoToken)}&retry=${videoRetry}`)
     : '';
+  const activeRecordingUsesZoomPlayer = Boolean(activeRecording?.zoom_share);
+
+  useEffect(() => {
+    if (!activeRecording || !videoLoading) return;
+    const timeout = window.setTimeout(() => {
+      setVideoLoading(false);
+      setVideoError('録画の読み込みに時間がかかっています。再読み込みをお試しください。');
+    }, 20_000);
+    return () => window.clearTimeout(timeout);
+  }, [activeRecording, activeRecordingSrc, videoLoading]);
 
   if (loading) return <div className="min-h-screen flex items-center justify-center bg-[#F0F4F8]"><Loader2 className="animate-spin text-red-400" size={40}/></div>;
 
   return (
     <div className="min-h-screen bg-[#F0F4F8] p-4 pb-24 font-sans sm:p-8">
+      {playbackChoices && (
+        <div className="fixed inset-0 z-[220] flex items-center justify-center bg-slate-950/75 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div><p className="text-xs font-black text-red-500">複数の録画があります</p><h2 className="mt-1 text-lg font-black text-slate-900">視聴する録画を選択</h2><p className="mt-2 text-xs font-bold text-slate-500">{playbackChoices.recording.title}</p></div>
+              <button type="button" onClick={() => setPlaybackChoices(null)} aria-label="閉じる" className="rounded-xl bg-slate-100 p-2 text-slate-500"><X size={18}/></button>
+            </div>
+            <div className="mt-5 space-y-2">
+              {playbackChoices.options.map((option, index) => (
+                <button
+                  key={option.key}
+                  type="button"
+                  onClick={() => {
+                    const target = window.open('', '_blank');
+                    if (!target) {
+                      setVideoError('ブラウザで新しいタブがブロックされました。');
+                      return;
+                    }
+                    target.opener = null;
+                    target.location.href = option.playback_url;
+                    void postRecordingView(playbackChoices.recording.id, 'start', 0).catch(error => console.warn('recording start log failed:', error));
+                    setPlaybackChoices(null);
+                  }}
+                  className="flex w-full items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-left transition hover:border-red-200 hover:bg-red-50"
+                >
+                  <span><span className="block text-sm font-black text-slate-800">録画 {index + 1}</span><span className="mt-1 block text-xs font-bold text-slate-500">{option.label}</span></span>
+                  <PlayCircle className="text-red-500" size={24}/>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
       {activeRecording && (
         <div className="fixed inset-0 z-[200] bg-slate-950/80 p-3 sm:p-6">
           <div className="mx-auto flex h-full max-w-6xl flex-col overflow-hidden rounded-3xl bg-white shadow-2xl">
@@ -279,35 +388,55 @@ export default function StudentRecordingsPage() {
               <button onClick={closeRecordingModal} className="rounded-xl bg-slate-900 px-4 py-2 text-xs font-black text-white">閉じる</button>
             </div>
             <div className="relative min-h-0 flex-1 bg-slate-900">
-              <video
-                src={activeRecordingSrc}
-                title={activeRecording.title}
-                className="h-full w-full bg-slate-900"
-                controls
-                autoPlay
-                controlsList="nodownload noremoteplayback"
-                disablePictureInPicture
-                playsInline
-                preload="metadata"
-                onContextMenu={(event) => event.preventDefault()}
-                onLoadStart={() => { setVideoLoading(true); setVideoError(''); }}
-                onCanPlay={() => setVideoLoading(false)}
-                onPlaying={() => setVideoLoading(false)}
-                onError={() => {
-                  setVideoLoading(false);
-                  setVideoError('録画を読み込めませんでした。少し待ってからもう一度お試しください。');
-                }}
-                onLoadedMetadata={(event) => {
-                  const start = activeRecording.trim_start_seconds || 0;
-                  if (start > 0) event.currentTarget.currentTime = start;
-                }}
-                onTimeUpdate={(event) => {
-                  const end = activeRecording.trim_end_seconds;
-                  if (end && event.currentTarget.currentTime >= end) {
-                    event.currentTarget.pause();
-                  }
-                }}
-              />
+              {activeRecordingUsesZoomPlayer ? (
+                <div className="flex h-full items-center justify-center bg-slate-950 p-6 text-center text-white">
+                  <div>
+                    <PlayCircle className="mx-auto text-red-400" size={44} />
+                    <p className="mt-4 text-sm font-black">Zoom公式プレイヤーで再生します</p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const playbackWindow = window.open('', '_blank');
+                        if (playbackWindow) playbackWindow.opener = null;
+                        void openZoomRecording(activeRecording, playbackWindow);
+                      }}
+                      className="mt-4 inline-flex rounded-xl bg-white px-5 py-3 text-xs font-black text-slate-900 hover:bg-slate-100"
+                    >
+                      録画を開く
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <video
+                  src={activeRecordingSrc}
+                  title={activeRecording.title}
+                  className="h-full w-full bg-slate-900"
+                  controls
+                  autoPlay
+                  controlsList="nodownload noremoteplayback"
+                  disablePictureInPicture
+                  playsInline
+                  preload="metadata"
+                  onContextMenu={(event) => event.preventDefault()}
+                  onLoadStart={() => { setVideoLoading(true); setVideoError(''); }}
+                  onCanPlay={() => setVideoLoading(false)}
+                  onPlaying={() => setVideoLoading(false)}
+                  onError={() => {
+                    setVideoLoading(false);
+                    setVideoError('録画を読み込めませんでした。少し待ってからもう一度お試しください。');
+                  }}
+                  onLoadedMetadata={(event) => {
+                    const start = activeRecording.trim_start_seconds || 0;
+                    if (start > 0) event.currentTarget.currentTime = start;
+                  }}
+                  onTimeUpdate={(event) => {
+                    const end = activeRecording.trim_end_seconds;
+                    if (end && event.currentTarget.currentTime >= end) {
+                      event.currentTarget.pause();
+                    }
+                  }}
+                />
+              )}
               {videoLoading && !videoError && (
                 <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-slate-950/70 text-white">
                   <div className="text-center">
@@ -318,7 +447,33 @@ export default function StudentRecordingsPage() {
               )}
               {videoError && (
                 <div className="absolute inset-0 flex items-center justify-center bg-slate-950 p-6 text-center text-sm font-bold text-white">
-                  {videoError}
+                  <div>
+                    <p>{videoError}</p>
+                    {activeRecordingUsesZoomPlayer && (
+                      <button type="button" onClick={() => {
+                        const playbackWindow = window.open('', '_blank');
+                        if (playbackWindow) playbackWindow.opener = null;
+                        void openZoomRecording(activeRecording, playbackWindow);
+                      }} className="mt-4 inline-flex rounded-xl bg-white px-4 py-2 text-xs font-black text-slate-900">
+                        Zoomで録画を開く
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (activeRecordingUsesZoomPlayer) {
+                          void closeRecordingModal();
+                          return;
+                        }
+                        setVideoError('');
+                        setVideoLoading(true);
+                        setVideoRetry(value => value + 1);
+                      }}
+                      className={`${activeRecordingUsesZoomPlayer ? 'ml-2' : 'mt-4'} rounded-xl bg-white px-4 py-2 text-xs font-black text-slate-900`}
+                    >
+                      {activeRecordingUsesZoomPlayer ? '閉じる' : '再読み込み'}
+                    </button>
+                  </div>
                 </div>
               )}
             </div>

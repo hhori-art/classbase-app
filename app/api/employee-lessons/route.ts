@@ -2,7 +2,7 @@ import { createHash } from 'crypto';
 import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
-import { canManageAttendance, getServerUser, jsonError } from '@/lib/server-auth';
+import { canManageAttendanceSystem, getServerUser, jsonError } from '@/lib/server-auth';
 import { employeeLessonMinutes, validateEmployeeLesson, type EmployeeLessonInput } from '@/lib/employee-lessons';
 import { isDedicatedProfile } from '@/lib/employment-category';
 
@@ -19,7 +19,7 @@ function monthRange(raw: string) {
 }
 
 function requireManager(user: Awaited<ReturnType<typeof getServerUser>>) {
-  if (!canManageAttendance(user)) throw new Error('forbidden');
+  if (!canManageAttendanceSystem(user)) throw new Error('forbidden');
 }
 
 function normalizedInput(body: Record<string, unknown>): EmployeeLessonInput {

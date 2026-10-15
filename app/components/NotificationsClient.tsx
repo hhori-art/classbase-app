@@ -1,7 +1,8 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { ArrowLeft, Bell, CheckCircle2, Loader2 } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
 
@@ -12,6 +13,7 @@ type NotificationItem = {
   kind?: string;
   read?: boolean;
   created_at?: any;
+  link?: string;
 };
 
 function dateLabel(value: any) {
@@ -27,11 +29,15 @@ function dateLabel(value: any) {
 
 export default function NotificationsClient({ backHref }: { backHref: string }) {
   const { user } = useAuth();
+  const router = useRouter();
   const [items, setItems] = useState<NotificationItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
+  const [actionError, setActionError] = useState('');
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
+    setLoadError('');
     try {
       if (!user) return;
       const token = await user.getIdToken();
@@ -39,31 +45,45 @@ export default function NotificationsClient({ backHref }: { backHref: string }) 
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json().catch(() => ({}));
-      if (data.ok) setItems(data.notifications || []);
+      if (!res.ok || !data.ok) throw new Error(data.error || 'notifications-load-failed');
+      setItems(data.notifications || []);
+    } catch (loadError) {
+      console.error(loadError);
+      setItems([]);
+      setLoadError('通知を読み込めませんでした。通信状態を確認して、もう一度お試しください。');
     } finally {
       setLoading(false);
     }
-  };
+  }, [user]);
 
   useEffect(() => {
     if (!user) return;
     load();
-  }, [user]);
+  }, [user, load]);
 
   const markRead = async (item: NotificationItem) => {
     if (item.read) return;
+    setActionError('');
     setItems(prev => prev.map(current => current.id === item.id ? { ...current, read: true } : current));
     try {
       if (!user) return;
       const token = await user.getIdToken();
-      await fetch('/api/notifications', {
+      const response = await fetch('/api/notifications', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ id: item.id, read: true }),
       });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) throw new Error(data.error || 'notification-update-failed');
     } catch {
       setItems(prev => prev.map(current => current.id === item.id ? { ...current, read: false } : current));
+      setActionError('既読状態を保存できませんでした。再度お試しください。');
     }
+  };
+
+  const openNotification = async (item: NotificationItem) => {
+    await markRead(item);
+    if (item.link?.startsWith('/') && !item.link.startsWith('//')) router.push(item.link);
   };
 
   return (
@@ -79,8 +99,12 @@ export default function NotificationsClient({ backHref }: { backHref: string }) 
           </div>
         </header>
 
+        {actionError && <div role="alert" className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-bold text-amber-800">{actionError}</div>}
+
         {loading ? (
           <div className="flex justify-center py-20"><Loader2 className="animate-spin text-indigo-400" size={32} /></div>
+        ) : loadError ? (
+          <div role="alert" className="rounded-3xl border border-rose-200 bg-rose-50 p-8 text-center"><p className="text-sm font-black text-rose-800">{loadError}</p><button type="button" onClick={() => void load()} className="mt-4 rounded-xl bg-rose-600 px-5 py-3 text-xs font-black text-white">再読み込み</button></div>
         ) : items.length === 0 ? (
           <div className="rounded-3xl border-2 border-dashed border-slate-200 bg-white py-16 text-center">
             <Bell className="mx-auto mb-3 text-slate-300" size={34} />
@@ -89,7 +113,7 @@ export default function NotificationsClient({ backHref }: { backHref: string }) 
         ) : (
           <div className="space-y-3">
             {items.map(item => (
-              <button key={item.id} onClick={() => markRead(item)} className={`w-full rounded-3xl border p-4 text-left shadow-sm transition ${item.read ? 'border-slate-100 bg-white' : 'border-indigo-100 bg-indigo-50'}`}>
+              <button key={item.id} onClick={() => void openNotification(item)} className={`w-full rounded-3xl border p-4 text-left shadow-sm transition ${item.read ? 'border-slate-100 bg-white' : 'border-indigo-100 bg-indigo-50'}`}>
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="mb-2 flex flex-wrap items-center gap-2">

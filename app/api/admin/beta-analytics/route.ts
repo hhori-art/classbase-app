@@ -64,7 +64,7 @@ export async function GET(request: NextRequest) {
     ] = await Promise.all([
       db.collection('beta_test_daily').where('date', '>=', dateKey(since)).get(),
       db.collection('beta_user_metrics').limit(3000).get(),
-      db.collection('users').where('role', '==', 'student').limit(5000).get(),
+      db.collection('users').where('role', '==', 'student').count().get(),
       db.collection('quest_results').where('created_at', '>=', sinceTs).limit(3000).get().catch(() => ({ docs: [] as any[] })),
       db.collection('recording_views').where('created_at', '>=', sinceTs).limit(3000).get().catch(() => ({ docs: [] as any[] })),
       db.collection('coin_transactions').where('created_at', '>=', sinceTs).limit(3000).get().catch(() => ({ docs: [] as any[] })),
@@ -102,7 +102,7 @@ export async function GET(request: NextRequest) {
       Object.entries(data.features || {}).forEach(([key, value]) => increment(featureMap, key, Number(value || 0)));
     });
 
-    const studentTotal = usersSnap.size;
+    const studentTotal = usersSnap.data().count;
     const userMetrics = userMetricsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
     const activeMetrics = userMetrics.filter(item => {
       const lastSeen = toDate(item.last_seen_at);

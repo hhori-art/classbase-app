@@ -1,7 +1,9 @@
 import { normalizePayrollName, normalizePersonCode, type RegularAttendanceInterval } from './attendance-payroll.ts';
 
 export type ExternalAttendanceFieldMap = Partial<Record<
-  'id' | 'person_code' | 'person_name' | 'date' | 'start_time' | 'end_time' | 'work_type' | 'status' | 'updated_at',
+  'id' | 'person_code' | 'person_name' | 'date' | 'start_time' | 'end_time' | 'work_type' |
+  'school_code' | 'school_name' | 'course_code' | 'course_name' | 'work_code' | 'actual_minutes' | 'payroll_tier' |
+  'status' | 'updated_at',
   string
 >>;
 
@@ -20,6 +22,13 @@ const aliases: Record<keyof Required<ExternalAttendanceFieldMap>, string[]> = {
   start_time: ['start_time', 'clock_in', 'clock_in_at', 'started_at', '勤務開始', '出勤時刻'],
   end_time: ['end_time', 'clock_out', 'clock_out_at', 'ended_at', '勤務終了', '退勤時刻'],
   work_type: ['work_type', 'attendance_type', 'category', '勤務区分'],
+  school_code: ['school_code', 'school_id', 'classroom_code', '校舎コード', '教室コード'],
+  school_name: ['school_name', 'school', 'classroom_name', '校舎名', '教室名'],
+  course_code: ['course_code', 'lesson_code', 'class_code', '講座コード', '授業コード'],
+  course_name: ['course_name', 'lesson_name', 'class_name', '講座名', '授業名'],
+  work_code: ['work_code', 'job_code', 'task_code', '業務コード', '作業コード'],
+  actual_minutes: ['actual_minutes', 'worked_minutes', 'work_minutes', '実働分', '勤務分'],
+  payroll_tier: ['payroll_tier', 'rate_tier', 'wage_type', '給与区分', '単価区分'],
   status: ['status', 'state'],
   updated_at: ['updated_at', 'modified_at', 'last_modified_at'],
 };
@@ -99,6 +108,13 @@ export function normalizeExternalAttendanceRecord(
         start_time: startTime,
         end_time: endTime,
         work_type: String(firstValue(record, 'work_type', fieldMap) || ''),
+        school_code: String(firstValue(record, 'school_code', fieldMap) || ''),
+        school_name: String(firstValue(record, 'school_name', fieldMap) || ''),
+        course_code: String(firstValue(record, 'course_code', fieldMap) || ''),
+        course_name: String(firstValue(record, 'course_name', fieldMap) || ''),
+        work_code: String(firstValue(record, 'work_code', fieldMap) || ''),
+        actual_minutes: Number(firstValue(record, 'actual_minutes', fieldMap) || 0),
+        payroll_tier: String(firstValue(record, 'payroll_tier', fieldMap) || ''),
         source_name: '',
         status,
         updated_at: String(firstValue(record, 'updated_at', fieldMap) || ''),
@@ -120,6 +136,13 @@ export function normalizeExternalAttendanceRecord(
       start_time: startTime,
       end_time: endTime,
       work_type: String(firstValue(record, 'work_type', fieldMap) || '通常勤務'),
+      school_code: String(firstValue(record, 'school_code', fieldMap) || ''),
+      school_name: String(firstValue(record, 'school_name', fieldMap) || ''),
+      course_code: String(firstValue(record, 'course_code', fieldMap) || ''),
+      course_name: String(firstValue(record, 'course_name', fieldMap) || ''),
+      work_code: String(firstValue(record, 'work_code', fieldMap) || ''),
+      actual_minutes: Number(firstValue(record, 'actual_minutes', fieldMap) || 0),
+      payroll_tier: String(firstValue(record, 'payroll_tier', fieldMap) || ''),
       source_name: '',
       status,
       updated_at: String(firstValue(record, 'updated_at', fieldMap) || ''),

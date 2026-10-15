@@ -1,19 +1,26 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { auth } from '@/lib/firebase';
 import {
   BookOpen,
+  AlertTriangle,
   CheckCircle2,
   CameraOff,
   FileUp,
+  Download,
   GraduationCap,
+  History,
+  CalendarDays,
+  LayoutList,
   Loader2,
+  MessageSquareText,
   LockKeyhole,
   PauseCircle,
   PhoneOff,
   Plus,
+  Pencil,
   Printer,
   RefreshCw,
   Search,
@@ -27,6 +34,8 @@ import CourseRegistrationCalendar, { getCourseDay, getCourseSlot, getCourseSubje
 import LastLoginCell from '@/app/components/LastLoginCell';
 import AccountGuideSheet, { ACCOUNT_GUIDE_PRINT_CSS } from '@/app/components/AccountGuideSheet';
 import { loadCourseRegistrationOptions } from '@/lib/client-course-options';
+import { courseOptionMatchesSelection, getCourseOptionStableKey, resolveSelectedCourseOptionIds, summarizeSelectedCourseLabels } from '@/lib/course-registration-selection';
+import { buildSchoolCourseRegistrationCsv } from '@/lib/school-course-registration-export';
 
 const STATUSES = [
   { id: 'active', label: '有効', icon: CheckCircle2, className: 'bg-emerald-50 text-emerald-700 border-emerald-100' },
@@ -36,19 +45,43 @@ const STATUSES = [
 ];
 
 const TRIAL_EVENT_OPTIONS = ['理科体験授業', '社会体験授業', '定期テスト対策体験', '保護者説明会'];
+const STUDENT_CSV_HEADERS = ['生涯番号', '氏名', '学年', '所属教室', '中学校', '受講開始月', '兄弟姉妹グループ', '双子フラグ', '体験授業', '継続フラグ', '電話', '曜日', '理科', '社会', '保護者氏名', '保護者電話'];
+const STUDENT_CSV_SAMPLE_ROWS = [
+  ['100001', '山田 太郎', '中1', '本山', '本山中学校', '2026-04', 'YAMADA', '○', '理科体験授業', 'はい', '090-0000-0001', '月', '物理', '地理', '山田 保護者', '078-000-0001'],
+  ['100002', '山田 花子', '中1', '本山', '本山中学校', '2026-04', 'YAMADA', '○', '社会体験授業', '', '090-0000-0002', '月', '物理', '地理', '山田 保護者', '078-000-0001'],
+];
+
+interface SchoolAccountImportBatch {
+  id: string;
+  file_name: string;
+  user_ids: string[];
+  success_count: number;
+  error_count: number;
+  imported_at: string;
+  school: string;
+}
+
+const currentMonthValue = () => {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+};
 
 const initialForm = {
   display_name: '',
+  student_name_kana: '',
   login_id: '',
   password: '',
   grade: '中1',
   classroom: '',
   middle_school: '',
-  course_start_month: '',
+  course_start_month: currentMonthValue(),
   sibling_ids: '',
   twin_sibling_ids: '',
   trial_event_ids: [] as string[],
   trial_continued: false,
+  member_type: 'enrolled',
+  summer_course_status: 'none',
+  summer_only: false,
   day_of_week: '',
   subject_science: '',
   subject_social: '',
@@ -57,6 +90,22 @@ const initialForm = {
   absence_call_not_required: false,
 };
 
+const WITHDRAWAL_REASONS = [
+  { id: 'withdrawal', label: '退学' },
+  { id: 'individual_transfer', label: '個別移籍' },
+  { id: 'dekitas_transfer', label: 'デキタス移籍' },
+  { id: 'course_reduction', label: '5教科→3教科' },
+  { id: 'other', label: 'その他' },
+];
+const CHANGE_REASONS = ['コベカツ', 'クラブチーム', '習い事', '経済的理由', '進路変更', 'その他'];
+const SESSION_EXPIRED_MESSAGE = 'ログイン情報が失効しています。再度ログインしてください。';
+const isExpiredSessionError = (error: unknown) => {
+  const code = String((error as any)?.code || '');
+  const status = Number((error as any)?.status || 0);
+  const message = String((error as any)?.message || error || '').toLowerCase();
+  return status === 401 || ['auth/id-token-revoked', 'auth/id-token-expired', 'auth/user-token-expired', 'auth/user-disabled', 'reauth-required'].includes(code) ||
+    message.includes('token has been revoked') || message.includes('ログイン情報が失効');
+};
 const currentCourseYear = () => {
   const now = new Date();
   return now.getMonth() + 1 >= 4 ? now.getFullYear() : now.getFullYear() - 1;
@@ -133,10 +182,16 @@ const formatCourseGroupLabel = (group: any) => {
 };
 
 export default function SchoolStudentsPage() {
-  const { profile } = useAuth();
+  const { profile, logout } = useAuth();
+  const sessionRecoveryStartedRef = useRef(false);
   const [students, setStudents] = useState<any[]>([]);
   const [school, setSchool] = useState('');
+  const [schoolOptions, setSchoolOptions] = useState<string[]>([]);
   const [status, setStatus] = useState('all');
+  const [activeView, setActiveView] = useState<'students' | 'attendance' | 'courses'>('students');
+  const [showAllAttendance, setShowAllAttendance] = useState(false);
+  const attendanceHistoryRef = useRef(false);
+  const studentRequestIdRef = useRef(0);
   const [search, setSearch] = useState('');
   const [middleSchoolFilter, setMiddleSchoolFilter] = useState('');
   const [bulkAbsenceDate, setBulkAbsenceDate] = useState(new Date().toISOString().slice(0, 10));
@@ -153,13 +208,21 @@ export default function SchoolStudentsPage() {
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState(initialForm);
   const [printStudent, setPrintStudent] = useState<any | null>(null);
+  const [printStudents, setPrintStudents] = useState<any[]>([]);
   const [isPrintModalOpen, setIsPrintModalOpen] = useState(false);
   const [printingId, setPrintingId] = useState('');
   const [isMounted, setIsMounted] = useState(false);
   const [qrBaseUrl, setQrBaseUrl] = useState('');
+  const [showParentCredentials, setShowParentCredentials] = useState(true);
   const [csvEncoding, setCsvEncoding] = useState('Shift_JIS');
+  const [csvDefaultStartMonth, setCsvDefaultStartMonth] = useState(currentMonthValue());
   const [csvImporting, setCsvImporting] = useState(false);
   const [csvLog, setCsvLog] = useState<string[]>([]);
+  const [csvImportBatches, setCsvImportBatches] = useState<SchoolAccountImportBatch[]>([]);
+  const [selectedCsvImportBatchId, setSelectedCsvImportBatchId] = useState('');
+  const [csvHistoryLoading, setCsvHistoryLoading] = useState(false);
+  const [isPdfExporting, setIsPdfExporting] = useState(false);
+  const [pdfProgress, setPdfProgress] = useState({ current: 0, total: 0 });
   const [courseModalStudent, setCourseModalStudent] = useState<any | null>(null);
   const [courseOptions, setCourseOptions] = useState<any[]>([]);
   const [courseLoading, setCourseLoading] = useState(false);
@@ -169,6 +232,12 @@ export default function SchoolStudentsPage() {
   const [courseYear, setCourseYear] = useState(currentCourseYear());
   const [courseTerm, setCourseTerm] = useState('');
   const [courseOptionCache, setCourseOptionCache] = useState<Record<string, any[]>>({});
+  const [editStudent, setEditStudent] = useState<any | null>(null);
+  const [editForm, setEditForm] = useState({ ...initialForm });
+  const [withdrawalStudent, setWithdrawalStudent] = useState<any | null>(null);
+  const [withdrawalForm, setWithdrawalForm] = useState({
+    month: currentMonthValue(), reasonCode: 'withdrawal', changeReasons: [] as string[], note: '',
+  });
 
   const mySchool = useMemo(() => {
     const ids = Array.isArray(profile?.school_ids) ? profile?.school_ids : [];
@@ -176,18 +245,24 @@ export default function SchoolStudentsPage() {
   }, [profile]);
 
   const filtered = useMemo(() => {
+    const selectedBatch = csvImportBatches.find(batch => batch.id === selectedCsvImportBatchId);
+    const importedIds = selectedBatch ? new Set(selectedBatch.user_ids) : null;
     return students.filter(student => {
       const statusValue = student.account_status || 'active';
-      const haystack = `${student.student_name || ''} ${student.grade || ''} ${student.classroom || ''} ${student.lifetime_id || ''}`.toLowerCase();
+      const haystack = `${student.student_name || ''} ${student.student_name_kana || ''} ${student.grade || ''} ${student.classroom || ''} ${student.lifetime_id || ''}`.toLowerCase();
       if (status !== 'all' && statusValue !== status) return false;
       if (middleSchoolFilter && student.middle_school !== middleSchoolFilter) return false;
       if (search && !haystack.includes(search.toLowerCase())) return false;
+      if (importedIds && !importedIds.has(student.id)) return false;
       return true;
     });
-  }, [students, status, search, middleSchoolFilter]);
+  }, [students, status, search, middleSchoolFilter, csvImportBatches, selectedCsvImportBatchId]);
+
+  const selectedCsvImportBatch = csvImportBatches.find(batch => batch.id === selectedCsvImportBatchId) || null;
 
   const middleSchools = useMemo(() => Array.from(new Set(students.map(student => String(student.middle_school || '').trim()).filter(Boolean))).sort(), [students]);
   const isMaster = profile?.role === 'master';
+  const canManageStudents = profile?.role === 'master';
   const courseYearChoices = useMemo(() => {
     const values = Array.from(new Set(courseOptions.map(option => Number(option.year || courseYear)).filter(Boolean)));
     if (!values.includes(courseYear)) values.push(courseYear);
@@ -273,27 +348,84 @@ export default function SchoolStudentsPage() {
     }, {} as Record<string, number>);
   }, [students]);
 
-  const loadStudents = async () => {
+  const loadStudents = useCallback(async (requestedSchool = '') => {
+    const requestId = ++studentRequestIdRef.current;
     setLoading(true);
     try {
-      const token = await auth.currentUser?.getIdToken();
-      const res = await fetch('/api/admin/school-students', {
+      const token = await auth.currentUser?.getIdToken(true);
+      const selectedSchool = String(requestedSchool).trim();
+      const params = new URLSearchParams({ include_pf: 'false' });
+      if (selectedSchool) params.set('school', selectedSchool);
+      if (attendanceHistoryRef.current) params.set('attendance_history', 'all');
+      const res = await fetch(`/api/admin/school-students?${params.toString()}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json();
-      if (!res.ok || !data.ok) throw new Error(data.error || 'failed');
+      if (!res.ok || !data.ok) throw Object.assign(new Error(data.error || 'failed'), { code: data.code || '', status: res.status });
+      if (requestId !== studentRequestIdRef.current) return;
       setSchool(data.school || mySchool || '');
+      setSchoolOptions(Array.isArray(data.schools) ? data.schools.map(String).filter(Boolean) : []);
       setStudents(data.students || []);
     } catch (e: any) {
-      alert(`生徒一覧の取得に失敗しました: ${e.message || e}`);
+      if (isExpiredSessionError(e)) {
+        if (!sessionRecoveryStartedRef.current) {
+          sessionRecoveryStartedRef.current = true;
+          alert(SESSION_EXPIRED_MESSAGE);
+          await logout();
+        }
+        return;
+      }
+      if (requestId === studentRequestIdRef.current) alert(`生徒一覧の取得に失敗しました: ${e.message || e}`);
     } finally {
-      setLoading(false);
+      if (requestId === studentRequestIdRef.current) setLoading(false);
     }
-  };
+  }, [logout, mySchool]);
+
+  const loadCsvImportBatches = useCallback(async (targetSchool: string) => {
+    if (!targetSchool) {
+      setCsvImportBatches([]);
+      return;
+    }
+    setCsvHistoryLoading(true);
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) throw new Error('ログイン情報を確認できません');
+      const params = new URLSearchParams({ school: targetSchool, source: 'school_students' });
+      const response = await fetch(`/api/admin/account-import-batches?${params.toString()}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok) throw new Error(result.error || '取込履歴を取得できませんでした');
+      setCsvImportBatches(Array.isArray(result.batches) ? result.batches : []);
+      setSelectedCsvImportBatchId(current => result.batches?.some((batch: SchoolAccountImportBatch) => batch.id === current) ? current : '');
+    } catch (error) {
+      console.error('School account import history fetch failed:', error);
+      setCsvImportBatches([]);
+    } finally {
+      setCsvHistoryLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    if (profile) loadStudents();
-  }, [profile]);
+    if (profile) loadStudents(mySchool);
+  }, [loadStudents, mySchool, profile]);
+
+  useEffect(() => {
+    if (canManageStudents && school) void loadCsvImportBatches(school);
+  }, [canManageStudents, loadCsvImportBatches, school]);
+
+  const exportCourseStatusCsv = useCallback(() => {
+    const csv = buildSchoolCourseRegistrationCsv(filtered, school);
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    const todayJst = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+    anchor.download = `${String(school || '校舎').replace(/[\\/:*?"<>|]/g, '_')}_受講講座状況_${todayJst}.csv`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }, [filtered, school]);
 
   useEffect(() => {
     if (!courseModalStudent || courseTermChoices.length === 0) return;
@@ -332,7 +464,7 @@ export default function SchoolStudentsPage() {
         const data = await loadCourseRegistrationOptions({
           grade: studentGrade,
           year: initialYear,
-          getToken: () => currentUser.getIdToken(),
+          getToken: forceRefresh => currentUser.getIdToken(forceRefresh),
         });
         gradeOptions = Array.isArray(data.options) ? data.options : [];
         setCourseOptionCache(prev => ({ ...prev, [cacheKey]: gradeOptions }));
@@ -357,12 +489,14 @@ export default function SchoolStudentsPage() {
         .filter(Boolean)));
       const selectedTerm = String(activeRegistration?.term || '').trim();
       const nextTerm = selectedTerm && termChoices.includes(selectedTerm) ? selectedTerm : termChoices[0] || selectedTerm || '';
-      const initialKeys = Array.from(new Set(gradeOptions
+      const scopedOptions = gradeOptions
         .filter((option: any) => (!option.year || Number(option.year) === nextYear) && (!nextTerm || optionTermKey(option) === nextTerm))
-        .filter((option: any) => initialSelectedIds.includes(option.id))
+      const resolvedInitialIds = resolveSelectedCourseOptionIds(scopedOptions, initialSelectedIds);
+      const initialKeys = Array.from(new Set(scopedOptions
+        .filter((option: any) => courseOptionMatchesSelection(option, initialSelectedIds))
         .map(courseKey)));
 
-      setCourseSelectedIds(initialSelectedIds);
+      setCourseSelectedIds(resolvedInitialIds.length > 0 ? resolvedInitialIds : initialSelectedIds);
       setCourseSelectedKeys(initialKeys);
       setCourseYear(nextYear);
       setCourseTerm(nextTerm);
@@ -419,6 +553,11 @@ export default function SchoolStudentsPage() {
     setCourseSaving(true);
     try {
       const selectedCourseLabels = selectedVisibleGroups.map(formatCourseGroupLabel);
+      const summaryLabels = summarizeSelectedCourseLabels(selectedCourseLabels);
+      const selectedCourseKeys = visibleCourseOptions
+        .filter((option: any) => visibleSelectedIds.includes(option.id))
+        .map(getCourseOptionStableKey)
+        .filter(Boolean);
       const token = await auth.currentUser?.getIdToken();
       const res = await fetch('/api/admin/course-registrations', {
         method: 'POST',
@@ -429,6 +568,7 @@ export default function SchoolStudentsPage() {
           term: courseTerm || 'manual',
           selected_course_ids: visibleSelectedIds,
           selected_course_labels: selectedCourseLabels,
+          selected_course_keys: selectedCourseKeys,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -436,7 +576,8 @@ export default function SchoolStudentsPage() {
       setStudents(prev => prev.map(student => student.id === courseModalStudent.id ? {
         ...student,
         selected_course_ids: data.selected_course_ids || visibleSelectedIds,
-        selected_course_labels: selectedCourseLabels,
+        selected_course_labels: summaryLabels,
+        current_course_label: summaryLabels.join(' / '),
         active_course_registration_id: data.registration_id,
         course_registration_status: 'active',
         course_registration_year: courseYear,
@@ -476,6 +617,7 @@ export default function SchoolStudentsPage() {
   const createStudent = async () => {
     if (!form.display_name.trim()) return alert('氏名は必須です');
     if (!form.login_id.trim()) return alert('初期IDは必須です');
+    if (!form.course_start_month) return alert('利用開始月を選択してください');
     if (!school) return alert('校舎が設定されていません。管理者アカウントの school_ids を確認してください。');
     setSaving(true);
     try {
@@ -497,7 +639,9 @@ export default function SchoolStudentsPage() {
       const createdStudent = {
         id: data.uid,
         uid: data.uid,
+        role: 'student',
         student_name: form.display_name,
+        student_name_kana: form.student_name_kana,
         lifetime_id: form.login_id,
         initial_password: data.initial_password || form.password,
         grade: form.grade,
@@ -508,6 +652,9 @@ export default function SchoolStudentsPage() {
         twin_sibling_ids: form.twin_sibling_ids.split(',').map(value => value.trim()).filter(Boolean),
         trial_event_ids: form.trial_event_ids,
         trial_continued: form.trial_continued,
+        member_type: form.member_type,
+        summer_course_status: form.summer_course_status,
+        summer_only: form.summer_only,
         day_of_week: form.day_of_week,
         subject_science: form.subject_science,
         subject_social: form.subject_social,
@@ -525,9 +672,11 @@ export default function SchoolStudentsPage() {
       };
       setModalOpen(false);
       setForm(initialForm);
-      await loadStudents();
+      await loadStudents(school);
       setPrintStudent(createdStudent);
-      alert(data.updated ? '生徒アカウントを更新しました' : '生徒アカウントを作成しました');
+      setPrintStudents([createdStudent]);
+      setIsPrintModalOpen(true);
+      alert(data.updated ? '生徒アカウントを更新し、案内書面を作成しました' : '生徒アカウントを作成し、案内書面を作成しました');
     } catch (e: any) {
       alert(`作成に失敗しました: ${e.message || e}`);
     } finally {
@@ -574,7 +723,7 @@ export default function SchoolStudentsPage() {
       if (!res.ok || !data.ok) throw new Error(data.error || 'failed');
       if (betaMode) await writeBetaLog('student_option_updated', { student_id: student.id, keys: Object.keys(patch) });
     } catch (e: any) {
-      await loadStudents();
+      await loadStudents(school);
       alert(`更新に失敗しました: ${e.message || e}`);
     }
   };
@@ -591,29 +740,105 @@ export default function SchoolStudentsPage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || 'failed');
-      await loadStudents();
+      await loadStudents(school);
     } catch (e: any) {
       alert(`移籍処理に失敗しました: ${e.message || e}`);
     }
   };
 
-  const withdrawStudent = async (student: any) => {
-    const month = prompt('解除月をYYYY-MMで入力してください', new Date().toISOString().slice(0, 7));
-    if (!month) return;
-    const reason = prompt('解除理由を入力してください');
-    if (!reason) return alert('解除理由は必須です');
+  const withdrawStudent = (student: any) => {
+    setWithdrawalStudent(student);
+    setWithdrawalForm({ month: currentMonthValue(), reasonCode: 'withdrawal', changeReasons: [], note: '' });
+  };
+
+  const saveWithdrawal = async () => {
+    if (!withdrawalStudent) return;
+    const reasonLabel = WITHDRAWAL_REASONS.find(item => item.id === withdrawalForm.reasonCode)?.label || 'その他';
+    if (['individual_transfer', 'dekitas_transfer', 'course_reduction'].includes(withdrawalForm.reasonCode) && withdrawalForm.changeReasons.length === 0) {
+      return alert('変更理由を1つ以上選択してください');
+    }
     try {
       const token = await auth.currentUser?.getIdToken();
       const res = await fetch('/api/admin/school-students/lifecycle', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ action: 'withdraw', user_id: student.id, enrollment_cancel_month: month, enrollment_cancel_reason: reason }),
+        body: JSON.stringify({
+          action: 'withdraw', user_id: withdrawalStudent.id,
+          enrollment_cancel_month: withdrawalForm.month,
+          enrollment_cancel_reason: [reasonLabel, withdrawalForm.changeReasons.join('・'), withdrawalForm.note].filter(Boolean).join(' / '),
+          enrollment_cancel_reason_code: withdrawalForm.reasonCode,
+          enrollment_change_reasons: withdrawalForm.changeReasons,
+          enrollment_cancel_note: withdrawalForm.note,
+        }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || 'failed');
-      await loadStudents();
+      setWithdrawalStudent(null);
+      await loadStudents(school);
     } catch (e: any) {
       alert(`受講解除に失敗しました: ${e.message || e}`);
+    }
+  };
+
+  const restoreStudent = async (student: any) => {
+    if (!confirm(`${student.student_name || student.id} を受講中へ復帰しますか？`)) return;
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      const res = await fetch('/api/admin/school-students/lifecycle', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action: 'restore', user_id: student.id }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'failed');
+      await loadStudents(school);
+    } catch (e: any) {
+      alert(`復帰処理に失敗しました: ${e.message || e}`);
+    }
+  };
+
+  const openEditStudent = (student: any) => {
+    setEditStudent(student);
+    setEditForm({
+      ...initialForm,
+      display_name: student.student_name || '', student_name_kana: student.student_name_kana || '',
+      grade: student.grade || '中1', classroom: student.classroom || '', middle_school: student.middle_school || '',
+      course_start_month: student.course_start_month || currentMonthValue(), day_of_week: student.day_of_week || '',
+      phone_number: student.phone_number || '', camera_off_requested: Boolean(student.camera_off_requested),
+      absence_call_not_required: Boolean(student.absence_call_not_required), trial_continued: Boolean(student.trial_continued),
+      trial_event_ids: Array.isArray(student.trial_event_ids) ? student.trial_event_ids : [],
+      member_type: student.member_type || 'enrolled', summer_course_status: student.summer_course_status || 'none',
+      summer_only: Boolean(student.summer_only), sibling_ids: (student.sibling_ids || []).join(','), twin_sibling_ids: (student.twin_sibling_ids || []).join(','),
+    });
+  };
+
+  const saveStudentProfile = async () => {
+    if (!editStudent || !editForm.display_name.trim()) return alert('氏名は必須です');
+    setSavingId(editStudent.id);
+    try {
+      const patch = {
+        student_name: editForm.display_name, student_name_kana: editForm.student_name_kana,
+        grade: editForm.grade, classroom: editForm.classroom, middle_school: editForm.middle_school,
+        course_start_month: editForm.course_start_month, day_of_week: editForm.day_of_week,
+        phone_number: editForm.phone_number, camera_off_requested: editForm.camera_off_requested,
+        absence_call_not_required: editForm.absence_call_not_required, trial_continued: editForm.trial_continued,
+        trial_event_ids: editForm.trial_event_ids, member_type: editForm.member_type,
+        summer_course_status: editForm.summer_course_status, summer_only: editForm.summer_only,
+        sibling_ids: editForm.sibling_ids.split(',').map(value => value.trim()).filter(Boolean),
+        twin_sibling_ids: editForm.twin_sibling_ids.split(',').map(value => value.trim()).filter(Boolean),
+      };
+      const token = await auth.currentUser?.getIdToken();
+      const res = await fetch('/api/admin/school-students/options', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ user_id: editStudent.id, ...patch }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'failed');
+      setEditStudent(null);
+      await loadStudents(school);
+    } catch (e: any) {
+      alert(`生徒情報の更新に失敗しました: ${e.message || e}`);
+    } finally {
+      setSavingId('');
     }
   };
 
@@ -636,7 +861,7 @@ export default function SchoolStudentsPage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || 'failed');
-      await loadStudents();
+      await loadStudents(school);
       if (betaMode) await writeBetaLog('student_relations_updated', { student_id: student.id });
     } catch (e: any) {
       alert(`兄弟姉妹連携の更新に失敗しました: ${e.message || e}`);
@@ -741,6 +966,54 @@ export default function SchoolStudentsPage() {
       };
       setStudents(current => current.map(item => item.id === student.id ? guideStudent : item));
       setPrintStudent(guideStudent);
+      setPrintStudents([guideStudent]);
+      setIsPrintModalOpen(true);
+    } catch (error: any) {
+      alert(`案内書面を作成できませんでした。\n${error?.message || error}`);
+    } finally {
+      setPrintingId('');
+    }
+  };
+
+  const printSelectedCsvImportBatch = async () => {
+    if (!selectedCsvImportBatch) return alert('CSV取込履歴を選択してください');
+    const targets = filtered;
+    if (targets.length === 0) return alert('現在の絞り込みに該当する生徒がいません');
+    setPrintingId('csv-batch');
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) throw new Error('ログイン情報を確認できませんでした。再ログインしてください。');
+      const userIds = Array.from(new Set(targets.flatMap(student => [student.id, student.parent_uid].filter(Boolean))));
+      const response = await fetch('/api/admin/accounts/sync-printed-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ user_ids: userIds }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok) throw new Error(result.error || 'パスワード同期に失敗しました');
+      if (result.error_count > 0) {
+        const details = (result.errors || []).slice(0, 5).map((item: any) => `${item.login_id || item.user_id}: ${item.error}`).join('\n');
+        throw new Error(`書面とログイン情報を同期できないアカウントがあります。\n${details}`);
+      }
+
+      const byOldId = new Map((result.results || []).map((item: any) => [String(item.old_user_id || ''), item]));
+      const prepared = targets.map(student => {
+        const studentResult: any = byOldId.get(student.id);
+        const parentResult: any = student.parent_uid ? byOldId.get(student.parent_uid) : null;
+        return {
+          ...student,
+          id: studentResult?.user_id || student.id,
+          uid: studentResult?.user_id || student.uid,
+          email: studentResult?.email || student.email,
+          initial_password: studentResult?.initial_password || student.initial_password,
+          isFirstLogin: true,
+          parent_uid: parentResult?.user_id || student.parent_uid,
+          parent_initial_password: parentResult?.initial_password || student.parent_initial_password || '',
+          parent_email: parentResult?.email || student.parent_email || '',
+        };
+      });
+      setPrintStudent(prepared[0] || null);
+      setPrintStudents(prepared);
       setIsPrintModalOpen(true);
     } catch (error: any) {
       alert(`案内書面を作成できませんでした。\n${error?.message || error}`);
@@ -776,7 +1049,12 @@ export default function SchoolStudentsPage() {
         const res = await fetch('/api/admin/school-students/import', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ csv_text: csvText, school_id: school }),
+          body: JSON.stringify({
+            csv_text: csvText,
+            file_name: file.name,
+            school_id: school,
+            default_course_start_month: csvDefaultStartMonth,
+          }),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.ok) throw new Error(data.error || 'failed');
@@ -785,9 +1063,14 @@ export default function SchoolStudentsPage() {
           addCsvLog(`注意: ${data.errors.length}件は登録できませんでした`);
           data.errors.slice(0, 3).forEach((item: any) => addCsvLog(`行${item.row}: ${item.error}`));
         }
-        await loadStudents();
+        await loadStudents(school);
+        await loadCsvImportBatches(school);
+        if (data.import_batch_id) setSelectedCsvImportBatchId(String(data.import_batch_id));
         if (Array.isArray(data.students) && data.students.length > 0) {
           setPrintStudent(data.students[0]);
+          setPrintStudents(data.students);
+          setIsPrintModalOpen(true);
+          addCsvLog(`案内書面: ${data.students.length}名分を作成しました`);
         }
       } catch (e: any) {
         addCsvLog(`エラー: ${e.message || e}`);
@@ -805,8 +1088,55 @@ export default function SchoolStudentsPage() {
     reader.readAsText(file, csvEncoding);
   };
 
+  const downloadIndividualPdfs = async () => {
+    if (isPdfExporting || printStudents.length === 0) return;
+    setIsPdfExporting(true);
+    setPdfProgress({ current: 0, total: printStudents.length });
+    try {
+      if (document.fonts?.ready) await document.fonts.ready;
+      const pages = Array.from(document.querySelectorAll<HTMLElement>('#school-student-print-root .account-guide-print-page'));
+      if (pages.length !== printStudents.length) throw new Error('書面の表示数とPDF対象数が一致しません');
+      const [{ default: html2canvas }, { jsPDF }, { default: JSZip }] = await Promise.all([
+        import('html2canvas'),
+        import('jspdf'),
+        import('jszip'),
+      ]);
+      const zip = new JSZip();
+      const usedNames = new Set<string>();
+      for (let index = 0; index < pages.length; index++) {
+        setPdfProgress({ current: index + 1, total: pages.length });
+        const student = printStudents[index];
+        const canvas = await html2canvas(pages[index], { scale: 2, useCORS: true, backgroundColor: '#ffffff', logging: false });
+        const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4', compress: true });
+        pdf.addImage(canvas.toDataURL('image/jpeg', 0.95), 'JPEG', 0, 0, 210, 297, undefined, 'FAST');
+        const rawName = String(student.student_name || student.name || student.lifetime_id || `user_${index + 1}`).trim();
+        const safeName = (rawName || `user_${index + 1}`).replace(/[\\/:*?"<>|\u0000-\u001F]/g, '_').slice(0, 80);
+        let fileName = `${safeName}_アカウント案内.pdf`;
+        if (usedNames.has(fileName)) fileName = `${safeName}_${index + 1}_アカウント案内.pdf`;
+        usedNames.add(fileName);
+        zip.file(fileName, pdf.output('arraybuffer'));
+      }
+      const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
+      const rawZipName = selectedCsvImportBatch?.file_name?.replace(/\.[^.]+$/, '') || `${school || mySchool || '校舎'}_アカウント案内`;
+      const safeZipName = rawZipName.replace(/[\\/:*?"<>|\u0000-\u001F]/g, '_').slice(0, 100);
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${safeZipName}_個別PDF.zip`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error: any) {
+      alert(`PDFの作成に失敗しました。\n${error?.message || error}`);
+    } finally {
+      setIsPdfExporting(false);
+      setPdfProgress({ current: 0, total: 0 });
+    }
+  };
+
   const PrintGuideModal = () => {
-    if (!isMounted || !printStudent || typeof document === 'undefined') return null;
+    if (!isMounted || printStudents.length === 0 || typeof document === 'undefined') return null;
 
     return createPortal(
       <div id="school-student-print-root" className="fixed inset-0 z-[9999] overflow-y-auto bg-slate-200 print:static print:overflow-visible print:bg-white">
@@ -817,21 +1147,44 @@ export default function SchoolStudentsPage() {
           }
           ${ACCOUNT_GUIDE_PRINT_CSS}
         ` }} />
-        <div className="account-guide-print-hide sticky top-0 z-50 flex items-center justify-between border-b border-slate-200 bg-white p-4 shadow-sm">
-          <h2 className="flex items-center gap-2 text-lg font-black text-slate-800">
-            <Printer size={20} className="text-indigo-600" /> 案内書面プレビュー
-          </h2>
-          <div className="flex gap-3">
+        <div className="account-guide-print-hide sticky top-0 z-50 flex flex-col gap-3 border-b border-slate-200 bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-wrap items-center gap-4">
+            <h2 className="flex items-center gap-2 text-lg font-black text-slate-800">
+              <Printer size={20} className="text-indigo-600" /> 案内書面プレビュー（{printStudents.length}名分）
+            </h2>
+            <label className="flex cursor-pointer items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-black text-amber-900">
+              <input
+                type="checkbox"
+                checked={showParentCredentials}
+                onChange={event => setShowParentCredentials(event.target.checked)}
+                className="h-4 w-4 accent-amber-600"
+              />
+              保護者ID・初期パスワードを掲載する
+            </label>
+          </div>
+          <div className="flex flex-wrap gap-3">
             <button onClick={() => window.print()} className="flex items-center gap-2 rounded-xl bg-indigo-600 px-6 py-2 text-sm font-black text-white hover:bg-indigo-700">
               <Printer size={18} /> 印刷する
             </button>
-            <button onClick={() => setIsPrintModalOpen(false)} className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-5 py-2 text-sm font-black text-slate-600 hover:bg-slate-50">
+            <button onClick={downloadIndividualPdfs} disabled={isPdfExporting} className="flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-2 text-sm font-black text-white hover:bg-emerald-700 disabled:cursor-wait disabled:opacity-60">
+              {isPdfExporting ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
+              {isPdfExporting ? `PDF作成中 ${pdfProgress.current}/${pdfProgress.total}` : '個別PDFをまとめて保存'}
+            </button>
+            <button onClick={() => { setIsPrintModalOpen(false); setPrintStudents([]); }} className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-5 py-2 text-sm font-black text-slate-600 hover:bg-slate-50">
               <X size={18} /> 閉じる
             </button>
           </div>
         </div>
-        <div className="flex min-w-max justify-center py-8 print:block print:min-w-0 print:p-0">
-          <AccountGuideSheet account={printStudent} school={school || mySchool} loginUrl={qrBaseUrl || 'https://classbase-app.vercel.app'} />
+        <div className="flex min-w-max flex-col items-center gap-8 py-8 print:block print:min-w-0 print:p-0">
+          {printStudents.map(student => (
+            <AccountGuideSheet
+              key={student.id || student.uid || student.lifetime_id}
+              account={student}
+              school={student.school_id || school || mySchool}
+              loginUrl={qrBaseUrl || 'https://classbase-app.vercel.app'}
+              showParentCredentials={showParentCredentials}
+            />
+          ))}
         </div>
       </div>,
       document.body
@@ -840,7 +1193,7 @@ export default function SchoolStudentsPage() {
 
   return (
     <>
-    {isMaster && isPrintModalOpen && <PrintGuideModal />}
+    {canManageStudents && isPrintModalOpen && <PrintGuideModal />}
     <div className="space-y-6 print:hidden">
       <section className="rounded-[28px] bg-slate-950 p-6 text-white shadow-xl">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
@@ -852,12 +1205,12 @@ export default function SchoolStudentsPage() {
               <p className="text-xs font-black uppercase tracking-[0.25em] text-slate-400">School Students</p>
               <h1 className="text-2xl font-black">校舎別 生徒管理</h1>
               <div className="mt-2 inline-flex rounded-2xl bg-white/10 px-4 py-2 text-sm font-black text-indigo-100 ring-1 ring-white/10">
-                現在ログイン中の校舎: {school || mySchool || '未設定'}
+                現在表示中: {school || mySchool || '校舎未設定'}
               </div>
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
-            <button onClick={loadStudents} className="flex items-center gap-2 rounded-2xl bg-slate-800 px-4 py-3 text-sm font-black hover:bg-slate-700">
+            <button onClick={() => void loadStudents(school)} className="flex items-center gap-2 rounded-2xl bg-slate-800 px-4 py-3 text-sm font-black hover:bg-slate-700">
               <RefreshCw size={18} /> 更新
             </button>
             {isMaster && (
@@ -865,30 +1218,130 @@ export default function SchoolStudentsPage() {
                 βテスト {betaMode ? 'ON' : 'OFF'}
               </button>
             )}
-            {isMaster && (
-              <>
-                <CsvSampleDownload
-                  filename="校舎別_生徒CSV追加例.csv"
-                  headers={['生涯番号', '氏名', '学年', '所属教室', '中学校', '受講開始月', '兄弟姉妹グループ', '双子フラグ', '体験授業', '継続フラグ', '電話', '曜日', '理科', '社会', '保護者氏名', '保護者電話']}
-                  rows={[
-                    ['100001', '山田 太郎', '中1', '本山', '本山中学校', '2026-04', 'YAMADA', '○', '理科体験授業', 'はい', '090-0000-0001', '月', '物理', '地理', '山田 保護者', '078-000-0001'],
-                    ['100002', '山田 花子', '中1', '本山', '本山中学校', '2026-04', 'YAMADA', '○', '社会体験授業', '', '090-0000-0002', '月', '物理', '地理', '山田 保護者', '078-000-0001'],
-                  ]}
-                  label="生徒CSV例"
-                  className="border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
-                />
-                <label className="relative flex cursor-pointer items-center gap-2 overflow-hidden rounded-2xl bg-emerald-400 px-4 py-3 text-sm font-black text-slate-950 hover:bg-emerald-300">
-                  {csvImporting ? <Loader2 className="animate-spin" size={18} /> : <FileUp size={18} />} 生徒CSV追加
-                  <input type="file" accept=".csv" onChange={handleCsvImport} disabled={csvImporting} className="absolute inset-0 cursor-pointer opacity-0" />
-                </label>
-                <button onClick={() => setModalOpen(true)} className="flex items-center gap-2 rounded-2xl bg-white px-4 py-3 text-sm font-black text-slate-950 hover:bg-indigo-50">
-                  <UserPlus size={18} /> 新規生徒登録
-                </button>
-              </>
-            )}
           </div>
         </div>
       </section>
+
+      {!canManageStudents ? <div className="rounded-2xl border border-sky-200 bg-sky-50 px-5 py-4 text-sm font-bold text-sky-900">この画面は閲覧専用です。登録内容の変更が必要な場合は、対象生徒と変更内容をマスター管理者へ連絡してください。</div> : null}
+
+      {canManageStudents && (
+        <section className="grid gap-4 xl:grid-cols-[0.8fr_1.35fr_1fr]">
+          <div className="rounded-[28px] border border-indigo-100 bg-indigo-50 p-5">
+            <p className="text-[11px] font-black uppercase tracking-[0.18em] text-indigo-500">STEP 1</p>
+            <h2 className="mt-1 text-lg font-black text-slate-900">対象校舎</h2>
+            {schoolOptions.length > 1 ? (
+              <label className="mt-4 block">
+                <span className="mb-2 block text-xs font-black text-slate-500">表示・登録する校舎</span>
+                <select
+                  value={school}
+                  onChange={event => void loadStudents(event.target.value)}
+                  disabled={loading}
+                  className="w-full rounded-2xl border border-indigo-200 bg-white px-4 py-3 text-sm font-black text-slate-800 outline-none focus:ring-2 focus:ring-indigo-200 disabled:opacity-60"
+                >
+                  {schoolOptions.map(option => <option key={option} value={option}>{option}</option>)}
+                </select>
+              </label>
+            ) : (
+              <div className="mt-4 rounded-2xl bg-white px-4 py-4 ring-1 ring-indigo-100">
+                <p className="text-xs font-bold text-slate-400">表示校舎</p>
+                <p className="mt-1 text-lg font-black text-indigo-700">{school || mySchool || '未設定'}</p>
+              </div>
+            )}
+            <p className="mt-3 text-xs font-bold leading-5 text-slate-500">一覧表示・新規登録・CSV取込は、この校舎だけが対象です。</p>
+          </div>
+
+          <div className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-[11px] font-black uppercase tracking-[0.18em] text-indigo-500">STEP 2</p>
+                <h2 className="mt-1 text-lg font-black text-slate-900">生徒を簡単追加</h2>
+                <p className="mt-1 text-xs font-bold text-slate-400">開始月まで選んで登録します。パスワードと保護者IDは自動発行し、案内書面も作成します。</p>
+              </div>
+              <UserPlus className="shrink-0 text-indigo-500" size={24} />
+            </div>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <input value={form.display_name} onChange={event => setForm(prev => ({ ...prev, display_name: event.target.value }))} placeholder="生徒氏名（必須）" className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100" />
+              <input value={form.login_id} onChange={event => setForm(prev => ({ ...prev, login_id: event.target.value }))} placeholder="生涯番号／ログインID（必須）" className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 font-mono text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100" />
+              <select value={form.grade} onChange={event => setForm(prev => ({ ...prev, grade: event.target.value }))} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100">
+                {['中1', '中2', '中3'].map(option => <option key={option} value={option}>{option}</option>)}
+              </select>
+              <input value={form.middle_school} onChange={event => setForm(prev => ({ ...prev, middle_school: event.target.value }))} placeholder="中学校名" className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100" />
+              <label className="sm:col-span-2">
+                <span className="mb-2 block text-xs font-black text-slate-500">何月スタート（利用開始月）</span>
+                <input type="month" value={form.course_start_month} onChange={event => setForm(prev => ({ ...prev, course_start_month: event.target.value }))} className="w-full rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm font-black text-indigo-800 outline-none focus:ring-2 focus:ring-indigo-100" />
+              </label>
+            </div>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <button onClick={createStudent} disabled={saving || !school} className="flex min-h-[44px] flex-1 items-center justify-center gap-2 rounded-2xl bg-slate-900 px-5 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-50">
+                {saving ? <Loader2 className="animate-spin" size={17} /> : <Plus size={17} />} この内容で登録
+              </button>
+              <button onClick={() => setModalOpen(true)} className="min-h-[44px] rounded-2xl border border-slate-200 px-4 text-xs font-black text-slate-600 hover:bg-slate-50">詳細も入力</button>
+            </div>
+          </div>
+
+          <div className="rounded-[28px] border border-emerald-100 bg-emerald-50 p-5">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-[11px] font-black uppercase tracking-[0.18em] text-emerald-600">STEP 3</p>
+                <h2 className="mt-1 text-lg font-black text-slate-900">CSVで一括追加</h2>
+              </div>
+              <FileUp className="shrink-0 text-emerald-600" size={24} />
+            </div>
+            <p className="mt-2 text-xs font-bold leading-5 text-slate-500">見本をダウンロードして入力し、そのままアップロードしてください。</p>
+            <div className="mt-4 flex flex-col gap-2">
+              <label className="rounded-2xl bg-white px-4 py-3 ring-1 ring-emerald-100">
+                <span className="mb-2 block text-xs font-black text-slate-500">CSVの既定開始月</span>
+                <input type="month" value={csvDefaultStartMonth} onChange={event => setCsvDefaultStartMonth(event.target.value)} className="w-full bg-transparent text-sm font-black text-emerald-700 outline-none" />
+                <span className="mt-1 block text-[10px] font-bold text-slate-400">CSVの「受講開始月」が空欄の行に適用します。</span>
+              </label>
+              <CsvSampleDownload filename="校舎別_生徒CSV追加例.csv" headers={STUDENT_CSV_HEADERS} rows={STUDENT_CSV_SAMPLE_ROWS} label="CSV見本をダウンロード" className="justify-center border-emerald-200 bg-white text-emerald-700 hover:bg-emerald-100" />
+              <label className="relative flex min-h-[44px] cursor-pointer items-center justify-center gap-2 overflow-hidden rounded-2xl bg-emerald-600 px-4 text-sm font-black text-white hover:bg-emerald-700">
+                {csvImporting ? <Loader2 className="animate-spin" size={18} /> : <FileUp size={18} />} CSVを選んで追加
+                <input type="file" accept=".csv,text/csv" onChange={handleCsvImport} disabled={csvImporting || !school} className="absolute inset-0 cursor-pointer opacity-0" />
+              </label>
+              <label className="flex items-center justify-between rounded-2xl bg-white px-4 py-3 text-xs font-black text-slate-500 ring-1 ring-emerald-100">
+                文字コード
+                <select value={csvEncoding} onChange={event => setCsvEncoding(event.target.value)} className="bg-transparent text-sm font-black text-emerald-700 outline-none">
+                  <option value="Shift_JIS">Shift_JIS</option>
+                  <option value="UTF-8">UTF-8</option>
+                </select>
+              </label>
+              <div className="mt-2 rounded-2xl border border-emerald-200 bg-white p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="flex items-center gap-2 text-xs font-black text-emerald-800"><History size={15} /> CSV取込履歴から再印刷</p>
+                  <button type="button" onClick={() => void loadCsvImportBatches(school)} disabled={csvHistoryLoading} className="text-[10px] font-black text-emerald-700 disabled:opacity-50">{csvHistoryLoading ? '更新中' : '更新'}</button>
+                </div>
+                <select
+                  value={selectedCsvImportBatchId}
+                  onChange={event => {
+                    setSelectedCsvImportBatchId(event.target.value);
+                    setSearch('');
+                    setStatus('all');
+                    setMiddleSchoolFilter('');
+                  }}
+                  className="mt-2 w-full rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-black text-slate-700 outline-none"
+                >
+                  <option value="">取込履歴を選択</option>
+                  {csvImportBatches.map(batch => (
+                    <option key={batch.id} value={batch.id}>
+                      {batch.imported_at ? new Date(batch.imported_at).toLocaleString('ja-JP') : '日時不明'} ｜ {batch.file_name} ｜ {batch.success_count}名
+                    </option>
+                  ))}
+                </select>
+                {selectedCsvImportBatch && (
+                  <div className="mt-2">
+                    <p className="mb-2 text-[10px] font-bold text-slate-500">{filtered.length}名を表示中{selectedCsvImportBatch.error_count > 0 ? ` ／ ${selectedCsvImportBatch.error_count}件は取込失敗` : ''}</p>
+                    <button type="button" onClick={() => void printSelectedCsvImportBatch()} disabled={printingId === 'csv-batch' || filtered.length === 0} className="flex min-h-[40px] w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-3 text-xs font-black text-white hover:bg-indigo-700 disabled:opacity-50">
+                      {printingId === 'csv-batch' ? <Loader2 size={15} className="animate-spin" /> : <Printer size={15} />} この履歴の{filtered.length}名を一括印刷
+                    </button>
+                  </div>
+                )}
+                {csvImportBatches.length === 0 && !csvHistoryLoading && <p className="mt-2 text-[10px] font-bold leading-4 text-slate-400">履歴保存機能の追加後に取り込んだCSVが表示されます。</p>}
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
 
       <section className="grid gap-4 lg:grid-cols-2">
         <div className="rounded-[28px] bg-white p-5 shadow-sm">
@@ -921,29 +1374,11 @@ export default function SchoolStudentsPage() {
         </div>
       </section>
 
-      {isMaster && <section className="rounded-[28px] bg-white p-5 shadow-sm">
+      {canManageStudents && <section className="rounded-[28px] bg-white p-5 shadow-sm">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <h2 className="text-lg font-black text-slate-900">CSV一括追加</h2>
-            <p className="mt-1 text-xs font-bold text-slate-400">`生涯番号`、`氏名`または`氏`・`名`、`学年`、`所属教室`などの列を自動判定します。保護者IDは「生徒ID + P」で作成します。</p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <CsvSampleDownload
-              filename="校舎別_生徒CSV追加例.csv"
-              headers={['生涯番号', '氏名', '学年', '所属教室', '中学校', '受講開始月', '兄弟姉妹グループ', '双子フラグ', '体験授業', '継続フラグ', '電話', '曜日', '理科', '社会', '保護者氏名', '保護者電話']}
-              rows={[
-                ['100001', '山田 太郎', '中1', '本山', '本山中学校', '2026-04', 'YAMADA', '○', '理科体験授業', 'はい', '090-0000-0001', '月', '物理', '地理', '山田 保護者', '078-000-0001'],
-                ['100002', '山田 花子', '中1', '本山', '本山中学校', '2026-04', 'YAMADA', '○', '社会体験授業', '', '090-0000-0002', '月', '物理', '地理', '山田 保護者', '078-000-0001'],
-              ]}
-              label="登録CSV例"
-            />
-            <div className="flex items-center gap-2 rounded-2xl bg-amber-50 px-4 py-3">
-              <span className="text-xs font-black text-slate-500">文字コード</span>
-              <select value={csvEncoding} onChange={e => setCsvEncoding(e.target.value)} className="bg-transparent text-sm font-black text-amber-700 outline-none">
-                <option value="Shift_JIS">Shift_JIS</option>
-                <option value="UTF-8">UTF-8</option>
-              </select>
-            </div>
+            <h2 className="text-lg font-black text-slate-900">CSV取込結果</h2>
+            <p className="mt-1 text-xs font-bold text-slate-400">登録結果と、修正が必要な行をここに表示します。</p>
           </div>
         </div>
         <div className="mt-4 rounded-2xl bg-slate-950 p-4 font-mono text-xs text-emerald-300">
@@ -952,7 +1387,7 @@ export default function SchoolStudentsPage() {
         {printStudent && (
           <div className="mt-3 flex justify-end">
             <button onClick={() => void printGuide(printStudent)} disabled={printingId === printStudent.id} className="rounded-2xl border border-indigo-100 px-4 py-3 text-xs font-black text-indigo-600 hover:bg-indigo-50 disabled:opacity-50">
-              {printingId === printStudent.id ? <Loader2 size={14} className="inline animate-spin" /> : <Printer size={14} className="inline" />} 最後に作成した案内書面を印刷
+              {printingId === printStudent.id ? <Loader2 size={14} className="inline animate-spin" /> : <Printer size={14} className="inline" />} 最後に作成した案内書面を再表示
             </button>
           </div>
         )}
@@ -976,21 +1411,46 @@ export default function SchoolStudentsPage() {
       </section>
 
       <section className="rounded-[28px] bg-white p-5 shadow-sm">
+        <div className="mb-4 flex flex-wrap gap-2 rounded-2xl bg-slate-100 p-1.5">
+          {[
+            { id: 'students', label: '受講者リスト', icon: LayoutList },
+            { id: 'attendance', label: '出席状況（週1回）', icon: CalendarDays },
+            { id: 'courses', label: '受講登録状況', icon: BookOpen },
+          ].map(item => {
+            const Icon = item.icon;
+            return (
+              <button key={item.id} onClick={() => setActiveView(item.id as typeof activeView)} className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-black transition ${activeView === item.id ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>
+                <Icon size={15} /> {item.label}
+              </button>
+            );
+          })}
+        </div>
         <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div className="relative w-full md:max-w-sm">
             <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
-            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="名前・学年・IDで検索" className="w-full rounded-2xl border border-slate-200 bg-slate-50 py-3 pl-11 pr-4 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100" />
+            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="名前・フリガナ・学年・IDで検索" className="w-full rounded-2xl border border-slate-200 bg-slate-50 py-3 pl-11 pr-4 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100" />
           </div>
-          <p className="text-xs font-black text-slate-400">{filtered.length}件表示</p>
+          <div className="flex flex-wrap items-center gap-3">
+            <p className="text-xs font-black text-slate-400">{filtered.length}件表示</p>
+            {activeView === 'courses' && <button onClick={exportCourseStatusCsv} disabled={loading || filtered.length === 0} className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-black text-white hover:bg-indigo-500 disabled:opacity-50"><Download size={16} /> 表示中の受講登録状況をCSV出力</button>}
+          </div>
         </div>
 
         {loading ? (
           <div className="flex justify-center py-12"><Loader2 className="animate-spin text-indigo-500" /></div>
         ) : filtered.length === 0 ? (
           <div className="rounded-2xl border-2 border-dashed border-slate-100 py-12 text-center text-sm font-bold text-slate-400">表示できる生徒がいません</div>
+        ) : activeView === 'attendance' ? (
+          <AttendanceOverview students={filtered} showAll={showAllAttendance} onHistoryChange={all => {
+            attendanceHistoryRef.current = all;
+            setShowAllAttendance(all);
+            void loadStudents(school);
+          }} onSaved={() => loadStudents(school)} />
+        ) : activeView === 'courses' ? (
+          <CourseRegistrationOverview students={filtered} />
         ) : (
           <div className="overflow-x-auto [scrollbar-gutter:stable]">
-            <table className="w-full min-w-[1720px] whitespace-nowrap text-left text-sm">
+            <table className={`w-full ${canManageStudents ? 'min-w-[1720px]' : 'min-w-[1100px]'} whitespace-nowrap text-left text-sm`}>
               <thead>
                 <tr className="border-b border-slate-100 text-xs font-black text-slate-400">
                   <th className="px-4 py-3">生徒</th>
@@ -1002,10 +1462,10 @@ export default function SchoolStudentsPage() {
                   <th className="px-4 py-3">受講講座</th>
                   <th className="px-4 py-3">初回ログイン</th>
                   <th className="px-4 py-3">最終ログイン</th>
-                  <th className="px-4 py-3">個別設定</th>
-                  <th className="px-4 py-3">体験/連携</th>
+                  {canManageStudents && <th className="px-4 py-3">個別設定</th>}
+                  {canManageStudents && <th className="px-4 py-3">体験/連携</th>}
                   <th className="px-4 py-3">状態</th>
-                  <th className="px-4 py-3 text-right">操作</th>
+                  {canManageStudents && <th className="px-4 py-3 text-right">操作</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-50">
@@ -1013,7 +1473,13 @@ export default function SchoolStudentsPage() {
                   <tr key={student.id} className="hover:bg-slate-50">
                     <td className="px-4 py-4">
                       <p className="font-black text-slate-800">{student.student_name || '名称未設定'}</p>
+                      {student.student_name_kana && <p className="text-[11px] font-bold text-slate-400">{student.student_name_kana}</p>}
                       <p className="text-xs font-bold text-slate-400">{student.school_id || school}</p>
+                      <div className="mt-1 flex gap-1">
+                        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-black text-slate-500">{student.member_type === 'general' ? '一般' : '在籍'}</span>
+                        {student.summer_course_status === 'attending' && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-black text-amber-700">夏期受講</span>}
+                        {student.summer_only && <span className="rounded-full bg-sky-50 px-2 py-0.5 text-[10px] font-black text-sky-700">夏期のみ</span>}
+                      </div>
                     </td>
                     <td className="px-4 py-4 font-mono text-xs font-bold text-slate-500">{student.lifetime_id || '-'}</td>
                     <td className="px-4 py-4 font-bold text-slate-600">{student.grade || '-'}</td>
@@ -1037,7 +1503,7 @@ export default function SchoolStudentsPage() {
                     <td className="px-4 py-4">
                       <LastLoginCell value={student.last_login_at || student.last_login} />
                     </td>
-                    <td className="px-4 py-4">
+                    {canManageStudents && <td className="px-4 py-4">
                       <div className="flex flex-col gap-2">
                         <label className="flex items-center gap-2 text-[11px] font-black text-slate-500">
                           <input type="checkbox" checked={Boolean(student.camera_off_requested)} onChange={e => updateStudentOptions(student, 'camera_off_requested', e.target.checked)} className="h-4 w-4 accent-indigo-600" />
@@ -1048,8 +1514,8 @@ export default function SchoolStudentsPage() {
                           <PhoneOff size={13} /> 欠席電話不要
                         </label>
                       </div>
-                    </td>
-                    <td className="px-4 py-4">
+                    </td>}
+                    {canManageStudents && <td className="px-4 py-4">
                       <div className="flex flex-col gap-2 text-[11px] font-black text-slate-500">
                         <label className="flex items-center gap-2">
                           <input type="checkbox" checked={Boolean(student.trial_continued)} onChange={e => updateStudentPatch(student, { trial_continued: e.target.checked })} className="h-4 w-4 accent-emerald-600" />
@@ -1060,29 +1526,32 @@ export default function SchoolStudentsPage() {
                           兄弟姉妹編集
                         </button>
                       </div>
-                    </td>
+                    </td>}
                     <td className="px-4 py-4">
                       <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-500">{STATUSES.find(s => s.id === student.account_status)?.label || student.account_status}</span>
-                      {student.enrollment_cancel_month && (
+                      {student.account_status === 'withdrawn' && student.enrollment_cancel_month && (
                         <p className="mt-2 text-[11px] font-bold text-rose-500">{student.enrollment_cancel_month}解除</p>
                       )}
                     </td>
-                    <td className="px-4 py-4">
+                    {canManageStudents && <td className="px-4 py-4">
                       <div className="flex items-center justify-end gap-2">
-                        {isMaster && (
-                          <button onClick={() => void printGuide(student)} disabled={printingId === student.id} className="shrink-0 rounded-xl border border-indigo-100 px-3 py-2 text-[11px] font-black text-indigo-600 hover:bg-indigo-50 disabled:opacity-50">
-                            {printingId === student.id ? <Loader2 size={13} className="inline animate-spin" /> : <Printer size={13} className="inline" />} 案内書面
-                          </button>
-                        )}
+                        <button onClick={() => openEditStudent(student)} className="shrink-0 rounded-xl border border-slate-200 px-3 py-2 text-[11px] font-black text-slate-600 hover:bg-slate-50">
+                          <Pencil size={13} className="inline" /> 編集
+                        </button>
+                        <button onClick={() => void printGuide(student)} disabled={printingId === student.id} className="shrink-0 rounded-xl border border-indigo-100 px-3 py-2 text-[11px] font-black text-indigo-600 hover:bg-indigo-50 disabled:opacity-50">
+                          {printingId === student.id ? <Loader2 size={13} className="inline animate-spin" /> : <Printer size={13} className="inline" />} 案内書面
+                        </button>
                         <button onClick={() => openCourseRegistrationModal(student)} className="shrink-0 rounded-xl border border-emerald-100 px-3 py-2 text-[11px] font-black text-emerald-600 hover:bg-emerald-50">
                           <BookOpen size={13} className="inline" /> 講座登録
                         </button>
                         <button onClick={() => transferStudent(student)} className="shrink-0 rounded-xl border border-sky-100 px-3 py-2 text-[11px] font-black text-sky-600 hover:bg-sky-50">
                           移籍
                         </button>
-                        <button onClick={() => withdrawStudent(student)} className="shrink-0 rounded-xl border border-rose-100 px-3 py-2 text-[11px] font-black text-rose-600 hover:bg-rose-50">
-                          受講解除
-                        </button>
+                        {student.account_status === 'withdrawn' ? (
+                          <button onClick={() => restoreStudent(student)} className="shrink-0 rounded-xl border border-emerald-100 px-3 py-2 text-[11px] font-black text-emerald-600 hover:bg-emerald-50">受講中へ復帰</button>
+                        ) : (
+                          <button onClick={() => withdrawStudent(student)} className="shrink-0 rounded-xl border border-rose-100 px-3 py-2 text-[11px] font-black text-rose-600 hover:bg-rose-50">受講解除</button>
+                        )}
                         <select
                           aria-label={`${student.student_name || '生徒'}のアカウント状態`}
                           value={student.account_status || 'active'}
@@ -1093,7 +1562,7 @@ export default function SchoolStudentsPage() {
                           {STATUSES.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
                         </select>
                       </div>
-                    </td>
+                    </td>}
                   </tr>
                 ))}
               </tbody>
@@ -1101,6 +1570,64 @@ export default function SchoolStudentsPage() {
           </div>
         )}
       </section>
+
+      {editStudent && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+          <div className="max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-[28px] bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b border-slate-100 p-5">
+              <div><p className="text-xs font-black text-indigo-500">STUDENT PROFILE</p><h2 className="text-lg font-black text-slate-900">生徒情報を編集</h2></div>
+              <button onClick={() => setEditStudent(null)} className="rounded-xl bg-slate-100 p-2 text-slate-400"><X size={18} /></button>
+            </div>
+            <div className="grid gap-4 p-5 md:grid-cols-2">
+              <Field label="氏名" value={editForm.display_name} onChange={value => setEditForm(prev => ({ ...prev, display_name: value }))} />
+              <Field label="フリガナ" value={editForm.student_name_kana} onChange={value => setEditForm(prev => ({ ...prev, student_name_kana: value }))} />
+              <SelectField label="学年" value={editForm.grade} options={['中1', '中2', '中3']} onChange={value => setEditForm(prev => ({ ...prev, grade: value }))} />
+              <Field label="教室/クラス" value={editForm.classroom} onChange={value => setEditForm(prev => ({ ...prev, classroom: value }))} />
+              <Field label="中学校名" value={editForm.middle_school} onChange={value => setEditForm(prev => ({ ...prev, middle_school: value }))} />
+              <MonthField label="受講開始月" value={editForm.course_start_month} onChange={value => setEditForm(prev => ({ ...prev, course_start_month: value }))} />
+              <SelectField label="曜日" value={editForm.day_of_week} options={['', '月', '火', '水', '木', '金', '土']} onChange={value => setEditForm(prev => ({ ...prev, day_of_week: value }))} />
+              <Field label="電話番号" value={editForm.phone_number} onChange={value => setEditForm(prev => ({ ...prev, phone_number: value }))} />
+              <SelectField label="会員区分" value={editForm.member_type} options={['enrolled', 'general']} optionLabels={{ enrolled: '在籍', general: '一般' }} onChange={value => setEditForm(prev => ({ ...prev, member_type: value }))} />
+              <SelectField label="夏期講習" value={editForm.summer_course_status} options={['none', 'attending']} optionLabels={{ none: '受講無', attending: '夏期受講' }} onChange={value => setEditForm(prev => ({ ...prev, summer_course_status: value }))} />
+              <Field label="兄弟姉妹UID（カンマ区切り）" value={editForm.sibling_ids} onChange={value => setEditForm(prev => ({ ...prev, sibling_ids: value }))} />
+              <Field label="双子UID（カンマ区切り）" value={editForm.twin_sibling_ids} onChange={value => setEditForm(prev => ({ ...prev, twin_sibling_ids: value }))} />
+              <div className="grid gap-2 md:col-span-2 md:grid-cols-2">
+                {[['camera_off_requested', 'カメラオフ希望'], ['absence_call_not_required', '欠席電話不要'], ['trial_continued', '残留特典体験生'], ['summer_only', '夏期講習のみ受講生']].map(([key, label]) => (
+                  <label key={key} className="flex items-center gap-3 rounded-2xl bg-slate-50 px-4 py-3 text-sm font-black text-slate-600">
+                    <input type="checkbox" checked={Boolean((editForm as any)[key])} onChange={event => setEditForm(prev => ({ ...prev, [key]: event.target.checked }))} className="h-5 w-5 accent-indigo-600" /> {label}
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div className="flex justify-end gap-3 border-t border-slate-100 bg-slate-50 p-5">
+              <button onClick={() => setEditStudent(null)} className="rounded-2xl px-5 py-3 text-sm font-black text-slate-500">キャンセル</button>
+              <button onClick={saveStudentProfile} disabled={savingId === editStudent.id} className="rounded-2xl bg-indigo-600 px-5 py-3 text-sm font-black text-white disabled:opacity-50">保存する</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {withdrawalStudent && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-xl rounded-[28px] bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b border-slate-100 p-5">
+              <div><p className="text-xs font-black text-rose-500">RELEASE</p><h2 className="text-lg font-black text-slate-900">{withdrawalStudent.student_name} の受講解除</h2></div>
+              <button onClick={() => setWithdrawalStudent(null)} className="rounded-xl bg-slate-100 p-2 text-slate-400"><X size={18} /></button>
+            </div>
+            <div className="space-y-4 p-5">
+              <MonthField label="解除月" value={withdrawalForm.month} onChange={value => setWithdrawalForm(prev => ({ ...prev, month: value }))} />
+              <SelectField label="解除理由" value={withdrawalForm.reasonCode} options={WITHDRAWAL_REASONS.map(item => item.id)} optionLabels={Object.fromEntries(WITHDRAWAL_REASONS.map(item => [item.id, item.label]))} onChange={value => setWithdrawalForm(prev => ({ ...prev, reasonCode: value, changeReasons: [] }))} />
+              {['individual_transfer', 'dekitas_transfer', 'course_reduction'].includes(withdrawalForm.reasonCode) && (
+                <div><p className="mb-2 text-xs font-black text-slate-500">変更理由（1つ以上）</p><div className="grid gap-2 sm:grid-cols-2">{CHANGE_REASONS.map(reason => (
+                  <label key={reason} className="flex items-center gap-2 rounded-xl bg-slate-50 px-3 py-2 text-xs font-black text-slate-600"><input type="checkbox" checked={withdrawalForm.changeReasons.includes(reason)} onChange={event => setWithdrawalForm(prev => ({ ...prev, changeReasons: event.target.checked ? [...prev.changeReasons, reason] : prev.changeReasons.filter(item => item !== reason) }))} />{reason}</label>
+                ))}</div></div>
+              )}
+              <label><span className="mb-2 block text-xs font-black text-slate-500">備考</span><textarea value={withdrawalForm.note} onChange={event => setWithdrawalForm(prev => ({ ...prev, note: event.target.value }))} className="min-h-[90px] w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none" /></label>
+            </div>
+            <div className="flex justify-end gap-3 border-t border-slate-100 bg-slate-50 p-5"><button onClick={() => setWithdrawalStudent(null)} className="rounded-2xl px-5 py-3 text-sm font-black text-slate-500">キャンセル</button><button onClick={saveWithdrawal} className="rounded-2xl bg-rose-600 px-5 py-3 text-sm font-black text-white">解除を確定</button></div>
+          </div>
+        </div>
+      )}
 
       {courseModalStudent && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
@@ -1300,6 +1827,7 @@ export default function SchoolStudentsPage() {
             </div>
             <div className="grid gap-4 p-5 md:grid-cols-2">
               <Field label="氏名" value={form.display_name} onChange={value => setForm(prev => ({ ...prev, display_name: value }))} />
+              <Field label="フリガナ" value={form.student_name_kana} onChange={value => setForm(prev => ({ ...prev, student_name_kana: value }))} />
               <Field label="初期ID" value={form.login_id} onChange={value => setForm(prev => ({ ...prev, login_id: value }))} />
               <Field label="初期パスワード（空欄なら自動発行）" value={form.password} onChange={value => setForm(prev => ({ ...prev, password: value }))} />
               <Field label="電話番号" value={form.phone_number} onChange={value => setForm(prev => ({ ...prev, phone_number: value }))} />
@@ -1307,6 +1835,8 @@ export default function SchoolStudentsPage() {
               <Field label="中学校名" value={form.middle_school} onChange={value => setForm(prev => ({ ...prev, middle_school: value }))} />
               <MonthField label="受講開始月" value={form.course_start_month} onChange={value => setForm(prev => ({ ...prev, course_start_month: value }))} />
               <SelectField label="学年" value={form.grade} options={['中1', '中2', '中3']} onChange={value => setForm(prev => ({ ...prev, grade: value }))} />
+              <SelectField label="会員区分" value={form.member_type} options={['enrolled', 'general']} optionLabels={{ enrolled: '在籍', general: '一般' }} onChange={value => setForm(prev => ({ ...prev, member_type: value }))} />
+              <SelectField label="夏期講習" value={form.summer_course_status} options={['none', 'attending']} optionLabels={{ none: '受講無', attending: '夏期受講' }} onChange={value => setForm(prev => ({ ...prev, summer_course_status: value }))} />
               <SelectField label="曜日" value={form.day_of_week} options={['', '月', '火', '水', '木', '金', '土']} onChange={value => setForm(prev => ({ ...prev, day_of_week: value }))} />
               <SelectField label="理科" value={form.subject_science} options={['', '物理', '化学', '生物', '地学']} onChange={value => setForm(prev => ({ ...prev, subject_science: value }))} />
               <SelectField label="社会" value={form.subject_social} options={['', '地理', '歴史', '公民']} onChange={value => setForm(prev => ({ ...prev, subject_social: value }))} />
@@ -1345,6 +1875,10 @@ export default function SchoolStudentsPage() {
                 <input type="checkbox" checked={form.absence_call_not_required} onChange={e => setForm(prev => ({ ...prev, absence_call_not_required: e.target.checked }))} className="h-5 w-5 accent-rose-600" />
                 欠席電話不要
               </label>
+              <label className="flex items-center gap-3 rounded-2xl bg-slate-50 px-4 py-3 text-sm font-black text-slate-600">
+                <input type="checkbox" checked={form.summer_only} onChange={e => setForm(prev => ({ ...prev, summer_only: e.target.checked }))} className="h-5 w-5 accent-sky-600" />
+                夏期講習のみ受講生
+              </label>
             </div>
             <div className="flex justify-end gap-3 border-t border-slate-100 bg-slate-50 p-5">
               <button onClick={() => setModalOpen(false)} className="rounded-2xl px-5 py-3 text-sm font-black text-slate-500 hover:bg-slate-200">キャンセル</button>
@@ -1378,14 +1912,140 @@ function MonthField({ label, value, onChange }: { label: string; value: string; 
   );
 }
 
-function SelectField({ label, value, options, onChange }: { label: string; value: string; options: string[]; onChange: (value: string) => void }) {
+function SelectField({ label, value, options, optionLabels, onChange }: { label: string; value: string; options: string[]; optionLabels?: Record<string, string>; onChange: (value: string) => void }) {
   return (
     <label>
       <span className="mb-2 block text-xs font-black text-slate-500">{label}</span>
       <select value={value} onChange={e => onChange(e.target.value)} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100">
-        {options.map(option => <option key={option || 'none'} value={option}>{option || '未設定'}</option>)}
+        {options.map(option => <option key={option || 'none'} value={option}>{optionLabels?.[option] || option || '未設定'}</option>)}
       </select>
     </label>
+  );
+}
+
+function AttendanceOverview({ students, showAll, onHistoryChange, onSaved }: { students: any[]; showAll: boolean; onHistoryChange: (all: boolean) => void; onSaved: () => Promise<void> }) {
+  const [target, setTarget] = useState<any | null>(null);
+  const [followUpStatus, setFollowUpStatus] = useState('contacted');
+  const [followUpNote, setFollowUpNote] = useState('');
+  const [followUpSaving, setFollowUpSaving] = useState(false);
+  const attendanceScrollRef = useRef<HTMLDivElement | null>(null);
+  const weeks = useMemo(() => (
+    [...(students.find(student => Array.isArray(student.weekly_participation))?.weekly_participation || [])].reverse()
+  ) as any[], [students]);
+  const warningCount = useMemo(() => students.filter(student => student.attendance_warning).length, [students]);
+  const attendanceTableWidth = 400 + (weeks.length * 190);
+  const currentWeek = weeks.find(week => week.is_current);
+  const attendedThisWeek = students.filter(student => student.weekly_participation?.some((week: any) => week.is_current && week.attended)).length;
+  const sortedStudents = useMemo(() => [...students].sort((a, b) => (
+    Number(Boolean(b.attendance_warning)) - Number(Boolean(a.attendance_warning)) ||
+    String(a.student_name || '').localeCompare(String(b.student_name || ''), 'ja')
+  )), [students]);
+  const formatDates = (dates: string[]) => dates.map(value => {
+    const [, month, day] = String(value).split('-');
+    return month && day ? `${Number(month)}/${Number(day)}` : value;
+  }).join('・');
+  const followUpLabel = (status: string) => status === 'resolved' ? '対応完了' : status === 'monitoring' ? '継続確認中' : '声掛け済み';
+  const saveFollowUp = async () => {
+    if (!target || !followUpNote.trim()) return alert('対応内容を入力してください');
+    setFollowUpSaving(true);
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      const latestCompletedWeek = [...(target.weekly_participation || [])].reverse().find((week: any) => !week.is_current);
+      const response = await fetch('/api/admin/school-students/attendance-follow-ups', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          student_id: target.id,
+          status: followUpStatus,
+          note: followUpNote.trim(),
+          week_start: latestCompletedWeek?.start_date || '',
+          week_end: latestCompletedWeek?.end_date || '',
+          consecutive_missed_weeks: target.consecutive_missed_weeks || 0,
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) throw new Error(data.error || 'failed');
+      await onSaved();
+      setTarget(null);
+      setFollowUpNote('');
+    } catch (error: any) {
+      alert(`対応記録の保存に失敗しました: ${error.message || error}`);
+    } finally {
+      setFollowUpSaving(false);
+    }
+  };
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-3 md:grid-cols-3">
+        <div className="rounded-2xl border-2 border-indigo-200 bg-indigo-50 p-4"><p className="text-xs font-black text-indigo-600">今週の出席 {currentWeek?.label || ''}</p><p className="mt-1 text-2xl font-black text-indigo-900">{attendedThisWeek} / {students.length}名</p><p className="mt-1 text-[11px] font-bold text-indigo-600">月〜日の間に1回以上。2回以上の参加も表示します</p></div>
+        <div className={`rounded-2xl p-4 ${warningCount ? 'bg-rose-50' : 'bg-emerald-50'}`}><p className={`text-xs font-black ${warningCount ? 'text-rose-500' : 'text-emerald-500'}`}>2週以上連続未参加</p><p className={`mt-1 text-2xl font-black ${warningCount ? 'text-rose-800' : 'text-emerald-800'}`}>{warningCount}名</p></div>
+        <div className="rounded-2xl bg-slate-100 p-4"><p className="text-xs font-black text-slate-500">表示期間</p><p className="mt-1 font-black text-slate-800">{weeks.length ? `${weeks[weeks.length - 1].label} 〜 ${weeks[0].label}` : '-'}</p><button type="button" onClick={() => onHistoryChange(!showAll)} className="mt-3 rounded-xl bg-white px-3 py-2 text-xs font-black text-indigo-700 ring-1 ring-slate-200 hover:bg-indigo-50">{showAll ? '直近9週間に戻す' : '全期間の出席を見る'}</button></div>
+      </div>
+      <div className="rounded-2xl border border-slate-200 bg-slate-50/50">
+        <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-3 py-2 text-[11px] font-bold text-slate-500">
+          <span>科目数が多い場合は「科目別の詳細」を押すと確認できます</span>
+          <div className="flex shrink-0 items-center gap-1">
+            <span className="hidden text-indigo-600 sm:inline">横にスライド</span>
+            <button type="button" aria-label="出席表を左へスクロール" onClick={() => attendanceScrollRef.current?.scrollBy({ left: -570, behavior: 'smooth' })} className="rounded-lg bg-white px-2.5 py-1.5 font-black text-indigo-700 ring-1 ring-slate-200 hover:bg-indigo-50">← 前へ</button>
+            <button type="button" aria-label="出席表を右へスクロール" onClick={() => attendanceScrollRef.current?.scrollBy({ left: 570, behavior: 'smooth' })} className="rounded-lg bg-white px-2.5 py-1.5 font-black text-indigo-700 ring-1 ring-slate-200 hover:bg-indigo-50">次へ →</button>
+          </div>
+        </div>
+        <div ref={attendanceScrollRef} className="max-h-[72vh] overflow-auto overscroll-contain [scrollbar-gutter:stable_both-edges] [touch-action:pan-x_pan-y]">
+        <table className="table-fixed text-left text-xs" style={{ width: `max(100%, ${attendanceTableWidth}px)` }}>
+          <colgroup><col className="w-[210px]" /><col className="w-[190px]" />{weeks.map(week => <col key={week.key} className="w-[190px]" />)}</colgroup>
+          <thead className="sticky top-0 z-20 bg-white shadow-sm"><tr className="border-b border-slate-100 font-black text-slate-400"><th className="sticky left-0 z-30 w-[210px] bg-white px-4 py-3">生徒</th><th className="w-[190px] px-3 py-3">警告・対応</th>{weeks.map(week => <th key={week.key} className={`w-[190px] px-3 py-3 ${week.is_current ? 'bg-indigo-50 text-indigo-600' : ''}`}><span className="block">{week.label}</span>{week.is_current && <span className="text-[10px]">今週</span>}</th>)}</tr></thead>
+          <tbody className="divide-y divide-slate-50">{sortedStudents.map(student => {
+            const latestFollowUp = student.attendance_follow_ups?.[0];
+            return <tr key={student.id} className={student.attendance_warning ? 'bg-rose-50/40' : 'hover:bg-slate-50'}>
+              <td className={`sticky left-0 z-10 w-[210px] max-w-[210px] overflow-hidden px-4 py-3 align-top ${student.attendance_warning ? 'bg-rose-50' : 'bg-white'}`}><p className="truncate font-black text-slate-800" title={student.student_name}>{student.student_name}</p><p className="truncate text-[10px] font-bold text-slate-400" title={`${student.grade || '-'} / ${student.current_course_label || '今期未登録'}`}>{student.grade || '-'} / {student.current_course_label || '今期未登録'}</p></td>
+              <td className="w-[190px] max-w-[190px] overflow-hidden px-3 py-3 align-top">{student.attendance_warning ? <div className="space-y-2"><span className="inline-flex items-center gap-1 rounded-full bg-rose-600 px-2 py-1 font-black text-white"><AlertTriangle size={12} />{student.consecutive_missed_weeks}週連続</span><button onClick={() => { setTarget(student); setFollowUpStatus('contacted'); setFollowUpNote(''); }} className="block rounded-lg bg-slate-900 px-2.5 py-1.5 font-black text-white"><MessageSquareText size={12} className="mr-1 inline" />対応を記録</button></div> : <span className="font-black text-emerald-600">正常</span>}{latestFollowUp && <div className="mt-2 max-w-[166px] rounded-lg bg-white p-2 ring-1 ring-slate-200"><p className="font-black text-slate-700">{followUpLabel(latestFollowUp.status)}</p><p className="mt-1 line-clamp-2 text-[10px] font-bold text-slate-500">{latestFollowUp.note}</p></div>}</td>
+              {[...(student.weekly_participation || [])].reverse().map((week: any) => <td key={week.key} className={`w-[190px] max-w-[190px] overflow-hidden px-3 py-3 align-top ${week.attended ? 'bg-emerald-50/60' : week.is_current ? 'bg-indigo-50/50' : week.expected ? 'bg-rose-50/50' : 'bg-slate-50'}`}><AttendanceWeekSummary week={week} formatDates={formatDates} /></td>)}
+            </tr>;
+          })}</tbody>
+        </table>
+        </div>
+      </div>
+      {target && <div className="fixed inset-0 z-[250] flex items-center justify-center bg-slate-950/60 p-4" onMouseDown={event => { if (event.currentTarget === event.target) setTarget(null); }}><div role="dialog" aria-modal="true" aria-labelledby="attendance-follow-up-title" className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl"><div className="flex items-start justify-between gap-4"><div><p className="text-xs font-black text-rose-500">未参加フォロー</p><h3 id="attendance-follow-up-title" className="mt-1 text-xl font-black text-slate-900">{target.student_name}</h3><p className="mt-1 text-xs font-bold text-slate-500">{target.consecutive_missed_weeks}週連続で未参加</p></div><button type="button" aria-label="閉じる" onClick={() => setTarget(null)} className="rounded-full bg-slate-100 p-2 text-slate-500"><X size={18} /></button></div><label className="mt-5 block text-xs font-black text-slate-500">対応状況<select value={followUpStatus} onChange={event => setFollowUpStatus(event.target.value)} className="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-black"><option value="contacted">声掛け済み</option><option value="monitoring">継続確認中</option><option value="resolved">対応完了</option></select></label><label className="mt-4 block text-xs font-black text-slate-500">対応内容<textarea value={followUpNote} onChange={event => setFollowUpNote(event.target.value)} placeholder="例：保護者へ電話。次週から参加予定と確認。" className="mt-2 min-h-[120px] w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100" /></label><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => setTarget(null)} className="rounded-xl px-4 py-2.5 text-sm font-black text-slate-500">キャンセル</button><button type="button" onClick={saveFollowUp} disabled={followUpSaving} className="rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-black text-white disabled:opacity-50">{followUpSaving ? '保存中...' : '対応を記録'}</button></div></div></div>}
+    </div>
+  );
+}
+
+function AttendanceWeekSummary({ week, formatDates }: { week: any; formatDates: (dates: string[]) => string }) {
+  if (!week.attended) {
+    return <span className={`font-black ${week.is_current ? 'text-indigo-400' : week.expected ? 'text-rose-400' : 'text-slate-300'}`}>{week.is_current ? '今週未参加' : week.expected ? '未参加' : '対象外'}</span>;
+  }
+
+  const subjects = Array.isArray(week.subjects) ? week.subjects : [];
+  const dates = Array.from(new Set(subjects.flatMap((item: any) => Array.isArray(item.dates) ? item.dates : []))) as string[];
+  const subjectLabel = subjects.length === 1 ? String(subjects[0]?.subject || '参加') : `${subjects.length}科目に参加`;
+
+  return (
+    <div className="w-[166px]">
+      <span className="inline-flex max-w-full items-center gap-1 rounded-md bg-emerald-600 px-2 py-1 font-black text-white" title={subjects.map((item: any) => item.subject).join(' / ')}>
+        <CheckCircle2 size={12} className="shrink-0" />
+        <span className="truncate">{subjectLabel}</span>
+      </span>
+      {dates.length > 0 && <p className="mt-1 truncate font-bold text-emerald-700" title={formatDates(dates)}>{formatDates(dates)}</p>}
+      {subjects.length > 1 && (
+        <details className="group mt-1.5">
+          <summary className="cursor-pointer select-none text-[10px] font-black text-emerald-700 hover:text-emerald-900">科目別の詳細</summary>
+          <div className="mt-2 space-y-1.5 rounded-lg bg-white p-2 ring-1 ring-emerald-100">
+            {subjects.map((item: any, index: number) => <div key={`${item.subject || 'subject'}-${index}`}><p className="break-words font-black text-slate-700">{item.subject || '科目未設定'}</p><p className="font-bold text-emerald-700">{formatDates(Array.isArray(item.dates) ? item.dates : [])}</p></div>)}
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function CourseRegistrationOverview({ students }: { students: any[] }) {
+  return (
+    <div className="overflow-x-auto [scrollbar-gutter:stable]">
+      <table className="w-full min-w-[1080px] text-left text-xs">
+        <thead><tr className="border-b border-slate-100 font-black text-slate-400"><th className="px-4 py-3">生徒</th><th className="min-w-[300px] px-4 py-3">通常講座</th><th className="px-4 py-3">通常登録期</th><th className="min-w-[300px] px-4 py-3">対策講座</th><th className="px-4 py-3">対策受付期</th><th className="px-4 py-3">更新日</th></tr></thead>
+        <tbody className="divide-y divide-slate-50">{students.map(student => { const prepLabels = student.selected_test_prep_course_labels?.length ? student.selected_test_prep_course_labels : student.selected_test_prep_course_ids || []; return <tr key={student.id} className="align-top hover:bg-slate-50"><td className="px-4 py-4"><p className="font-black text-slate-800">{student.student_name}</p><p className="text-[10px] font-bold text-slate-400">{student.grade || '-'}</p></td><td className="px-4 py-4">{student.selected_course_labels?.length ? <div className="flex flex-wrap gap-1.5">{student.selected_course_labels.map((label: string) => <span key={label} className="inline-block rounded-xl bg-emerald-50 px-3 py-2 font-black text-emerald-700 ring-1 ring-emerald-100">{label}</span>)}</div> : <span className="font-bold text-slate-300">今期未登録</span>}</td><td className="px-4 py-4 font-black text-slate-600">{[student.course_registration_year ? `${student.course_registration_year}年度` : '', student.course_registration_term_label || student.course_registration_term || ''].filter(Boolean).join(' / ') || '-'}</td><td className="px-4 py-4">{prepLabels.length ? <div className="flex flex-wrap gap-1.5">{prepLabels.map((label: string) => <span key={label} className="inline-block rounded-xl bg-amber-50 px-3 py-2 font-black text-amber-800 ring-1 ring-amber-100">{label}</span>)}</div> : <span className="font-bold text-slate-300">未登録</span>}</td><td className="px-4 py-4 font-black text-slate-600">{[student.test_prep_course_registration_year ? `${student.test_prep_course_registration_year}年度` : '', student.test_prep_course_registration_term || ''].filter(Boolean).join(' / ') || '-'}</td><td className="px-4 py-4 font-bold text-slate-400"><p>通常 {String(student.course_registration_updated_at || '').slice(0, 10) || '-'}</p><p className="mt-1 text-amber-700">対策 {String(student.test_prep_course_registration_updated_at || '').slice(0, 10) || '-'}</p></td></tr>; })}</tbody>
+      </table>
+    </div>
   );
 }
 
@@ -1405,7 +2065,7 @@ function CourseSummaryCell({ student }: { student: any }) {
   const ids: string[] = Array.isArray(student.selected_course_ids)
     ? student.selected_course_ids.map((id: any) => String(id || '').trim()).filter(Boolean)
     : [];
-  const visibleLabels = labels.slice(0, 3);
+  const visibleLabels = labels;
   const term = String(student.course_registration_term_label || student.course_registration_term || '').trim();
   const year = student.course_registration_year ? `${student.course_registration_year}年度` : '';
 
@@ -1422,18 +2082,11 @@ function CourseSummaryCell({ student }: { student: any }) {
       <div className="flex items-center gap-1.5">
         {visibleLabels.length > 0 ? (
           <>
-            <span className="max-w-[210px] truncate rounded-xl bg-emerald-50 px-2.5 py-1 text-[11px] font-black text-emerald-700 ring-1 ring-emerald-100" title={labels.join(' / ')}>
-              {visibleLabels[0]}
-            </span>
-            {labels.length > 1 && (
-              <span className="shrink-0 rounded-xl bg-slate-100 px-2 py-1 text-[10px] font-black text-slate-500" title={labels.slice(1).join(' / ')}>
-                +{labels.length - 1}件
-              </span>
-            )}
+            <div className="flex flex-wrap gap-1" title={labels.join(' / ')}>{visibleLabels.map(label => <span key={label} className="max-w-[260px] truncate rounded-xl bg-emerald-50 px-2.5 py-1 text-[11px] font-black text-emerald-700 ring-1 ring-emerald-100">{label}</span>)}</div>
           </>
         ) : (
-          <span className="rounded-xl bg-indigo-50 px-2.5 py-1 text-[11px] font-black text-indigo-700 ring-1 ring-indigo-100">
-            登録済み {ids.length}件
+          <span className="rounded-xl bg-indigo-50 px-2.5 py-1 text-[11px] font-black text-indigo-700 ring-1 ring-indigo-100" title={ids[0]}>
+            登録済み
           </span>
         )}
       </div>

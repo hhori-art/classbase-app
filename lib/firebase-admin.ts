@@ -32,14 +32,27 @@ function storageBucketName() {
 function ensureAdminInitialized() {
   if (getApps().length) return;
 
-  // ★ 修正: 先ほどの .env の変更に合わせて NEXT_PUBLIC_ 付きで読み込みます
-  const projectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID; 
+  const projectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID;
   const storageBucket = storageBucketName();
+  const emulatorMode = Boolean(
+    process.env.FIREBASE_AUTH_EMULATOR_HOST ||
+    process.env.FIRESTORE_EMULATOR_HOST ||
+    process.env.FIREBASE_STORAGE_EMULATOR_HOST
+  );
+
+  // Emulator SDKs route by host environment variables and do not need production credentials.
+  // This branch prevents security tests from reading or requiring any production secret.
+  if (emulatorMode) {
+    if (!projectId) throw new Error('Missing env: NEXT_PUBLIC_FIREBASE_PROJECT_ID');
+    initializeApp({ projectId, storageBucket });
+    return;
+  }
+
   const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
   const privateKeyRaw = process.env.FIREBASE_PRIVATE_KEY;
 
   const missing: string[] = [];
-  if (!projectId) missing.push('NEXT_PUBLIC_FIREBASE_PROJECT_ID'); // ★ 修正
+  if (!projectId) missing.push('NEXT_PUBLIC_FIREBASE_PROJECT_ID');
   if (!clientEmail) missing.push('FIREBASE_CLIENT_EMAIL');
   if (!privateKeyRaw) missing.push('FIREBASE_PRIVATE_KEY');
   if (missing.length) throw new Error(`Missing env: ${missing.join(', ')}`);

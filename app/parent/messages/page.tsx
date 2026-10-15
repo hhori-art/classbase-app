@@ -4,14 +4,12 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { ArrowRight, Loader2, MessageCircle, Send } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
-import { db } from '@/lib/firebase';
-import { collection, doc, getDoc, getDocs, limit, orderBy, query } from 'firebase/firestore';
 
 type Student = { id: string; student_name?: string; grade?: string };
 type ChatItem = { id: string; student_name: string; role?: string; content?: string; createdAt?: any };
 
 export default function ParentMessagesPage() {
-  const { profile } = useAuth();
+  const { user, profile } = useAuth();
   const [students, setStudents] = useState<Student[]>([]);
   const [chatItems, setChatItems] = useState<ChatItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -21,26 +19,12 @@ export default function ParentMessagesPage() {
       if (!profile) return;
       setLoading(true);
       try {
-        const linkedIds = Array.isArray(profile.student_ids) ? profile.student_ids.slice(0, 10) : [];
-        const linkedStudents: Student[] = [];
-
-        for (const sid of linkedIds) {
-          const studentSnap = await getDoc(doc(db, 'users', sid));
-          if (studentSnap.exists()) linkedStudents.push({ id: studentSnap.id, ...studentSnap.data() });
-        }
-
-        const chats: ChatItem[] = [];
-        for (const student of linkedStudents) {
-          const chatSnap = await getDocs(query(collection(db, 'users', student.id, 'chat_history'), orderBy('createdAt', 'desc'), limit(5)));
-          chatSnap.forEach(chatDoc => chats.push({
-            id: `${student.id}_${chatDoc.id}`,
-            student_name: student.student_name || '生徒',
-            ...chatDoc.data(),
-          }));
-        }
-
-        setStudents(linkedStudents);
-        setChatItems(chats);
+        if (!user) return;
+        const response = await fetch('/api/parent/chat-history', { headers: { Authorization: `Bearer ${await user.getIdToken()}` }, cache: 'no-store' });
+        const data = await response.json();
+        if (!response.ok || !data.ok) throw new Error(data.error || 'chat-history-load-failed');
+        setStudents(data.students || []);
+        setChatItems(data.messages || []);
       } catch (e) {
         console.error(e);
       } finally {
@@ -49,7 +33,7 @@ export default function ParentMessagesPage() {
     };
 
     load();
-  }, [profile]);
+  }, [profile, user]);
 
   return (
     <div className="space-y-6">
@@ -100,4 +84,3 @@ export default function ParentMessagesPage() {
     </div>
   );
 }
-

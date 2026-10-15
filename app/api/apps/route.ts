@@ -3,6 +3,7 @@ import { canAccessEiken } from '@/lib/eiken/access';
 import { normalizeAdminAppPermissions } from '@/lib/admin-app-permissions';
 import { getServerUser, jsonError } from '@/lib/server-auth';
 import { hasScienceSocialProgram } from '@/lib/teacher-programs';
+import { hasOnlineSchoolProgram } from '@/lib/online-school/access';
 
 export const runtime = 'nodejs';
 
@@ -12,8 +13,12 @@ export async function GET(request: NextRequest) {
     const eiken = await canAccessEiken(user);
     const adminPermissions = normalizeAdminAppPermissions(user.role, user.profile);
     const isManagementAccount = user.role === 'admin' || user.role === 'master';
+    const isLinkedParent = user.role === 'parent' && Array.isArray(user.profile.student_ids) &&
+      user.profile.student_ids.some((studentId: unknown) => String(studentId || '').trim());
     const attendance = isManagementAccount ? adminPermissions.attendance : user.role === 'teacher';
-    const scienceSocial = isManagementAccount ? adminPermissions.science_social : user.role === 'teacher' && hasScienceSocialProgram(user.profile);
+    const scienceSocial = isManagementAccount
+      ? adminPermissions.science_social
+      : user.role === 'student' || isLinkedParent || (user.role === 'teacher' && hasScienceSocialProgram(user.profile));
 
     return Response.json({
       ok: true,
@@ -22,6 +27,7 @@ export async function GET(request: NextRequest) {
         science_social: scienceSocial,
         eiken,
         attendance,
+        online_school: user.role === 'student' && hasOnlineSchoolProgram(user.profile),
       },
       admin_permissions: isManagementAccount ? adminPermissions : null,
     });

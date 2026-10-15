@@ -4,8 +4,7 @@ import { useState, useEffect } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
 import { 
-  collection, query, where, orderBy, limit, getDocs, addDoc, serverTimestamp, 
-  doc, updateDoc, increment, arrayUnion, onSnapshot, deleteDoc
+  collection, query, where, orderBy, limit, onSnapshot
 } from 'firebase/firestore';
 import { 
   MessageCircle, Heart, MessageSquare, Plus, Send, Loader2, 
@@ -13,9 +12,6 @@ import {
   BarChart2, MessagesSquare, LayoutGrid, Ghost, BookOpen, Briefcase, Users 
 } from 'lucide-react';
 import Link from 'next/link';
-
-// 定数設定
-const LIKE_REWARD_THRESHOLD = 10; 
 
 // カテゴリ定義
 const CATEGORIES = {
@@ -25,10 +21,8 @@ const CATEGORIES = {
 };
 
 export default function TeacherCommunityPage() {
-  const { user, profile } = useAuth();
+  const { user } = useAuth();
   
-  // ユーザー名 (講師名)
-  const currentName = profile?.name || profile?.student_name || user?.displayName || '名無し先生';
   const uid = user?.uid;
 
   const [topics, setTopics] = useState<any[]>([]);
@@ -88,6 +82,19 @@ export default function TeacherCommunityPage() {
 
   // --- アクション ---
 
+  const postCommunityAction = async (payload: Record<string, unknown>) => {
+    const token = await user?.getIdToken();
+    if (!token) throw new Error('login-required');
+    const response = await fetch('/api/teacher/community', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ ...payload, audience: 'teacher' }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) throw new Error(data.error || 'community-action-failed');
+    return data;
+  };
+
   const handlePostSubmit = async () => {
     if (!newTitle.trim()) return alert('タイトルまたは内容を入力してください');
     if (newType === 'vote' && voteOptions.some(o => !o.trim())) return alert('空欄の選択肢があります');
@@ -95,21 +102,13 @@ export default function TeacherCommunityPage() {
 
     setPostLoading(true);
     try {
-      await addDoc(collection(db, 'teacher_community_topics'), {
+      await postCommunityAction({
+        action: 'create_topic',
         title: newTitle,
         type: newType,
         category: newCategory,
         is_anonymous: isAnonymous,
         options: newType === 'vote' ? voteOptions : null,
-        votes: {},
-        voted_by: [],
-        creator_uid: uid,
-        creator_name: isAnonymous ? '匿名講師' : currentName,
-        is_approved: true, // 講師間のやり取りは即時反映
-        likes: 0,
-        liked_by: [],
-        created_at: serverTimestamp(),
-        reward_given: false
       });
       setIsPosting(false); 
       setNewTitle(''); 
@@ -124,7 +123,7 @@ export default function TeacherCommunityPage() {
     if (!confirm('この投稿を削除しますか？\n削除するとコメントや投票データも失われます。')) return;
 
     try {
-      await deleteDoc(doc(db, 'teacher_community_topics', topicId));
+      await postCommunityAction({ action: 'delete_topic', topic_id: topicId });
       if (expandedTopicId === topicId) {
         setExpandedTopicId(null);
       }
@@ -140,7 +139,7 @@ export default function TeacherCommunityPage() {
     if (!confirm('このコメントを削除しますか？')) return;
 
     try {
-      await deleteDoc(doc(db, 'teacher_community_topics', expandedTopicId, 'comments', commentId));
+      await postCommunityAction({ action: 'delete_comment', topic_id: expandedTopicId, comment_id: commentId });
     } catch (error) {
       alert('コメントの削除に失敗しました。');
       console.error(error);
@@ -155,27 +154,14 @@ export default function TeacherCommunityPage() {
     setTopics(prev => prev.map(t => t.id === topic.id ? { ...t, likes: (t.likes || 0) + 1, liked_by: [...(t.liked_by || []), uid] } : t));
 
     try {
-      const topicRef = doc(db, 'teacher_community_topics', topic.id);
-      await updateDoc(topicRef, { likes: increment(1), liked_by: arrayUnion(uid) });
-      
-      if (!topic.reward_given && (topic.likes || 0) + 1 >= LIKE_REWARD_THRESHOLD) {
-        const token = await user?.getIdToken();
-        if (token) {
-          await fetch('/api/coin-transactions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ action: 'community_like_reward', collection_name: 'teacher_community_topics', topic_id: topic.id }),
-          });
-        }
-      }
+      await postCommunityAction({ action: 'like', topic_id: topic.id });
     } catch (e) { console.error(e); }
   };
 
   const handleVote = async (topicId: string, optionIndex: number) => {
     if (!uid) return;
     try {
-      const topicRef = doc(db, 'teacher_community_topics', topicId);
-      await updateDoc(topicRef, { [`votes.${optionIndex}`]: increment(1), voted_by: arrayUnion(uid) });
+      await postCommunityAction({ action: 'vote', topic_id: topicId, option_index: optionIndex });
     } catch (e) { alert('投票失敗'); }
   };
 
@@ -183,12 +169,11 @@ export default function TeacherCommunityPage() {
     if (!newComment.trim() || !expandedTopicId || !uid) return;
     setCommentLoading(true);
     try {
-      await addDoc(collection(db, 'teacher_community_topics', expandedTopicId, 'comments'), { 
+      await postCommunityAction({
+        action: 'comment',
+        topic_id: expandedTopicId,
         text: newComment, 
-        uid: uid, 
-        name: newCommentIsAnonymous ? '匿名講師' : currentName, 
         is_anonymous: newCommentIsAnonymous,
-        created_at: serverTimestamp() 
       });
       setNewComment('');
       setNewCommentIsAnonymous(false);
@@ -211,9 +196,11 @@ export default function TeacherCommunityPage() {
                 <ArrowLeft size={20} className="text-slate-600" />
               </Link>
               <h1 className="text-lg md:text-xl font-extrabold text-slate-800 flex items-center gap-2">
-                <Users className="text-indigo-600" fill="currentColor" /> 講師コミュニティ
+                <Users className="text-indigo-600" fill="currentColor" /> 講師交流掲示板
               </h1>
             </div>
+
+            <p className="rounded-2xl bg-indigo-50 p-3 text-xs font-bold leading-5 text-indigo-700">講師同士に公開される交流掲示板です。運営からの正式連絡は「お知らせ」で確認してください。</p>
 
             {/* 投稿作成カード */}
             {!isPosting ? (

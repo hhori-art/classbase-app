@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getRequestOrigin, parseLineState, safeRedirectUrl, saveLineUserId } from '@/lib/line';
+import { completeLineLink, getNotificationSettings, getRequestOrigin, parseLineState, roleLineEnabled, safeRedirectUrl } from '@/lib/line';
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -27,6 +27,12 @@ export async function GET(request: Request) {
     // state を復元して、元の設定画面のURLを取り出す
     const decodedState = parseLineState(state);
     const redirectObj = safeRedirectUrl(decodedState.redirect, request);
+
+    const notificationSettings = await getNotificationSettings();
+    if (!roleLineEnabled(notificationSettings, decodedState.role)) {
+      redirectObj.searchParams.set('error', 'line_integration_unavailable');
+      return NextResponse.redirect(redirectObj);
+    }
 
     const clientId = process.env.LINE_LOGIN_CHANNEL_ID;
     const clientSecret = process.env.LINE_LOGIN_CHANNEL_SECRET;
@@ -72,16 +78,27 @@ export async function GET(request: Request) {
     }
 
     // 取得できたLINE専用のユーザーID
-    const lineUserId = profileData.userId;
+    const lineUserId = String(profileData.userId || '');
+    if (!/^U[0-9a-f]{32}$/i.test(lineUserId)) {
+      redirectObj.searchParams.set('error', 'profile_failed');
+      return NextResponse.redirect(redirectObj);
+    }
 
     // 3. サーバー側でLINE IDを保存してから元の設定画面へ戻す
-    await saveLineUserId(decodedState.uid, lineUserId);
+    await completeLineLink(decodedState, lineUserId);
     redirectObj.searchParams.set('line_linked', '1');
 
     return NextResponse.redirect(redirectObj.toString());
 
   } catch (err) {
     console.error('Callback Error:', err);
-    return new NextResponse('Internal Server Error', { status: 500 });
+    try {
+      const decodedState = parseLineState(state);
+      const redirectObj = safeRedirectUrl(decodedState.redirect, request);
+      redirectObj.searchParams.set('error', 'line_link_failed');
+      return NextResponse.redirect(redirectObj);
+    } catch {
+      return new NextResponse('LINE link failed. Please restart from the settings page.', { status: 400 });
+    }
   }
 }

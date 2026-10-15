@@ -11,6 +11,7 @@ const monthPattern = /^\d{4}-\d{2}$/;
 export async function POST(request: NextRequest) {
   try {
     const actor = await getServerUser(request);
+    if (actor.role !== 'master') throw new Error('forbidden');
     if (!isAdminLike(actor)) throw new Error('forbidden');
     const body = await request.json();
     const action = String(body.action || '').trim();
@@ -50,7 +51,17 @@ export async function POST(request: NextRequest) {
         status: 'withdrawn',
         enrollment_cancel_month: cancelMonth,
         enrollment_cancel_reason: reason.slice(0, 1000),
+        enrollment_cancel_reason_code: String(body.enrollment_cancel_reason_code || 'other').slice(0, 40),
+        enrollment_change_reasons: Array.isArray(body.enrollment_change_reasons) ? body.enrollment_change_reasons.map(String).filter(Boolean).slice(0, 10) : [],
+        enrollment_cancel_note: String(body.enrollment_cancel_note || '').trim().slice(0, 1000),
         withdrawn_at: FieldValue.serverTimestamp(),
+      });
+    } else if (action === 'restore') {
+      Object.assign(updates, {
+        account_status: 'active',
+        status: 'active',
+        restored_at: FieldValue.serverTimestamp(),
+        restored_by: actor.uid,
       });
     } else if (action === 'relations') {
       const siblingIds: string[] = Array.isArray(body.sibling_ids) ? body.sibling_ids.map(String).filter(Boolean) : [];

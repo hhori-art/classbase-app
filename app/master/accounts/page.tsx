@@ -7,7 +7,7 @@ import {
   Headphones,
   KeyRound,
   ShieldCheck,
-  Trash2,
+  Archive,
   UserCog,
 } from 'lucide-react';
 
@@ -21,8 +21,8 @@ const ACCOUNT_ACTIONS = [
     iconStyle: 'bg-amber-600',
   },
   {
-    title: 'アカウント作成・停止',
-    description: '生徒、保護者、講師、管理者、勤怠アプリ利用者のアカウントを作成・更新します。',
+    title: 'アカウント作成・更新・PW変更',
+    description: '生徒、保護者、講師、管理者のアカウント作成・更新と、初回ログイン後のパスワード変更を行います。',
     href: '/master/accounts/sso',
     icon: UserCog,
     style: 'border-sky-200 bg-sky-50 text-sky-950',
@@ -45,10 +45,10 @@ const ACCOUNT_ACTIONS = [
     iconStyle: 'bg-violet-600',
   },
   {
-    title: 'アカウント・データ削除',
-    description: '不要なアカウントや関連データを確認して削除します。',
+    title: '利用停止・アーカイブ',
+    description: '退塾・退職者のログインを停止し、必要に応じて復旧できる状態で保管します。',
     href: '/master/delete',
-    icon: Trash2,
+    icon: Archive,
     style: 'border-rose-200 bg-rose-50 text-rose-950',
     iconStyle: 'bg-rose-600',
   },

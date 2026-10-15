@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server';
-import { canManageAttendance, getServerUser, jsonError } from '@/lib/server-auth';
+import { canManageAttendanceSystem, getServerUser, jsonError } from '@/lib/server-auth';
 import {
   getExternalAttendanceStatus,
   syncExternalAttendance,
@@ -20,7 +20,7 @@ function monthRange(raw: string) {
 }
 
 function requireManager(user: Awaited<ReturnType<typeof getServerUser>>) {
-  if (!canManageAttendance(user)) throw new Error('forbidden');
+  if (!canManageAttendanceSystem(user)) throw new Error('forbidden');
 }
 
 export async function GET(request: NextRequest) {

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
+import { useParams } from 'next/navigation';
 import { ArrowLeft, CheckCircle2, ExternalLink, Loader2, Sparkles } from 'lucide-react';
 import { useEikenApi } from '@/app/eiken/useEikenApi';
 
@@ -15,7 +16,8 @@ const youtubeEmbedUrl = (value: string) => {
   return '';
 };
 
-export default function EikenTaskPage({ params }: { params: { id: string } }) {
+export default function EikenTaskPage() {
+  const params = useParams<{ id: string }>();
   const api = useEikenApi();
   const [task, setTask] = useState<any>(null);
   const [progress, setProgress] = useState<any>(null);

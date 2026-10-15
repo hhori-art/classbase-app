@@ -16,6 +16,7 @@ type TransferOption = {
   course_name: string;
   unit: string;
   period: number;
+  transfer_token: string;
 };
 
 export default function StudentAbsencePage() {
@@ -34,8 +35,15 @@ export default function StudentAbsencePage() {
   const [loading, setLoading] = useState(false);
   const [featureEnabled, setFeatureEnabled] = useState(true);
   const [transferEnabled, setTransferEnabled] = useState(true);
+  const [directTransferEntry, setDirectTransferEntry] = useState(false);
   const [visibilityLoading, setVisibilityLoading] = useState(true);
   const [submitted, setSubmitted] = useState(false);
+
+  useEffect(() => {
+    const isDirectTransfer = new URLSearchParams(window.location.search).get('mode') === 'transfer';
+    setDirectTransferEntry(isDirectTransfer);
+    if (isDirectTransfer) setMode('transfer');
+  }, []);
 
   useEffect(() => {
     const loadVisibility = async () => {
@@ -99,6 +107,7 @@ export default function StudentAbsencePage() {
             body: JSON.stringify({
               absence_id: selectedAbsenceId,
               transfer_shift_id: selectedTransferId,
+              transfer_token: transferOptions.find(option => option.id === selectedTransferId)?.transfer_token || '',
               note: reason,
             }),
           })
@@ -149,12 +158,12 @@ export default function StudentAbsencePage() {
     return <div className="min-h-screen flex items-center justify-center bg-blue-50"><Loader2 className="animate-spin text-blue-500" size={32} /></div>;
   }
 
-  if (!featureEnabled) {
+  if ((directTransferEntry && !transferEnabled) || (!directTransferEntry && !featureEnabled)) {
     return (
       <div className="min-h-screen bg-slate-50 p-6 font-sans flex items-center justify-center">
         <div className="max-w-sm rounded-[32px] bg-white p-8 text-center shadow-sm">
           <AlertTriangle className="mx-auto mb-4 text-slate-400" size={36} />
-          <h1 className="text-xl font-black text-slate-800">欠席連絡は現在利用できません</h1>
+          <h1 className="text-xl font-black text-slate-800">{directTransferEntry ? '振替登録' : '欠席連絡'}は現在利用できません</h1>
           <p className="mt-2 text-sm font-bold text-slate-400">管理者設定で非表示になっています。</p>
           <Link href="/student" className="mt-6 inline-flex rounded-2xl bg-slate-900 px-5 py-3 text-sm font-black text-white">ホームへ戻る</Link>
         </div>
@@ -174,9 +183,9 @@ export default function StudentAbsencePage() {
           </Link>
           <div>
             <h1 className="text-2xl font-black text-gray-800 flex items-center gap-2 tracking-tight">
-              欠席・遅刻の連絡
+              {directTransferEntry ? '振替先を選択' : '欠席・遅刻の連絡'}
             </h1>
-            <p className="text-xs font-bold text-gray-400">先生にメッセージを送ります</p>
+            <p className="text-xs font-bold text-gray-400">{directTransferEntry ? '登録済みの欠席連絡に合う候補を表示します' : '先生にメッセージを送ります'}</p>
           </div>
         </div>
 
@@ -188,7 +197,7 @@ export default function StudentAbsencePage() {
           
           {/* 左カラム: 選択系 */}
           <div className="space-y-6">
-            <div className="bg-white p-6 rounded-[32px] shadow-sm border border-gray-100">
+            {!directTransferEntry && <div className="bg-white p-6 rounded-[32px] shadow-sm border border-gray-100">
               <label className="flex items-center gap-2 text-sm font-black text-gray-700 mb-4">
                 <span className="bg-slate-100 text-slate-600 p-1.5 rounded-lg"><Repeat size={18} strokeWidth={3}/></span>
                 登録する内容
@@ -206,7 +215,7 @@ export default function StudentAbsencePage() {
                   通常の振替登録は現在非表示です。保護者から「お子様が選択する」で届いた振替はホーム画面に表示されます。
                 </p>
               )}
-            </div>
+            </div>}
             
             {/* 1. 種類の選択 */}
             {mode === 'absence' && <div className="bg-white p-6 rounded-[32px] shadow-sm border border-gray-100 h-full">

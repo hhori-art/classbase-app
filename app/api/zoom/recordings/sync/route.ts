@@ -12,6 +12,18 @@ const dateBefore = (date: Date, days: number) => {
   return next.toISOString().slice(0, 10);
 };
 
+class ZoomApiError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+  }
+}
+
+const validDateKey = (value: string) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+};
+
 const zoomAccessToken = async () => {
   const accountId = process.env.ZOOM_ACCOUNT_ID;
   const clientId = process.env.ZOOM_CLIENT_ID;
@@ -24,6 +36,7 @@ const zoomAccessToken = async () => {
       Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
     },
     cache: 'no-store',
+    signal: AbortSignal.timeout(10_000),
   });
 
   const data = await tokenRes.json().catch(() => ({}));
@@ -43,6 +56,7 @@ const fetchRecordingsPage = async (accessToken: string, endpoint: string, from: 
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${accessToken}` },
     cache: 'no-store',
+    signal: AbortSignal.timeout(15_000),
   });
   const data = await res.json().catch(() => ({}));
   return { res, data };
@@ -57,7 +71,7 @@ const listRecordingsFromEndpoint = async (accessToken: string, endpoint: string,
   do {
     pageCount += 1;
     const { res, data } = await fetchRecordingsPage(accessToken, endpoint, from, to, nextPageToken);
-    if (!res.ok) throw new Error(`zoom-recordings-failed:${data.message || data.reason || res.status}`);
+    if (!res.ok) throw new ZoomApiError(res.status, `zoom-recordings-failed:${data.message || data.reason || res.status}`);
 
     meetings.push(...(Array.isArray(data.meetings) ? data.meetings : []));
     nextPageToken = String(data.next_page_token || '');
@@ -77,6 +91,7 @@ const listRecordings = async (accessToken: string, from: string, to: string, max
     const result = await listRecordingsFromEndpoint(accessToken, 'https://api.zoom.us/v2/accounts/me/recordings', from, to, maxMeetings);
     return { ...result, scope: 'account' };
   } catch (accountError: any) {
+    if (!(accountError instanceof ZoomApiError) || ![400, 404].includes(accountError.status)) throw accountError;
     const result = await listRecordingsFromEndpoint(accessToken, 'https://api.zoom.us/v2/users/me/recordings', from, to, maxMeetings);
     return { ...result, scope: 'user', account_error: accountError?.message || String(accountError) };
   }
@@ -84,10 +99,19 @@ const listRecordings = async (accessToken: string, from: string, to: string, max
 
 const runRecordingSync = async (input: Record<string, unknown>, source: string) => {
   const today = new Date();
-  const days = Math.min(30, Math.max(1, Number(input.days || 14)));
-  const maxMeetings = Math.min(300, Math.max(20, Number(input.max_meetings || 180)));
+  const requestedDays = Number(input.days || 14);
+  const requestedMaxMeetings = Number(input.max_meetings || 180);
+  const days = Number.isFinite(requestedDays) ? Math.min(30, Math.max(1, Math.floor(requestedDays))) : 14;
+  const maxMeetings = Number.isFinite(requestedMaxMeetings) ? Math.min(300, Math.max(20, Math.floor(requestedMaxMeetings))) : 180;
   const from = String(input.from || input.start_date || dateBefore(today, days)).slice(0, 10);
   const to = String(input.to || input.end_date || today.toISOString().slice(0, 10)).slice(0, 10);
+  if (!validDateKey(from) || !validDateKey(to)) throw new Error('invalid-recording-date-range');
+  const fromMs = new Date(`${from}T00:00:00Z`).getTime();
+  const toMs = new Date(`${to}T00:00:00Z`).getTime();
+  const todayKey = today.toISOString().slice(0, 10);
+  if (fromMs > toMs || toMs - fromMs > 31 * 24 * 60 * 60 * 1000 || to > todayKey) {
+    throw new Error('invalid-recording-date-range');
+  }
 
   const accessToken = await zoomAccessToken();
   const recordingResult = await listRecordings(accessToken, from, to, maxMeetings);

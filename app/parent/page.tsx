@@ -3,12 +3,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
-import { collection, doc, getDoc, getDocs, limit, orderBy, query, where } from 'firebase/firestore';
-import CourseRegistrationCalendar, { getCourseDay, getCourseSlot, getCourseSubject } from '@/app/components/CourseRegistrationCalendar';
+import { collection, getDocs, limit, query, where } from 'firebase/firestore';
+import CourseRegistrationCalendar, { CourseOpeningMap, getCourseDay, getCourseSlot, getCourseSubject } from '@/app/components/CourseRegistrationCalendar';
 import { canStudentRegisterCourseOption } from '@/lib/course-registration-rules';
 import { loadCourseRegistrationOptions } from '@/lib/client-course-options';
-import { getCourseSubjectGroup, normalizeCourseText } from '@/lib/course-text';
-import { looksLikeZoomUrl, normalizeZoomMeetingId } from '@/lib/zoom-url';
+import { loadAnnouncements } from '@/lib/client-announcements';
+import { loadStudentCalendar } from '@/lib/client-student-homework';
+import { getCourseOptionStableKey } from '@/lib/course-registration-selection';
+import { calendarScheduleKind, calendarScheduleLabel } from '@/lib/calendar-schedule-display';
 import { usePortalVisibility } from '@/app/hooks/usePortalVisibility';
 import AppSwitcherLink from '@/app/components/AppSwitcherLink';
 import {
@@ -43,7 +45,12 @@ type TransferOption = {
   meetingId: string;
   targetDate: string;
   matchLabel: string;
+  transferToken: string;
 };
+
+const emptyDetails = (): Record<string, DetailItem[]> => ({
+  homework: [], attendance: [], absence: [], recordings: [], aiMessages: [], announcements: [],
+});
 
 const toDateLabel = (value: any) => {
   if (!value) return '-';
@@ -67,85 +74,18 @@ const normalizeGrade = (value: any) => {
   if (raw.includes('1')) return '中1';
   return raw.trim();
 };
-const normalizeText = normalizeCourseText;
-const periodFromShift = (shift: any) => {
-  const values = [
-    shift.period,
-    shift.target_period,
-    shift.time_period,
-    shift.class_period,
-    shift.period_number,
-    shift.lesson_period,
-    shift.slot,
-    shift.time_slot,
-    shift.note,
-  ];
-  for (const value of values) {
-    const raw = String(value || '').replace(/[０-９]/g, char => String.fromCharCode(char.charCodeAt(0) - 0xfee0)).trim();
-    if (!raw) continue;
-    if (/^1$/.test(raw) || raw.includes('1限') || raw.includes('1時間目') || raw.includes('①')) return 1;
-    if (/^2$/.test(raw) || raw.includes('2限') || raw.includes('2時間目') || raw.includes('②')) return 2;
-  }
-  return 0;
-};
-const optionMatchesShift = (option: any, shift: any) => {
-  const gradeOk = !option.grade || !shift.target_grade || normalizeGrade(option.grade) === normalizeGrade(shift.target_grade);
-  const optionSubject = normalizeText(option.subject);
-  const shiftSubject = normalizeText([shift.target_subject, shift.target_detail_subject, shift.subject].filter(Boolean).join(' '));
-  const optionSubjectGroup = getCourseSubjectGroup(option.subject);
-  const shiftSubjectGroup = getCourseSubjectGroup([shift.target_subject, shift.target_detail_subject, shift.subject].filter(Boolean).join(' '));
-  const subjectOk = !optionSubject || !shiftSubject ||
-    (optionSubjectGroup && shiftSubjectGroup ? optionSubjectGroup === shiftSubjectGroup : (
-      optionSubject === shiftSubject ||
-      optionSubject.includes(shiftSubject) ||
-      shiftSubject.includes(optionSubject)
-    ));
-  const course = normalizeText(option.course_name || option.title);
-  const detail = normalizeText(shift.target_detail_subject || shift.target_subject);
-  const unit = normalizeText(option.resolved_unit || option.unit || option.matched_units?.[0]);
-  const shiftUnit = normalizeText(shift.unit);
-  const courseOk = !course || !detail || course === detail || course.includes(detail) || detail.includes(course);
-  const unitOk = !unit || !shiftUnit || unit === shiftUnit || unit.includes(shiftUnit) || shiftUnit.includes(unit);
-  return gradeOk && subjectOk && (courseOk || unitOk);
-};
-
-const getShiftMeetingId = (shift: any) => normalizeZoomMeetingId(
-  shift.target_meeting_id ||
-  shift.meeting_id ||
-  shift.zoom_meeting_id ||
-  shift.meetingId ||
-  shift.target_url ||
-  shift.zoom_url ||
-  shift.join_url ||
-  shift.meeting_url ||
-  shift.url ||
-  ''
-);
-
-const hasShiftZoomTarget = (shift: any) => Boolean(
-  getShiftMeetingId(shift) ||
-  looksLikeZoomUrl(shift.target_url) ||
-  looksLikeZoomUrl(shift.zoom_url) ||
-  looksLikeZoomUrl(shift.join_url) ||
-  looksLikeZoomUrl(shift.meeting_url) ||
-  looksLikeZoomUrl(shift.url)
-);
-
 export default function ParentDashboardPage() {
   const { user, profile } = useAuth();
   const [students, setStudents] = useState<Student[]>([]);
   const [selectedId, setSelectedId] = useState('');
   const [loading, setLoading] = useState(true);
   const [detailsLoading, setDetailsLoading] = useState(false);
+  const [dashboardError, setDashboardError] = useState('');
+  const [detailsError, setDetailsError] = useState('');
+  const [dashboardReload, setDashboardReload] = useState(0);
+  const [detailsReload, setDetailsReload] = useState(0);
   const { visibility } = usePortalVisibility('parent');
-  const [details, setDetails] = useState<Record<string, DetailItem[]>>({
-    homework: [],
-    attendance: [],
-    absence: [],
-    recordings: [],
-    aiMessages: [],
-    announcements: [],
-  });
+  const [details, setDetails] = useState<Record<string, DetailItem[]>>(emptyDetails);
   const [currentMonth, setCurrentMonth] = useState(() => new Date());
   const [selectedDate, setSelectedDate] = useState('');
   const [monthlySchedules, setMonthlySchedules] = useState<any[]>([]);
@@ -153,7 +93,6 @@ export default function ParentDashboardPage() {
   const [requestText, setRequestText] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [courseOptions, setCourseOptions] = useState<any[]>([]);
-  const [courseRegistrations, setCourseRegistrations] = useState<any[]>([]);
   const [selectedCourseIds, setSelectedCourseIds] = useState<string[]>([]);
   const [savingCourses, setSavingCourses] = useState(false);
   const [pendingCourseRequests, setPendingCourseRequests] = useState<any[]>([]);
@@ -177,33 +116,30 @@ export default function ParentDashboardPage() {
 
   useEffect(() => {
     const loadStudents = async () => {
-      if (!profile) return;
+      if (!profile || !user) return;
       setLoading(true);
+      setDashboardError('');
       try {
-        const linkedIds = Array.isArray(profile.student_ids) ? profile.student_ids : [];
-        const fetched: Student[] = [];
-
-        if (linkedIds.length > 0) {
-          const snaps = await Promise.all(linkedIds.slice(0, 10).map((sid: string) => getDoc(doc(db, 'users', sid))));
-          snaps.forEach(snap => {
-            if (snap.exists()) fetched.push({ id: snap.id, ...snap.data() });
-          });
-        } else {
-          const snap = await getDocs(query(collection(db, 'users'), where('parent_uid', '==', profile.uid), limit(10)));
-          snap.forEach(d => fetched.push({ id: d.id, ...d.data() }));
-        }
-
+        const response = await fetch('/api/parent/dashboard', {
+          headers: { Authorization: `Bearer ${await user.getIdToken()}` }, cache: 'no-store',
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.ok) throw new Error(data.error || 'failed');
+        const fetched: Student[] = Array.isArray(data.students) ? data.students : [];
         setStudents(fetched);
-        setSelectedId(fetched[0]?.id || '');
+        setSelectedId(current => fetched.some(student => student.id === current) ? current : fetched[0]?.id || '');
       } catch (e) {
         console.error(e);
+        setStudents([]);
+        setSelectedId('');
+        setDashboardError('保護者情報を読み込めませんでした。通信状態を確認して、もう一度お試しください。');
       } finally {
         setLoading(false);
       }
     };
 
     loadStudents();
-  }, [profile]);
+  }, [profile, user, dashboardReload]);
 
   useEffect(() => {
     const loadMonthlySchedules = async () => {
@@ -213,29 +149,8 @@ export default function ParentDashboardPage() {
         const month = currentMonth.getMonth() + 1;
         const start = `${year}-${String(month).padStart(2, '0')}-01`;
         const end = `${year}-${String(month).padStart(2, '0')}-${String(new Date(year, month, 0).getDate()).padStart(2, '0')}`;
-        const rangeSnap = await getDocs(query(
-          collection(db, 'monthly_schedules'),
-          where('start_date', '<=', end),
-          orderBy('start_date', 'asc')
-        )).catch(() => ({ docs: [] as any[] }));
-        const legacySnap = await getDocs(query(
-          collection(db, 'monthly_schedules'),
-          where('target_date', '>=', start),
-          where('target_date', '<=', end),
-          orderBy('target_date', 'asc')
-        )).catch(() => ({ docs: [] as any[] }));
-        const merged = new Map<string, any>();
-        [...rangeSnap.docs, ...legacySnap.docs].forEach((doc: any) => {
-          const item = { id: doc.id, ...doc.data() };
-          if (scheduleStart(item) <= end && scheduleEnd(item) >= start) merged.set(item.id, item);
-        });
-        const studentSchool = selectedStudent.school || (selectedStudent as any).school_id || '';
-        setMonthlySchedules(Array.from(merged.values())
-          .filter((item: any) => !item.archived)
-          .filter((item: any) => !item.audience || ['all', 'student_parent', 'parent'].includes(item.audience))
-          .filter((item: any) => !item.school_id || item.school_id === studentSchool)
-          .filter((item: any) => !Array.isArray(item.grades) || item.grades.length === 0 || item.grades.includes(selectedStudent.grade))
-        );
+        const calendar = await loadStudentCalendar(start, end, selectedStudent.id);
+        setMonthlySchedules(calendar.schedules);
       } catch (e) {
         console.warn('Monthly schedules read failed:', e);
         setMonthlySchedules([]);
@@ -245,77 +160,48 @@ export default function ParentDashboardPage() {
   }, [currentMonth, selectedStudent, visibility.calendar]);
 
   useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
     const loadDetails = async () => {
-      if (!selectedId) return;
+      if (!selectedId || !user) return;
       setDetailsLoading(true);
+      setDetailsError('');
+      setDetails(emptyDetails());
       try {
-        const [submissions, attendance, absences, transferRequests, recordingViews, chatHistory, announcements] = await Promise.all([
-          getDocs(query(collection(db, 'submissions'), where('student_id', '==', selectedId), limit(20))).catch(() => ({ docs: [] })),
-          getDocs(query(collection(db, 'attendance'), where('user_id', '==', selectedId), limit(30))).catch(() => ({ docs: [] })),
-          getDocs(query(collection(db, 'requests'), where('user_id', '==', selectedId), where('type', '==', 'absence'), limit(30))).catch(() => ({ docs: [] })),
-          getDocs(query(collection(db, 'requests'), where('user_id', '==', selectedId), where('type', '==', 'transfer'), limit(30))).catch(() => ({ docs: [] })),
-          getDocs(query(collection(db, 'recording_views'), where('user_id', '==', selectedId), limit(30))).catch(() => ({ docs: [] })),
-          getDocs(query(collection(db, 'users', selectedId, 'chat_history'), orderBy('createdAt', 'desc'), limit(20))).catch(() => ({ docs: [] })),
-          getDocs(query(collection(db, 'announcements'), orderBy('created_at', 'desc'), limit(10))).catch(() => ({ docs: [] })),
+        const [dashboardResponse, announcements] = await Promise.all([
+          fetch(`/api/parent/dashboard?student_id=${encodeURIComponent(selectedId)}`, {
+            headers: { Authorization: `Bearer ${await user.getIdToken()}` }, cache: 'no-store', signal: controller.signal,
+          }),
+          loadAnnouncements(10),
         ]);
-
-        const absenceItems = [
-          ...absences.docs.map((d: any) => {
-            const data = d.data();
-            return {
-              id: d.id,
-              title: data.absence_type === 'late' ? '遅刻連絡' : '欠席連絡',
-              meta: `${data.target_date || '-'} / ${data.status || 'pending'}`,
-              body: data.content || data.reason || '',
-              status: data.status || 'pending',
-            };
-          }),
-          ...transferRequests.docs.map((d: any) => {
-            const data = d.data();
-            return {
-              id: d.id,
-              title: '振替希望',
-              meta: `${data.target_date || '-'} / ${data.status || 'pending'}`,
-              body: data.content || data.reason || '',
-              status: data.status || 'pending',
-            };
-          }),
-        ];
+        const dashboard = await dashboardResponse.json().catch(() => ({}));
+        if (!dashboardResponse.ok || !dashboard.ok) throw new Error(dashboard.error || 'failed');
+        if (!active) return;
+        const source = dashboard.details || {};
 
         setDetails({
-          homework: submissions.docs.map((d: any) => {
-            const data = d.data();
-            return { id: d.id, title: data.title || data.homework_title || '宿題提出', meta: toDateTimeLabel(data.submitted_at || data.created_at), body: data.comment || data.memo || '', status: data.status };
-          }),
-          attendance: attendance.docs.map((d: any) => {
-            const data = d.data();
-            return { id: d.id, title: data.target_date || data.date || '出席記録', meta: data.status || data.attendance_status || '記録あり', body: data.note || '' };
-          }),
-          absence: absenceItems,
-          recordings: recordingViews.docs.map((d: any) => {
-            const data = d.data();
-            return { id: d.id, title: data.recording_title || data.title || '録画視聴', meta: `${toDateTimeLabel(data.updated_at || data.started_at || data.created_at)} / ${data.event_type || data.status || 'view'}`, body: data.watch_seconds ? `${Math.round(data.watch_seconds / 60)}分視聴` : '' };
-          }),
-          aiMessages: chatHistory.docs.map((d: any) => {
-            const data = d.data();
-            return { id: d.id, title: data.role === 'assistant' ? 'AIからの返信' : '生徒の質問', meta: toDateTimeLabel(data.createdAt || data.created_at), body: data.content || '' };
-          }),
-          announcements: announcements.docs
-            .map((d: any) => ({ id: d.id, ...d.data() }))
-            .filter((data: any) => !data.target || ['all', 'parent'].includes(data.target))
+          homework: (source.homework || []).map((item: any) => ({ id: item.id, title: item.title, meta: toDateTimeLabel(item.occurred_at), body: item.body, status: item.status })),
+          attendance: (source.attendance || []).map((item: any) => ({ id: item.id, title: item.title, meta: item.status, body: item.body })),
+          absence: (source.absence || []).map((item: any) => ({ id: item.id, title: item.title, meta: `${item.target_date || '-'} / ${item.status || 'pending'}`, body: item.body, status: item.status })),
+          recordings: (source.recordings || []).map((item: any) => ({ id: item.id, title: item.title, meta: `${toDateTimeLabel(item.occurred_at)} / ${item.status}`, body: item.watch_seconds ? `${Math.round(item.watch_seconds / 60)}分視聴` : '' })),
+          aiMessages: (source.aiMessages || []).map((item: any) => ({ id: item.id, title: item.role === 'assistant' ? 'AIからの返信' : '生徒の質問', meta: toDateTimeLabel(item.occurred_at), body: item.body })),
+          announcements: announcements
             .map((data: any) => {
               return { id: data.id, title: data.title || 'お知らせ', meta: toDateLabel(data.created_at), body: data.content || data.body || '' };
             }),
         });
       } catch (e) {
+        if (!active) return;
         console.error(e);
+        setDetailsError('学習・出席情報を読み込めませんでした。空の履歴ではありません。再読み込みしてください。');
       } finally {
-        setDetailsLoading(false);
+        if (active) setDetailsLoading(false);
       }
     };
 
     loadDetails();
-  }, [selectedId]);
+    return () => { active = false; controller.abort(); };
+  }, [selectedId, user, detailsReload]);
 
   useEffect(() => {
     const loadCourseOptions = async () => {
@@ -324,7 +210,7 @@ export default function ParentDashboardPage() {
         const [optionData, registrationSnap] = await Promise.all([
           loadCourseRegistrationOptions({
             grade: normalizeGrade(selectedStudent.grade),
-            getToken: () => user.getIdToken(),
+            getToken: forceRefresh => user.getIdToken(forceRefresh),
           }),
           getDocs(query(collection(db, 'course_registrations'), where('parent_id', '==', user.uid), limit(50))).catch(() => ({ docs: [] as any[] })),
         ]);
@@ -335,7 +221,6 @@ export default function ParentDashboardPage() {
           .sort((a: any, b: any) => `${a.year}_${a.term}_${a.subject}_${a.course_name}`.localeCompare(`${b.year}_${b.term}_${b.subject}_${b.course_name}`));
         const registrations = registrationSnap.docs.map((d: any) => ({ id: d.id, ...d.data() })).filter((item: any) => item.student_id === selectedStudent.id);
         setCourseOptions(options);
-        setCourseRegistrations(registrations);
         const latest = registrations.sort((a: any, b: any) => String(b.updated_at?.seconds || 0).localeCompare(String(a.updated_at?.seconds || 0)))[0];
         setSelectedCourseIds(Array.isArray(latest?.selected_course_ids)
           ? latest.selected_course_ids.map(String)
@@ -391,58 +276,19 @@ export default function ParentDashboardPage() {
       if (!selectedStudent || !selectedDate || requestMode !== 'transfer') return;
       setLoadingTransferOptions(true);
       try {
-        const shiftSnap = await getDocs(query(collection(db, 'shift_assignments'), where('target_date', '==', selectedDate), limit(100))).catch(() => ({ docs: [] as any[] }));
-        const rawShifts = shiftSnap.docs
-          .map((d: any) => ({ id: d.id, ...d.data() }))
-          .filter((shift: any) => shift.role_type !== 'sub')
-          .filter((shift: any) => !String(shift.teacher_name || '').includes('サポート'))
-          .filter((shift: any) => canStudentRegisterCourseOption(selectedStudent.grade, {
-            grade: shift.target_grade,
-            subject: shift.target_subject,
-            course_name: shift.target_detail_subject,
-            unit: shift.unit,
-          }))
-          .filter(hasShiftZoomTarget);
-
-        const latestRegistration = [...courseRegistrations]
-          .filter((item: any) => item.student_id === selectedStudent.id)
-          .sort((a: any, b: any) => Number(b.updated_at?.seconds || b.created_at?.seconds || 0) - Number(a.updated_at?.seconds || a.created_at?.seconds || 0))[0];
-        const registeredIds = new Set(Array.isArray(latestRegistration?.selected_course_ids) ? latestRegistration.selected_course_ids.map(String) : selectedCourseIds.map(String));
-        const registeredOptions = courseOptions.filter((option: any) => (
-          registeredIds.has(option.id) ||
-          registeredIds.has(option.parent_course_option_id) ||
-          registeredIds.has(option.fallback_curriculum_option_id)
-        ));
-        const registeredShiftIds = new Set<string>();
-        registeredOptions.forEach((option: any) => {
-          if (Array.isArray(option.matched_shift_ids)) option.matched_shift_ids.forEach((id: any) => registeredShiftIds.add(String(id)));
-        });
-
-        const matched = rawShifts
-          .filter((shift: any) => {
-            if (registeredShiftIds.has(shift.id)) return true;
-            if (registeredOptions.length === 0) return true;
-            return registeredOptions.some((option: any) => optionMatchesShift(option, shift));
-          })
-          .map((shift: any) => {
-            const courseName = shift.target_detail_subject || shift.target_subject || '講座';
-            const unit = shift.unit || shift.curriculum_unit || '';
-            const period = periodFromShift(shift);
-            return {
-              id: shift.id,
-              title: `${period ? `${period}限 ` : ''}${shift.target_subject || ''} ${courseName}`,
-              unit,
-              subject: shift.target_subject || '',
-              courseName,
-              period,
-              meetingId: getShiftMeetingId(shift),
-              targetDate: shift.target_date || selectedDate,
-              matchLabel: registeredOptions.length > 0 ? '受講登録に紐づく候補' : '同学年の実施講座',
-            };
-          })
-          .sort((a: TransferOption, b: TransferOption) => `${a.period}_${a.subject}_${a.courseName}_${a.unit}`.localeCompare(`${b.period}_${b.subject}_${b.courseName}_${b.unit}`, 'ja'));
-
-        setTransferOptions(matched);
+        const token = await user?.getIdToken();
+        if (!token) throw new Error('ログイン情報を確認できません。');
+        const params = new URLSearchParams({ student_id: selectedStudent.id, absence_date: selectedDate });
+        const res = await fetch(`/api/student/transfer-options?${params}`, { headers: { Authorization: `Bearer ${token}` } });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.ok === false) throw new Error(data.error || 'failed');
+        setTransferOptions((Array.isArray(data.options) ? data.options : []).map((option: any) => ({
+          id: String(option.id || ''), title: String(option.title || ''), unit: String(option.unit || ''),
+          subject: String(option.subject || ''), courseName: String(option.course_name || ''),
+          period: Number(option.period) || 0, meetingId: String(option.meeting_id || ''),
+          targetDate: String(option.target_date || ''), matchLabel: '欠席授業と同じ単元の振替候補',
+          transferToken: String(option.transfer_token || ''),
+        })));
       } catch (e) {
         console.warn('Transfer options read failed:', e);
         setTransferOptions([]);
@@ -451,7 +297,7 @@ export default function ParentDashboardPage() {
       }
     };
     loadTransferOptions();
-  }, [selectedStudent, selectedDate, requestMode, courseOptions, courseRegistrations, selectedCourseIds]);
+  }, [user, selectedStudent, selectedDate, requestMode]);
 
   const submitCalendarRequest = async () => {
     if (!user || !selectedStudent || !selectedDate) return;
@@ -484,6 +330,7 @@ export default function ParentDashboardPage() {
           transfer_course_name: isTransfer ? selectedTransfer?.courseName || '' : '',
           transfer_period: isTransfer ? selectedTransfer?.period || null : null,
           transfer_meeting_id: isTransfer ? selectedTransfer?.meetingId || '' : '',
+          transfer_token: isTransfer ? selectedTransfer?.transferToken || '' : '',
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -505,6 +352,14 @@ export default function ParentDashboardPage() {
     setSavingCourses(true);
     try {
       const token = await user.getIdToken();
+      const selectedCourseKeys = courseOptions
+        .filter(option => selectedCourseIds.includes(String(option.id)))
+        .map(getCourseOptionStableKey)
+        .filter(Boolean);
+      const registrationTokens = courseOptions
+        .filter(option => selectedCourseIds.includes(String(option.id)))
+        .map(option => option.registration_token)
+        .filter(Boolean);
       const res = await fetch('/api/parent/course-registrations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -514,6 +369,8 @@ export default function ParentDashboardPage() {
           term,
           year,
           selected_course_ids: selectedCourseIds,
+          selected_course_keys: selectedCourseKeys,
+          registration_tokens: registrationTokens,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -531,7 +388,11 @@ export default function ParentDashboardPage() {
   };
 
   if (loading && students.length === 0) {
-    return <div className="flex min-h-[60vh] items-center justify-center"><Loader2 className="animate-spin text-indigo-500" /></div>;
+    return <div className="min-h-[60vh]" aria-busy="true" />;
+  }
+
+  if (dashboardError) {
+    return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-8 text-center"><AlertCircle className="mx-auto mb-3 text-rose-500" /><p className="font-black text-rose-900">{dashboardError}</p><button type="button" onClick={() => setDashboardReload(value => value + 1)} className="mt-5 rounded-xl bg-rose-600 px-5 py-3 text-sm font-black text-white">再読み込み</button></div>;
   }
 
   if (students.length === 0) {
@@ -588,6 +449,8 @@ export default function ParentDashboardPage() {
           </div>
         </div>
       </section>
+
+      {detailsError && <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-rose-200 bg-rose-50 px-5 py-4 text-sm font-bold text-rose-900"><span>{detailsError}</span><button type="button" onClick={() => setDetailsReload(value => value + 1)} className="rounded-xl bg-rose-600 px-4 py-2 text-xs font-black text-white">再読み込み</button></div>}
 
       {visibility.calendar && (
         <ParentActionCalendar
@@ -772,6 +635,9 @@ function CourseRegistrationPanel({
           <CheckCircle2 size={18} /> 登録済みです。変更する場合は選び直して再登録できます。
         </div>
       )}
+      <div className="mb-5">
+        <CourseOpeningMap options={items} selectedIds={selectedCourseIds} title="現在の週間開講状況" />
+      </div>
       <CourseRegistrationCalendar
         options={items}
         selectedIds={selectedCourseIds}
@@ -806,9 +672,12 @@ function ParentCourseRequestModal({
   saving: boolean;
 }) {
   const requestOptionIds = Array.isArray(request?.course_option_ids) ? request.course_option_ids : [];
-  const requestOptions = requestOptionIds.length > 0
-    ? options.filter(option => requestOptionIds.includes(option.id) || requestOptionIds.includes(option.parent_course_option_id))
-    : options;
+  const annotatedRequestOptions = options.filter(option => String(option.registration_request_id || '') === String(request?.id || ''));
+  const requestOptions = annotatedRequestOptions.length > 0
+    ? annotatedRequestOptions
+    : requestOptionIds.length > 0
+      ? options.filter(option => requestOptionIds.includes(option.id) || requestOptionIds.includes(option.parent_course_option_id) || requestOptionIds.includes(option.fallback_curriculum_option_id))
+      : options;
   const first = requestOptions[0] || {};
   const [selectedCourseKeys, setSelectedCourseKeys] = useState<string[]>([]);
 
@@ -867,15 +736,27 @@ function ParentCourseRequestModal({
   const visibleOptionIds = new Set(visibleCourseOptions.map(option => option.id));
   const visibleSelectedIds = selectedCourseIds.filter(id => visibleOptionIds.has(id));
   const toggleCourseKey = (key: string) => {
-    const targetOptionIds = new Set(requestOptions.filter(option => courseKey(option) === key).map(option => option.id));
-    setSelectedCourseKeys(prev => {
-      const selected = prev.includes(key);
-      const next = selected ? prev.filter(item => item !== key) : [...prev, key];
-      if (selected) {
-        onChangeSelectedCourseIds(current => current.filter(id => !targetOptionIds.has(id)));
-      }
-      return next;
-    });
+    const targetOptions = requestOptions.filter(option => courseKey(option) === key);
+    const targetOptionIds = new Set(targetOptions.map(option => option.id));
+    const selected = selectedCourseKeys.includes(key);
+    setSelectedCourseKeys(prev => selected ? prev.filter(item => item !== key) : [...prev, key]);
+    if (selected) {
+      onChangeSelectedCourseIds(current => current.filter(id => !targetOptionIds.has(id)));
+      return;
+    }
+    const scheduleKeys = new Set(targetOptions.map(timeKey));
+    if (scheduleKeys.size === 1) {
+      onChangeSelectedCourseIds(prev => {
+        const visibleIds = new Set(requestOptions.map(option => option.id));
+        const selectedInRequest = new Set(prev.filter(id => visibleIds.has(id)));
+        const outsideRequest = prev.filter(id => !visibleIds.has(id));
+        requestOptions
+          .filter(option => scheduleKeys.has(timeKey(option)))
+          .forEach(option => selectedInRequest.delete(option.id));
+        targetOptions.forEach(option => selectedInRequest.add(option.id));
+        return Array.from(new Set([...outsideRequest, ...Array.from(selectedInRequest)]));
+      });
+    }
   };
   const toggleCourseGroup = (ids: string[]) => {
     const cleanIds = Array.from(new Set(ids.filter(Boolean)));
@@ -918,11 +799,17 @@ function ParentCourseRequestModal({
         </div>
         <div className="overflow-y-auto p-6">
           <div className="space-y-5">
+            <CourseOpeningMap
+              options={requestOptions}
+              selectedIds={visibleSelectedIds}
+              title="この登録で選べる週間開講状況"
+              description="先に曜日と時限の全体像を確認してから、下で講座を選べます。"
+            />
             <div className="rounded-3xl border border-indigo-100 bg-indigo-50/70 p-4">
               <div className="mb-3 flex items-center justify-between gap-3">
                 <div>
-                  <p className="text-xs font-black text-indigo-500">Step 1</p>
-                  <h3 className="text-base font-black text-slate-900">受講したい科目を選択</h3>
+                  <p className="text-xs font-black text-indigo-500">1. 科目</p>
+                  <h3 className="text-base font-black text-slate-900">受講したい講座を選ぶ</h3>
                 </div>
                 <span className="rounded-full bg-white px-3 py-1 text-[11px] font-black text-indigo-600">{selectedCourseKeys.length}科目</span>
               </div>
@@ -942,6 +829,7 @@ function ParentCourseRequestModal({
                         key={choice.key}
                         type="button"
                         onClick={() => toggleCourseKey(choice.key)}
+                        aria-pressed={active}
                         className={`rounded-2xl border-2 p-4 text-left transition ${
                           active
                             ? 'border-indigo-500 bg-white text-indigo-700 shadow-sm'
@@ -955,11 +843,10 @@ function ParentCourseRequestModal({
                               {daySlots.slice(0, 4).join(' / ') || '曜日・時間未設定'}
                               {daySlots.length > 4 ? ` ほか${daySlots.length - 4}件` : ''}
                             </p>
-                            {units.length > 0 && (
-                              <p className="mt-1 line-clamp-2 text-[11px] font-bold text-emerald-600">
-                                単元: {units.slice(0, 3).join(' / ')}{units.length > 3 ? ` ほか${units.length - 3}件` : ''}
-                              </p>
-                            )}
+                            <p className="mt-2 text-[11px] font-black text-emerald-600">
+                              {daySlots.length === 1 ? '選ぶだけで曜日・時間も確定' : `${daySlots.length}個の曜日・時間から選択`}
+                              {units.length > 0 ? ` ・ 全${units.length}単元` : ''}
+                            </p>
                           </div>
                           {active && <CheckCircle2 size={18} className="shrink-0 text-indigo-600" />}
                         </div>
@@ -973,8 +860,8 @@ function ParentCourseRequestModal({
             <div className="rounded-3xl border border-slate-100 bg-white p-4">
               <div className="mb-3 flex items-center justify-between gap-3">
                 <div>
-                  <p className="text-xs font-black text-slate-500">Step 2</p>
-                  <h3 className="text-base font-black text-slate-900">開講曜日・時間を選択</h3>
+                  <p className="text-xs font-black text-slate-500">2. 曜日・時間</p>
+                  <h3 className="text-base font-black text-slate-900">通える曜日・時間を決める</h3>
                   <p className="mt-1 text-xs font-bold text-slate-400">同じ曜日・同じ時限は1つだけ選べます。別の講座を選ぶと前の選択は自動で外れます。</p>
                 </div>
                 <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-black text-slate-600">{visibleSelectedIds.length}件</span>
@@ -1072,22 +959,30 @@ function ParentActionCalendar({
         {days.map(day => day.date ? (() => {
           const daySchedules = schedules.filter(item => scheduleCoversDate(item, day.date));
           const weekday = ['日', '月', '火', '水', '木', '金', '土'][new Date(`${day.date}T12:00:00`).getDay()];
-          const isClosedDay = daySchedules.length === 0 || daySchedules.every(item => /休み|休講|閉室/.test(String(item.title || '')));
+          const isClosedDay = daySchedules.some(item => calendarScheduleKind(item) === 'closed');
+          const isLessonDay = daySchedules.some(item => calendarScheduleKind(item) === 'lesson');
           const isRegisteredDay = registeredWeekdays.includes(weekday);
           const actionable = !isClosedDay && isRegisteredDay && (canAbsence || canTransfer);
           return (
-          <button key={day.key} disabled={!actionable} onClick={() => actionable && onSelectDate(day.date)} className={`min-h-24 rounded-2xl border p-2 text-left transition ${selectedDate === day.date ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : actionable ? 'border-slate-100 bg-slate-50 hover:border-slate-200' : 'cursor-default border-slate-100 bg-slate-50/60 text-slate-400'}`}>
+          <button key={day.key} disabled={!actionable} onClick={() => actionable && onSelectDate(day.date)} className={`min-h-24 rounded-2xl border p-2 text-left transition ${selectedDate === day.date ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : isClosedDay ? 'cursor-default border-rose-200 bg-rose-50 text-rose-500' : isLessonDay ? 'border-sky-200 bg-sky-50 text-sky-800' : actionable ? 'border-slate-100 bg-slate-50 hover:border-slate-200' : 'cursor-default border-slate-100 bg-slate-50/60 text-slate-400'}`}>
             <span className="text-sm font-black">{day.label}</span>
             <div className="mt-2 flex flex-col gap-1">
-              {daySchedules.slice(0, 2).map(item => (
-                <span key={item.id} className="rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-black text-emerald-700">{item.title}</span>
-              ))}
+              {daySchedules.slice(0, 2).map(item => {
+                const kind = calendarScheduleKind(item);
+                return <span key={item.id} className={`rounded px-1.5 py-0.5 text-[9px] font-black ${kind === 'closed' ? 'bg-rose-100 text-rose-700' : kind === 'lesson' ? 'bg-sky-100 text-sky-800' : 'bg-emerald-100 text-emerald-700'}`}>{calendarScheduleLabel(item)}</span>;
+              })}
               {actionable && canAbsence && <span className="rounded bg-orange-100 px-1.5 py-0.5 text-[9px] font-black text-orange-600">欠席</span>}
               {actionable && canTransfer && <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[9px] font-black text-indigo-600"><Repeat size={8} className="inline" /> 振替</span>}
             </div>
           </button>
           );
         })() : <div key={day.key} className="min-h-20" />)}
+      </div>
+      <div className="mt-4 flex flex-wrap gap-3 rounded-2xl bg-slate-50 px-4 py-3 text-[11px] font-black text-slate-600">
+        <span className="flex items-center gap-1"><i className="h-3 w-3 rounded bg-sky-200" />授業実施日</span>
+        <span className="flex items-center gap-1"><i className="h-3 w-3 rounded bg-rose-200" />休み・休講</span>
+        <span className="flex items-center gap-1"><i className="h-3 w-3 rounded bg-emerald-200" />その他予定</span>
+        <span className="font-bold text-slate-400">予定がない日は休みとは判定しません。</span>
       </div>
     </section>
   );

@@ -30,7 +30,8 @@ export default function TeacherHomeworkPage() {
       // シンプルに取得してからJSでソートします
       const q = query(collection(db, 'homework_assignments'));
       const snapshot = await getDocs(q);
-      const list = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      const list = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as any))
+        .filter(item => item.archived !== true && item.status !== 'archived');
       
       // 締め切りが近い順にソート
       list.sort((a: any, b: any) => new Date(a.deadline).getTime() - new Date(b.deadline).getTime());
@@ -72,7 +73,7 @@ export default function TeacherHomeworkPage() {
 
   // 削除
   const handleDelete = async (id: string) => {
-    if (!confirm('本当に削除しますか？\n(提出されたデータも見えなくなります)')) return;
+    if (!confirm('この宿題の配信を終了しますか？\n提出履歴と確認記録は削除せず保管します。')) return;
     try {
       const token = await user?.getIdToken();
       const res = await fetch('/api/teacher/homework', {

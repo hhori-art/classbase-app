@@ -1,7 +1,10 @@
 import { NextResponse } from 'next/server';
 import { NextRequest } from 'next/server';
 import { adminDb } from '@/lib/firebase-admin';
-import { getServerUser, isAdminLike, requireRole } from '@/lib/server-auth';
+import { canManageSchool, getServerUser, isAdminLike, requireRole } from '@/lib/server-auth';
+import { accessibleTeacherStudents } from '@/lib/server/teacher-student-access';
+import { jstDateKey } from '@/lib/date-key';
+import { normalizeMeetingId } from '@/lib/zoom-recording-match';
 
 export const runtime = 'nodejs';
 
@@ -9,15 +12,43 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const fetchCache = 'force-no-store';
 
+const clean = (value: unknown) => String(value || '').normalize('NFKC').trim();
+const normalizeName = (value: unknown) => clean(value).replace(/[\s　]+/g, '').toLowerCase();
+
+function teacherAssigned(user: Awaited<ReturnType<typeof getServerUser>>, shift: Record<string, any>) {
+  if (String(shift.user_id || '') === user.uid) return true;
+  const shiftName = normalizeName(shift.teacher_name);
+  return Boolean(shiftName && [
+    user.profile.teacher_name, user.profile.name, user.profile.display_name, user.profile.displayName,
+  ].some(name => normalizeName(name) === shiftName));
+}
+
+function canViewShift(user: Awaited<ReturnType<typeof getServerUser>>, shift: Record<string, any>) {
+  const school = clean(shift.school_id || shift.school_code || shift.school_name || shift.school || shift.classroom);
+  if (isAdminLike(user)) return user.role === 'master' || Boolean(school && canManageSchool(user, school));
+  if (teacherAssigned(user, shift)) return true;
+  const allowedSchools = new Set([user.school, ...user.school_ids].map(clean).filter(Boolean));
+  return Boolean(school && allowedSchools.has(school));
+}
+
 export async function POST(request: NextRequest) {
   try {
     const user = await getServerUser(request);
     if (!isAdminLike(user)) requireRole(user, ['teacher']);
 
-    const { meetingId } = await request.json();
+    const { meetingId, shiftId } = await request.json();
+    const cleanMeetingId = normalizeMeetingId(meetingId);
+    const cleanShiftId = clean(shiftId).slice(0, 160);
 
-    if (!meetingId) {
-      return NextResponse.json({ success: false, error: 'Meeting ID is required' }, { status: 400 });
+    if (!cleanMeetingId || !cleanShiftId) {
+      return NextResponse.json({ success: false, error: '授業を選択してください。' }, { status: 400 });
+    }
+
+    const shiftSnapshot = await adminDb().collection('shift_assignments').doc(cleanShiftId).get();
+    if (!shiftSnapshot.exists) return NextResponse.json({ success: false, error: '授業が見つかりません。' }, { status: 404 });
+    const shift: Record<string, any> = { id: shiftSnapshot.id, ...(shiftSnapshot.data() || {}) };
+    if (clean(shift.target_date) !== jstDateKey() || normalizeMeetingId(shift.target_meeting_id) !== cleanMeetingId || !canViewShift(user, shift)) {
+      return NextResponse.json({ success: false, error: 'この授業の出席状況は確認できません。' }, { status: 403 });
     }
 
     const accountId = process.env.ZOOM_ACCOUNT_ID;
@@ -46,7 +77,7 @@ export async function POST(request: NextRequest) {
 
     // 2) Zoom Live Data (Metrics API)
     const metricsRes = await fetch(
-      `https://api.zoom.us/v2/metrics/meetings/${meetingId}/participants?type=live&page_size=300&_t=${Date.now()}`,
+      `https://api.zoom.us/v2/metrics/meetings/${cleanMeetingId}/participants?type=live&page_size=300&_t=${Date.now()}`,
       {
         method: 'GET',
         headers: { Authorization: `Bearer ${accessToken}` },
@@ -72,17 +103,8 @@ export async function POST(request: NextRequest) {
       return true;
     });
 
-    // 3) 名簿データ取得（Admin Firestore）
-    const students: any[] = [];
-    try {
-      const db = adminDb();
-      const usersSnap = await db.collection('users').where('role', '==', 'student').get();
-      usersSnap.forEach((doc) => {
-        students.push({ id: doc.id, ...doc.data() });
-      });
-    } catch (dbError: any) {
-      console.error('Firestore Admin Error:', dbError);
-    }
+    // 3) 認証利用者が担当校舎・明示割当で閲覧できる生徒だけを取得
+    const students = await accessibleTeacherStudents(user);
 
     // 正規化関数
     const normalize = (str: string) => {
@@ -171,6 +193,6 @@ export async function POST(request: NextRequest) {
     });
   } catch (error: any) {
     console.error('API Error:', error);
-    return NextResponse.json({ success: false, error: error.message || String(error) }, { status: 500 });
+    return NextResponse.json({ success: false, error: '出席状況を取得できませんでした。' }, { status: 500 });
   }
 }

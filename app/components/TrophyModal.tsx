@@ -122,6 +122,7 @@ export default function TrophyModal({ isOpen, onClose, userData, canUseShop = tr
   const selectedBadge = currentSelectedBadge;
 
   useEffect(() => {
+    if (!isOpen) return;
     const unsubscribe = onSnapshot(
       doc(db, 'settings', 'mission_control'),
       (snapshot) => {
@@ -142,7 +143,7 @@ export default function TrophyModal({ isOpen, onClose, userData, canUseShop = tr
       }
     );
     return () => unsubscribe();
-  }, []);
+  }, [isOpen]);
 
   // 初期化 & データ取得
   useEffect(() => {

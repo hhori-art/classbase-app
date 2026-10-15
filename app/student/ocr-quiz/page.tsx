@@ -117,6 +117,31 @@ export default function PrivateOcrQuizPage() {
     setShowConsent(true);
   };
 
+  const downloadDiagnosisSample = () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 1200;
+    canvas.height = 800;
+    const context = canvas.getContext('2d');
+    if (!context) return;
+    context.fillStyle = '#ffffff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = '#0f172a';
+    context.font = 'bold 48px sans-serif';
+    context.fillText('診断用 OCR テスト教材', 70, 100);
+    context.font = '32px sans-serif';
+    ['中学3年 理科：イオン', '・原子が電子を失うと陽イオンになる。', '・原子が電子を受け取ると陰イオンになる。', '・電解質の水溶液には電流が流れる。', '問：塩化ナトリウム水溶液中の粒子を説明しなさい。']
+      .forEach((line, index) => context.fillText(line, 70, 210 + index * 100));
+    canvas.toBlob(blob => {
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = 'diagnosis-ocr-sample.png';
+      anchor.click();
+      URL.revokeObjectURL(url);
+    }, 'image/png');
+  };
+
   const proceedToFilePicker = () => {
     if (!agreed) return;
     setShowConsent(false);
@@ -278,6 +303,15 @@ export default function PrivateOcrQuizPage() {
             {generating ? <Loader2 className="animate-spin" size={18} /> : <FileImage size={18} />}
             画像から私用問題を作成
           </button>
+          {process.env.NEXT_PUBLIC_SECURITY_DIAGNOSIS_MODE === 'true' && (
+            <button
+              type="button"
+              onClick={downloadDiagnosisSample}
+              className="mt-3 flex w-full items-center justify-center gap-2 rounded-2xl border border-indigo-200 bg-indigo-50 py-3 text-xs font-black text-indigo-700 hover:bg-indigo-100"
+            >
+              <FileImage size={16} /> 診断用サンプル画像をダウンロード
+            </button>
+          )}
           {message && (
             <div className="mt-3 rounded-2xl bg-rose-50 p-3 text-xs font-bold leading-relaxed text-rose-600">
               {message}

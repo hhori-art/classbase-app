@@ -2,8 +2,9 @@
 
 import { useState, useEffect } from 'react';
 import { auth, db } from '@/lib/firebase';
-import { collection, query, where, getDocs, addDoc, serverTimestamp, doc, getDoc } from 'firebase/firestore';
+import { collection, query, where, getDocs, doc, getDoc } from 'firebase/firestore';
 import { Loader2, MessageSquare, Star, X, Send, Trophy } from 'lucide-react';
+import { jstDateKey } from '@/lib/date-key';
 
 // 型定義
 type Student = {
@@ -50,7 +51,7 @@ export default function PendingSurveys({ student }: { student: Student }) {
   const fetchPendingSurveys = async () => {
     setLoading(true);
     try {
-      const today = new Date().toISOString().split('T')[0];
+      const today = jstDateKey();
       
       // 1. 今日のシフトを取得
       const q = query(
@@ -124,26 +125,13 @@ export default function PendingSurveys({ student }: { student: Student }) {
 
     setSubmitting(true);
     try {
-      // 1. 回答を保存
-      await addDoc(collection(db, 'survey_responses'), {
-        student_id: student.uid,
-        student_name: student.student_name || '名無し',
-        teacher_id: selectedClass.user_id || '', 
-        teacher_name: selectedClass.teacher_name,
-        shift_id: selectedClass.id,
-        target_date: selectedClass.target_date,
-        subject: selectedClass.target_subject,
-        answers: answers,
-        created_at: serverTimestamp()
-      });
-
       const rewardCoins = 10;
       const token = await auth.currentUser?.getIdToken();
       if (!token) throw new Error('ログイン情報を確認できません');
       const rewardRes = await fetch('/api/coin-transactions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ action: 'survey_reward', shift_id: selectedClass.id }),
+        body: JSON.stringify({ action: 'survey_reward', shift_id: selectedClass.id, answers }),
       });
       const rewardData = await rewardRes.json().catch(() => ({}));
       if (!rewardRes.ok || rewardData.ok === false) throw new Error(rewardData.error || 'reward failed');

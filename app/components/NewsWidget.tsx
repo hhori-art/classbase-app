@@ -2,15 +2,15 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { db } from '@/lib/firebase';
-import { collection, query, orderBy, limit, getDocs } from 'firebase/firestore';
 import { Bell, Info, AlertCircle, Sparkles, ChevronRight, Megaphone, List } from 'lucide-react';
+import { loadAnnouncements } from '@/lib/client-announcements';
 
 interface NewsItem {
   id: string;
   title: string;
   content: string;
   created_at: string;
+  publish_at?: string;
   label: string;
   target: string;
 }
@@ -33,37 +33,20 @@ const newsPreview = (value: string) => {
 export default function NewsWidget({ role, pendingRequests = [], onOpenRequest }: Props) {
   const [news, setNews] = useState<NewsItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
 
   // 一覧ページへのパス
-  const listPagePath = role === 'student' ? '/student/news' : role === 'teacher' ? '/teacher/news' : '#';
+  const listPagePath = role === 'student' ? '/student/news' : role === 'teacher' ? '/teacher/news' : role === 'parent' ? '/parent/news' : '#';
   // 詳細ページへのプレフィックス
-  const detailPagePrefix = role === 'student' ? '/student/news' : role === 'teacher' ? '/teacher/news' : '#';
+  const detailPagePrefix = role === 'student' ? '/student/news' : role === 'teacher' ? '/teacher/news' : role === 'parent' ? '/parent/news' : '#';
 
   useEffect(() => {
     const fetchNews = async () => {
+      setLoading(true);
+      setLoadError(false);
       try {
-        const q = query(
-          collection(db, 'announcements'),
-          orderBy('created_at', 'desc'),
-          limit(5)
-        );
-        
-        const snap = await getDocs(q);
-        const list = snap.docs.map(doc => {
-          const data = doc.data();
-          let dateStr = '';
-          if (data.created_at?.toDate) {
-            dateStr = data.created_at.toDate().toISOString();
-          } else if (typeof data.created_at === 'string') {
-            dateStr = data.created_at;
-          }
-
-          return { 
-            id: doc.id, 
-            ...data,
-            created_at: dateStr 
-          } as NewsItem;
-        });
+        const list = await loadAnnouncements(5) as NewsItem[];
 
         const filteredList = list.filter(item => 
           !item.target || 
@@ -75,13 +58,14 @@ export default function NewsWidget({ role, pendingRequests = [], onOpenRequest }
         setNews(filteredList);
       } catch (e) {
         console.error('News fetch error:', e);
+        setLoadError(true);
       } finally {
         setLoading(false);
       }
     };
 
     fetchNews();
-  }, [role]);
+  }, [role, reloadKey]);
 
   const getBadgeStyle = (label: string) => {
     switch (label) {
@@ -102,6 +86,17 @@ export default function NewsWidget({ role, pendingRequests = [], onOpenRequest }
     return (
       <div className="bg-white p-4 rounded-3xl shadow-sm border border-gray-100 animate-pulse h-24 flex items-center justify-center mb-6">
         <span className="text-gray-300 text-xs font-bold">読み込み中...</span>
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="mb-6 rounded-3xl border border-amber-200 bg-amber-50 p-5 text-center">
+        <p className="text-sm font-black text-amber-800">お知らせを読み込めませんでした</p>
+        <button type="button" onClick={() => setReloadKey(value => value + 1)} className="mt-3 rounded-xl bg-amber-700 px-4 py-2 text-xs font-black text-white">
+          もう一度読み込む
+        </button>
       </div>
     );
   }
@@ -154,7 +149,7 @@ export default function NewsWidget({ role, pendingRequests = [], onOpenRequest }
           {/* お知らせ一覧 */}
           {news.slice(0, 3).map((item) => {
             const style = getBadgeStyle(item.label);
-            const dateLabel = item.created_at ? new Date(item.created_at).toLocaleDateString() : '-';
+            const dateLabel = item.publish_at || item.created_at ? new Date(item.publish_at || item.created_at).toLocaleDateString('ja-JP') : '-';
 
             return (
               <Link 

@@ -3,12 +3,12 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs, updateDoc, doc, orderBy, limit } from 'firebase/firestore';
+import { collection, query, where, getDocs, orderBy, limit } from 'firebase/firestore';
 import {
   Clock, CheckCircle, AlertCircle, Play, Square, Briefcase,
   ArrowLeft, Plus, Trash2, Save, X, Edit3, Train,
   ChevronLeft, ChevronRight, Loader2, Copy,
-  Calendar, LayoutTemplate, Coffee, DollarSign, Send, LogOut
+  Calendar, LayoutTemplate, Coffee, DollarSign, Send, LogOut, MapPin
 } from 'lucide-react';
 import Link from 'next/link';
 import { TRANSPORT_TYPE_OPTIONS } from '@/lib/transport-fares';
@@ -16,26 +16,59 @@ import { hasScienceSocialProgram } from '@/lib/teacher-programs';
 import TransportLineSelect from '@/app/components/TransportLineSelect';
 import TransportStationSearchInput from '@/app/components/TransportStationSearchInput';
 import TeacherCommuterPassPanel from '@/app/components/TeacherCommuterPassPanel';
+import FiveMinuteTimePicker from '@/app/components/FiveMinuteTimePicker';
 import { isDedicatedProfile } from '@/lib/employment-category';
+import {
+  ATTENDANCE_SCHOOL_OPTION_GROUPS,
+  SCIENCE_SOCIAL_WORKPLACE_ID,
+  SCIENCE_SOCIAL_WORKPLACE_LABEL,
+  attendanceSchoolName,
+  resolveAttendanceSchoolCode,
+} from '@/lib/attendance-schools';
+import {
+  ATTENDANCE_GRADES,
+  ATTENDANCE_PROGRAM_LABELS,
+  ATTENDANCE_PROGRAMS,
+  OFFICE_TASK_OPTIONS,
+  attendanceSegmentNeedsSchool,
+  normalizeAttendanceSegment,
+  payrollTierForSegment,
+  segmentProgram,
+  validateAttendanceSegment,
+  type AttendanceProgram,
+} from '@/lib/attendance-work-detail';
+import { SHIFT_CATEGORY_LABELS, type AttendanceShiftPlan } from '@/lib/attendance-shift-plan';
 
 // --- 型定義 ---
 interface WorkSegment {
+  id?: string;
   start: string;
   end: string;
-  type: 'lesson' | 'office' | 'support' | 'break' | 'interview' | 'grading' | 'other' | 'breakthrough_lesson' | 'breakthrough_office' | 'breakthrough';
+  type: 'lesson' | 'individual' | 'office' | 'support' | 'break' | 'interview' | 'grading' | 'other' | 'breakthrough_lesson' | 'breakthrough_office' | 'breakthrough';
   note: string;
   isAuto?: boolean;
+  program?: AttendanceProgram;
+  grade?: string;
+  lesson_format?: 'group' | 'individual';
+  individual_level?: 'standard' | 'advanced';
+  individual_ratio?: '1:1' | '1:2' | '1:3';
+  office_task?: string;
+  payroll_tier?: string;
+  school_id?: string;
+  approval_status?: 'pending' | 'approved' | 'rejected';
 }
 
 type AttendanceKind = 'normal' | 'breakthrough';
 type SegmentGroup = 'normal' | 'breakthrough';
+type AttendanceProgramFilter = 'all' | AttendanceProgram;
 
 const segmentTypeLabel = (type: WorkSegment['type'], short = false) => {
   const labels: Record<WorkSegment['type'], string> = {
     lesson: '授業',
-    support: short ? 'サブ' : 'サブ（面接）',
+    individual: '個別授業',
+    support: short ? 'サブ' : 'サブ（サポート）',
     office: '事務',
-    interview: short ? 'サブ' : 'サブ（面接）',
+    interview: short ? 'サブ' : 'サブ（サポート）',
     grading: short ? '成績' : '成績集約',
     other: 'その他',
     breakthrough_lesson: short ? '突破授業' : '突破ゼミの授業',
@@ -49,6 +82,7 @@ const segmentTypeLabel = (type: WorkSegment['type'], short = false) => {
 const segmentToneClass = (type: WorkSegment['type'], variant: 'chip' | 'row' | 'select' | 'bar' = 'chip') => {
   const tones = {
     lesson: { chip: 'bg-blue-100 text-blue-700', row: 'border-blue-100 bg-blue-50/60', select: 'text-blue-600 border-blue-200 bg-white', bar: 'bg-blue-500' },
+    individual: { chip: 'bg-indigo-100 text-indigo-700', row: 'border-indigo-100 bg-indigo-50/60', select: 'text-indigo-600 border-indigo-200 bg-white', bar: 'bg-indigo-500' },
     support: { chip: 'bg-green-100 text-green-700', row: 'border-green-100 bg-green-50/60', select: 'text-green-600 border-green-200 bg-white', bar: 'bg-green-500' },
     office: { chip: 'bg-orange-100 text-orange-700', row: 'border-orange-100 bg-orange-50/60', select: 'text-orange-600 border-orange-200 bg-white', bar: 'bg-orange-500' },
     interview: { chip: 'bg-violet-100 text-violet-700', row: 'border-violet-100 bg-violet-50/60', select: 'text-violet-600 border-violet-200 bg-white', bar: 'bg-violet-500' },
@@ -63,9 +97,10 @@ const segmentToneClass = (type: WorkSegment['type'], variant: 'chip' | 'row' | '
 };
 
 const NORMAL_WORK_SEGMENT_OPTIONS: Array<{ value: WorkSegment['type']; label: string }> = [
-  { value: 'lesson', label: '授業' },
+  { value: 'lesson', label: '集団授業' },
+  { value: 'individual', label: '個別授業' },
   { value: 'office', label: '事務' },
-  { value: 'support', label: 'サブ（面接）［サブ給与］' },
+  { value: 'support', label: 'サブ（サポート）［サブ給与］' },
   { value: 'other', label: 'その他' },
   { value: 'break', label: '休憩' },
 ];
@@ -102,6 +137,21 @@ const getRecordAttendanceKind = (record: any): AttendanceKind => {
     : 'normal';
 };
 
+const getRecordPrograms = (record: any): AttendanceProgram[] => {
+  const segments = Array.isArray(record?.work_segments)
+    ? record.work_segments.filter((segment: WorkSegment) => segment.type !== 'break')
+    : [];
+  const programs = Array.from(new Set<AttendanceProgram>(segments.map((segment: WorkSegment) => segmentProgram(segment))));
+  if (programs.length > 0) return programs;
+  return [record?.attendance_kind === 'breakthrough' ? 'breakthrough' : 'normal'];
+};
+
+const programBadgeClass = (program: AttendanceProgram) => {
+  if (program === 'science_social') return 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100';
+  if (program === 'breakthrough') return 'bg-fuchsia-50 text-fuchsia-700 ring-1 ring-fuchsia-100';
+  return 'bg-blue-50 text-blue-700 ring-1 ring-blue-100';
+};
+
 const defaultSegmentNote = (type: WorkSegment['type']) => {
   if (type === 'breakthrough' || type === 'breakthrough_lesson') return '突破ゼミの授業';
   if (type === 'breakthrough_office') return '突破ゼミの事務';
@@ -111,9 +161,22 @@ const defaultSegmentNote = (type: WorkSegment['type']) => {
 
 const normalizeWorkSegments = (items: WorkSegment[] = []): WorkSegment[] =>
   items.map(seg => ({
-    ...seg,
-    type: seg.type === 'breakthrough' ? 'breakthrough_lesson' : seg.type === 'interview' ? 'support' : seg.type,
-  }));
+    ...normalizeAttendanceSegment(seg),
+    school_id: resolveAttendanceSchoolCode(seg.school_id) || undefined,
+  }) as WorkSegment);
+
+const attendanceSchoolOptions = () => ATTENDANCE_SCHOOL_OPTION_GROUPS.map(group => (
+  <optgroup key={group.label} label={group.label}>
+    {group.schools.map(school => <option key={school.code} value={school.code}>{school.name}</option>)}
+  </optgroup>
+));
+const FiveMinuteTimeSelect = FiveMinuteTimePicker;
+const attendanceWorkplaceName = (record: any) => record?.default_program === 'science_social' || record?.workplace_type === 'science_social'
+  ? SCIENCE_SOCIAL_WORKPLACE_LABEL
+  : attendanceSchoolName(record?.school_id || record?.school_name);
+const attendanceSchoolForProfile = (profile: any) => resolveAttendanceSchoolCode(
+  profile?.school_id || profile?.school_code || profile?.school_name || profile?.school || profile?.classroom || (Array.isArray(profile?.school_ids) ? profile.school_ids[0] : '')
+);
 
 interface Transportation {
   from: string;
@@ -193,6 +256,7 @@ type AttendanceDiagnostic = {
 type CorrectionRequest = {
   id: string;
   work_record_id?: string | null;
+  school_id?: string | null;
   request_type?: string;
   target_date?: string | null;
   requested_start_time?: string | null;
@@ -302,23 +366,29 @@ export default function TeacherAttendancePage() {
   const [currentSession, setCurrentSession] = useState<any>(null);
   const [todayRecord, setTodayRecord] = useState<any>(null);
   const [history, setHistory] = useState<any[]>([]);
+  const [historyError, setHistoryError] = useState('');
   const [viewDate, setViewDate] = useState(new Date());
+  const [programFilter, setProgramFilter] = useState<AttendanceProgramFilter>('all');
+  const [clockSchoolId, setClockSchoolId] = useState('');
 
   const [editingRecord, setEditingRecord] = useState<any>(null);
   const [correctionTarget, setCorrectionTarget] = useState<any>(null);
   const [segments, setSegments] = useState<WorkSegment[]>([]);
   const [expenses, setExpenses] = useState<Transportation[]>([]);
+  const [transportationNone, setTransportationNone] = useState(false);
   const [correctionModalOpen, setCorrectionModalOpen] = useState(false);
   const [missingCorrectionOpen, setMissingCorrectionOpen] = useState(false);
   const [correctionSending, setCorrectionSending] = useState(false);
   const [correctionForm, setCorrectionForm] = useState({ requested_start_time: '', requested_end_time: '', reason: '' });
   const [missingCorrectionForm, setMissingCorrectionForm] = useState({
     target_date: getJstDateKey(),
+    school_id: '',
     requested_start_time: '',
     requested_end_time: '',
     reason: '',
   });
   const [attendanceAlerts, setAttendanceAlerts] = useState<AttendanceDiagnostic[]>([]);
+  const [todayShiftPlans, setTodayShiftPlans] = useState<AttendanceShiftPlan[]>([]);
   const [correctionRequests, setCorrectionRequests] = useState<CorrectionRequest[]>([]);
   const [showCorrectionRequests, setShowCorrectionRequests] = useState(false);
   const [fareLookupIndex, setFareLookupIndex] = useState<number | null>(null);
@@ -328,10 +398,15 @@ export default function TeacherAttendancePage() {
   }, [isDedicated, profile]);
 
   useEffect(() => {
+    if (!clockSchoolId && profile) setClockSchoolId(attendanceSchoolForProfile(profile));
+  }, [clockSchoolId, profile]);
+
+  useEffect(() => {
     if (user) {
       fetchTodayStatus();
       fetchMonthlyHistory();
       fetchAttendanceAlerts();
+      fetchTodayShiftPlans();
     }
   }, [user, viewDate]);
 
@@ -344,6 +419,16 @@ export default function TeacherAttendancePage() {
   const handleLogout = async () => {
     if (!confirm('ログアウトしますか？')) return;
     await logout();
+  };
+
+  const getFreshAttendanceToken = async () => {
+    if (!user) throw new Error('ログイン情報を確認できません。画面を再読み込みしてください。');
+    try {
+      return await user.getIdToken(true);
+    } catch (error) {
+      console.warn('Attendance token refresh failed:', error);
+      throw new Error('ログイン情報の有効期限が切れています。一度ログアウトして、再度ログインしてください。');
+    }
   };
 
   useEffect(() => {
@@ -382,15 +467,50 @@ export default function TeacherAttendancePage() {
   };
 
   const fetchMonthlyHistory = async () => {
+    if (!user) return;
+    setHistoryError('');
     try {
       const year = viewDate.getFullYear();
       const month = viewDate.getMonth() + 1;
       const startStr = `${year}-${String(month).padStart(2, '0')}-01`;
       const endStr = `${year}-${String(month).padStart(2, '0')}-31`;
-      const q = query(collection(db, 'work_records'), where('teacher_id', '==', user?.uid), where('date', '>=', startStr), where('date', '<=', endStr), orderBy('date', 'desc'), orderBy('created_at', 'desc'));
-      const snap = await getDocs(q);
-      setHistory(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-    } catch (e) { console.error(e); }
+      const sortRecords = (records: any[]) => records.sort((a, b) => {
+        const dateOrder = String(b.date || '').localeCompare(String(a.date || ''));
+        if (dateOrder !== 0) return dateOrder;
+        const createdMillis = (value: any) => {
+          if (typeof value?.toMillis === 'function') return value.toMillis();
+          const parsed = Date.parse(String(value || ''));
+          return Number.isFinite(parsed) ? parsed : 0;
+        };
+        return createdMillis(b.created_at) - createdMillis(a.created_at);
+      });
+
+      try {
+        const optimizedQuery = query(
+          collection(db, 'work_records'),
+          where('teacher_id', '==', user.uid),
+          where('date', '>=', startStr),
+          where('date', '<=', endStr),
+          orderBy('date', 'desc'),
+          orderBy('created_at', 'desc')
+        );
+        const snap = await getDocs(optimizedQuery);
+        setHistory(sortRecords(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+      } catch (error: any) {
+        // 新環境で複合インデックスの反映待ちでも、履歴を「0件」と誤表示しない。
+        if (String(error?.code || '') !== 'failed-precondition') throw error;
+        console.warn('Attendance history index unavailable; using teacher-scoped fallback query.');
+        const fallbackQuery = query(collection(db, 'work_records'), where('teacher_id', '==', user.uid));
+        const fallbackSnap = await getDocs(fallbackQuery);
+        const monthlyRecords = fallbackSnap.docs
+          .map(d => ({ id: d.id, ...d.data() } as any))
+          .filter(record => String(record.date || '') >= startStr && String(record.date || '') <= endStr);
+        setHistory(sortRecords(monthlyRecords));
+      }
+    } catch (e) {
+      console.error(e);
+      setHistoryError('勤務履歴を読み込めませんでした。通信状態を確認して、もう一度お試しください。');
+    }
   };
 
   const fetchAttendanceAlerts = async () => {
@@ -406,6 +526,24 @@ export default function TeacherAttendancePage() {
       if (res.ok && data.ok) setAttendanceAlerts(data.diagnostics || []);
     } catch (e) {
       console.warn('勤怠アラート取得エラー:', e);
+    }
+  };
+
+  const fetchTodayShiftPlans = async () => {
+    if (!user || isDedicated) return;
+    try {
+      const today = getJstDateKey();
+      const token = await user.getIdToken();
+      const res = await fetch(`/api/attendance-shifts?start=${today}&end=${today}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: 'no-store',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) {
+        setTodayShiftPlans((data.shifts || []).filter((item: AttendanceShiftPlan) => item.reflect_to_attendance !== false));
+      }
+    } catch (error) {
+      console.warn('今日の勤務予定取得エラー:', error);
     }
   };
 
@@ -434,15 +572,20 @@ export default function TeacherAttendancePage() {
       alert('本日は既に勤務記録が完了しています。1日1回のみ打刻可能です。');
       return;
     }
-    if (!confirm('出勤時刻を記録しますか？')) return;
+    if (!clockSchoolId) {
+      alert('勤務する校舎を選択してください。');
+      return;
+    }
+    const workplaceLabel = clockSchoolId === SCIENCE_SOCIAL_WORKPLACE_ID ? SCIENCE_SOCIAL_WORKPLACE_LABEL : attendanceSchoolName(clockSchoolId);
+    if (!confirm(`${workplaceLabel}の勤務として出勤時刻を記録しますか？`)) return;
 
     try {
       setLoading(true);
-      const token = await user?.getIdToken();
+      const token = await getFreshAttendanceToken();
       const res = await fetch('/api/teacher/attendance-clock', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ action: 'clock_in' }),
+        body: JSON.stringify({ action: 'clock_in', school_id: clockSchoolId }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.ok === false) {
@@ -466,14 +609,21 @@ export default function TeacherAttendancePage() {
     if (!confirm('退勤しますか？')) return;
     try {
       setLoading(true);
-      const token = await user?.getIdToken();
+      const token = await getFreshAttendanceToken();
       const res = await fetch('/api/teacher/attendance-clock', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ action: 'clock_out', work_record_id: currentSession.id }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || data.ok === false) throw new Error(data.error || '退勤打刻に失敗しました');
+      if (!res.ok || data.ok === false) {
+        const message = data.error === 'work record belongs to another date'
+          ? '日付が変わっているため、このまま退勤打刻はできません。打刻修正依頼から前日の退勤時刻を申請してください。'
+          : data.error === 'work record already clocked out'
+          ? 'すでに退勤打刻済みです。画面を更新してください。'
+          : data.error || '退勤打刻に失敗しました';
+        throw new Error(message);
+      }
       if (Array.isArray(data.warnings) && data.warnings.length > 0) {
         alert(`退勤しました。\n\n確認が必要な項目があります:\n${data.warnings.map((w: any) => `・${w.label}`).join('\n')}`);
       }
@@ -488,9 +638,15 @@ export default function TeacherAttendancePage() {
   const openEditModal = (rec: any) => {
     setEditingRecord(rec);
     setExpenses(normalizeTransportExpenses(rec.transportation || []));
+    setTransportationNone(rec.transportation_status === 'none');
 
     if (rec.work_segments && rec.work_segments.length > 0) {
-      const sorted = normalizeWorkSegments(rec.work_segments).sort((a: WorkSegment, b: WorkSegment) => a.start.localeCompare(b.start));
+      const fallbackSchool = resolveAttendanceSchoolCode(rec.school_id) || attendanceSchoolForProfile(profile);
+      const sorted = normalizeWorkSegments(rec.work_segments)
+        .map((segment: WorkSegment) => attendanceSegmentNeedsSchool(segment) && !segment.school_id
+          ? { ...segment, school_id: fallbackSchool }
+          : segment)
+        .sort((a: WorkSegment, b: WorkSegment) => a.start.localeCompare(b.start));
       setSegments(sorted);
     } else {
       setSegments([]);
@@ -512,11 +668,42 @@ export default function TeacherAttendancePage() {
       if (value === 'break' && !current.note) {
         current.note = '休憩';
       }
+      if (value === 'break') delete current.school_id;
+      else if (segmentProgram(current) !== 'science_social' && !current.school_id) {
+        current.school_id = attendanceSchoolForProfile(profile);
+      }
+      if (value === 'lesson') current.lesson_format = 'group';
+      if (value === 'individual') {
+        current.lesson_format = 'individual';
+        delete current.grade;
+      }
+      if (value !== 'individual') {
+        delete current.individual_level;
+        delete current.individual_ratio;
+      }
+      if (value === 'office') current.office_task = current.office_task || 'lesson_preparation';
+      else if (value !== 'breakthrough_office') delete current.office_task;
     } else {
-      const textField = field as Exclude<keyof WorkSegment, 'type' | 'isAuto'>;
-      current[textField] = value;
+      (current as Record<string, unknown>)[field] = value;
     }
 
+    current.payroll_tier = payrollTierForSegment(current) || undefined;
+    newSegs[index] = current;
+    setSegments(newSegs);
+  };
+
+  const updateSegmentProgram = (index: number, program: AttendanceProgram) => {
+    const newSegs = [...segments];
+    const current = { ...newSegs[index], program };
+    if (program === 'breakthrough') {
+      current.type = current.type === 'lesson' || current.type === 'individual' ? 'breakthrough_lesson' : 'breakthrough_office';
+      current.lesson_format = current.type === 'breakthrough_lesson' ? 'group' : undefined;
+    } else if (isBreakthroughSegment(current)) {
+      current.type = current.type === 'breakthrough_lesson' ? 'lesson' : 'office';
+    }
+    if (program === 'science_social') delete current.school_id;
+    else if (!current.school_id && current.type !== 'break') current.school_id = attendanceSchoolForProfile(profile);
+    current.payroll_tier = payrollTierForSegment(current) || undefined;
     newSegs[index] = current;
     setSegments(newSegs);
   };
@@ -535,6 +722,7 @@ export default function TeacherAttendancePage() {
 
   const addSegment = (defaultType: WorkSegment['type'] = 'office') => {
     let nextStart = '';
+    let nextEnd = '';
     if (segments.length > 0) {
       nextStart = segments[segments.length - 1].end;
     } else if (editingRecord) {
@@ -545,7 +733,24 @@ export default function TeacherAttendancePage() {
       const m = startMin % 60;
       nextStart = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
     }
-    setSegments([...segments, { start: nextStart, end: '', type: defaultType, note: defaultSegmentNote(defaultType) }]);
+    if (editingRecord?.end_time) {
+      const shiftEnd = new Date(editingRecord.end_time);
+      const endMin = Math.floor((shiftEnd.getHours() * 60 + shiftEnd.getMinutes()) / 5) * 5;
+      nextEnd = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
+    }
+    const defaultProgram: AttendanceProgram = editingRecord?.default_program === 'science_social'
+      ? 'science_social'
+      : defaultType.startsWith('breakthrough') ? 'breakthrough' : 'normal';
+    setSegments([...segments, normalizeAttendanceSegment({
+      start: nextStart,
+      end: nextEnd,
+      type: defaultType,
+      program: defaultProgram,
+      lesson_format: defaultType === 'lesson' ? 'group' : undefined,
+      school_id: defaultType === 'break' || defaultProgram === 'science_social' ? undefined : attendanceSchoolForProfile(profile),
+      office_task: defaultType === 'office' || defaultType === 'breakthrough_office' ? 'lesson_preparation' : undefined,
+      note: defaultSegmentNote(defaultType),
+    }) as WorkSegment]);
   };
 
   const removeSegment = (index: number) => setSegments(segments.filter((_, i) => i !== index));
@@ -602,7 +807,7 @@ export default function TeacherAttendancePage() {
 
     setFareLookupIndex(index);
     try {
-      const token = await user?.getIdToken();
+      const token = await getFreshAttendanceToken();
       const params = new URLSearchParams({
         transport_type: exp.transport_type,
         from: exp.from,
@@ -738,9 +943,8 @@ export default function TeacherAttendancePage() {
           return alert('【エラー】業務内訳の開始・終了時刻は5分単位（0, 5, 10...）で入力してください。');
         }
       }
-      if (seg.type === 'other' && !String(seg.note || '').trim()) {
-        return alert('【エラー】「その他」を選択した場合は、具体的な業務内容を入力してください。');
-      }
+      const detailError = validateAttendanceSegment(normalizeAttendanceSegment(seg));
+      if (detailError) return alert(`【入力を確認してください】${detailError}`);
     }
 
     // ★ 修正: 打刻時間を丸めた範囲内に詳細が収まっているか、および開始直後の休憩禁止チェック
@@ -780,7 +984,8 @@ export default function TeacherAttendancePage() {
     try {
       const validSegments = segments.filter(s => s.start && s.end);
       validSegments.sort((a, b) => a.start.localeCompare(b.start));
-      const filledSegments = fillGaps(validSegments, editingRecord.start_time, editingRecord.end_time);
+      const filledSegments = fillGaps(validSegments, editingRecord.start_time, editingRecord.end_time)
+        .map(seg => normalizeAttendanceSegment(seg) as WorkSegment);
 
       // ★ 修正: 最後が休憩で終わることを禁止するバリデーション
       if (filledSegments.length > 0) {
@@ -813,24 +1018,33 @@ export default function TeacherAttendancePage() {
       const formattedExpenses = formatTransportationForSave(expenses);
       const nextAttendanceKind: AttendanceKind = filledSegments.some(seg => isBreakthroughSegment(seg)) ? 'breakthrough' : 'normal';
 
-      await updateDoc(doc(db, 'work_records', editingRecord.id), {
-        attendance_kind: nextAttendanceKind,
-        work_segments: filledSegments,
-        transportation: formattedExpenses,
-        updated_at: new Date().toISOString()
+      const token = await user?.getIdToken();
+      if (!token) throw new Error('ログイン情報を確認できませんでした。再ログインしてください。');
+      const response = await fetch('/api/teacher/attendance-details', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          work_record_id: editingRecord.id,
+          attendance_kind: nextAttendanceKind,
+          work_segments: filledSegments,
+          transportation: formattedExpenses,
+          transportation_status: transportationNone ? 'none' : formattedExpenses.length ? 'entered' : 'unset',
+        }),
       });
+      const responseBody = await response.json().catch(() => ({}));
+      if (!response.ok || responseBody.ok === false) {
+        throw new Error(responseBody.error || '勤務詳細を保存できませんでした。');
+      }
 
       alert('保存しました。');
       setEditingRecord(null);
       fetchMonthlyHistory();
       fetchAttendanceAlerts();
     } catch (e: any) {
-      const code = String(e?.code || '');
       const message = String(e?.message || '');
-      if (code === 'permission-denied' || message.includes('Missing or insufficient permissions')) {
-        alert('保存権限を確認できませんでした。ページを再読み込みしてから、もう一度「保存して完了」を押してください。続く場合は、承認済みの勤怠ではないかをご確認ください。');
-        return;
-      }
       alert('保存エラー: ' + (message || '保存に失敗しました。'));
     }
   };
@@ -841,6 +1055,15 @@ export default function TeacherAttendancePage() {
     if (Number.isNaN(d.getTime())) return '';
     const pad = (n: number) => String(n).padStart(2, '0');
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+
+  const toFiveMinuteLocalInputValue = (value?: string | null) => {
+    if (!value) return '';
+    const rounded = new Date(value);
+    if (Number.isNaN(rounded.getTime())) return '';
+    rounded.setSeconds(0, 0);
+    rounded.setMinutes(Math.round(rounded.getMinutes() / 5) * 5);
+    return toLocalInputValue(rounded.toISOString());
   };
 
   const formatDateTimeLabel = (value?: string | null) => {
@@ -858,8 +1081,8 @@ export default function TeacherAttendancePage() {
     }
     setCorrectionTarget(record);
     setCorrectionForm({
-      requested_start_time: toLocalInputValue(record.start_time),
-      requested_end_time: toLocalInputValue(record.end_time),
+      requested_start_time: toFiveMinuteLocalInputValue(record.start_time),
+      requested_end_time: toFiveMinuteLocalInputValue(record.end_time),
       reason: '',
     });
     setCorrectionModalOpen(true);
@@ -874,6 +1097,7 @@ export default function TeacherAttendancePage() {
     const targetDate = getJstDateKey();
     setMissingCorrectionForm({
       target_date: targetDate,
+      school_id: clockSchoolId || attendanceSchoolForProfile(profile),
       requested_start_time: `${targetDate}T19:20`,
       requested_end_time: `${targetDate}T21:40`,
       reason: '',
@@ -893,8 +1117,8 @@ export default function TeacherAttendancePage() {
       }
       setCorrectionTarget(record);
       setCorrectionForm({
-        requested_start_time: toLocalInputValue(request.requested_start_time || record.start_time),
-        requested_end_time: toLocalInputValue(request.requested_end_time || record.end_time),
+        requested_start_time: toFiveMinuteLocalInputValue(request.requested_start_time || record.start_time),
+        requested_end_time: toFiveMinuteLocalInputValue(request.requested_end_time || record.end_time),
         reason: '',
       });
       setCorrectionModalOpen(true);
@@ -908,8 +1132,9 @@ export default function TeacherAttendancePage() {
     }
     setMissingCorrectionForm({
       target_date: targetDate,
-      requested_start_time: toLocalInputValue(request.requested_start_time) || `${targetDate}T19:20`,
-      requested_end_time: toLocalInputValue(request.requested_end_time) || `${targetDate}T21:40`,
+      school_id: request.school_id || clockSchoolId || attendanceSchoolForProfile(profile),
+      requested_start_time: toFiveMinuteLocalInputValue(request.requested_start_time) || `${targetDate}T19:20`,
+      requested_end_time: toFiveMinuteLocalInputValue(request.requested_end_time) || `${targetDate}T21:40`,
       reason: '',
     });
     setMissingCorrectionOpen(true);
@@ -929,13 +1154,17 @@ export default function TeacherAttendancePage() {
     if (!targetRecord) return;
     if (!correctionForm.reason.trim()) return alert('修正理由を入力してください。');
     if (!correctionForm.requested_start_time && !correctionForm.requested_end_time) return alert('修正後の出勤時刻または退勤時刻を入力してください。');
+    const targetDate = String(targetRecord.date || '').slice(0, 10);
+    if ([correctionForm.requested_start_time, correctionForm.requested_end_time].filter(Boolean).some(value => value.slice(0, 10) !== targetDate)) {
+      return alert('出勤・退勤時刻は勤務日と同じ日付で入力してください。');
+    }
     if (correctionForm.requested_start_time && correctionForm.requested_end_time && new Date(correctionForm.requested_start_time) >= new Date(correctionForm.requested_end_time)) {
       return alert('退勤時刻は出勤時刻より後にしてください。');
     }
 
     try {
       setCorrectionSending(true);
-      const token = await user?.getIdToken();
+      const token = await getFreshAttendanceToken();
       if (!token) throw new Error('ログイン情報を確認できません。再ログインしてください。');
       const res = await fetch('/api/attendance-corrections', {
         method: 'POST',
@@ -956,6 +1185,10 @@ export default function TeacherAttendancePage() {
           ? '退勤時刻は出勤時刻より後にしてください。'
           : data.error === 'invalid requested time'
           ? '出勤時刻または退勤時刻の形式を確認してください。'
+          : data.error === 'requested time must be in 5 minute increments'
+          ? '出勤・退勤時刻は5分単位で選択してください。'
+          : data.error === 'missing-token' || res.status === 401
+          ? 'ログイン情報の有効期限が切れています。画面を再読み込みして、もう一度お試しください。'
           : data.error || 'failed';
         throw new Error(message);
       }
@@ -976,7 +1209,11 @@ export default function TeacherAttendancePage() {
   const requestMissingClockCorrection = async () => {
     if (!missingCorrectionForm.target_date) return alert('申請する日付を選択してください。');
     if (!missingCorrectionForm.requested_start_time || !missingCorrectionForm.requested_end_time) return alert('出勤時刻と退勤時刻を入力してください。');
+    if (!missingCorrectionForm.school_id) return alert('勤務校舎を選択してください。');
     if (!missingCorrectionForm.reason.trim()) return alert('申請理由を入力してください。');
+    if (missingCorrectionForm.requested_start_time.slice(0, 10) !== missingCorrectionForm.target_date || missingCorrectionForm.requested_end_time.slice(0, 10) !== missingCorrectionForm.target_date) {
+      return alert('出勤・退勤時刻は申請日と同じ日付で入力してください。');
+    }
     if (new Date(missingCorrectionForm.requested_start_time) >= new Date(missingCorrectionForm.requested_end_time)) {
       return alert('退勤時刻は出勤時刻より後にしてください。');
     }
@@ -986,7 +1223,7 @@ export default function TeacherAttendancePage() {
     }
     try {
       setCorrectionSending(true);
-      const token = await user?.getIdToken();
+      const token = await getFreshAttendanceToken();
       if (!token) throw new Error('ログイン情報を確認できません。再ログインしてください。');
       const res = await fetch('/api/attendance-corrections', {
         method: 'POST',
@@ -994,6 +1231,7 @@ export default function TeacherAttendancePage() {
         body: JSON.stringify({
           action: 'request',
           target_date: missingCorrectionForm.target_date,
+          school_id: missingCorrectionForm.school_id,
           requested_start_time: new Date(missingCorrectionForm.requested_start_time).toISOString(),
           requested_end_time: new Date(missingCorrectionForm.requested_end_time).toISOString(),
           reason: missingCorrectionForm.reason,
@@ -1003,6 +1241,10 @@ export default function TeacherAttendancePage() {
       if (!res.ok || data.ok === false) {
         const message = data.error === 'work record already exists for target_date'
           ? 'この日はすでに勤務記録があります。該当日の「詳細・交通費を入力」から打刻修正依頼を送ってください。'
+          : data.error === 'requested time must be in 5 minute increments'
+          ? '出勤・退勤時刻は5分単位で選択してください。'
+          : data.error === 'missing-token' || res.status === 401
+          ? 'ログイン情報の有効期限が切れています。画面を再読み込みして、もう一度お試しください。'
           : data.error || 'failed';
         throw new Error(message);
       }
@@ -1042,14 +1284,18 @@ export default function TeacherAttendancePage() {
 
   const calcTotalCost = (exps: Transportation[]) => exps ? exps.reduce((sum, item) => sum + (Number(item.cost) || 0), 0) : 0;
 
+  const filteredHistory = useMemo(() => history.filter(record => (
+    programFilter === 'all' || getRecordPrograms(record).includes(programFilter)
+  )), [history, programFilter]);
+
   const monthlySummary = useMemo(() => {
     let totalMinutes = 0, totalTransportCost = 0;
-    history.forEach(rec => {
+    filteredHistory.forEach(rec => {
       if (rec.end_time) totalMinutes += calcDurationMinutes(rec.start_time, rec.end_time);
       if (rec.transportation) totalTransportCost += calcTotalCost(rec.transportation);
     });
     return { hours: Math.floor(totalMinutes / 60), minutes: totalMinutes % 60, cost: totalTransportCost };
-  }, [history]);
+  }, [filteredHistory]);
 
   return (
     <div className="min-h-screen bg-gray-50 px-3 py-4 pb-48 font-sans sm:px-4 md:p-8">
@@ -1073,6 +1319,27 @@ export default function TeacherAttendancePage() {
           )}
         </div>
 
+        {todayShiftPlans.length > 0 && (
+          <section className="mb-5 rounded-3xl border border-indigo-100 bg-indigo-50/80 p-4 shadow-sm sm:mb-6">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h2 className="flex items-center gap-2 text-sm font-black text-indigo-950"><Calendar size={17} />今日の勤務予定</h2>
+                <p className="mt-1 text-xs font-bold text-indigo-700">承認者が登録したシフトです。打刻後の勤務詳細入力に使用されます。</p>
+              </div>
+              <span className="shrink-0 rounded-full bg-white px-3 py-1 text-xs font-black text-indigo-700 ring-1 ring-indigo-200">{todayShiftPlans.length}件</span>
+            </div>
+            <div className="mt-3 space-y-2">
+              {todayShiftPlans.map(plan => (
+                <div key={plan.id} className="flex items-center gap-3 rounded-2xl bg-white px-3 py-3 text-left shadow-sm ring-1 ring-indigo-100">
+                  <span className="shrink-0 font-mono text-sm font-black text-slate-800">{plan.start}–{plan.end}</span>
+                  <span className="rounded-full bg-indigo-100 px-2 py-1 text-[10px] font-black text-indigo-700">{SHIFT_CATEGORY_LABELS[plan.category]}</span>
+                  <span className="min-w-0 flex-1 truncate text-xs font-bold text-slate-600">{[plan.title, plan.subject, plan.room].filter(Boolean).join(' ／ ') || '勤務予定'}</span>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
         {/* 今日の打刻 */}
         <div className="relative mb-5 overflow-hidden rounded-[28px] border border-white bg-white p-5 text-center shadow-lg shadow-blue-50 sm:mb-6 sm:rounded-[32px] sm:p-6 md:p-8">
           <div className="absolute top-0 left-0 w-full h-1.5 bg-gradient-to-r from-blue-400 via-green-400 to-orange-400"></div>
@@ -1088,6 +1355,10 @@ export default function TeacherAttendancePage() {
               <div className="inline-flex items-center gap-2 px-4 py-2 bg-green-50 text-green-700 rounded-full text-sm font-bold animate-pulse border border-green-100 shadow-sm">
                 <span className="w-2.5 h-2.5 rounded-full bg-green-500"></span>
                 勤務中 ({new Date(currentSession.start_time).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})} 〜)
+              </div>
+              <div className="flex items-center justify-center gap-1.5 text-xs font-black text-emerald-700">
+                <MapPin size={14} /> {attendanceWorkplaceName(currentSession) || '勤務校舎未登録'}
+                {currentSession.default_program === 'science_social' && <span className="ml-1 rounded-full bg-sky-100 px-2 py-0.5 text-[10px] text-sky-700">実績も理社講座が初期値</span>}
               </div>
               {clockClosed && (
                 <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-black leading-relaxed text-amber-800">
@@ -1125,6 +1396,21 @@ export default function TeacherAttendancePage() {
                       23時以降は出勤打刻できません。打刻を忘れた日は「打刻を忘れた日の申請」から申請してください。
                     </div>
                   )}
+                  <label className="block text-left">
+                    <span className="mb-2 flex items-center gap-1.5 text-xs font-black text-slate-600">
+                      <MapPin size={14} className="text-emerald-600" /> 今日勤務する校舎
+                    </span>
+                    <select
+                      value={clockSchoolId}
+                      onChange={event => setClockSchoolId(event.target.value)}
+                      disabled={clockClosed}
+                      className="min-h-[52px] w-full rounded-2xl border border-emerald-200 bg-emerald-50 px-4 text-sm font-black text-emerald-900 outline-none focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100 disabled:bg-gray-100 disabled:text-gray-400"
+                    >
+                      <option value="">勤務校舎を選択</option>
+                      <option value={SCIENCE_SOCIAL_WORKPLACE_ID}>★ {SCIENCE_SOCIAL_WORKPLACE_LABEL}</option>
+                      {attendanceSchoolOptions()}
+                    </select>
+                  </label>
                   <button
                     onClick={handleClockIn}
                     disabled={clockClosed}
@@ -1265,6 +1551,35 @@ export default function TeacherAttendancePage() {
             <h2 className="flex items-center gap-2 text-base font-black text-gray-700 sm:text-lg"><Calendar size={18} className="mb-0.5 text-blue-500"/> {viewDate.getFullYear()}年 {viewDate.getMonth() + 1}月</h2>
             <button onClick={() => changeMonth(1)} className="grid h-11 w-11 place-items-center rounded-full text-gray-400 transition-colors hover:bg-gray-100 hover:text-blue-600"><ChevronRight size={22}/></button>
           </div>
+          <div className="rounded-3xl border border-slate-200 bg-white p-2 shadow-sm">
+            <p className="px-2 pb-2 pt-1 text-[10px] font-black tracking-wider text-slate-400">表示する勤怠区分</p>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              {([
+                ['all', 'すべて'],
+                ['normal', ATTENDANCE_PROGRAM_LABELS.normal],
+                ['science_social', ATTENDANCE_PROGRAM_LABELS.science_social],
+                ['breakthrough', ATTENDANCE_PROGRAM_LABELS.breakthrough],
+              ] as const).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setProgramFilter(value)}
+                  aria-pressed={programFilter === value}
+                  className={`min-h-[44px] rounded-2xl px-2 text-xs font-black transition-colors ${
+                    programFilter === value
+                      ? value === 'science_social'
+                        ? 'bg-emerald-600 text-white shadow-sm'
+                        : value === 'breakthrough'
+                        ? 'bg-fuchsia-600 text-white shadow-sm'
+                        : 'bg-blue-600 text-white shadow-sm'
+                      : 'bg-slate-50 text-slate-500 hover:bg-slate-100'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="flex min-h-[92px] flex-col items-center justify-center rounded-2xl border border-gray-100 bg-white p-4 shadow-sm">
               <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Total Hours</span>
@@ -1285,11 +1600,18 @@ export default function TeacherAttendancePage() {
 
         {/* 履歴リスト */}
         <div className="space-y-4 pb-24">
-          {history.length === 0 ? <div className="text-center py-12 bg-white rounded-3xl border-2 border-dashed border-gray-100"><Clock size={40} className="mx-auto text-gray-200 mb-2"/><p className="text-gray-400 font-bold text-sm">この月の履歴はありません</p></div> : history.map((rec) => {
+          {historyError ? (
+            <div className="rounded-3xl border border-red-200 bg-red-50 px-5 py-8 text-center">
+              <AlertCircle size={36} className="mx-auto mb-2 text-red-400" />
+              <p className="text-sm font-black text-red-700">{historyError}</p>
+              <button type="button" onClick={fetchMonthlyHistory} className="mt-4 min-h-[44px] rounded-xl bg-red-600 px-5 text-sm font-black text-white">再読み込み</button>
+            </div>
+          ) : filteredHistory.length === 0 ? <div className="text-center py-12 bg-white rounded-3xl border-2 border-dashed border-gray-100"><Clock size={40} className="mx-auto text-gray-200 mb-2"/><p className="text-gray-400 font-bold text-sm">{history.length === 0 ? 'この月の履歴はありません' : 'この区分の勤怠はありません'}</p></div> : filteredHistory.map((rec) => {
              const duration = rec.end_time ? calcDurationMinutes(rec.start_time, rec.end_time) : 0;
              if(currentSession && currentSession.id === rec.id) return null;
              const displaySegments = rec.work_segments?.slice().sort((a: WorkSegment, b: WorkSegment) => a.start.localeCompare(b.start));
-             const recAttendanceKind = getRecordAttendanceKind(rec);
+             const recPrograms = getRecordPrograms(rec);
+             const recordSchool = attendanceWorkplaceName(rec);
 
              return (
               <div key={rec.id} className="rounded-3xl border border-gray-100 bg-white p-4 shadow-sm transition-all hover:border-blue-200 hover:shadow-md sm:p-5">
@@ -1303,10 +1625,16 @@ export default function TeacherAttendancePage() {
                       <div className="flex flex-wrap items-center gap-1 font-mono text-lg font-black text-gray-800">{new Date(rec.start_time).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}<ArrowLeft size={12} className="rotate-180 text-gray-300"/>{rec.end_time ? new Date(rec.end_time).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '...'}</div>
                       <div className="mt-1 flex flex-wrap items-center gap-2">
                         <span className="rounded bg-gray-100 px-2 py-1 text-xs font-bold text-gray-500">{formatDuration(duration)}</span>
-                        <span className={`rounded px-2 py-1 text-[10px] font-black ${recAttendanceKind === 'breakthrough' ? 'bg-fuchsia-50 text-fuchsia-700 ring-1 ring-fuchsia-100' : 'bg-blue-50 text-blue-700 ring-1 ring-blue-100'}`}>
-                          {recAttendanceKind === 'breakthrough' ? '突破ゼミ勤怠' : '通常勤怠'}
-                        </span>
+                        {recPrograms.map(program => (
+                          <span key={program} className={`rounded px-2 py-1 text-[10px] font-black ${programBadgeClass(program)}`}>
+                            {ATTENDANCE_PROGRAM_LABELS[program]}
+                          </span>
+                        ))}
                         {rec.status === 'approved' ? <span className="flex items-center gap-0.5 text-[10px] font-bold text-green-600"><CheckCircle size={10}/> 承認済</span> : <span className="flex items-center gap-0.5 text-[10px] font-bold text-orange-400"><AlertCircle size={10}/> 承認待</span>}
+                      </div>
+                      <div className="mt-2 flex items-center gap-1.5 text-xs font-black text-emerald-700">
+                        <MapPin size={13} className="shrink-0" />
+                        <span className="truncate">{recordSchool || '勤務校舎未登録'}</span>
                       </div>
                     </div>
                   </div>
@@ -1320,7 +1648,18 @@ export default function TeacherAttendancePage() {
                         <div className={`px-2 py-0.5 rounded font-bold mr-3 shrink-0 text-[10px] ${segmentToneClass(seg.type, 'chip')}`}>
                           {segmentTypeLabel(seg.type, true)}
                         </div>
-                        <div className="truncate text-gray-600 font-medium">{seg.note}</div>
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-gray-600 font-medium">{seg.note}</div>
+                          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] font-bold text-slate-500">
+                            <span className={`rounded px-1.5 py-0.5 ${programBadgeClass(segmentProgram(seg))}`}>{ATTENDANCE_PROGRAM_LABELS[segmentProgram(seg)]}</span>
+                            {seg.type !== 'break' && (
+                              <span className="flex min-w-0 items-center gap-1 text-emerald-700">
+                                <MapPin size={10} className="shrink-0" />
+                                <span className="truncate">{attendanceSchoolName(seg.school_id || rec.school_id || rec.school_name) || '校舎未登録'}</span>
+                              </span>
+                            )}
+                          </div>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -1410,24 +1749,30 @@ export default function TeacherAttendancePage() {
                       <div className="grid grid-cols-2 gap-3">
                         <label>
                           <span className="mb-1 block text-[10px] font-black text-gray-500">開始</span>
-                          <input type="time" className="min-h-[48px] w-full rounded-xl border border-gray-200 bg-white px-3 font-mono text-base font-black outline-none focus:border-blue-300 focus:ring-2 focus:ring-blue-100" value={seg.start} onChange={(e) => updateSegment(i, 'start', e.target.value)} />
+                          <FiveMinuteTimeSelect className="min-h-[48px] w-full rounded-xl border border-gray-200 bg-white px-3 font-mono text-base font-black outline-none focus:border-blue-300 focus:ring-2 focus:ring-blue-100" value={seg.start} onChange={value => updateSegment(i, 'start', value)} />
                         </label>
                         <label>
                           <span className="mb-1 block text-[10px] font-black text-gray-500">終了</span>
-                          <input type="time" className="min-h-[48px] w-full rounded-xl border border-gray-200 bg-white px-3 font-mono text-base font-black outline-none focus:border-blue-300 focus:ring-2 focus:ring-blue-100" value={seg.end} onChange={(e) => updateSegment(i, 'end', e.target.value)} />
+                          <FiveMinuteTimeSelect className="min-h-[48px] w-full rounded-xl border border-gray-200 bg-white px-3 font-mono text-base font-black outline-none focus:border-blue-300 focus:ring-2 focus:ring-blue-100" value={seg.end} onChange={value => updateSegment(i, 'end', value)} />
                         </label>
                       </div>
                       <label className="mt-3 block">
                         <span className="mb-1 block text-[10px] font-black text-gray-500">種別</span>
                         <select
                           className={`min-h-[48px] w-full rounded-xl border px-3 text-sm font-black outline-none ${segmentGroup(seg.type) === 'breakthrough' ? 'border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700' : 'border-blue-200 bg-white text-blue-700'}`}
-                          value={segmentGroup(seg.type)}
-                          onChange={(e) => updateSegmentGroup(i, e.target.value as SegmentGroup)}
+                          value={segmentProgram(seg)}
+                          onChange={(e) => updateSegmentProgram(i, e.target.value as AttendanceProgram)}
                         >
-                          <option value="normal">通常</option>
-                          <option value="breakthrough">突破ゼミ</option>
+                          {ATTENDANCE_PROGRAMS.map(program => <option key={program} value={program}>{ATTENDANCE_PROGRAM_LABELS[program]}</option>)}
                         </select>
                       </label>
+                      {attendanceSegmentNeedsSchool(seg) && <label className="mt-3 block">
+                        <span className="mb-1 block text-[10px] font-black text-gray-500">勤務校舎（必須）</span>
+                        <select value={seg.school_id || ''} onChange={e => updateSegment(i, 'school_id', e.target.value)} className="min-h-[48px] w-full rounded-xl border border-emerald-200 bg-white px-3 text-sm font-black text-emerald-800">
+                          <option value="">校舎を選択</option>
+                          {attendanceSchoolOptions()}
+                        </select>
+                      </label>}
                       <label className="mt-3 block">
                         <span className="mb-1 block text-[10px] font-black text-gray-500">区分</span>
                         <select
@@ -1435,11 +1780,17 @@ export default function TeacherAttendancePage() {
                           value={seg.type}
                           onChange={(e) => updateSegment(i, 'type', e.target.value as any)}
                         >
-                          {segmentOptionsForGroup(segmentGroup(seg.type)).map(option => (
+                          {segmentOptionsForGroup(segmentProgram(seg) === 'breakthrough' ? 'breakthrough' : 'normal').map(option => (
                             <option key={option.value} value={option.value}>{option.label}</option>
                           ))}
                         </select>
                       </label>
+                      {seg.type === 'lesson' && <label className="mt-3 block"><span className="mb-1 block text-[10px] font-black text-gray-500">学年（必須）</span><select value={seg.grade || ''} onChange={e => updateSegment(i, 'grade', e.target.value)} className="min-h-[48px] w-full rounded-xl border border-gray-200 bg-white px-3 text-sm font-black"><option value="">学年を選択</option>{ATTENDANCE_GRADES.map(grade => <option key={grade} value={grade}>{grade}</option>)}</select></label>}
+                      {seg.type === 'individual' && <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                        <label><span className="mb-1 block text-[10px] font-black text-gray-500">単価区分（必須）</span><select value={seg.individual_level || ''} onChange={e => updateSegment(i, 'individual_level', e.target.value)} className="min-h-[48px] w-full rounded-xl border border-indigo-200 bg-white px-3 text-sm font-black text-indigo-700"><option value="">区分を選択</option><option value="standard">個別通常</option><option value="advanced">個別中受・高</option></select></label>
+                        <label><span className="mb-1 block text-[10px] font-black text-gray-500">指導人数（必須）</span><select value={seg.individual_ratio || ''} onChange={e => updateSegment(i, 'individual_ratio', e.target.value)} className="min-h-[48px] w-full rounded-xl border border-indigo-200 bg-white px-3 text-sm font-black text-indigo-700"><option value="">人数を選択</option><option value="1:1">1対1</option><option value="1:2">1対2</option><option value="1:3">1対3</option></select></label>
+                      </div>}
+                      {seg.type === 'office' && <label className="mt-3 block"><span className="mb-1 block text-[10px] font-black text-gray-500">事務内容（必須）</span><select value={seg.office_task || ''} onChange={e => updateSegment(i, 'office_task', e.target.value)} className="min-h-[48px] w-full rounded-xl border border-orange-200 bg-white px-3 text-sm font-black text-orange-700"><option value="">内容を選択</option>{OFFICE_TASK_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>}
                       <label className="mt-3 block">
                         <span className="mb-1 block text-[10px] font-black text-gray-500">詳細</span>
                         <input type="text" className="min-h-[48px] w-full rounded-xl border border-gray-200 bg-white px-3 text-sm font-bold outline-none focus:border-indigo-300 focus:ring-2 focus:ring-indigo-100" placeholder="詳細..." value={seg.note} onChange={(e) => updateSegment(i, 'note', e.target.value)} />
@@ -1456,6 +1807,7 @@ export default function TeacherAttendancePage() {
                         <th className="px-2 py-2 text-left w-16">終了</th>
                         <th className="px-2 py-2 text-left w-24">種別</th>
                         <th className="px-2 py-2 text-left w-32">区分</th>
+                        <th className="px-2 py-2 text-left w-28">勤務校舎</th>
                         <th className="px-2 py-2 text-left hidden sm:table-cell">詳細</th>
                         <th className="w-10"></th>
                       </tr>
@@ -1463,17 +1815,16 @@ export default function TeacherAttendancePage() {
                     <tbody className="divide-y divide-gray-100">
                       {segments.map((seg, i) => (
                         <tr key={i} className={`transition-colors ${segmentToneClass(seg.type, 'row')}`}>
-                          <td className="p-2"><input type="time" className="w-full bg-white rounded border border-gray-300 font-mono text-xs font-bold p-1" value={seg.start} onChange={(e) => updateSegment(i, 'start', e.target.value)} /></td>
-                          <td className="p-2"><input type="time" className="w-full bg-white rounded border border-gray-300 font-mono text-xs font-bold p-1" value={seg.end} onChange={(e) => updateSegment(i, 'end', e.target.value)} /></td>
+                          <td className="p-2"><FiveMinuteTimeSelect className="w-full bg-white rounded border border-gray-300 font-mono text-xs font-bold p-1" value={seg.start} onChange={value => updateSegment(i, 'start', value)} /></td>
+                          <td className="p-2"><FiveMinuteTimeSelect className="w-full bg-white rounded border border-gray-300 font-mono text-xs font-bold p-1" value={seg.end} onChange={value => updateSegment(i, 'end', value)} /></td>
                           <td className="p-2">
                             <div className="flex flex-col sm:flex-row gap-1">
                               <select
                                 className={`w-full text-xs font-bold p-1 rounded border outline-none ${segmentGroup(seg.type) === 'breakthrough' ? 'border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700' : 'border-blue-200 bg-white text-blue-700'}`}
-                                value={segmentGroup(seg.type)}
-                                onChange={(e) => updateSegmentGroup(i, e.target.value as SegmentGroup)}
+                                value={segmentProgram(seg)}
+                                onChange={(e) => updateSegmentProgram(i, e.target.value as AttendanceProgram)}
                               >
-                                <option value="normal">通常</option>
-                                <option value="breakthrough">突破ゼミ</option>
+                                {ATTENDANCE_PROGRAMS.map(program => <option key={program} value={program}>{ATTENDANCE_PROGRAM_LABELS[program]}</option>)}
                               </select>
                             </div>
                           </td>
@@ -1484,14 +1835,15 @@ export default function TeacherAttendancePage() {
                                 value={seg.type}
                                 onChange={(e) => updateSegment(i, 'type', e.target.value as any)}
                               >
-                                {segmentOptionsForGroup(segmentGroup(seg.type)).map(option => (
+                                {segmentOptionsForGroup(segmentProgram(seg) === 'breakthrough' ? 'breakthrough' : 'normal').map(option => (
                                   <option key={option.value} value={option.value}>{option.label}</option>
                                 ))}
                               </select>
                               <input type="text" className="sm:hidden w-full bg-transparent border-b border-gray-300 text-xs p-1 mt-1 min-w-0" placeholder="詳細..." value={seg.note} onChange={(e) => updateSegment(i, 'note', e.target.value)} />
                             </div>
                           </td>
-                          <td className="p-2 hidden sm:table-cell"><input type="text" className="w-full bg-transparent border-b border-gray-300 focus:border-indigo-500 outline-none text-xs p-1 min-w-0" placeholder="詳細..." value={seg.note} onChange={(e) => updateSegment(i, 'note', e.target.value)} /></td>
+                          <td className="p-2">{attendanceSegmentNeedsSchool(seg) ? <select value={seg.school_id || ''} onChange={e => updateSegment(i, 'school_id', e.target.value)} className="w-full rounded border border-emerald-200 bg-white p-1 text-[10px] font-bold text-emerald-800"><option value="">校舎を選択</option>{attendanceSchoolOptions()}</select> : <span className="text-[10px] font-bold text-slate-400">不要</span>}</td>
+                          <td className="p-2 hidden sm:table-cell"><div className="grid gap-1"><input type="text" className="w-full bg-transparent border-b border-gray-300 focus:border-indigo-500 outline-none text-xs p-1 min-w-0" placeholder="詳細..." value={seg.note} onChange={(e) => updateSegment(i, 'note', e.target.value)} />{seg.type === 'lesson' && <select value={seg.grade || ''} onChange={e => updateSegment(i, 'grade', e.target.value)} className="rounded border border-gray-200 bg-white p-1 text-[10px] font-bold"><option value="">学年を選択</option>{ATTENDANCE_GRADES.map(grade => <option key={grade} value={grade}>{grade}</option>)}</select>}{seg.type === 'individual' && <div className="grid grid-cols-2 gap-1"><select value={seg.individual_level || ''} onChange={e => updateSegment(i, 'individual_level', e.target.value)} className="rounded border border-gray-200 bg-white p-1 text-[10px] font-bold"><option value="">単価区分</option><option value="standard">個別通常</option><option value="advanced">個別中受・高</option></select><select value={seg.individual_ratio || ''} onChange={e => updateSegment(i, 'individual_ratio', e.target.value)} className="rounded border border-gray-200 bg-white p-1 text-[10px] font-bold"><option value="">人数</option><option value="1:1">1対1</option><option value="1:2">1対2</option><option value="1:3">1対3</option></select></div>}{seg.type === 'office' && <select value={seg.office_task || ''} onChange={e => updateSegment(i, 'office_task', e.target.value)} className="rounded border border-gray-200 bg-white p-1 text-[10px] font-bold"><option value="">事務内容を選択</option>{OFFICE_TASK_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select>}</div></td>
                           <td className="p-2 text-center w-10 whitespace-nowrap"><button onClick={() => removeSegment(i)} className="text-gray-300 hover:text-red-500 p-2 hover:bg-red-50 rounded-lg transition-colors shrink-0"><Trash2 size={16}/></button></td>
                         </tr>
                       ))}
@@ -1507,6 +1859,10 @@ export default function TeacherAttendancePage() {
 
               {/* 交通費セクション */}
               <section className="pt-4 border-t border-gray-200">
+                <label className="mb-4 flex min-h-[44px] cursor-pointer items-center gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 text-sm font-black text-emerald-800">
+                  <input type="checkbox" checked={transportationNone} onChange={event => { setTransportationNone(event.target.checked); if (event.target.checked) setExpenses([]); }} className="h-5 w-5 accent-emerald-600" />
+                  交通費なし（入力漏れではありません）
+                </label>
                 <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end mb-3 gap-2">
                   <div>
                     <h4 className="text-sm font-bold text-gray-700 flex items-center gap-2">
@@ -1518,7 +1874,7 @@ export default function TeacherAttendancePage() {
                     <button onClick={handleCopyLastTransport} className="flex min-h-[44px] items-center justify-center gap-1 rounded-xl bg-blue-50 px-3 text-[10px] font-bold text-blue-600 hover:bg-blue-100 sm:text-xs">
                       <Copy size={12}/> 前回をコピー
                     </button>
-                    <button onClick={addExpense} className="flex min-h-[44px] items-center justify-center gap-1 rounded-xl bg-green-100 px-3 text-[10px] font-bold text-green-700 hover:bg-green-200 sm:text-xs">
+                    <button disabled={transportationNone} onClick={addExpense} className="flex min-h-[44px] items-center justify-center gap-1 rounded-xl bg-green-100 px-3 text-[10px] font-bold text-green-700 hover:bg-green-200 disabled:opacity-40 sm:text-xs">
                       <Plus size={12}/> 追加
                     </button>
                   </div>
@@ -1618,6 +1974,7 @@ export default function TeacherAttendancePage() {
                 <span className="text-gray-800 text-sm">
                   {formatDuration(
                     calcSegmentTotal(segments, 'lesson') +
+                    calcSegmentTotal(segments, 'individual') +
                     calcSegmentTotal(segments, 'breakthrough') +
                     calcSegmentTotal(segments, 'breakthrough_lesson') +
                     calcSegmentTotal(segments, 'breakthrough_office') +
@@ -1665,19 +2022,17 @@ export default function TeacherAttendancePage() {
               <div className="grid gap-4 sm:grid-cols-2">
                 <label>
                   <span className="mb-2 block text-xs font-black text-slate-600">修正後の出勤時刻</span>
-                  <input
-                    type="datetime-local"
-                    value={correctionForm.requested_start_time}
-                    onChange={e => setCorrectionForm(prev => ({ ...prev, requested_start_time: e.target.value }))}
+                  <FiveMinuteTimeSelect
+                    value={correctionForm.requested_start_time.slice(11, 16)}
+                    onChange={value => setCorrectionForm(prev => ({ ...prev, requested_start_time: value ? `${String((correctionTarget || editingRecord).date || '').slice(0, 10)}T${value}` : '' }))}
                     className="min-h-[52px] w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none focus:border-amber-300 focus:ring-2 focus:ring-amber-100"
                   />
                 </label>
                 <label>
                   <span className="mb-2 block text-xs font-black text-slate-600">修正後の退勤時刻</span>
-                  <input
-                    type="datetime-local"
-                    value={correctionForm.requested_end_time}
-                    onChange={e => setCorrectionForm(prev => ({ ...prev, requested_end_time: e.target.value }))}
+                  <FiveMinuteTimeSelect
+                    value={correctionForm.requested_end_time.slice(11, 16)}
+                    onChange={value => setCorrectionForm(prev => ({ ...prev, requested_end_time: value ? `${String((correctionTarget || editingRecord).date || '').slice(0, 10)}T${value}` : '' }))}
                     className="min-h-[52px] w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none focus:border-amber-300 focus:ring-2 focus:ring-amber-100"
                   />
                 </label>
@@ -1735,22 +2090,33 @@ export default function TeacherAttendancePage() {
                 />
               </label>
 
+              <label>
+                <span className="mb-2 block text-xs font-black text-slate-600">勤務した校舎</span>
+                <select
+                  value={missingCorrectionForm.school_id}
+                  onChange={event => setMissingCorrectionForm(prev => ({ ...prev, school_id: event.target.value }))}
+                  className="min-h-[52px] w-full rounded-2xl border border-emerald-200 bg-emerald-50 px-4 text-sm font-black text-emerald-900 outline-none focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100"
+                >
+                  <option value="">勤務校舎を選択</option>
+                  <option value={SCIENCE_SOCIAL_WORKPLACE_ID}>★ {SCIENCE_SOCIAL_WORKPLACE_LABEL}</option>
+                  {attendanceSchoolOptions()}
+                </select>
+              </label>
+
               <div className="grid gap-4 sm:grid-cols-2">
                 <label>
                   <span className="mb-2 block text-xs font-black text-slate-600">申請する出勤時刻</span>
-                  <input
-                    type="datetime-local"
-                    value={missingCorrectionForm.requested_start_time}
-                    onChange={e => setMissingCorrectionForm(prev => ({ ...prev, requested_start_time: e.target.value }))}
+                  <FiveMinuteTimeSelect
+                    value={missingCorrectionForm.requested_start_time.slice(11, 16)}
+                    onChange={value => setMissingCorrectionForm(prev => ({ ...prev, requested_start_time: value ? `${prev.target_date}T${value}` : '' }))}
                     className="min-h-[52px] w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none focus:border-amber-300 focus:ring-2 focus:ring-amber-100"
                   />
                 </label>
                 <label>
                   <span className="mb-2 block text-xs font-black text-slate-600">申請する退勤時刻</span>
-                  <input
-                    type="datetime-local"
-                    value={missingCorrectionForm.requested_end_time}
-                    onChange={e => setMissingCorrectionForm(prev => ({ ...prev, requested_end_time: e.target.value }))}
+                  <FiveMinuteTimeSelect
+                    value={missingCorrectionForm.requested_end_time.slice(11, 16)}
+                    onChange={value => setMissingCorrectionForm(prev => ({ ...prev, requested_end_time: value ? `${prev.target_date}T${value}` : '' }))}
                     className="min-h-[52px] w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none focus:border-amber-300 focus:ring-2 focus:ring-amber-100"
                   />
                 </label>

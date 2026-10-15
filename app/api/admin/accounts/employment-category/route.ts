@@ -41,7 +41,7 @@ export async function POST(request: NextRequest) {
       if (!userId || !EMPLOYMENT_CATEGORIES.includes(category as any)) return Response.json({ ok: false, error: '区分を指定してください。' }, { status: 400 });
       const ref = db.collection('users').doc(userId);
       const snapshot = await ref.get();
-      if (!snapshot.exists || !isAttendanceUserRole(snapshot.data()?.role)) return Response.json({ ok: false, error: '講師・勤怠利用者のアカウントではありません。' }, { status: 400 });
+      if (!snapshot.exists || !isAttendanceUserRole(snapshot.data()?.role)) return Response.json({ ok: false, error: '講師・職員のアカウントではありません。' }, { status: 400 });
       await ref.set({ employment_category: category, employment_category_updated_at: FieldValue.serverTimestamp(), employment_category_updated_by: actor.uid }, { merge: true });
       return Response.json({ ok: true });
     }

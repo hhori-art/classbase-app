@@ -13,12 +13,12 @@ const inputSchema = z.object({
   status: z.enum(['noted', 'contacted', 'resolved']).default('noted'),
 });
 
-export async function POST(request: NextRequest, context: { params: { id: string } }) {
+export async function POST(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   try {
     const user = await getServerUser(request);
     requireRole(user, ['teacher', 'admin', 'master']);
     await requireEikenAccess(user);
-    const studentId = String(context.params.id || '');
+    const studentId = String((await context.params).id || '');
     const input = inputSchema.parse(await request.json());
     if (!(await canReadEikenStudent(user, studentId, input.course_id))) {
       throw new Error('forbidden');

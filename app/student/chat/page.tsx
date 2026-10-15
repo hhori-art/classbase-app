@@ -1,10 +1,8 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useChat } from 'ai/react';
 import { useAuth } from '@/app/context/AuthContext';
-import { db } from '@/lib/firebase';
-import { collection, addDoc, serverTimestamp, query, orderBy, getDocs, where, limit, onSnapshot } from 'firebase/firestore';
 import { Send, User, Bot, Loader2, Mail, Sparkles, MessageCircle, Info } from 'lucide-react';
 import { logActivity } from '@/lib/logActivity';
 
@@ -18,19 +16,12 @@ export default function StudentChat() {
   const stamps = ['ありがとう', 'わかった', '質問です', '復習します'];
   
   // useChat フック
-  const { messages, input, handleInputChange, handleSubmit, isLoading, setMessages } = useChat({
+  const { messages, input, handleInputChange, handleSubmit, isLoading, setMessages, error: aiError } = useChat({
     api: '/api/chat',
     
-    // AIの回答が完了したタイミングで保存
     onFinish: async (message) => {
       if (!user) return;
       try {
-        await addDoc(collection(db, 'users', user.uid, 'chat_history'), {
-          role: 'assistant',
-          content: message.content,
-          createdAt: serverTimestamp(),
-        });
-
         await logActivity(
           user.uid,
           profile?.student_name || '生徒',
@@ -49,17 +40,11 @@ export default function StudentChat() {
 
     const loadHistory = async () => {
       try {
-        const q = query(
-          collection(db, 'users', user.uid, 'chat_history'),
-          orderBy('createdAt', 'asc')
-        );
-        const snapshot = await getDocs(q);
-        
-        const history = snapshot.docs.map(doc => ({
-          id: doc.id,
-          role: doc.data().role === 'assistant' ? 'assistant' as const : 'user' as const,
-          content: String(doc.data().content || ''),
-        }));
+        const token = await user.getIdToken();
+        const response = await fetch('/api/chat/history', { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' });
+        const data = await response.json();
+        if (!response.ok || !data.ok) throw new Error(data.error || 'history-load-failed');
+        const history = data.messages || [];
 
         if (history.length > 0) {
           setMessages(history);
@@ -72,43 +57,24 @@ export default function StudentChat() {
     loadHistory();
   }, [user, setMessages]);
 
-  useEffect(() => {
+  const loadTeacherMessages = useCallback(async () => {
     if (!user) return;
-    const q = query(collection(db, 'chat_logs'), where('uid', '==', user.uid), limit(100));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const list = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      const toMillis = (value: any) => {
-        if (!value) return 0;
-        if (typeof value.toMillis === 'function') return value.toMillis();
-        if (typeof value.toDate === 'function') return value.toDate().getTime();
-        if (typeof value.seconds === 'number') return value.seconds * 1000;
-        const parsed = new Date(value).getTime();
-        return Number.isFinite(parsed) ? parsed : 0;
-      };
-      list.sort((a: any, b: any) => toMillis(a.created_at || a.createdAt) - toMillis(b.created_at || b.createdAt));
-      setTeacherMessages(list);
-    }, (error) => {
-      console.error('先生チャット読み込みエラー', error);
-    });
-    return () => unsubscribe();
+    try {
+      const response = await fetch('/api/student/teacher-chat', { headers: { Authorization: `Bearer ${await user.getIdToken()}` }, cache: 'no-store' });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || 'teacher-chat-load-failed');
+      setTeacherMessages(data.messages || []);
+    } catch (error) { console.error('先生チャット読み込みエラー', error); }
   }, [user]);
+  useEffect(() => { void loadTeacherMessages(); }, [loadTeacherMessages]);
 
   // --- 2. ユーザーのメッセージ送信時に保存 ---
   const customSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!user || !input.trim()) return;
 
-    try {
-      await addDoc(collection(db, 'users', user.uid, 'chat_history'), {
-        role: 'user',
-        content: input,
-        createdAt: serverTimestamp(),
-      });
-    } catch (error) {
-      console.error("メッセージ保存エラー", error);
-    }
-
-    handleSubmit(e);
+    const token = await user.getIdToken();
+    handleSubmit(e, { headers: { Authorization: `Bearer ${token}` } });
   };
 
   // --- 3. 先生に送信機能 ---
@@ -118,13 +84,9 @@ export default function StudentChat() {
 
     setIsSendingToTeacher(true);
     try {
-      await addDoc(collection(db, 'teacher_inquiries'), {
-        studentId: user.uid,
-        studentName: profile?.student_name || '生徒',
-        content: messages.map(m => `${m.role === 'user' ? '生徒' : 'AI'}: ${m.content}`).join('\n\n'),
-        createdAt: serverTimestamp(),
-        status: 'unread'
-      });
+      const response = await fetch('/api/student/teacher-chat', { method: 'POST', headers: { Authorization: `Bearer ${await user.getIdToken()}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'report_ai_chat' }) });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || 'report-failed');
       alert('先生に送信しました！\n確認まで少し待っててね。');
     } catch (e) {
       console.error(e);
@@ -137,13 +99,10 @@ export default function StudentChat() {
   const sendStamp = async (stamp: string) => {
     if (!user) return;
     try {
-      await addDoc(collection(db, 'users', user.uid, 'chat_history'), {
-        role: 'user',
-        content: `[スタンプ] ${stamp}`,
-        message_type: 'stamp',
-        createdAt: serverTimestamp(),
-      });
-      setMessages(current => [...current, { id: `stamp-${Date.now()}`, role: 'user', content: `[スタンプ] ${stamp}` }]);
+      const response = await fetch('/api/chat/history', { method: 'POST', headers: { Authorization: `Bearer ${await user.getIdToken()}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'stamp', stamp }) });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || 'stamp-failed');
+      setMessages(current => [...current, data.message]);
     } catch (e) {
       console.error(e);
     }
@@ -162,6 +121,7 @@ export default function StudentChat() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || 'teacher-chat-send-failed');
       setTeacherReply('');
+      await loadTeacherMessages();
     } catch (e) {
       console.error(e);
       alert('先生への返信に失敗しました');
@@ -213,6 +173,10 @@ export default function StudentChat() {
 
       {/* メッセージエリア */}
       <div className="flex-1 overflow-y-auto p-4 space-y-6">
+        <details className="mx-auto max-w-3xl rounded-2xl border border-indigo-100 bg-indigo-50/80 px-4 py-3">
+          <summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-black text-indigo-900"><Info size={15}/>AIと先生、どちらに届く？</summary>
+          <div className="mt-2 space-y-1 text-xs font-bold leading-6 text-indigo-800"><p>下の入力欄はAIチューター宛です。先生に直接送る場合は「先生からのメッセージ」の返信欄を使います。</p><p>AIとの会話を先生に見せたい場合だけ、右上の「先生へ報告」を押してください。パスワードや個人情報は送らないでください。</p></div>
+        </details>
         <section className="mx-auto max-w-3xl rounded-3xl border border-orange-100 bg-white p-4 shadow-sm">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div className="flex items-center gap-2">
@@ -247,6 +211,7 @@ export default function StudentChat() {
             <input
               value={teacherReply}
               onChange={(e) => setTeacherReply(e.target.value)}
+              maxLength={2000}
               placeholder="先生へ返信..."
               className="min-w-0 flex-1 rounded-2xl border border-gray-100 bg-gray-50 px-4 py-3 text-sm font-bold outline-none focus:border-orange-200 focus:bg-white"
             />
@@ -325,6 +290,7 @@ export default function StudentChat() {
 
       {/* 入力エリア: 浮かんでいるようなモダンなデザイン */}
       <div className="p-3 pb-6 bg-[#F0F4F8] sm:p-4"> {/* 背景色に合わせて一体感を出す */}
+        {aiError && <div role="alert" className="mx-auto mb-2 max-w-3xl rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-black text-rose-700">AIチューターへ送信できませんでした。通信状態を確認し、時間を置いてもう一度お試しください。</div>}
         <div className="mx-auto mb-2 flex max-w-3xl gap-2 overflow-x-auto pb-1">
           {stamps.map(stamp => (
             <button key={stamp} onClick={() => sendStamp(stamp)} className="shrink-0 rounded-full bg-white px-3 py-1.5 text-xs font-black text-indigo-500 shadow-sm border border-indigo-50">

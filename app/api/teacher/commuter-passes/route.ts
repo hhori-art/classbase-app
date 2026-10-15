@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import { Timestamp } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
-import { canManageAttendance, getServerUser, jsonError, requireRole } from '@/lib/server-auth';
+import { canManageAttendanceSchool, getServerUser, jsonError, requireRole } from '@/lib/server-auth';
 import { cleanFareLabel, normalizeTransportType } from '@/lib/transport-fares';
 import { createEkispertCommuterPass } from '@/lib/transport-fare-providers';
 
@@ -27,13 +27,19 @@ function isActivePass(data: FirebaseFirestore.DocumentData) {
   return activeStatuses.has(status) && (!endDate || endDate >= todayKey());
 }
 
+async function requireTargetAccess(user: Awaited<ReturnType<typeof getServerUser>>, teacherId: string) {
+  if (teacherId === user.uid) return;
+  const target = await adminDb().collection('users').doc(teacherId).get();
+  if (!target.exists || !canManageAttendanceSchool(user, target.data()?.school_id || target.data()?.school)) throw new Error('forbidden');
+}
+
 export async function GET(request: NextRequest) {
   try {
     const user = await getServerUser(request);
     requireRole(user, ['teacher', 'attendance_admin', 'admin', 'master']);
 
     const teacherId = request.nextUrl.searchParams.get('teacher_id') || user.uid;
-    if (!canManageAttendance(user) && teacherId !== user.uid) throw new Error('forbidden');
+    await requireTargetAccess(user, teacherId);
 
     const snap = await adminDb()
       .collection('teacher_commuter_passes')
@@ -66,7 +72,7 @@ export async function POST(request: NextRequest) {
 
     const body = await request.json().catch(() => ({}));
     const teacherId = String(body.teacher_id || user.uid);
-    if (!canManageAttendance(user) && teacherId !== user.uid) throw new Error('forbidden');
+    await requireTargetAccess(user, teacherId);
 
     const transportType = normalizeTransportType(body.transport_type || '');
     const from = String(body.from || '').trim();
@@ -112,7 +118,8 @@ export async function POST(request: NextRequest) {
     if (id) {
       const existing = await ref.get();
       if (!existing.exists) throw new Error('not-found');
-      if (!canManageAttendance(user) && existing.data()?.teacher_id !== user.uid) throw new Error('forbidden');
+      await requireTargetAccess(user, String(existing.data()?.teacher_id || ''));
+      if (existing.data()?.teacher_id !== teacherId) throw new Error('forbidden');
       await ref.set(payload, { merge: true });
     } else {
       await ref.set({ ...payload, created_at: Timestamp.now(), created_by: user.uid });
@@ -138,7 +145,7 @@ export async function PATCH(request: NextRequest) {
     const ref = adminDb().collection('teacher_commuter_passes').doc(id);
     const snap = await ref.get();
     if (!snap.exists) throw new Error('not-found');
-    if (!canManageAttendance(user) && snap.data()?.teacher_id !== user.uid) throw new Error('forbidden');
+    await requireTargetAccess(user, String(snap.data()?.teacher_id || ''));
 
     const update: Record<string, unknown> = {
       updated_at: Timestamp.now(),

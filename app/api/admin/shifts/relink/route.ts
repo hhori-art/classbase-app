@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
-import { getServerUser, isAdminLike, jsonError } from '@/lib/server-auth';
+import { canManageShifts, getServerUser, jsonError } from '@/lib/server-auth';
 import { normalizeAttendanceName } from '@/lib/attendance-diagnostics';
 
 export const runtime = 'nodejs';
@@ -9,7 +9,7 @@ export const runtime = 'nodejs';
 export async function POST(request: NextRequest) {
   try {
     const user = await getServerUser(request);
-    if (!isAdminLike(user)) throw new Error('forbidden');
+    if (!canManageShifts(user)) throw new Error('forbidden');
 
     const body = await request.json();
     const targetDate = String(body.target_date || '').trim();

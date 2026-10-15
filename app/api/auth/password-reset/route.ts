@@ -2,9 +2,15 @@ import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminAuth, adminDb } from '@/lib/firebase-admin';
 import { getServerUser, isAdminLike, jsonError } from '@/lib/server-auth';
+import { assertAccountTargetAllowed } from '@/lib/server/account-credentials';
 import { hashSecret, newSecretToken } from '@/lib/server/password-recovery';
 
 export const runtime = 'nodejs';
+
+const ADMIN_ROLES = new Set([
+  'master', 'admin', 'master_admin', 'super_admin', 'school_admin',
+  'branch_admin', 'campus_admin', 'classroom_admin', 'test_admin',
+]);
 
 export async function POST(request: NextRequest) {
   try {
@@ -17,6 +23,8 @@ export async function POST(request: NextRequest) {
     const db = adminDb();
     const targetSnap = await db.collection('users').doc(userId).get();
     if (!targetSnap.exists) return Response.json({ ok: false, error: 'user not found' }, { status: 404 });
+
+    assertAccountTargetAllowed(actor, targetSnap.data() || {});
 
     const token = newSecretToken();
     const expiresAt = new Date(Date.now() + 1000 * 60 * 60);
@@ -42,7 +50,7 @@ export async function PATCH(request: NextRequest) {
     const token = String(body.token || '').trim();
     const password = String(body.password || '');
     if (!token) return Response.json({ ok: false, error: 'token is required' }, { status: 400 });
-    if (password.length < 10 || password.length > 128) {
+    if (password.length < 6 || password.length > 128) {
       return Response.json({ ok: false, error: 'password-length' }, { status: 400 });
     }
 
@@ -62,9 +70,14 @@ export async function PATCH(request: NextRequest) {
     }
 
     const userId = String(tokenData.user_id || '');
+    if (!userId) return Response.json({ ok: false, error: 'invalid-token' }, { status: 400 });
     await db.runTransaction(async transaction => {
       const fresh = await transaction.get(tokenDoc.ref);
       if (fresh.data()?.used_at || fresh.data()?.processing_at) throw new Error('token-used');
+      const target = await transaction.get(db.collection('users').doc(userId));
+      if (!target.exists) throw new Error('invalid-token');
+      const targetRole = String(target.data()?.role || '').toLowerCase();
+      if (ADMIN_ROLES.has(targetRole)) throw new Error('reset-target-not-allowed');
       transaction.set(tokenDoc.ref, { processing_at: FieldValue.serverTimestamp() }, { merge: true });
     });
 
@@ -74,6 +87,7 @@ export async function PATCH(request: NextRequest) {
       await db.collection('users').doc(userId).set({
         initial_password: FieldValue.delete(),
         raw_password: FieldValue.delete(),
+        password: FieldValue.delete(),
         isFirstLogin: false,
         password_changed_at: FieldValue.serverTimestamp(),
         updated_at: FieldValue.serverTimestamp(),

@@ -2,23 +2,26 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Bell, Home, Briefcase, Settings, MessageCircle, Clock, LogOut } from 'lucide-react';
+import { Bell, Home, Briefcase, Settings, MessageCircle, Clock, LogOut, ClipboardCheck, Users, CalendarDays } from 'lucide-react';
 import { usePortalVisibility } from '@/app/hooks/usePortalVisibility';
 import { useAuth } from '@/app/context/AuthContext';
 import { hasScienceSocialProgram } from '@/lib/teacher-programs';
+import { isDedicatedAttendanceApproverProfile, isDedicatedProfile } from '@/lib/employment-category';
 
 export default function TeacherBottomNav() {
   const pathname = usePathname();
   const { visibility } = usePortalVisibility('teacher');
   const { profile, logout } = useAuth();
   const isAttendanceOnly = !hasScienceSocialProgram(profile);
+  const isDedicatedScienceSocial = Boolean(profile && isDedicatedProfile(profile) && !isAttendanceOnly);
+  const canApproveAttendance = Boolean(profile && isDedicatedAttendanceApproverProfile(profile));
 
   const handleLogout = async () => {
     if (!confirm('ログアウトしますか？')) return;
     await logout();
   };
 
-  const navItems = (isAttendanceOnly ? [
+  const attendanceNavItems = [
     {
       label: '勤怠',
       path: '/teacher/attendance',
@@ -27,6 +30,22 @@ export default function TeacherBottomNav() {
       bgColor: 'bg-blue-50',
       visible: true,
     },
+    ...(canApproveAttendance ? [{
+      label: '承認',
+      path: '/teacher/attendance-approvals',
+      icon: <ClipboardCheck size={24} />,
+      activeColor: 'text-emerald-600',
+      bgColor: 'bg-emerald-50',
+      visible: true,
+    }] : []),
+    ...(canApproveAttendance ? [{
+      label: 'シフト',
+      path: '/teacher/shift-management',
+      icon: <CalendarDays size={24} />,
+      activeColor: 'text-indigo-600',
+      bgColor: 'bg-indigo-50',
+      visible: true,
+    }] : []),
     {
       label: '設定',
       path: '/teacher/settings',
@@ -52,7 +71,20 @@ export default function TeacherBottomNav() {
       visible: true,
       onClick: handleLogout,
     },
-  ] : [
+  ];
+  const dedicatedNavItems = [
+    {
+      label: '校舎生徒',
+      path: '/teacher/school-students',
+      icon: <Users size={24} />,
+      activeColor: 'text-indigo-600',
+      bgColor: 'bg-indigo-50',
+      visible: true,
+    },
+    ...attendanceNavItems.filter(item => item.path !== '#logout'),
+    attendanceNavItems.find(item => item.path === '#logout')!,
+  ];
+  const scienceSocialNavItems = [
     { 
       label: 'ホーム', 
       path: '/teacher', 
@@ -71,7 +103,7 @@ export default function TeacherBottomNav() {
     },
     // ★ コミュニティリンクを追加
     { 
-      label: 'コミュニティ', 
+      label: '掲示板',
       path: '/teacher/community', 
       icon: <MessageCircle size={24} />, 
       activeColor: 'text-blue-500', 
@@ -94,7 +126,11 @@ export default function TeacherBottomNav() {
       bgColor: 'bg-gray-100',
       visible: visibility.settings !== false,
     },
-  ]).filter(item => item.visible);
+  ];
+  const navItems = (isAttendanceOnly
+    ? attendanceNavItems
+    : isDedicatedScienceSocial ? dedicatedNavItems : scienceSocialNavItems
+  ).filter(item => item.visible);
 
   // パス判定
   const isActive = (path: string) => {
@@ -134,12 +170,13 @@ export default function TeacherBottomNav() {
           </>
         );
 
-        if ('onClick' in item && item.onClick) {
+        if ('onClick' in item && typeof item.onClick === 'function') {
+          const onClick = item.onClick as () => void;
           return (
             <button
               key={item.path}
               type="button"
-              onClick={item.onClick}
+              onClick={() => void onClick()}
               className={baseClassName}
             >
               {content}

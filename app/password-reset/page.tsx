@@ -67,7 +67,7 @@ export default function PasswordResetRequestPage() {
                   </div>
                 )}
                 <a href="tel:0783214123" className="mt-5 inline-flex items-center gap-2 text-base font-black text-slate-900">
-                  <Phone size={18} /> 理社講座サポートセンター 078-321-4123
+                  <Phone size={18} /> 創造学園アプリ サポート窓口 078-321-4123
                 </a>
                 <p className="mt-2 text-xs font-bold leading-6 text-slate-400">受付番号とログインIDをお伝えください。</p>
               </>

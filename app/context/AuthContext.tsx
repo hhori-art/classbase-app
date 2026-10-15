@@ -4,19 +4,22 @@ import React, { createContext, useContext, useEffect, useRef, useState } from 'r
 import {
   onAuthStateChanged,
   User,
-  signInWithEmailAndPassword,
   signOut as firebaseSignOut,
   setPersistence,
   browserLocalPersistence,
 } from 'firebase/auth';
-import { doc, getDoc, getDocFromCache, serverTimestamp, updateDoc } from 'firebase/firestore';
+import { doc, getDocFromCache, serverTimestamp, updateDoc } from 'firebase/firestore';
 import { usePathname } from 'next/navigation';
 import { auth, db } from '@/lib/firebase';
 import { passwordChangePathForRole, shouldRedirectToPasswordChange } from '@/lib/first-login-guard';
+import { AuthRole, isPublicAuthPath, isRoleScopedPath, profileMatchesPath, targetPathForProfile } from '@/lib/auth-navigation';
+import { loadAuthenticatedProfile } from '@/lib/client-auth-profile';
+import { signInWithNetworkRetry } from '@/lib/client-auth-login';
+import { clearCourseRegistrationOptionsCache } from '@/lib/client-course-options';
 
 export interface UserProfile {
   uid: string;
-  role: 'student' | 'teacher' | 'master' | 'admin' | 'parent' | 'attendance_admin';
+  role: AuthRole;
   [key: string]: any;
 }
 
@@ -46,6 +49,7 @@ const isLoginLikePath = (path: string) =>
   path === '/' || path === '/login' || path.includes('login') || path.startsWith('/admin/login');
 
 const isDeniedPath = (path: string) => path === '/403' || path.startsWith('/403');
+const isPublicPath = isPublicAuthPath;
 const FORCE_LOGOUT_KEY = 'classbase_force_logout';
 const LOGIN_FLOW_LOCK_KEY = 'classbase_login_flow_lock';
 const ADMIN_ROLE_ALIASES = [
@@ -65,23 +69,10 @@ const normalizeRole = (role: any): 'student' | 'teacher' | 'master' | 'admin' | 
   const r = String(role || '').toLowerCase();
   if (r === 'teacher') return 'teacher';
   if (r === 'master') return 'master';
-  if (isAttendanceAdminRole(r)) return 'teacher';
+  if (isAttendanceAdminRole(r)) return 'attendance_admin';
   if (ADMIN_ROLE_ALIASES.includes(r)) return 'admin';
   if (r === 'parent' || r === 'guardian') return 'parent';
   return 'student';
-};
-
-const targetPathByRole = (role: 'student' | 'teacher' | 'master' | 'admin' | 'parent' | 'attendance_admin') => {
-  return '/apps';
-};
-
-const roleMatchesPath = (role: 'student' | 'teacher' | 'master' | 'admin' | 'parent' | 'attendance_admin', path: string) => {
-  if (path.startsWith('/zoom-meeting')) return true;
-  if (path === '/apps' || path.startsWith('/apps/')) return true;
-  if (role === 'teacher') return path.startsWith('/teacher') || path.startsWith('/eiken/teacher');
-  if (role === 'master' || role === 'admin') return path.startsWith('/master') || path.startsWith('/admin');
-  if (role === 'parent') return path.startsWith('/parent') || path.startsWith('/eiken/parent');
-  return path.startsWith('/student') || path.startsWith('/eiken/student');
 };
 
 const isChunkLoadError = (value: unknown) => {
@@ -169,15 +160,17 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const lastPathRef = useRef<string>('');
   const logoutInProgressRef = useRef(false);
   const authSettledRef = useRef(false);
+  const authTransitionRef = useRef(0);
+  const lastAuthenticatedUidRef = useRef<string | null>(null);
 
-  const clearAuthUiState = () => {
+  const clearAuthUiState = (keepLoading = false) => {
     redirectingRef.current = false;
     setUser(null);
     setProfile(null);
     setConnectionIssue(false);
     setProfileMissing(false);
     setAuthWaitTooLong(false);
-    setLoading(false);
+    setLoading(keepLoading);
   };
 
   useEffect(() => {
@@ -188,10 +181,34 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   }, []);
 
   useEffect(() => {
+    const handleProfileUpdated = (event: Event) => {
+      const updates = (event as CustomEvent<Record<string, unknown>>).detail;
+      if (!updates || typeof updates !== 'object') return;
+
+      // A course registration is written by a server route, so Firebase Auth
+      // does not emit another auth-state event. Keep the provider and its
+      // session cache in sync before the registration screen navigates home.
+      setProfile(current => {
+        if (!current) return current;
+        const cleanedUpdates = Object.fromEntries(
+          Object.entries(updates).filter(([, value]) => value !== undefined),
+        );
+        const nextProfile = { ...current, ...cleanedUpdates };
+        writeCachedProfile(nextProfile);
+        return nextProfile;
+      });
+      clearCourseRegistrationOptionsCache();
+    };
+
+    window.addEventListener('classbase:user-profile-updated', handleProfileUpdated);
+    return () => window.removeEventListener('classbase:user-profile-updated', handleProfileUpdated);
+  }, []);
+
+  useEffect(() => {
     if (!loading) return;
     const failSafe = window.setTimeout(() => {
       const currentPath = getBrowserPath() || '/';
-      if (isLoginLikePath(currentPath)) {
+      if (authSettledRef.current && !auth.currentUser && (isLoginLikePath(currentPath) || isPublicPath(currentPath))) {
         setLoading(false);
         setConnectionIssue(false);
         setProfileMissing(false);
@@ -216,7 +233,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       const currentPath = getBrowserPath() || '/';
       console.warn('Auth loading watchdog released the checking screen.');
 
-      if (isLoginLikePath(currentPath)) {
+      if (isLoginLikePath(currentPath) || isPublicPath(currentPath)) {
         setConnectionIssue(false);
         setProfileMissing(false);
         setLoading(false);
@@ -282,32 +299,28 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
   const logout = async () => {
     logoutInProgressRef.current = true;
+    authTransitionRef.current += 1;
     if (typeof window !== 'undefined') {
       sessionStorage.setItem(FORCE_LOGOUT_KEY, 'true');
     }
     clearProfileCache(user?.uid || auth.currentUser?.uid);
-    clearAuthUiState();
+    clearAuthUiState(true);
 
     try {
       await firebaseSignOut(auth);
     } catch (error) {
       console.error('Logout error:', error);
     } finally {
-      if (typeof window !== 'undefined' && (window.location.pathname !== '/' || window.location.search)) {
-        window.location.replace('/');
+      if (typeof window !== 'undefined') {
+        if (window.location.pathname !== '/' || window.location.search) {
+          window.location.replace('/');
+        } else {
+          sessionStorage.removeItem(FORCE_LOGOUT_KEY);
+          logoutInProgressRef.current = false;
+          setLoading(false);
+        }
       }
     }
-  };
-
-  const tryRepairProfile = async (currentUser: User) => {
-    const token = await currentUser.getIdToken();
-    const res = await fetch('/api/auth/repair-profile', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || data.ok === false) throw new Error(data.error || 'profile-repair-failed');
-    return data;
   };
 
   const finishAuthWithProfile = (
@@ -323,21 +336,25 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       return true;
     }
 
+    // 公開マニュアルは、未ログイン・ログイン済みのどちらでも表示する。
+    if (isPublicPath(currentPath)) {
+      setLoading(false);
+      return true;
+    }
+
     if (
       typeof window !== 'undefined' &&
       isLoginLikePath(currentPath) &&
       sessionStorage.getItem(LOGIN_FLOW_LOCK_KEY) === 'true'
     ) {
-      setLoading(false);
       return true;
     }
 
-    if (roleMatchesPath(normalizedProfile.role, currentPath)) {
+    if (profileMatchesPath(normalizedProfile, currentPath)) {
       if (shouldRedirectToPasswordChange(normalizedProfile, currentPath)) {
         const passwordPath = passwordChangePathForRole(normalizedProfile.role);
         if (!redirectingRef.current && currentPath !== passwordPath) {
           redirectingRef.current = true;
-          setLoading(false);
           window.location.replace(passwordPath);
           return true;
         }
@@ -346,15 +363,12 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       return true;
     }
 
-    const target = targetPathByRole(normalizedProfile.role);
+    const target = targetPathForProfile(normalizedProfile);
     if (!redirectingRef.current) {
       redirectingRef.current = true;
-      setLoading(false);
       window.location.replace(target);
       return true;
     }
-
-    setLoading(false);
     return true;
   };
 
@@ -371,7 +385,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         setConnectionIssue(false);
         setProfileMissing(false);
         setLoading(false);
-        if (!isLoginLikePath(currentPath) && !isDeniedPath(currentPath)) window.location.replace('/');
+        if (!isLoginLikePath(currentPath) && !isDeniedPath(currentPath) && !isPublicPath(currentPath)) window.location.replace('/');
         return;
       }
       setUser(auth.currentUser);
@@ -382,6 +396,11 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     }, AUTH_INIT_TIMEOUT_MS);
 
     const unsub = onAuthStateChanged(auth, async (currentUser) => {
+      const authTransition = ++authTransitionRef.current;
+      const isCurrentTransition = () =>
+        authTransitionRef.current === authTransition &&
+        (currentUser ? auth.currentUser?.uid === currentUser.uid : !auth.currentUser);
+
       authSettledRef.current = true;
       window.clearTimeout(initWatchdog);
       const currentPath = typeof window !== 'undefined' ? window.location.pathname : '/';
@@ -396,7 +415,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       // 強制ログアウト
       if (forceLogout) {
         logoutInProgressRef.current = true;
-        clearAuthUiState();
+        clearAuthUiState(true);
         if (typeof window !== 'undefined' && window.location.search.includes('logout=true')) {
           window.history.replaceState(null, '', window.location.pathname);
         }
@@ -405,9 +424,14 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         } catch (error) {
           console.error('Forced logout error:', error);
         }
-        if (!currentUser && typeof window !== 'undefined') {
-          sessionStorage.removeItem(FORCE_LOGOUT_KEY);
-          logoutInProgressRef.current = false;
+        if (typeof window !== 'undefined' && isCurrentTransition()) {
+          if (currentPath !== '/' || window.location.search) {
+            window.location.replace('/');
+          } else {
+            sessionStorage.removeItem(FORCE_LOGOUT_KEY);
+            logoutInProgressRef.current = false;
+            setLoading(false);
+          }
         }
         return;
       }
@@ -416,17 +440,18 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       if (!currentUser) {
         if (typeof window !== 'undefined') sessionStorage.removeItem(FORCE_LOGOUT_KEY);
         logoutInProgressRef.current = false;
-        clearProfileCache(user?.uid);
+        clearProfileCache(lastAuthenticatedUidRef.current);
+        lastAuthenticatedUidRef.current = null;
         setUser(null);
         setProfile(null);
         setConnectionIssue(false);
         setProfileMissing(false);
-        setLoading(false);
-
-        if (!isLoginLikePath(currentPath) && !isDeniedPath(currentPath)) {
+        if (!isLoginLikePath(currentPath) && !isDeniedPath(currentPath) && !isPublicPath(currentPath)) {
+          setLoading(true);
           window.location.replace('/');
           return;
         }
+        setLoading(false);
         return;
       }
 
@@ -436,71 +461,94 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       }
 
       // ログイン済み
+      lastAuthenticatedUidRef.current = currentUser.uid;
+      setLoading(true);
       setUser(currentUser);
+      setProfile(null);
       setConnectionIssue(false);
       setProfileMissing(false);
 
       try {
-        const cachedProfile = readCachedProfile(currentUser.uid);
+        // ログイン入り口では、管理者が変更した専任区分・理社講座の
+        // 紐付けを即座に反映するため、短時間のセッションキャッシュも使わない。
+        const cachedProfile = isLoginLikePath(currentPath) ? null : readCachedProfile(currentUser.uid);
         if (cachedProfile) {
+          if (!isCurrentTransition()) return;
           void touchLastLogin(currentUser.uid);
           finishAuthWithProfile(cachedProfile, currentPath, { cache: false });
           return;
         }
 
         const profileRef = doc(db, 'users', currentUser.uid);
-        let snap;
+        let profileData: Record<string, any> | null = null;
         try {
-          snap = await Promise.race([
-            getDoc(profileRef),
-            timeoutAfter(PROFILE_FETCH_TIMEOUT_MS, 'profile-fetch-timeout'),
+          profileData = await Promise.race([
+            loadAuthenticatedProfile(currentUser, PROFILE_FETCH_TIMEOUT_MS),
+            timeoutAfter(PROFILE_FETCH_TIMEOUT_MS + 500, 'profile-fetch-timeout'),
           ]);
         } catch (fetchError: any) {
-          if (String(fetchError?.message || '') !== 'profile-fetch-timeout') throw fetchError;
-          console.warn(`Profile fetch timed out after ${PROFILE_FETCH_TIMEOUT_MS}ms; trying cached profile.`);
+          // 無効化・失効したアカウントは古いキャッシュで入れないよう、ここで打ち切る。
+          if (
+            fetchError?.status === 401 ||
+            ['account-inactive', 'auth/user-disabled', 'auth/user-token-expired', 'auth/id-token-revoked', 'auth/id-token-expired']
+              .includes(String(fetchError?.code || '')) ||
+            String(fetchError?.code || '').includes('reauth')
+          ) throw fetchError;
+          console.warn('Server profile fetch failed; trying Firestore browser cache.', fetchError);
           try {
-            snap = await getDocFromCache(profileRef);
+            const cachedSnapshot = await getDocFromCache(profileRef);
+            if (cachedSnapshot.exists()) profileData = cachedSnapshot.data();
           } catch {
             throw fetchError;
           }
         }
 
-        if (!snap.exists()) {
-          try {
-            await tryRepairProfile(currentUser);
-            snap = await Promise.race([
-              getDoc(profileRef),
-              timeoutAfter(PROFILE_FETCH_TIMEOUT_MS, 'profile-fetch-timeout'),
-            ]);
-          } catch (repairError) {
-            console.warn('Profile repair failed:', repairError);
-          }
-        }
+        if (!isCurrentTransition()) return;
 
-        if (!snap.exists()) {
+        if (!profileData) {
           // ★ここが「止まる」原因になりやすい：必ずloadingを解除し、表示する
           setProfile(null);
           setProfileMissing(true);
           setLoading(false);
 
           // login画面ならそのまま（管理者が再登録などできる）
-          if (isLoginLikePath(currentPath) || isDeniedPath(currentPath)) return;
+          if (isLoginLikePath(currentPath) || isDeniedPath(currentPath) || isPublicPath(currentPath)) return;
 
           // 保護画面にいるなら、いったんトップへ戻す（無限ループ防止）
           window.location.replace('/?profile_missing=true');
           return;
         }
 
-        const data = snap.data() as UserProfile;
+        const data = profileData as UserProfile;
         const role = normalizeRole(data.role);
         const normalizedProfile = { ...data, uid: currentUser.uid, role };
         void touchLastLogin(currentUser.uid);
         finishAuthWithProfile(normalizedProfile, currentPath);
       } catch (err: any) {
+        if (!isCurrentTransition()) return;
         console.error('Profile fetch error:', err);
 
         const code = err?.code;
         const msg = String(err?.message || '').toLowerCase();
+
+        const accountInactive = code === 'account-inactive';
+        if (
+          err?.status === 401 || accountInactive ||
+          ['auth/id-token-revoked', 'auth/id-token-expired', 'auth/user-token-expired', 'auth/user-disabled', 'reauth-required'].includes(String(code || '')) ||
+          msg.includes('token has been revoked') || msg.includes('session-expired') || msg.includes('再度ログイン')
+        ) {
+          logoutInProgressRef.current = true;
+          clearProfileCache(currentUser.uid);
+          clearAuthUiState(true);
+          try {
+            await firebaseSignOut(auth);
+          } catch (signOutError) {
+            console.error('Expired session cleanup failed:', signOutError);
+          } finally {
+            window.location.replace(accountInactive ? '/?reason=account-inactive' : '/?reason=session-expired');
+          }
+          return;
+        }
 
         if (code === 'unavailable' || msg.includes('offline') || msg.includes('profile-fetch-timeout')) {
           setConnectionIssue(true);
@@ -523,22 +571,38 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
   const login = async (email: string, pass: string) => {
     if (typeof window !== 'undefined') sessionStorage.removeItem(FORCE_LOGOUT_KEY);
-    await signInWithEmailAndPassword(auth, email, pass);
+    await signInWithNetworkRetry(auth, email, pass);
   };
 
-  const renderPath = clientPath || pathname || '';
+  const renderPath = pathname || clientPath || '';
   const isAuthScreenPath = Boolean(renderPath && isLoginLikePath(renderPath));
-  const shouldShowLoading =
-    loading && !isAuthScreenPath;
+  const isPublicScreenPath = Boolean(renderPath && isPublicPath(renderPath));
+  const hasIdentityMismatch = Boolean(user && profile && profile.uid !== user.uid);
+  const hasRolePathMismatch = Boolean(
+    profile &&
+    renderPath &&
+    isRoleScopedPath(renderPath) &&
+    !isLoginLikePath(renderPath) &&
+    !isDeniedPath(renderPath) &&
+    !profileMatchesPath(profile, renderPath)
+  );
+  // Login screens own their submit state. Keep them mounted while Firebase restores
+  // the session so users do not see a separate account-check screen between pages.
+  const shouldShowLoading = !isAuthScreenPath && !isPublicScreenPath && (loading || hasIdentityMismatch || hasRolePathMismatch);
+
+  useEffect(() => {
+    if (loading || !user || !profile || !renderPath || !hasRolePathMismatch) return;
+    redirectingRef.current = true;
+    setLoading(true);
+    window.location.replace(targetPathForProfile(profile));
+  }, [hasRolePathMismatch, loading, profile, renderPath, user]);
 
   return (
     <AuthContext.Provider value={{ user, profile, loading, connectionIssue, profileMissing, login, logout }}>
       {shouldShowLoading ? (
-        <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 px-6 text-center">
-          <div className="animate-spin h-10 w-10 border-4 border-indigo-500 rounded-full border-t-transparent"></div>
-          <p className="mt-4 text-sm font-bold text-gray-400">アカウントを確認中...</p>
+        <div className="min-h-[100dvh] bg-gray-50" aria-busy="true" aria-label="">
           {authWaitTooLong ? (
-            <div className="mt-5 max-w-sm">
+            <div className="flex min-h-[100dvh] flex-col items-center justify-center px-6 text-center">
               <p className="text-xs leading-6 text-gray-500">
                 確認に時間がかかっています。通信またはユーザーデータの取得で止まっている可能性があります。
               </p>
@@ -560,7 +624,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
             </div>
           ) : null}
         </div>
-      ) : connectionIssue && !isAuthScreenPath ? (
+      ) : connectionIssue && !isAuthScreenPath && !isPublicScreenPath ? (
         <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 px-6 text-center">
           <div className="h-12 w-12 rounded-full border-4 border-gray-300 border-t-transparent animate-spin"></div>
           <p className="mt-4 text-sm font-bold text-gray-600">接続が不安定です</p>
@@ -569,7 +633,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
             リロード
           </button>
         </div>
-      ) : profileMissing && !isAuthScreenPath ? (
+      ) : profileMissing && !isAuthScreenPath && !isPublicScreenPath ? (
         <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 px-6 text-center">
           <p className="text-sm font-bold text-gray-700">ユーザーデータが見つかりません</p>
           <p className="mt-2 text-xs text-gray-500">初回登録が未完了、または users/{`{uid}`} が存在しません。</p>

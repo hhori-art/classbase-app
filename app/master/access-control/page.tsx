@@ -35,7 +35,7 @@ type PermissionHistory = {
 const PERMISSION_PRESETS: Array<{ label: string; permissions: AdminAppPermissions }> = [
   { label: '理社講座のみ', permissions: { science_social: true, eiken: false, attendance: false } },
   { label: 'Boosterのみ', permissions: { science_social: false, eiken: true, attendance: false } },
-  { label: '勤怠のみ', permissions: { science_social: false, eiken: false, attendance: true } },
+  { label: '勤怠管理', permissions: { science_social: false, eiken: false, attendance: true } },
   { label: 'すべて', permissions: { science_social: true, eiken: true, attendance: true } },
   { label: 'すべて停止', permissions: { science_social: false, eiken: false, attendance: false } },
 ];

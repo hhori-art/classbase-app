@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { Bell, HelpCircle, Home, LogOut, MessageCircle, UserRound } from 'lucide-react';
+import { BarChart3, Bell, Home, LogOut, Megaphone, MessageCircle, UserRound } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
 import NotificationBell from '@/app/components/NotificationBell';
 import { usePortalVisibility } from '@/app/hooks/usePortalVisibility';
@@ -15,8 +15,10 @@ export default function ParentLayout({ children }: { children: React.ReactNode }
 
   const navItems = [
     { href: '/parent', label: 'ホーム', icon: Home, visible: true },
-    { href: '/parent/messages', label: 'AI・連絡', icon: MessageCircle, visible: visibility.aiMessages },
-    { href: '/parent/contact', label: '問合せ', icon: HelpCircle, visible: visibility.contact !== false },
+    { href: '/parent/pf', label: '学習状況', icon: BarChart3, visible: true },
+    { href: '/parent/news', label: 'お知らせ', icon: Megaphone, visible: true },
+    { href: '/parent/messages', label: 'AI履歴', icon: MessageCircle, visible: visibility.aiMessages },
+    { href: '/parent/contact', label: '教室連絡', icon: MessageCircle, visible: visibility.contact !== false },
     { href: '/parent/notifications', label: '通知', icon: Bell, visible: visibility.notifications !== false },
     { href: '/parent/settings', label: '設定', icon: Bell, visible: visibility.settings !== false && visibility.notificationSettings !== false },
   ].filter(item => item.visible);

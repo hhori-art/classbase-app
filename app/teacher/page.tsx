@@ -3,9 +3,10 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs } from 'firebase/firestore';
-import { Loader2 } from 'lucide-react';
+import { collection, query, where, getDocs, getCountFromServer } from 'firebase/firestore';
 import TeacherDashboard from '@/app/components/TeacherDashboard';
+import { jstDateKey } from '@/lib/date-key';
+import { selectDisplayShiftAssignments } from '@/lib/shift-assignment-display';
 
 export default function TeacherPage() {
   const { user, profile, loading } = useAuth();
@@ -21,7 +22,7 @@ export default function TeacherPage() {
   const [dataLoading, setDataLoading] = useState(true);
 
   // 基準日（デフォルトは今日）
-  const [currentDate, setCurrentDate] = useState(new Date().toISOString().split('T')[0]);
+  const [currentDate, setCurrentDate] = useState(jstDateKey());
 
   useEffect(() => {
     if (!user) return;
@@ -47,7 +48,9 @@ export default function TeacherPage() {
         );
         
         const shiftsSnap = await getDocs(shiftsQuery);
-        const fetchedAssignments = shiftsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        const fetchedAssignments = selectDisplayShiftAssignments(
+          shiftsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() })),
+        );
         
         // ソート
         fetchedAssignments.sort((a: any, b: any) => {
@@ -62,8 +65,8 @@ export default function TeacherPage() {
           collection(db, 'submissions'),
           where('status', '==', 'pending')
         );
-        const pendingSnap = await getDocs(pendingQuery);
-        setPendingCount(pendingSnap.size);
+        const pendingSnap = await getCountFromServer(pendingQuery);
+        setPendingCount(pendingSnap.data().count);
 
       } catch (e) {
         console.error('Teacher Data Fetch Error:', e);
@@ -85,14 +88,7 @@ export default function TeacherPage() {
 
   // ローディング中
   if (loading || dataLoading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50">
-        <div className="flex flex-col items-center gap-4">
-          <Loader2 className="animate-spin text-indigo-600" size={40} />
-          <p className="text-slate-400 text-sm font-bold">データを読み込んでいます...</p>
-        </div>
-      </div>
-    );
+    return <div className="min-h-[100dvh] bg-slate-50" aria-busy="true" />;
   }
 
   if (!user) return null;

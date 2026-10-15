@@ -1,68 +1,21 @@
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 
-const EMAIL_DOMAINS = ['classbase.local', 'sozogakuen.co.jp'];
-
 const clean = (value: unknown) => String(value || '').trim();
 
-const emailLocalPart = (email?: string | null) => {
-  const normalized = clean(email).toLowerCase();
-  if (!normalized.includes('@')) return normalized;
-  return normalized.split('@')[0] || '';
-};
-
-const unique = <T>(items: T[]) => Array.from(new Set(items.filter(Boolean)));
-
-const loginCandidatesFromEmail = (email?: string | null) => {
-  const normalizedEmail = clean(email).toLowerCase();
-  const local = emailLocalPart(normalizedEmail);
-  const localVariants = unique([local, local.toLowerCase(), local.toUpperCase()]);
-  return unique([
-    normalizedEmail,
-    ...localVariants,
-    ...localVariants.flatMap(candidate => EMAIL_DOMAINS.map(domain => candidate ? `${candidate}@${domain}` : '')),
-  ]);
-};
-
-const passwordFields = ['initial_password', 'raw_password', 'password'];
-
-function candidateScore(docId: string, data: FirebaseFirestore.DocumentData, uid: string, email: string) {
-  let score = 0;
-  const normalizedEmail = clean(email).toLowerCase();
-  if (docId === uid) score += 1000;
-  if (clean(data.uid) === uid || clean(data.id) === uid) score += 100;
-  if (clean(data.email).toLowerCase() === normalizedEmail) score += 50;
-  if ((data.account_status || data.status || 'active') === 'active') score += 10;
-  if (data.role) score += 5;
-  if (passwordFields.some(key => data[key])) score += 3;
-  return score;
-}
-
-async function findProfileCandidates(uid: string, email?: string | null) {
+// Only a server-managed Auth UID binding establishes profile ownership.
+// Email/local-part matches are hints for administrators, not authentication proof.
+async function findProfileCandidates(uid: string) {
   const db = adminDb();
+  const snapshots = await Promise.all(['uid', 'id'].map(field =>
+    db.collection('users').where(field, '==', uid).limit(2).get()
+  ));
   const candidates = new Map<string, FirebaseFirestore.QueryDocumentSnapshot>();
-  const direct = await db.collection('users').doc(uid).get();
-  if (direct.exists) candidates.set(direct.id, direct as FirebaseFirestore.QueryDocumentSnapshot);
-
-  for (const login of loginCandidatesFromEmail(email)) {
-    const queries = [
-      db.collection('users').where('email', '==', login).limit(10).get(),
-      db.collection('users').where('lifetime_id', '==', login).limit(10).get(),
-      db.collection('users').where('initial_login_id', '==', login).limit(10).get(),
-    ];
-
-    if (/^\d+$/.test(login)) {
-      queries.push(db.collection('users').where('lifetime_id', '==', Number(login)).limit(10).get());
-    }
-
-    const snaps = await Promise.all(queries);
-    snaps.forEach(snap => snap.docs.forEach(doc => candidates.set(doc.id, doc)));
-  }
-
-  return Array.from(candidates.values()).sort((a, b) =>
-    candidateScore(b.id, b.data(), uid, clean(email).toLowerCase()) -
-    candidateScore(a.id, a.data(), uid, clean(email).toLowerCase())
-  );
+  snapshots.forEach(snapshot => snapshot.docs.forEach(doc => candidates.set(doc.id, doc)));
+  return Array.from(candidates.values()).filter(doc => {
+    const data = doc.data();
+    return (!data.uid || data.uid === uid) && (!data.id || data.id === uid);
+  });
 }
 
 async function updateParentStudentLinks(role: string, oldId: string, uid: string, data: FirebaseFirestore.DocumentData) {
@@ -106,15 +59,15 @@ export async function repairUserProfileForAuth(uid: string, email?: string | nul
     return { ok: true, repaired: Object.keys(patch).length > 0, uid, source_id: uid };
   }
 
-  const candidates = await findProfileCandidates(uid, email);
-  const source = candidates.find(doc => doc.id !== uid);
+  const candidates = await findProfileCandidates(uid);
+  const source = candidates.length === 1 ? candidates[0] : undefined;
   if (!source) return { ok: false, error: 'profile-not-found' };
 
   const data = source.data() || {};
   const role = clean(data.role || 'student').toLowerCase();
   const normalizedEmail = clean(email || data.email).toLowerCase();
 
-  await targetRef.set({
+  await targetRef.create({
     ...data,
     uid,
     id: uid,
@@ -123,7 +76,7 @@ export async function repairUserProfileForAuth(uid: string, email?: string | nul
     identity_repaired_at: FieldValue.serverTimestamp(),
     updated_at: FieldValue.serverTimestamp(),
     created_at: data.created_at || FieldValue.serverTimestamp(),
-  }, { merge: true });
+  });
 
   await updateParentStudentLinks(role, source.id, uid, data);
   await source.ref.delete().catch(() => {});

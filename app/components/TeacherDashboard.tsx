@@ -121,10 +121,15 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
 
   const launchWebUrl = (url: string, targetWindow?: Window | null) => {
     if (targetWindow && !targetWindow.closed) {
-      targetWindow.location.href = url;
+      targetWindow.location.replace(url);
       return;
     }
-    window.open(url, '_blank');
+
+    // API待機後の window.open は、Safariやポップアップ制限中の
+    // ブラウザでは null になる。その場合もホスト開始URLを失わないよう、
+    // 現在のタブで確実に開く。
+    const openedWindow = window.open(url, '_blank');
+    if (!openedWindow) window.location.assign(url);
   };
   const handleEnterZoom = async (e: React.MouseEvent) => {
     e.preventDefault();
@@ -139,6 +144,7 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
       const popup = window.open('', '_blank');
       if (popup) {
         popup.document.write('<p style="font-family: sans-serif; padding: 24px;">Zoomホスト開始を準備しています...</p>');
+        popup.document.close();
       }
       setLoading(true);
       try {

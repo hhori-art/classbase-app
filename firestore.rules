@@ -3,7 +3,9 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     function signedIn() {
-      return request.auth != null;
+      return request.auth != null &&
+        !(get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('account_status', 'active') in ['suspended', 'withdrawn', 'archived']) &&
+        !(get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('status', 'active') in ['suspended', 'withdrawn', 'archived']);
     }
 
     function myUser() {
@@ -19,7 +21,7 @@ service cloud.firestore {
     }
 
     function isParent() {
-      return role() == 'parent' || role() == 'guardian';
+      return role() in ['parent', 'guardian'];
     }
 
     function isTeacher() {
@@ -27,9 +29,17 @@ service cloud.firestore {
     }
 
     function isAttendanceAdmin() {
-      return role() == 'attendance_admin' ||
-        role() == 'attendance_only' ||
-        role() == 'attendance_manager';
+      return role() in ['attendance_admin', 'attendance_only', 'attendance_manager'];
+    }
+
+    function isDedicatedAttendanceApprover() {
+      return isTeacher() &&
+        myUser().get('attendance_school_manager', false) == true &&
+        (
+          myUser().get('employment_category', '') in ['dedicated', 'employee', 'full_time', 'regular_employee', '専任', '社員', '正社員'] ||
+          myUser().get('employment_type', '') in ['dedicated', 'employee', 'full_time', 'regular_employee', '専任', '社員', '正社員'] ||
+          myUser().get('worker_type', '') in ['dedicated', 'employee', 'full_time', 'regular_employee', '専任', '社員', '正社員']
+        );
     }
 
     function canUseTeacherAttendance() {
@@ -37,15 +47,8 @@ service cloud.firestore {
     }
 
     function isAdminRole() {
-      return role() == 'admin' ||
-        role() == 'master' ||
-        role() == 'school_admin' ||
-        role() == 'branch_admin' ||
-        role() == 'campus_admin' ||
-        role() == 'classroom_admin' ||
-        role() == 'test_admin' ||
-        role() == 'master_admin' ||
-        role() == 'super_admin';
+      return role() in ['admin', 'master', 'school_admin', 'branch_admin', 'campus_admin',
+        'classroom_admin', 'test_admin', 'master_admin', 'super_admin'];
     }
 
     function isAdmin() {
@@ -62,8 +65,21 @@ service cloud.firestore {
 
     function adminSafeUserUpdate() {
       return isAdmin() &&
+        resource.data.role in ['student', 'teacher', 'parent', 'guardian'] &&
+        canManageSchool(resource.data.get('school_id', resource.data.get('school', null))) &&
         !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-          'role', 'admin', 'admin_permissions', 'eiken_admin', 'enabled_programs',
+          'uid', 'id', 'email', 'lifetime_id', 'initial_login_id', 'credential_primary_uid',
+          'staff_id', 'staffId', 'employee_id', 'employeeId', 'teacher_code',
+          'school_code', 'schoolCode', 'school_name', 'schoolName', 'school_number', 'affiliation', 'department',
+          'tp_serial', 'tpSerial', 'tp_number', 'tpNumber', 'tp',
+          'prescribed_work_start', 'prescribed_work_end', 'prescribed_break_minutes', 'prescribed_work_days',
+          'school', 'school_id', 'classroom',
+          'employment_category', 'employment_type', 'worker_type', 'attendance_school_manager',
+          'zoom_email', 'zoomEmail', 'target_signin_address', 'signin_address', 'teacher_zoom_email',
+          'teacher_name', 'student_name', 'name', 'display_name', 'displayName', 'full_name',
+          'role', 'admin', 'admin_permissions', 'eiken_admin', 'eiken_teacher', 'enabled_programs',
+          'parent_uid', 'parent_ids', 'student_ids',
+          'recovery_email', 'recovery_email_verified_at', 'pending_recovery_email', 'recovery_email_verification_sent_at',
           'permissions_updated_at', 'permissions_updated_by',
           'email', 'lifetime_id', 'initial_login_id',
           'initial_password', 'raw_password', 'password', 'parent_initial_password',
@@ -126,9 +142,20 @@ service cloud.firestore {
 
     function userSafeUpdate() {
       return !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+        'uid', 'id', 'email', 'lifetime_id', 'initial_login_id', 'credential_primary_uid',
+          'staff_id', 'staffId', 'employee_id', 'employeeId', 'teacher_code',
+          'school_code', 'schoolCode', 'school_name', 'schoolName', 'school_number', 'affiliation', 'department',
+          'tp_serial', 'tpSerial', 'tp_number', 'tpNumber', 'tp',
+          'prescribed_work_start', 'prescribed_work_end', 'prescribed_break_minutes', 'prescribed_work_days',
+          'school', 'school_id', 'classroom',
+          'employment_category', 'employment_type', 'worker_type', 'attendance_school_manager',
+          'zoom_email', 'zoomEmail', 'target_signin_address', 'signin_address', 'teacher_zoom_email',
+          'teacher_name', 'student_name', 'name', 'display_name', 'displayName', 'full_name',
         'coins', 'total_coins', 'points', 'total_points', 'risk', 'churn_risk',
         'role', 'admin', 'school_ids', 'account_status', 'status',
         'earned_badges', 'attendance_count', 'quest_clear_count',
+        // 報酬判定・配信対象の絞り込みにサーバーが使う属性は本人が変更できない。
+        'grade', 'class', 'subjects', 'test_subjects', 'login_streak', 'last_login_bonus_date',
         'initial_password', 'raw_password', 'password', 'parent_initial_password',
         'initial_password_policy', 'isFirstLogin',
         'enabled_programs', 'eiken_teacher', 'eiken_admin', 'admin_permissions',
@@ -152,44 +179,6 @@ service cloud.firestore {
       return isParent() &&
         request.resource.data.parent_id == request.auth.uid &&
         parentLinkedTo(request.resource.data.student_id);
-    }
-
-    function courseRegistrationOwnerCreate() {
-      return signedIn() &&
-        (
-          (isStudent() && request.resource.data.student_id == request.auth.uid) ||
-          (isParent() && request.resource.data.parent_id == request.auth.uid && parentLinkedTo(request.resource.data.student_id))
-        ) &&
-        request.resource.data.status in ['active', 'submitted'] &&
-        !request.resource.data.keys().hasAny(['approved_by', 'approved_at']);
-    }
-
-    function courseRegistrationOwnerUpdate() {
-      return signedIn() &&
-        (
-          (isStudent() && resource.data.student_id == request.auth.uid && request.resource.data.student_id == request.auth.uid) ||
-          (isParent() && resource.data.parent_id == request.auth.uid && request.resource.data.parent_id == request.auth.uid && parentLinkedTo(resource.data.student_id))
-        ) &&
-        request.resource.data.status in ['active', 'submitted'] &&
-        !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-          'student_id', 'parent_id', 'approved_by', 'approved_at'
-        ]);
-    }
-
-    function topicSafeReactionUpdate() {
-      return signedIn() &&
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          'likes', 'liked_by', 'votes', 'voted_by', 'updated_at'
-        ]);
-    }
-
-    function topicOwnerSafeUpdate() {
-      return signedIn() &&
-        resource.data.creator_uid == request.auth.uid &&
-        request.resource.data.creator_uid == request.auth.uid &&
-        !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-          'creator_uid', 'created_at', 'is_approved'
-        ]);
     }
 
     function teacherOwnAvailabilityCreate() {
@@ -220,25 +209,16 @@ service cloud.firestore {
     }
 
     function teacherWorkUpdate() {
-      return canUseTeacherAttendance() &&
-        resource.data.teacher_id == request.auth.uid &&
-        request.resource.data.teacher_id == request.auth.uid &&
-        (!resource.data.keys().hasAny(['status']) || resource.data.status != 'approved') &&
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          'attendance_kind',
-          'work_segments',
-          'transportation',
-          'updated_at',
-          'updated_at_server'
-        ]);
+      // 勤務内訳は校舎別承認情報を含むため、講師本人は Admin SDK の専用API経由で更新する。
+      return false;
     }
 
     match /users/{userId} {
       allow read: if signedIn() && (
         request.auth.uid == userId ||
-        isAdmin() ||
-        isEikenAdmin() ||
-        isAttendanceManager() ||
+        isMaster() ||
+        (resource.data.role in ['student', 'teacher', 'parent', 'guardian', 'attendance_admin', 'attendance_only', 'attendance_manager'] &&
+          (isAdmin() || isEikenAdmin() || isAttendanceManager())) ||
         parentLinkedTo(userId)
       );
       allow create: if isMaster();
@@ -250,9 +230,7 @@ service cloud.firestore {
       allow delete: if isMaster();
 
       match /chat_history/{messageId} {
-        allow read: if signedIn() && (request.auth.uid == userId || isTeacher() || isAdmin() || parentLinkedTo(userId));
-        allow create: if signedIn() && request.auth.uid == userId;
-        allow update, delete: if isAdmin();
+        allow read, write: if false;
       }
 
       match /point_history/{historyId} {
@@ -323,7 +301,8 @@ service cloud.firestore {
     }
 
     match /monthly_schedules/{scheduleId} {
-      allow read: if signedIn();
+      // 生徒・保護者には校舎・学年・対象ロールを検証するAPI経由で配信する。
+      allow read: if isTeacher() || isAdmin();
       allow write: if false;
     }
 
@@ -342,11 +321,14 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    match /test_prep_course_options/{optionId} {
+      allow read, write: if false;
+    }
+
     match /course_registrations/{registrationId} {
       allow read: if signedIn() && (resource.data.parent_id == request.auth.uid || isAdmin() || parentLinkedTo(resource.data.student_id));
-      allow create: if isAdmin() || courseRegistrationOwnerCreate();
-      allow update: if isAdmin() || courseRegistrationOwnerUpdate();
-      allow delete: if isAdmin();
+      // 候補、学年、受付期間、重複を再検証する専用API（Admin SDK）だけが更新する。
+      allow write: if false;
     }
 
     match /attendance_correction_requests/{requestId} {
@@ -356,29 +338,21 @@ service cloud.firestore {
 
     match /attendance/{attendanceId} {
       allow read: if signedIn() && (resource.data.user_id == request.auth.uid || isTeacher() || isAdmin() || parentLinkedTo(resource.data.user_id));
-      allow create: if isAdmin() || (isStudent() && request.resource.data.user_id == request.auth.uid);
-      allow update: if isAdmin() ||
-        (isStudent() &&
-          resource.data.user_id == request.auth.uid &&
-          request.resource.data.user_id == request.auth.uid &&
-          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-            'user_id', 'approved_at', 'approved_by', 'status', 'points', 'coins'
-          ])
-        );
+      // 出席の作成・更新は、授業の存在と当日性を検証する専用API（Admin SDK）に限定する。
+      allow create, update: if isAdmin();
       allow delete: if isAdmin();
     }
 
     match /submissions/{submissionId} {
       allow read: if signedIn() && (resource.data.student_id == request.auth.uid || isTeacher() || isAdmin() || parentLinkedTo(resource.data.student_id));
-      allow create: if isStudent() && request.resource.data.student_id == request.auth.uid;
-      allow update: if isAdmin() ||
-        (isTeacher() && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['student_id', 'assignment_id'])) ||
-        (isStudent() && request.resource.data.student_id == request.auth.uid);
+      // 提出と講師確認は課題対象・画像・状態遷移を検証する専用APIのみが書き込む。
+      allow create, update: if false;
       allow delete: if isAdmin();
     }
 
     match /homework_assignments/{assignmentId} {
-      allow read: if signedIn();
+      // 生徒には学年・受講科目を検証する専用API経由でのみ配信する。
+      allow read: if isTeacher() || isAdmin();
       allow create, update, delete: if isTeacher() || isAdmin();
     }
 
@@ -388,53 +362,59 @@ service cloud.firestore {
     }
 
     match /class_recordings/{recordingId} {
-      allow read: if signedIn();
+      // 生徒には学年・科目・校舎・公開状態を検証するAPI経由で配信する。
+      allow read: if isTeacher() || isAdmin();
       allow write: if isAdmin();
     }
 
+    // Zoom録画の再生パスコードはAdmin SDKからのみ利用する。
+    match /recording_playback_secrets/{recordingId} {
+      allow read, write: if false;
+    }
+
+    match /recording_playback_sessions/{sessionId} {
+      allow read, write: if false;
+    }
+
     match /teacher_inquiries/{inquiryId} {
-      allow read: if isTeacher() || isAdmin();
-      allow create: if isStudent() && request.resource.data.studentId == request.auth.uid;
-      allow update: if isTeacher() || isAdmin();
-      allow delete: if isAdmin();
+      allow read, write: if false;
     }
 
     match /chat_logs/{messageId} {
-      allow read: if signedIn() && (resource.data.uid == request.auth.uid || isTeacher() || isAdmin() || parentLinkedTo(resource.data.uid));
-      allow create: if isTeacher() || isAdmin() || (isStudent() && request.resource.data.uid == request.auth.uid);
-      allow update, delete: if isAdmin();
+      allow read, write: if false;
     }
 
     match /community_topics/{topicId} {
-      allow read: if signedIn();
-      allow create: if isStudent() && request.resource.data.creator_uid == request.auth.uid;
-      allow update: if isAdmin() || topicOwnerSafeUpdate() || topicSafeReactionUpdate();
-      allow delete: if isAdmin() || (signedIn() && resource.data.creator_uid == request.auth.uid);
+      allow read: if signedIn() && (isAdmin() || resource.data.is_approved == true);
+      allow create: if false;
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
 
       match /comments/{commentId} {
-        allow read: if signedIn();
-        allow create: if isStudent() && request.resource.data.uid == request.auth.uid;
+        allow read: if signedIn() && (
+          isAdmin() ||
+          get(/databases/$(database)/documents/community_topics/$(topicId)).data.is_approved == true
+        );
+        allow create: if false;
         allow update, delete: if isAdmin() || (signedIn() && resource.data.uid == request.auth.uid);
       }
     }
 
     match /teacher_community_topics/{topicId} {
       allow read: if isTeacher() || isAdmin();
-      allow create: if isTeacher() && request.resource.data.creator_uid == request.auth.uid;
-      allow update: if isAdmin() || topicOwnerSafeUpdate() || topicSafeReactionUpdate();
-      allow delete: if isAdmin() || (isTeacher() && resource.data.creator_uid == request.auth.uid);
+      // サーバーで入力上限、投票、いいね、所有者を検証する。
+      allow create, update, delete: if isAdmin();
 
       match /comments/{commentId} {
         allow read: if isTeacher() || isAdmin();
-        allow create: if isTeacher() && request.resource.data.uid == request.auth.uid;
-        allow update, delete: if isAdmin() || (isTeacher() && resource.data.uid == request.auth.uid);
+        allow create, update, delete: if isAdmin();
       }
     }
 
     match /contact_logs/{logId} {
       allow read: if isTeacher() || isAdmin();
       allow create: if isTeacher() || isAdmin();
-      allow update, delete: if isAdmin();
+      allow update, delete: if isMaster();
     }
 
     match /pf_records/{recordId} {
@@ -451,9 +431,9 @@ service cloud.firestore {
 
     match /work_records/{recordId} {
       allow read: if signedIn() && (resource.data.teacher_id == request.auth.uid || isAttendanceManager());
-      allow create: if teacherWorkCreate();
-      allow update: if teacherWorkUpdate() || isAttendanceManager();
-      allow delete: if isAttendanceManager();
+      // 承認者の更新・削除は担当校舎を検証する専用APIだけに集約する。
+      // masterの旧管理画面の後方互換書き込みのみ直接操作を許可する。
+      allow create, update, delete: if isMaster();
     }
 
     // 給与単価・通常勤怠インポートは機微情報のため、Admin SDK経由の専用APIのみ許可する。
@@ -462,6 +442,7 @@ service cloud.firestore {
     }
 
     match /attendance_regular_imports/{importId} {
+      // 取込元の給与データは専用APIで校舎範囲を検証して返す。
       allow read, write: if false;
     }
 
@@ -469,11 +450,45 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    match /attendance_integration_alerts/{alertId} {
+      allow read: if isAttendanceManager();
+      allow write: if false;
+    }
+
+    match /attendance_integration_batches/{batchId} {
+      allow read, write: if false;
+    }
+
+    match /attendance_integration_history/{historyId} {
+      allow read: if isAttendanceManager();
+      allow write: if false;
+    }
+
     match /teacher_availability/{availabilityId} {
       allow read: if isTeacher() || isAttendanceManager();
       allow create: if teacherOwnAvailabilityCreate() || isAttendanceManager();
       allow update: if teacherOwnAvailabilityUpdate() || isAttendanceManager();
       allow delete: if isAttendanceManager() || (isTeacher() && (resource.data.teacher_id == request.auth.uid || resource.data.user_id == request.auth.uid));
+    }
+
+    match /teacher_availability_profiles/{teacherId} {
+      allow read: if isAttendanceManager() || (isTeacher() && teacherId == request.auth.uid);
+      allow create: if isAttendanceManager() || (
+        isTeacher() &&
+        teacherId == request.auth.uid &&
+        request.resource.data.teacher_id == request.auth.uid &&
+        request.resource.data.user_id == request.auth.uid
+      );
+      allow update: if isAttendanceManager() || (
+        isTeacher() &&
+        teacherId == request.auth.uid &&
+        resource.data.teacher_id == request.auth.uid &&
+        resource.data.user_id == request.auth.uid &&
+        request.resource.data.teacher_id == request.auth.uid &&
+        request.resource.data.user_id == request.auth.uid &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['teacher_id', 'user_id', 'created_at'])
+      );
+      allow delete: if isAttendanceManager() || (isTeacher() && teacherId == request.auth.uid);
     }
 
     match /teacher_commuter_passes/{passId} {
@@ -506,12 +521,13 @@ service cloud.firestore {
         parentLinkedTo(resource.data.student_id)
       );
       allow create: if isAdmin() || isTeacher() || studentOwnedCreate() || parentOwnedCreate();
-      allow update, delete: if isAdmin();
+      allow update, delete: if false;
     }
 
     match /announcements/{announcementId} {
-      allow read: if signedIn();
-      allow create, update, delete: if isAdmin();
+      // 送信対象・校舎・学年の判定は /api/announcements で行う。
+      allow read: if isAdmin();
+      allow create, update, delete: if false;
     }
 
     match /registration_requests/{requestId} {
@@ -530,8 +546,14 @@ service cloud.firestore {
     }
 
     match /shift_assignments/{shiftId} {
-      allow read: if signedIn();
-      allow write: if isAdmin();
+      // 生徒の授業候補は受講登録を検証する専用APIから返す。
+      allow read: if isTeacher() || isAdmin();
+      allow write: if isMaster() || isDedicatedAttendanceApprover();
+    }
+
+    match /attendance_shift_plans/{shiftId} {
+      // 校舎範囲・職員所属・CSV一括処理を専用APIで検証する。
+      allow read, write: if false;
     }
 
     match /settings/{settingId} {
@@ -551,23 +573,23 @@ service cloud.firestore {
     }
 
     match /rewards/{rewardId} {
-      allow read: if signedIn();
-      allow write: if isAdmin();
+      allow read, write: if false;
     }
 
     match /learning_units/{unitId} {
       allow read: if signedIn();
-      allow write: if isAdmin();
+      allow write: if false;
     }
 
     match /lesson_slides/{slideId} {
-      allow read: if signedIn();
-      allow write: if isAdmin();
+      allow read: if isTeacher() || isAdmin();
+      allow write: if false;
     }
 
     match /quizzes/{quizId} {
-      allow read: if signedIn();
-      allow write: if isAdmin();
+      // 正解を含むため生徒には直接読ませず、/api/quest-sessions が選択肢だけを返す。
+      allow read: if isTeacher() || isAdmin();
+      allow write: if false;
     }
 
     match /quest_results/{resultId} {
@@ -578,6 +600,10 @@ service cloud.firestore {
         parentLinkedTo(resource.data.student_id)
       );
       allow write: if isAdmin();
+    }
+
+    match /quest_sessions/{sessionId} {
+      allow read, write: if false;
     }
 
     match /quest_question_attempts/{attemptId} {
@@ -628,12 +654,8 @@ service cloud.firestore {
         isTeacher() ||
         isAdmin()
       );
-      allow create: if signedIn() && (
-        request.resource.data.user_id == request.auth.uid ||
-        request.resource.data.student_id == request.auth.uid ||
-        isTeacher() ||
-        isAdmin()
-      );
+      // 対象授業の検証とコイン付与を同一トランザクションで行う専用APIのみ作成可。
+      allow create: if false;
       allow update, delete: if isAdmin();
     }
 
@@ -732,11 +754,138 @@ service cloud.firestore {
       allow read, write: if isMaster();
     }
 
+    // オンライン校は更新処理をAPI（Admin SDK）のトランザクションに集約する。
+    // 生徒からの直接書き込みを禁止し、XPや正答情報の改ざんを防ぐ。
+    match /online_school_student_progress/{progressId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    match /online_school_category_progress/{progressId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    match /online_school_learning_sessions/{sessionId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    match /online_school_answers/{answerId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    match /online_school_problems/{problemId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    match /online_school_active_sessions/{pointerId} {
+      allow read, write: if false;
+    }
+
+    function hasExplicitCollectionRules(collection) {
+      return collection in [
+        'users',
+        'test_prep_course_options',
+        'attendance_integration_alerts',
+        'attendance_integration_batches',
+        'attendance_integration_history',
+        'teacher_availability_profiles',
+        'learning_events',
+        'recording_views',
+        'coin_transactions',
+        'camera_session_summaries',
+        'notification_jobs',
+        'notification_campaigns',
+        'user_notifications',
+        'password_reset_tokens',
+        'email_verification_tokens',
+        'password_recovery_rate_limits',
+        'password_recovery_requests',
+        'mail',
+        'monthly_schedules',
+        'annual_lesson_schedules',
+        'annual_curriculum_schedules',
+        'course_registration_options',
+        'course_registrations',
+        'attendance_correction_requests',
+        'attendance',
+        'submissions',
+        'homework_assignments',
+        'assignments',
+        'class_recordings',
+        'recording_playback_secrets',
+        'recording_playback_sessions',
+        'teacher_inquiries',
+        'chat_logs',
+        'community_topics',
+        'teacher_community_topics',
+        'contact_logs',
+        'pf_records',
+        'pf_resolutions',
+        'work_records',
+        'attendance_payroll_rate_masters',
+        'attendance_regular_imports',
+        'attendance_import_batches',
+        'teacher_availability',
+        'teacher_commuter_passes',
+        'teacher_substitution_posts',
+        'requests',
+        'announcements',
+        'registration_requests',
+        'student_registrations',
+        'shift_assignments',
+        'attendance_shift_plans',
+        'settings',
+        'system_status',
+        'action_logs',
+        'rewards',
+        'learning_units',
+        'lesson_slides',
+        'quizzes',
+        'quest_results',
+        'quest_sessions',
+        'quest_question_attempts',
+        'quest_question_mastery',
+        'quest_unit_mastery',
+        'subject_urls',
+        'survey_templates',
+        'survey_responses',
+        'messages',
+        'activity_logs',
+        'parent_inquiries',
+        'course_enrollments',
+        'eiken_courses',
+        'eiken_course_units',
+        'eiken_tasks',
+        'eiken_task_progress',
+        'eiken_lessons',
+        'eiken_attendance',
+        'eiken_assignments',
+        'eiken_submissions',
+        'eiken_quizzes',
+        'eiken_quiz_questions',
+        'eiken_quiz_results',
+        'eiken_writing_submissions',
+        'eiken_teacher_assignments',
+        'eiken_announcements',
+        'eiken_follow_up_records',
+        'online_school_student_progress',
+        'online_school_category_progress',
+        'online_school_learning_sessions',
+        'online_school_answers',
+        'online_school_problems',
+        'online_school_active_sessions'
+      ];
+    }
+
     match /{collection}/{document=**} {
-      allow read: if isAdmin() && !isEikenCollection(collection);
+      allow read: if isAdmin() && !hasExplicitCollectionRules(collection);
       // 未定義コレクションへの包括的な書き込みはマスターだけに限定する。
       // 校舎管理者の操作は、上で用途ごとに定義したルールを通す。
-      allow write: if isMaster() && !isEikenCollection(collection);
+      allow write: if isMaster() && !hasExplicitCollectionRules(collection);
     }
   }
 }

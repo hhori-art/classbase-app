@@ -12,8 +12,8 @@ const submitSchema = z.object({
   answer: z.string().trim().min(10).max(6000),
 });
 
-export async function POST(request: NextRequest, context: { params: { id: string } }) {
-  const taskId = String(context.params.id || '');
+export async function POST(request: NextRequest, context: { params: Promise<{ id: string }> }) {
+  const taskId = String((await context.params).id || '');
   let submissionRef: FirebaseFirestore.DocumentReference | null = null;
   let processingStarted = false;
   try {

@@ -3,7 +3,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import { db } from '@/lib/firebase';
-import { collection, query, where, orderBy, getDocs, doc, updateDoc, deleteDoc, writeBatch, getDoc } from 'firebase/firestore';
+import { collection, query, where, orderBy, getDocs, doc, updateDoc, deleteDoc, writeBatch, getDoc, serverTimestamp } from 'firebase/firestore';
 import { ArrowLeft, MessageCircle, Check, Trash2, Loader2, User, Clock, ShieldAlert, X, Search, MessageSquare, CheckSquare, ListChecks } from 'lucide-react';
 
 export default function CommunityManagerPage() {
@@ -28,23 +28,23 @@ export default function CommunityManagerPage() {
       // 承認待ち
       const q1 = query(collection(db, 'community_topics'), where('is_approved', '==', false), orderBy('created_at', 'desc'));
       const snap1 = await getDocs(q1);
-      setPendingRequests(snap1.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      setPendingRequests(snap1.docs.map(doc => ({ id: doc.id, ...doc.data() })).filter((item: any) => item.archived !== true));
 
       // 公開中 (承認済み)
       const q2 = query(collection(db, 'community_topics'), where('is_approved', '==', true), orderBy('created_at', 'desc'));
       const snap2 = await getDocs(q2);
-      setActiveTopics(snap2.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      setActiveTopics(snap2.docs.map(doc => ({ id: doc.id, ...doc.data() })).filter((item: any) => item.archived !== true));
 
     } catch (e) {
       console.error(e);
       try {
         const q1 = query(collection(db, 'community_topics'), where('is_approved', '==', false));
         const snap1 = await getDocs(q1);
-        setPendingRequests(snap1.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+        setPendingRequests(snap1.docs.map(doc => ({ id: doc.id, ...doc.data() })).filter((item: any) => item.archived !== true));
 
         const q2 = query(collection(db, 'community_topics'), where('is_approved', '==', true));
         const snap2 = await getDocs(q2);
-        setActiveTopics(snap2.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+        setActiveTopics(snap2.docs.map(doc => ({ id: doc.id, ...doc.data() })).filter((item: any) => item.archived !== true));
       } catch(e2) {}
     } finally {
       setLoading(false);
@@ -145,7 +145,7 @@ export default function CommunityManagerPage() {
       const batch = writeBatch(db);
       selectedIds.forEach(id => {
         const ref = doc(db, 'community_topics', id);
-        batch.delete(ref);
+        batch.update(ref, { archived: true, is_approved: false, archived_at: serverTimestamp() });
       });
       await batch.commit();
 
@@ -177,7 +177,7 @@ export default function CommunityManagerPage() {
     const msg = activeTab === 'active' ? '【警告】公開中の投稿を削除しますか？' : 'この申請を却下（削除）しますか？';
     if (!confirm(msg)) return;
     try {
-      await deleteDoc(doc(db, 'community_topics', id));
+      await updateDoc(doc(db, 'community_topics', id), { archived: true, is_approved: false, archived_at: serverTimestamp() });
       if (activeTab === 'active') setActiveTopics(prev => prev.filter(r => r.id !== id));
       else setPendingRequests(prev => prev.filter(r => r.id !== id));
       if (selectedTopic?.id === id) setSelectedTopic(null);
@@ -232,9 +232,9 @@ export default function CommunityManagerPage() {
           </Link>
           <div>
             <h1 className="text-2xl font-black text-slate-800 flex items-center gap-2">
-              <MessageCircle className="text-pink-500" /> コミュニティ管理
+              <MessageCircle className="text-pink-500" /> 交流掲示板管理
             </h1>
-            <p className="text-xs text-slate-500 font-bold mt-1">生徒の投稿を承認・監視・削除します</p>
+            <p className="text-xs text-slate-500 font-bold mt-1">参加者同士に公開される投稿・コメントを管理します。正式な一方向連絡は「お知らせ配信」を使用してください。</p>
           </div>
         </div>
 

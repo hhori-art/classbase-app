@@ -3,11 +3,16 @@
 import { useState, useEffect } from 'react';
 import { auth, db } from '@/lib/firebase';
 import { collection, query, where, getDocs, addDoc, deleteDoc, doc, updateDoc, orderBy, limit, getDoc } from 'firebase/firestore';
-import { Briefcase, Trash2, ArrowLeft, Video, Save, Loader2, Link as LinkIcon, Users, MapPin, User, GripVertical, CheckCircle, HelpCircle, Clock, KeyRound, Zap, BarChart2, X, Settings, AlertTriangle, Bell } from 'lucide-react';
+import { Briefcase, Trash2, ArrowLeft, Video, Save, Loader2, Link as LinkIcon, Users, MapPin, User, GripVertical, CheckCircle, HelpCircle, Clock, KeyRound, Zap, BarChart2, X, Settings, AlertTriangle, Bell, XCircle, ClipboardCheck, Search, ChevronDown, ChevronUp, CalendarClock, UserPlus } from 'lucide-react';
 import Link from 'next/link';
+import { usePathname } from 'next/navigation';
 import ShiftImportButton from '@/app/components/ShiftImportButton';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, CartesianGrid } from 'recharts';
 import { useAuth } from '@/app/context/AuthContext';
+import { jstDateKey } from '@/lib/date-key';
+import { selectDisplayShiftAssignments } from '@/lib/shift-assignment-display';
+import { availabilityStatusForWeeklyDay, weekdayKeyForDate, weeklyDaySummary, type TeacherAvailabilityProfile } from '@/lib/teacher-weekly-availability';
+import { isConfigurableAdminRole } from '@/lib/admin-app-permissions';
 
 // --- 型定義 ---
 type ShiftAssignment = {
@@ -28,7 +33,10 @@ type ShiftAssignment = {
   note: string;
   parent_id?: string;
   start_url?: string; 
+  target_join_url?: string;
   target_recording_url?: string;
+  school_id?: string | null;
+  school?: string | null;
 };
 
 type Teacher = {
@@ -52,6 +60,7 @@ type TeacherAvailability = {
   note?: string;
   roles?: string[];
   status?: string;
+  source?: 'date' | 'weekly';
 };
 
 const normalizeMeetingId = (value?: string | null) =>
@@ -89,12 +98,16 @@ const WORK_LOCATIONS = ['元町', '本山', '西神南', '姫路', '加古川', 
 const teacherIdOfAvailability = (availability: TeacherAvailability) => availability.teacher_id || availability.user_id || '';
 const teacherNameOf = (teacher?: Teacher | null) => teacher?.student_name || teacher?.name || '名称未設定';
 
-export default function MasterShiftPage() {
-  const { user } = useAuth();
-  const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
+export default function ShiftManagementPage() {
+  const pathname = usePathname();
+  const teacherSurface = pathname.startsWith('/teacher/');
+  const { user, profile } = useAuth();
+  const schoolAdminReadOnly = isConfigurableAdminRole(profile?.role) && profile?.role !== 'master';
+  const [date, setDate] = useState(jstDateKey());
   const [dayOfWeek, setDayOfWeek] = useState('');
   const [allTeachers, setAllTeachers] = useState<Teacher[]>([]);
   const [availabilities, setAvailabilities] = useState<TeacherAvailability[]>([]);
+  const [availabilityProfiles, setAvailabilityProfiles] = useState<TeacherAvailabilityProfile[]>([]);
   const [assignments, setAssignments] = useState<ShiftAssignment[]>([]);
   const [urlMaster, setUrlMaster] = useState<{[key: string]: string}>({});
   const [unassignedNotice, setUnassignedNotice] = useState<{ count: number; names: string[]; notified: number } | null>(null);
@@ -128,16 +141,31 @@ export default function MasterShiftPage() {
   });
   const [loading, setLoading] = useState(true);
   const [relinking, setRelinking] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const [teacherSearch, setTeacherSearch] = useState('');
+  const [assignmentSearch, setAssignmentSearch] = useState('');
+  const [assignmentTarget, setAssignmentTarget] = useState<{
+    role: 'main' | 'sub' | 'general';
+    targetClass?: ShiftAssignment;
+    period: string;
+  } | null>(null);
 
   // データ取得
   const fetchData = async () => {
     try {
       const tQ = query(collection(db, 'users'), where('role', '==', 'teacher'));
-      const tSnap = await getDocs(tQ);
+      const avQ = query(collection(db, 'teacher_availability'), where('available_date', '==', date));
+      const asQ = query(collection(db, 'shift_assignments'), where('target_date', '==', date));
+      const [tSnap, avSnap, profileSnap, asSnap, urlSnap, tmplSnap] = await Promise.all([
+        getDocs(tQ),
+        getDocs(avQ),
+        getDocs(collection(db, 'teacher_availability_profiles')),
+        getDocs(asQ),
+        getDocs(collection(db, 'subject_urls')),
+        getDoc(doc(db, 'survey_templates', 'default')),
+      ]);
       setAllTeachers(tSnap.docs.map(d => ({ id: d.id, ...d.data() } as Teacher)));
 
-      const avQ = query(collection(db, 'teacher_availability'), where('available_date', '==', date));
-      const avSnap = await getDocs(avQ);
       const availabilityData = avSnap.docs.map(d => ({ id: d.id, ...d.data() } as TeacherAvailability));
       availabilityData.sort((a, b) => {
         const aName = a.teacher_name || '';
@@ -146,16 +174,16 @@ export default function MasterShiftPage() {
       });
       setAvailabilities(availabilityData);
 
-      const asQ = query(collection(db, 'shift_assignments'), where('target_date', '==', date));
-      const asSnap = await getDocs(asQ);
-      setAssignments(asSnap.docs.map(d => ({ id: d.id, ...d.data() } as ShiftAssignment)));
+      setAvailabilityProfiles(profileSnap.docs.map(d => ({ id: d.id, ...d.data() } as TeacherAvailabilityProfile)));
 
-      const urlSnap = await getDocs(collection(db, 'subject_urls'));
+      setAssignments(selectDisplayShiftAssignments(
+        asSnap.docs.map(d => ({ id: d.id, ...d.data() } as ShiftAssignment)),
+      ));
+
       const urls: {[key: string]: string} = {};
       urlSnap.forEach(doc => { urls[doc.id] = doc.data().url; });
       setUrlMaster(urls);
 
-      const tmplSnap = await getDoc(doc(db, 'survey_templates', 'default'));
       if (tmplSnap.exists()) {
         setSurveyQuestions(tmplSnap.data().questions || []);
       }
@@ -212,8 +240,8 @@ export default function MasterShiftPage() {
   }, [date]);
 
   useEffect(() => {
-    if (user && !loading) notifyUnassignedTeachers();
-  }, [user, loading, date]);
+    if (user && !loading && !schoolAdminReadOnly) notifyUnassignedTeachers();
+  }, [user, loading, date, schoolAdminReadOnly]);
 
   useEffect(() => {
     if (form.subject === '理科' && !SUBJECT_DETAILS['理科'].includes(form.detail_subject)) setForm(prev => ({ ...prev, detail_subject: '物理' }));
@@ -240,7 +268,8 @@ export default function MasterShiftPage() {
         target_date: date,
         role_type: role,
         note: `【${periodStr}】`,
-        teacher_availability_id: availability?.id || null,
+        teacher_availability_id: availability?.source === 'weekly' ? null : availability?.id || null,
+        availability_source: availability?.source || 'date',
         teacher_workplace: requestedWorkplace || null,
         requested_time_range: availability?.time_range || null,
         created_at: new Date().toISOString()
@@ -341,6 +370,7 @@ export default function MasterShiftPage() {
         target_meeting_id: editingShift.target_meeting_id,
         target_signin_address: editingShift.target_signin_address,
         start_url: editingShift.start_url || null,
+        target_join_url: editingShift.target_join_url || null,
         target_recording_url: editingShift.target_recording_url || null 
       });
       setEditingShift(null);
@@ -399,33 +429,44 @@ export default function MasterShiftPage() {
 
     setCreatingZoom(true);
     try {
+      const token = await user?.getIdToken();
+      if (!token) throw new Error('ログイン情報を確認できません。再ログインしてください。');
       const res = await fetch('/api/create-zoom-meeting', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
+          shift_id: editingShift.id,
           topic: `${editingShift.target_grade}${editingShift.target_subject} (${editingShift.teacher_name}先生)`,
           startTime: startTimeISO,
           duration: 75
         }),
       });
 
-      if (!res.ok) throw new Error('API Error');
       const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || 'Zoomミーティングを発行できませんでした。');
 
       if (data.success) {
         setEditingShift({
           ...editingShift,
           target_meeting_id: String(data.meeting_id),
+          target_password: data.passcode,
           start_url: data.start_url,
-          target_recording_url: data.join_url,
+          target_join_url: data.join_url,
         });
-        alert('Zoomミーティングを発行しました。\n「保存」ボタンを押して確定してください。');
+        setAssignments(previous => previous.map(shift => shift.id === editingShift.id ? {
+          ...shift,
+          target_meeting_id: String(data.meeting_id),
+          target_password: data.passcode,
+          start_url: data.start_url,
+          target_join_url: data.join_url,
+        } : shift));
+        alert('Zoomミーティングを発行し、講師配置へ保存しました。');
       } else {
         alert(`作成失敗: ${data.error}`);
       }
     } catch (e) {
       console.error(e);
-      alert('Zoom作成中にエラーが発生しました。');
+      alert(`Zoom作成中にエラーが発生しました: ${e instanceof Error ? e.message : '通信エラー'}`);
     } finally {
       setCreatingZoom(false);
     }
@@ -539,8 +580,31 @@ export default function MasterShiftPage() {
     return assignments.filter(a => a.role_type === 'general' && a.note.includes(`【${time}】`));
   };
 
+  const weekdayKey = weekdayKeyForDate(date);
+  const explicitTeacherIds = new Set(availabilities.map(teacherIdOfAvailability).filter(Boolean));
+  const effectiveAvailabilities = [...availabilities];
+  availabilityProfiles.forEach(profile => {
+    const teacherId = profile.teacher_id || profile.user_id || profile.id;
+    const weeklyDay = profile.weekdays?.[weekdayKey];
+    if (!teacherId || !weeklyDay || explicitTeacherIds.has(teacherId)) return;
+    effectiveAvailabilities.push({
+      id: `weekly-${teacherId}-${weekdayKey}`,
+      teacher_id: teacherId,
+      user_id: teacherId,
+      teacher_name: profile.teacher_name,
+      available_date: date,
+      time_range: weeklyDaySummary(weeklyDay),
+      workplace: weeklyDay.workplace,
+      location: weeklyDay.workplace,
+      roles: weeklyDay.roles,
+      status: availabilityStatusForWeeklyDay(weeklyDay),
+      note: weeklyDay.note || weeklyDaySummary(weeklyDay),
+      source: 'weekly',
+    });
+  });
+
   const availabilitiesByTeacher = new Map<string, TeacherAvailability[]>();
-  availabilities.forEach(availability => {
+  effectiveAvailabilities.forEach(availability => {
     const teacherId = teacherIdOfAvailability(availability);
     if (!teacherId) return;
     const current = availabilitiesByTeacher.get(teacherId) || [];
@@ -550,30 +614,32 @@ export default function MasterShiftPage() {
 
   const assignedTeacherIds = new Set(assignments.map(a => a.user_id).filter(Boolean));
   const submittedTeachers = allTeachers
-    .filter(t => (availabilitiesByTeacher.get(t.id) || []).some(a => a.status !== 'impossible'))
+    .filter(t => (availabilitiesByTeacher.get(t.id) || []).length > 0)
     .sort((a, b) => teacherNameOf(a).localeCompare(teacherNameOf(b), 'ja'));
-  const unassignedSubmittedTeachers = submittedTeachers.filter(t => !assignedTeacherIds.has(t.id));
+  const workableTeachers = submittedTeachers.filter(t => (availabilitiesByTeacher.get(t.id) || []).some(a => a.status !== 'impossible'));
+  const unavailableTeachers = submittedTeachers.filter(t => (availabilitiesByTeacher.get(t.id) || []).every(a => a.status === 'impossible'));
+  const notSubmittedTeachers = allTeachers.filter(t => !(availabilitiesByTeacher.get(t.id) || []).length);
+  const unassignedSubmittedTeachers = workableTeachers.filter(t => !assignedTeacherIds.has(t.id));
 
   // 講師リストのグループ分け
   const groupedTeachers = {
     available: [] as Teacher[],
     maybe: [] as Teacher[],
-    others: [] as Teacher[]
+    unavailable: [] as Teacher[],
+    unsubmitted: [] as Teacher[],
   };
 
   allTeachers.forEach(t => {
     const teacherAvailabilities = availabilitiesByTeacher.get(t.id) || [];
     const avail = teacherAvailabilities.find(a => a.status !== 'impossible');
-    
-    if (!avail) {
-      // 完全未提出
-      groupedTeachers.others.push(t);
-    } else if (avail.status === 'impossible') {
-      // 提出済みだが「不可」
-      groupedTeachers.others.push(t);
+
+    if (teacherAvailabilities.length === 0) {
+      groupedTeachers.unsubmitted.push(t);
+    } else if (!avail) {
+      groupedTeachers.unavailable.push(t);
     } else {
       // それ以外（possible, またはステータス不明でもレコードがあれば提出済みとみなす）
-      if (avail.note?.includes('△')) {
+      if (avail.status === 'maybe' || avail.note?.includes('△')) {
         groupedTeachers.maybe.push(t);
       } else {
         groupedTeachers.available.push(t);
@@ -581,16 +647,29 @@ export default function MasterShiftPage() {
     }
   });
 
-  const renderTeacherList = (list: Teacher[], type: 'available' | 'maybe' | 'others') => {
-    if (list.length === 0) return <div className="text-xs text-gray-400 p-2">該当なし</div>;
+  const teacherMatches = (teacher: Teacher, search: string) => {
+    const normalized = search.trim().toLocaleLowerCase('ja');
+    if (!normalized) return true;
+    const availabilityText = (availabilitiesByTeacher.get(teacher.id) || [])
+      .map(item => [item.workplace, item.location, item.time_range, item.note, item.roles?.join(' ')].filter(Boolean).join(' '))
+      .join(' ');
+    return [teacherNameOf(teacher), teacher.lifetime_id, availabilityText]
+      .filter(Boolean)
+      .join(' ')
+      .toLocaleLowerCase('ja')
+      .includes(normalized);
+  };
+
+  const renderTeacherList = (list: Teacher[], type: 'available' | 'maybe' | 'unavailable' | 'unsubmitted') => {
+    const filteredList = list.filter(teacher => teacherMatches(teacher, teacherSearch));
+    if (filteredList.length === 0) return <div className="text-xs text-gray-400 p-2">該当なし</div>;
     
-    return list.map(t => {
+    return filteredList.map(t => {
       const assignedCount = assignments.filter(a => a.user_id === t.id).length;
       const teacherAvailabilities = availabilitiesByTeacher.get(t.id) || [];
       const avail = teacherAvailabilities.find(a => a.status !== 'impossible') || teacherAvailabilities[0]; 
 
       // 不可で提出されている場合
-      const isImpossible = avail?.status === 'impossible';
       const workplace = avail?.workplace || avail?.location;
       const roles = Array.isArray(avail?.roles) ? avail?.roles.join(' / ') : '';
 
@@ -614,13 +693,14 @@ export default function MasterShiftPage() {
             </div>
             {type === 'available' && <CheckCircle size={16} className="text-green-500" />}
             {type === 'maybe' && <HelpCircle size={16} className="text-yellow-500" />}
-            {isImpossible && <span className="text-[10px] font-bold text-red-500 bg-red-50 px-2 py-0.5 rounded">不可</span>}
+            {type === 'unavailable' && <span className="rounded bg-red-50 px-2 py-0.5 text-[10px] font-bold text-red-600">提出済・勤務不可</span>}
+            {type === 'unsubmitted' && <span className="rounded bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-500">未提出</span>}
           </div>
           
           <div className="pl-6 mt-1.5 flex flex-wrap gap-2 items-center w-full">
-             {avail && (
+             {avail && type !== 'unsubmitted' && (
                <div className="text-[11px] font-bold text-indigo-600 bg-indigo-50 px-2 py-1 rounded border border-indigo-100 w-full truncate">
-                 <span className="text-indigo-400 mr-1 text-[9px] uppercase">SHIFT:</span>
+                 <span className="text-indigo-400 mr-1 text-[9px] uppercase">{avail.source === 'weekly' ? '基本設定:' : '個別提出:'}</span>
                  {[workplace, avail.time_range, roles || avail.note].filter(Boolean).join(' / ')}
                </div>
              )}
@@ -633,12 +713,45 @@ export default function MasterShiftPage() {
     });
   };
 
+  if (schoolAdminReadOnly && !teacherSurface) {
+    const schools = new Set([
+      ...(Array.isArray(profile?.school_ids) ? profile.school_ids : []),
+      profile?.school_id,
+      profile?.school,
+    ].map(value => String(value || '').trim()).filter(Boolean));
+    const scopedAssignments = assignments.filter(item => {
+      const assignedSchool = String(item.school_id || item.school || '').trim();
+      return !assignedSchool || schools.size === 0 || schools.has(assignedSchool);
+    });
+    return (
+      <main className="min-h-screen bg-slate-50 p-4 text-slate-800 md:p-6">
+        <div className="mx-auto max-w-6xl space-y-5">
+          <header className="rounded-3xl bg-slate-950 p-6 text-white shadow-xl">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div className="flex items-center gap-4"><Link href="/master" className="rounded-full bg-white/10 p-3 hover:bg-white/20" aria-label="管理画面へ戻る"><ArrowLeft size={20} /></Link><div><p className="text-xs font-black text-indigo-300">READ ONLY</p><h1 className="mt-1 text-2xl font-black">シフト配置（閲覧のみ）</h1><p className="mt-1 text-sm font-bold text-slate-300">配置の変更はマスター管理者へ依頼してください。</p></div></div>
+              <label className="flex items-center gap-2 rounded-2xl bg-white/10 px-4 py-3"><CalendarClock size={18} /><input type="date" value={date} onChange={event => setDate(event.target.value)} className="bg-transparent text-sm font-black text-white outline-none [color-scheme:dark]" /></label>
+            </div>
+          </header>
+          {loading ? <div className="grid min-h-48 place-items-center"><Loader2 className="animate-spin text-indigo-600" size={32} /></div> : (
+            <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+              <div className="flex items-end justify-between gap-3"><div><h2 className="text-lg font-black">{date}（{dayOfWeek}）の配置</h2><p className="mt-1 text-xs font-bold text-slate-400">講師・担当・教室を一覧で確認できます。</p></div><span className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-black text-indigo-700">{scopedAssignments.length}件</span></div>
+              <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {scopedAssignments.map(item => <article key={item.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-4"><div className="flex items-start justify-between gap-2"><p className="font-black text-slate-900">{item.teacher_name || '講師未設定'}</p><span className="rounded-full bg-white px-2 py-1 text-[10px] font-black text-indigo-600">{item.note?.match(/[12]限/)?.[0] || item.role_type}</span></div><p className="mt-3 text-sm font-bold text-slate-700">{[item.target_grade, item.target_subject, item.target_detail_subject].filter(Boolean).join('・') || '全体サポート'}</p><p className="mt-2 flex items-center gap-1 text-xs font-bold text-slate-500"><MapPin size={13} />{item.target_place || item.teacher_workplace || '教室未設定'}</p>{item.unit ? <p className="mt-2 text-xs font-medium text-slate-500">単元：{item.unit}</p> : null}</article>)}
+                {scopedAssignments.length === 0 ? <div className="col-span-full rounded-2xl bg-slate-50 py-14 text-center text-sm font-black text-slate-400">この日の配置はありません。</div> : null}
+              </div>
+            </section>
+          )}
+        </div>
+      </main>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-50 p-4 md:p-6 pb-40 font-sans text-slate-800">
       <div className="max-w-[1800px] mx-auto">
         <div className="flex flex-col md:flex-row items-center justify-between mb-6 gap-4 bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
           <div className="flex items-center gap-4 w-full md:w-auto">
-            <Link href="/master" className="bg-slate-100 p-2.5 rounded-full hover:bg-slate-200 text-slate-600 transition-colors">
+            <Link href={teacherSurface ? '/teacher/attendance-approvals' : '/master'} className="bg-slate-100 p-2.5 rounded-full hover:bg-slate-200 text-slate-600 transition-colors" aria-label={teacherSurface ? '勤怠承認へ戻る' : '管理画面へ戻る'}>
               <ArrowLeft size={20} />
             </Link>
             <div>
@@ -647,24 +760,41 @@ export default function MasterShiftPage() {
               </h1>
             </div>
           </div>
-          <div className="flex items-center gap-3">
-            <ShiftImportButton onSuccess={fetchData} />
+          <div className="flex flex-wrap items-center justify-end gap-3">
             <button
-              onClick={relinkShiftTeachers}
-              disabled={relinking}
-              className="text-xs font-bold text-rose-600 hover:bg-rose-50 px-4 py-2 rounded-lg transition-colors flex items-center gap-2 border border-rose-100 disabled:opacity-50"
+              type="button"
+              onClick={() => setToolsOpen(previous => !previous)}
+              className="flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 transition-colors hover:bg-slate-50"
+              aria-expanded={toolsOpen}
             >
-              {relinking ? <Loader2 size={14} className="animate-spin" /> : <Settings size={14}/>} 紐付け再照合
+              <Settings size={14} /> データ取込・設定 {toolsOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
             </button>
-            <Link href="/master/settings" className="text-xs font-bold text-indigo-600 hover:bg-indigo-50 px-4 py-2 rounded-lg transition-colors flex items-center gap-2 border border-indigo-100">
-              <LinkIcon size={14}/> URL設定
-            </Link>
             <div className="flex items-center gap-2 bg-slate-100 p-1.5 rounded-xl border border-slate-200">
               <input type="date" className="font-bold bg-transparent outline-none text-slate-700 cursor-pointer text-sm px-2" value={date} onChange={e => setDate(e.target.value)} />
               <span className="text-xs font-black bg-indigo-600 text-white px-3 py-1.5 rounded-lg">{dayOfWeek}曜日</span>
             </div>
           </div>
         </div>
+
+        {toolsOpen && (
+          <div className="mb-4 flex flex-wrap items-center gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="mr-auto">
+              <p className="text-sm font-black text-slate-700">データ取込・保守設定</p>
+              <p className="mt-0.5 text-xs text-slate-500">通常の配置作業では閉じたままで問題ありません。</p>
+            </div>
+            <ShiftImportButton onSuccess={fetchData} />
+            <button
+              onClick={relinkShiftTeachers}
+              disabled={relinking}
+              className="flex items-center gap-2 rounded-lg border border-rose-100 px-4 py-2 text-xs font-bold text-rose-600 transition-colors hover:bg-rose-50 disabled:opacity-50"
+            >
+              {relinking ? <Loader2 size={14} className="animate-spin" /> : <Settings size={14}/>} 紐付け再照合
+            </button>
+            {!teacherSurface && <Link href="/master/settings" className="flex items-center gap-2 rounded-lg border border-indigo-100 px-4 py-2 text-xs font-bold text-indigo-600 transition-colors hover:bg-indigo-50">
+              <LinkIcon size={14}/> URL設定
+            </Link>}
+          </div>
+        )}
 
         {unassignedSubmittedTeachers.length > 0 && (
           <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-amber-900 shadow-sm">
@@ -690,28 +820,36 @@ export default function MasterShiftPage() {
         <div className="mb-6 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <div className="mb-3 flex items-center justify-between">
             <h2 className="flex items-center gap-2 text-sm font-black text-slate-800">
-              <CheckCircle size={16} className="text-emerald-600" /> 本日のシフト提出者一覧
+              <ClipboardCheck size={16} className="text-indigo-600" /> 本日の提出・勤務可能状況
             </h2>
             <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-500">
-              {submittedTeachers.length}名提出 / 未配置 {unassignedSubmittedTeachers.length}名
+              全講師 {allTeachers.length}名
             </span>
+          </div>
+          <div className="mb-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded-xl bg-emerald-50 p-3 ring-1 ring-emerald-100"><p className="text-[10px] font-black text-emerald-600">勤務可能</p><p className="mt-1 text-2xl font-black text-emerald-800">{workableTeachers.length}<span className="ml-1 text-xs">名</span></p></div>
+            <div className="rounded-xl bg-amber-50 p-3 ring-1 ring-amber-100"><p className="text-[10px] font-black text-amber-600">勤務可能・未配置</p><p className="mt-1 text-2xl font-black text-amber-800">{unassignedSubmittedTeachers.length}<span className="ml-1 text-xs">名</span></p></div>
+            <div className="rounded-xl bg-rose-50 p-3 ring-1 ring-rose-100"><p className="text-[10px] font-black text-rose-600">提出済・勤務不可</p><p className="mt-1 text-2xl font-black text-rose-800">{unavailableTeachers.length}<span className="ml-1 text-xs">名</span></p></div>
+            <div className="rounded-xl bg-slate-100 p-3"><p className="text-[10px] font-black text-slate-500">未提出</p><p className="mt-1 text-2xl font-black text-slate-700">{notSubmittedTeachers.length}<span className="ml-1 text-xs">名</span></p></div>
           </div>
           {submittedTeachers.length > 0 ? (
             <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
               {submittedTeachers.map(teacher => {
                 const teacherAvailabilities = availabilitiesByTeacher.get(teacher.id) || [];
                 const assignedCount = assignments.filter(a => a.user_id === teacher.id).length;
+                const canWork = teacherAvailabilities.some(availability => availability.status !== 'impossible');
                 return (
-                  <div key={teacher.id} className={`rounded-xl border p-3 ${assignedCount > 0 ? 'border-emerald-100 bg-emerald-50/40' : 'border-amber-200 bg-amber-50/70'}`}>
+                  <div key={teacher.id} className={`rounded-xl border p-3 ${!canWork ? 'border-rose-100 bg-rose-50/60' : assignedCount > 0 ? 'border-emerald-100 bg-emerald-50/40' : 'border-amber-200 bg-amber-50/70'}`}>
                     <div className="flex items-center justify-between gap-3">
                       <p className="text-sm font-black text-slate-800">{teacherNameOf(teacher)}</p>
-                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-black ${assignedCount > 0 ? 'bg-emerald-600 text-white' : 'bg-amber-500 text-white'}`}>
-                        {assignedCount > 0 ? `配置済 ${assignedCount}` : '未配置'}
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-black ${!canWork ? 'bg-rose-600 text-white' : assignedCount > 0 ? 'bg-emerald-600 text-white' : 'bg-amber-500 text-white'}`}>
+                        {!canWork ? '勤務不可' : assignedCount > 0 ? `配置済 ${assignedCount}` : '勤務可能・未配置'}
                       </span>
                     </div>
                     <div className="mt-2 space-y-1">
                       {teacherAvailabilities.map(availability => (
                         <div key={availability.id} className="flex flex-wrap gap-2 text-[11px] font-bold text-slate-600">
+                          <span className={`rounded px-2 py-1 ${availability.source === 'weekly' ? 'bg-violet-100 text-violet-700' : 'bg-blue-100 text-blue-700'}`}>{availability.source === 'weekly' ? '基本設定' : '個別提出'}</span>
                           <span className="flex items-center gap-1 rounded bg-white px-2 py-1"><MapPin size={11} className="text-slate-400" />{availability.workplace || availability.location || '勤務地未設定'}</span>
                           <span className="flex items-center gap-1 rounded bg-white px-2 py-1"><Clock size={11} className="text-slate-400" />{availability.time_range || '時間未設定'}</span>
                           <span className="rounded bg-white px-2 py-1">{Array.isArray(availability.roles) && availability.roles.length ? availability.roles.join(' / ') : availability.note || '希望未設定'}</span>
@@ -761,6 +899,20 @@ export default function MasterShiftPage() {
               </div>
             </div>
 
+            <div className="sticky top-0 z-10 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
+              <label className="mb-2 block text-xs font-black text-slate-700">講師・勤務条件を検索</label>
+              <div className="flex items-center gap-2 rounded-xl border border-slate-300 bg-slate-50 px-3 focus-within:border-indigo-400 focus-within:ring-2 focus-within:ring-indigo-100">
+                <Search size={16} className="text-slate-400" />
+                <input
+                  value={teacherSearch}
+                  onChange={event => setTeacherSearch(event.target.value)}
+                  placeholder="氏名、ID、校舎、時間で検索"
+                  className="min-w-0 flex-1 bg-transparent py-2.5 text-sm outline-none"
+                />
+                {teacherSearch && <button type="button" onClick={() => setTeacherSearch('')} aria-label="検索をクリア" className="text-slate-400 hover:text-slate-700"><X size={15} /></button>}
+              </div>
+            </div>
+
             <div className="space-y-4">
               <div>
                 <h3 className="text-xs font-bold text-green-700 bg-green-50 px-3 py-2 rounded-lg mb-2 flex items-center gap-2">
@@ -782,10 +934,19 @@ export default function MasterShiftPage() {
 
               <div>
                 <h3 className="text-xs font-bold text-gray-500 bg-gray-100 px-3 py-2 rounded-lg mb-2 flex items-center gap-2">
-                  <User size={14}/> その他 / 未提出
+                  <XCircle size={14}/> 提出済・勤務不可
                 </h3>
-                <div className="space-y-1 opacity-80">
-                  {renderTeacherList(groupedTeachers.others, 'others')}
+                <div className="space-y-1 opacity-90">
+                  {renderTeacherList(groupedTeachers.unavailable, 'unavailable')}
+                </div>
+              </div>
+
+              <div>
+                <h3 className="text-xs font-bold text-slate-500 bg-slate-100 px-3 py-2 rounded-lg mb-2 flex items-center gap-2">
+                  <User size={14}/> 未提出
+                </h3>
+                <div className="space-y-1 opacity-70">
+                  {renderTeacherList(groupedTeachers.unsubmitted, 'unsubmitted')}
                 </div>
               </div>
             </div>
@@ -817,13 +978,13 @@ export default function MasterShiftPage() {
                            <ClassCard 
                              key={info.id} 
                              info={info} 
-                             allTeachers={allTeachers}
                              onDelete={handleDelete}
                              onEdit={setEditingShift}
                              onShowResults={handleShowSurveyResults}
                              onDragOver={handleDragOver}
                              onDragLeave={handleDragLeave}
                              onDrop={(e: any, t: any, z: any) => handleDrop(e, t, z, period)}
+                             onSearchAssign={(role: 'main' | 'sub') => { setAssignmentSearch(''); setAssignmentTarget({ role, targetClass: info.main || undefined, period }); }}
                              dragOverCardId={dragOverCardId}
                              dragOverZone={dragOverZone}
                            />
@@ -842,13 +1003,13 @@ export default function MasterShiftPage() {
                            <ClassCard 
                              key={info.id} 
                              info={info} 
-                             allTeachers={allTeachers}
                              onDelete={handleDelete}
                              onEdit={setEditingShift}
                              onShowResults={handleShowSurveyResults}
                              onDragOver={handleDragOver}
                              onDragLeave={handleDragLeave}
                              onDrop={(e: any, t: any, z: any) => handleDrop(e, t, z, period)}
+                             onSearchAssign={(role: 'main' | 'sub') => { setAssignmentSearch(''); setAssignmentTarget({ role, targetClass: info.main || undefined, period }); }}
                              dragOverCardId={dragOverCardId}
                              dragOverZone={dragOverZone}
                            />
@@ -869,6 +1030,13 @@ export default function MasterShiftPage() {
                       >
                         <div className="text-[10px] font-bold text-slate-400 mb-2 flex items-center gap-1 uppercase tracking-wider shrink-0">
                           <User size={12}/> General Support
+                          <button
+                            type="button"
+                            onClick={() => { setAssignmentSearch(''); setAssignmentTarget({ role: 'general', period }); }}
+                            className="ml-auto flex items-center gap-1 rounded-md bg-white px-2 py-1 normal-case text-indigo-600 shadow-sm hover:bg-indigo-50"
+                          >
+                            <Search size={10} /> 検索
+                          </button>
                         </div>
                         
                         <div className="flex flex-col gap-2 flex-1 overflow-y-auto custom-scrollbar">
@@ -899,6 +1067,77 @@ export default function MasterShiftPage() {
           </div>
         </div>
       </div>
+
+      {assignmentTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/55 p-4" role="dialog" aria-modal="true" aria-labelledby="assignment-search-title">
+          <div className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+            <div className="flex items-start justify-between border-b border-slate-200 bg-slate-50 p-5">
+              <div>
+                <h2 id="assignment-search-title" className="flex items-center gap-2 text-lg font-black text-slate-800"><UserPlus size={20} className="text-indigo-600" />講師を検索して配置</h2>
+                <p className="mt-1 text-xs font-bold text-slate-500">
+                  {assignmentTarget.period}・{assignmentTarget.role === 'main' ? '主担当' : assignmentTarget.role === 'sub' ? 'サポート' : '全体サポート'}
+                  {assignmentTarget.targetClass ? `／${assignmentTarget.targetClass.target_grade || ''} ${assignmentTarget.targetClass.target_subject || ''} ${assignmentTarget.targetClass.target_detail_subject || ''}` : ''}
+                </p>
+              </div>
+              <button type="button" onClick={() => setAssignmentTarget(null)} className="rounded-full p-2 text-slate-400 hover:bg-slate-200" aria-label="閉じる"><X size={20} /></button>
+            </div>
+            <div className="border-b border-slate-200 p-4">
+              <div className="flex items-center gap-2 rounded-xl border border-slate-300 bg-white px-3 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-100">
+                <Search size={17} className="text-slate-400" />
+                <input autoFocus value={assignmentSearch} onChange={event => setAssignmentSearch(event.target.value)} placeholder="氏名、ID、校舎、勤務可能時間で検索" className="min-w-0 flex-1 py-3 text-sm outline-none" />
+              </div>
+            </div>
+            <div className="space-y-2 overflow-y-auto p-4">
+              {allTeachers
+                .filter(teacher => teacherMatches(teacher, assignmentSearch))
+                .sort((left, right) => {
+                  const rank = (teacher: Teacher) => {
+                    const items = availabilitiesByTeacher.get(teacher.id) || [];
+                    if (items.some(item => item.status === 'possible' || !item.status)) return 0;
+                    if (items.some(item => item.status === 'maybe')) return 1;
+                    if (items.length === 0) return 2;
+                    return 3;
+                  };
+                  return rank(left) - rank(right) || teacherNameOf(left).localeCompare(teacherNameOf(right), 'ja');
+                })
+                .map(teacher => {
+                  const items = availabilitiesByTeacher.get(teacher.id) || [];
+                  const available = items.find(item => item.status !== 'impossible') || items[0];
+                  const unavailable = items.length > 0 && items.every(item => item.status === 'impossible');
+                  const isMaybe = available?.status === 'maybe';
+                  const alreadyAssigned = assignments.filter(item => item.user_id === teacher.id).length;
+                  return (
+                    <div key={teacher.id} className={`flex flex-col gap-3 rounded-xl border p-3 sm:flex-row sm:items-center ${unavailable ? 'border-rose-200 bg-rose-50/60' : isMaybe ? 'border-amber-200 bg-amber-50/60' : 'border-slate-200'}`}>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="font-black text-slate-800">{teacherNameOf(teacher)}</p>
+                          {teacher.lifetime_id && <span className="text-[10px] font-bold text-slate-400">{teacher.lifetime_id}</span>}
+                          <span className={`rounded-full px-2 py-0.5 text-[10px] font-black ${unavailable ? 'bg-rose-600 text-white' : isMaybe ? 'bg-amber-500 text-white' : available ? 'bg-emerald-600 text-white' : 'bg-slate-200 text-slate-600'}`}>
+                            {unavailable ? '勤務不可' : isMaybe ? '予定終了後なら可能' : available ? '勤務可能' : '未提出'}
+                          </span>
+                          {alreadyAssigned > 0 && <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-bold text-indigo-600">配置済 {alreadyAssigned}</span>}
+                        </div>
+                        <p className="mt-1 text-xs font-bold text-slate-600">{available ? [available.workplace || available.location, available.time_range, available.note].filter(Boolean).join(' ／ ') : '基本勤務設定・個別希望とも未提出'}</p>
+                        {available?.roles?.length ? <p className="mt-1 text-[10px] font-bold text-slate-400">希望役割: {available.roles.join(' / ')}　{available.source === 'weekly' ? '（基本設定）' : '（個別提出）'}</p> : null}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (unavailable && !confirm(`${teacherNameOf(teacher)}先生は勤務不可として申告しています。配置を続けますか？`)) return;
+                          await executeAssign(teacher.id, assignmentTarget.role, assignmentTarget.targetClass, assignmentTarget.period);
+                          setAssignmentTarget(null);
+                        }}
+                        className={`shrink-0 rounded-lg px-4 py-2 text-xs font-black text-white ${unavailable ? 'bg-rose-600 hover:bg-rose-700' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+                      >
+                        {assignmentTarget.role === 'main' ? 'この先生に変更' : 'この先生を追加'}
+                      </button>
+                    </div>
+                  );
+                })}
+            </div>
+          </div>
+        </div>
+      )}
 
       {editingShift && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -1072,7 +1311,7 @@ export default function MasterShiftPage() {
 }
 
 // ClassCard (DnD対応・管理者向け・デザイン統一)
-function ClassCard({ info, allTeachers, onDelete, onEdit, onShowResults, onDragOver, onDragLeave, onDrop, dragOverCardId, dragOverZone }: any) {
+function ClassCard({ info, onDelete, onEdit, onShowResults, onDragOver, onDragLeave, onDrop, onSearchAssign, dragOverCardId, dragOverZone }: any) {
   const [loading, setLoading] = useState(false);
   const isTarget = dragOverCardId === info.id;
   const isEmerald = info.subject === '理科';
@@ -1107,10 +1346,14 @@ function ClassCard({ info, allTeachers, onDelete, onEdit, onShowResults, onDragO
 
   const launchWebUrl = (url: string, targetWindow?: Window | null) => {
     if (targetWindow && !targetWindow.closed) {
-      targetWindow.location.href = url;
+      targetWindow.location.replace(url);
       return;
     }
-    window.open(url, '_blank');
+
+    // API待機後の新規ウィンドウがブラウザに拒否されても、
+    // ホスト開始URLは現在のタブで確実に開く。
+    const openedWindow = window.open(url, '_blank');
+    if (!openedWindow) window.location.assign(url);
   };
   // 管理者用ホスト開始ロジック (先生画面と同じ)
   const handleEnterZoom = async (e: React.MouseEvent) => {
@@ -1128,6 +1371,7 @@ function ClassCard({ info, allTeachers, onDelete, onEdit, onShowResults, onDragO
       const popup = window.open('', '_blank');
       if (popup) {
         popup.document.write('<p style="font-family: sans-serif; padding: 24px;">Zoomホスト開始を準備しています...</p>');
+        popup.document.close();
       }
       setLoading(true);
       try {
@@ -1236,6 +1480,9 @@ function ClassCard({ info, allTeachers, onDelete, onEdit, onShowResults, onDragO
                 <span className="truncate">{info.main?.teacher_name || '未定'}</span>
                 {info.main?.teacher_name && <BarChart2 size={10} className="text-slate-300 group-hover/link:text-indigo-500 shrink-0"/>}
               </button>
+              <button type="button" onClick={() => onSearchAssign('main')} className="mt-1 flex items-center gap-1 text-[9px] font-bold text-indigo-600 hover:underline">
+                <Search size={9} /> 講師を検索して変更
+              </button>
               
               {/* ログインID表示 & ボタン (先生画面のロジックを移植) */}
               {displayLoginId ? (
@@ -1270,7 +1517,10 @@ function ClassCard({ info, allTeachers, onDelete, onEdit, onShowResults, onDragO
           onDragLeave={onDragLeave}
           onDrop={(e) => onDrop(e, info.main, 'sub')}
         >
-          <span className="text-[8px] text-slate-400 font-bold uppercase tracking-wider block mb-1">Sub (Drop)</span>
+          <div className="mb-1 flex items-center justify-between">
+            <span className="text-[8px] text-slate-400 font-bold uppercase tracking-wider">Sub</span>
+            <button type="button" onClick={() => onSearchAssign('sub')} className="flex items-center gap-1 text-[9px] font-bold text-indigo-600 hover:underline"><UserPlus size={9} />検索して追加</button>
+          </div>
           <div className="space-y-1">
             {info.subs.map((sub: any) => (
               <div key={sub.id} className="flex justify-between items-center text-[10px]">

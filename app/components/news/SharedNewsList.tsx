@@ -1,11 +1,10 @@
 'use client';
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { db } from '@/lib/firebase';
-import { collection, query, orderBy, limit, getDocs } from 'firebase/firestore';
 import { ArrowLeft, Loader2, ChevronRight, Bell, Tag, PartyPopper, AlertTriangle, Info } from 'lucide-react';
+import { loadAnnouncements } from '@/lib/client-announcements';
 
-type Props = { role: 'student' | 'teacher'; basePath: string; dashboardPath: string; };
+type Props = { role: 'student' | 'teacher' | 'parent'; basePath: string; dashboardPath: string; };
 
 export default function SharedNewsList({ role, basePath, dashboardPath }: Props) {
   const [newsList, setNewsList] = useState<any[]>([]);
@@ -14,9 +13,7 @@ export default function SharedNewsList({ role, basePath, dashboardPath }: Props)
   useEffect(() => {
     const fetchNews = async () => {
       try {
-        const q = query(collection(db, 'announcements'), orderBy('created_at', 'desc'), limit(50));
-        const snapshot = await getDocs(q);
-        const allData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        const allData = await loadAnnouncements(50);
         const filtered = allData.filter((item: any) => item.target === 'all' || item.target === role);
         setNewsList(filtered);
       } catch (e) { console.error(e); } finally { setLoading(false); }
@@ -64,7 +61,7 @@ export default function SharedNewsList({ role, basePath, dashboardPath }: Props)
             <Link key={item.id} href={`${basePath}/${item.id}`} className="block bg-white p-5 rounded-2xl shadow-sm border border-gray-100 hover:border-blue-300 hover:shadow-md transition-all group relative overflow-hidden">
               <div className="flex items-center flex-wrap gap-2 mb-3">
                 <span className="text-xs font-bold text-gray-400 bg-gray-50 px-2 py-0.5 rounded">
-                  {item.created_at ? new Date(item.created_at).toLocaleDateString() : '-'}
+                  {item.publish_at || item.created_at ? new Date(item.publish_at || item.created_at).toLocaleDateString('ja-JP') : '-'}
                 </span>
                 {/* バッジ表示（全てのラベルに対応） */}
                 {getBadge(item.label)}

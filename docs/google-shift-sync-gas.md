@@ -125,10 +125,23 @@ function firebaseDateKey_(displayValue, year) {
 }
 
 function firebasePeriod_(label) {
-  const text = firebaseDisplay_(label);
-  if (text.includes('２') || text.includes('2')) return 2;
-  if (text.includes('１') || text.includes('1')) return 1;
+  const text = firebaseDisplay_(label).normalize('NFKC');
+  if (/^(?:第\s*)?1\s*(?:時間目|時限|限|コマ)/.test(text)) return 1;
+  if (/^(?:第\s*)?2\s*(?:時間目|時限|限|コマ)/.test(text)) return 2;
   return 0;
+}
+
+function firebaseGrade_(value) {
+  const text = firebaseDisplay_(value).normalize('NFKC').replace(/[\s　]/g, '');
+  const match = text.match(/中(?:学)?([123])/);
+  return match ? `中${match[1]}` : text.replace(/理科|社会/g, '');
+}
+
+function firebaseSubject_(value) {
+  const text = firebaseDisplay_(value).normalize('NFKC');
+  if (text.includes('理科')) return '理科';
+  if (text.includes('社会')) return '社会';
+  return text.trim();
 }
 
 function firebaseSplitNames_(value) {
@@ -256,7 +269,7 @@ function parseSheetForFirebase_() {
     }
 
     const period = firebasePeriod_(row[0]);
-    if (!period || !currentDate) continue;
+    if (!period || !currentDate || firebaseDisplay_(row[1]) !== '教科') continue;
 
     const subjectRow = values[r] || [];
     const classRow = values[r + 1] || [];
@@ -290,8 +303,8 @@ function parseSheetForFirebase_() {
         target_date: currentDate,
         role_type: 'main',
         teacher_name: teacher || '未定',
-        target_grade: subject.replace(/理科|社会/g, ''),
-        target_subject: subject,
+        target_grade: firebaseGrade_(subject),
+        target_subject: firebaseSubject_(subject),
         target_detail_subject: detail,
         target_place: place,
         target_meeting_id: meetingId,
@@ -312,8 +325,8 @@ function parseSheetForFirebase_() {
           target_date: currentDate,
           role_type: 'sub',
           teacher_name: name,
-          target_grade: subject.replace(/理科|社会/g, ''),
-          target_subject: subject,
+          target_grade: firebaseGrade_(subject),
+          target_subject: firebaseSubject_(subject),
           target_detail_subject: detail,
           target_place: place,
           unit,
@@ -519,10 +532,23 @@ function dateKey_(displayValue, year) {
 }
 
 function periodFromLabel_(label) {
-  const text = display_(label);
-  if (text.includes('２') || text.includes('2')) return 2;
-  if (text.includes('１') || text.includes('1')) return 1;
+  const text = display_(label).normalize('NFKC');
+  if (/^(?:第\s*)?1\s*(?:時間目|時限|限|コマ)/.test(text)) return 1;
+  if (/^(?:第\s*)?2\s*(?:時間目|時限|限|コマ)/.test(text)) return 2;
   return 0;
+}
+
+function gradeFromSubject_(value) {
+  const text = display_(value).normalize('NFKC').replace(/[\s　]/g, '');
+  const match = text.match(/中(?:学)?([123])/);
+  return match ? `中${match[1]}` : text.replace(/理科|社会/g, '');
+}
+
+function subjectGroup_(value) {
+  const text = display_(value).normalize('NFKC');
+  if (text.includes('理科')) return '理科';
+  if (text.includes('社会')) return '社会';
+  return text.trim();
 }
 
 function splitNames_(value) {
@@ -556,7 +582,7 @@ function parseActiveSheet_() {
     }
 
     const period = periodFromLabel_(row[0]);
-    if (!period || !currentDate) continue;
+    if (!period || !currentDate || display_(row[1]) !== '教科') continue;
 
     currentPeriod = period;
 
@@ -592,8 +618,8 @@ function parseActiveSheet_() {
         period,
         role_type: 'main',
         teacher_name: teacher || '未定',
-        grade: subject.replace(/理科|社会/g, ''),
-        subject,
+        grade: gradeFromSubject_(subject),
+        subject: subjectGroup_(subject),
         detail_subject: detail,
         unit,
         place,
@@ -613,8 +639,8 @@ function parseActiveSheet_() {
           period,
           role_type: 'sub',
           teacher_name: name,
-          grade: subject.replace(/理科|社会/g, ''),
-          subject,
+          grade: gradeFromSubject_(subject),
+          subject: subjectGroup_(subject),
           detail_subject: detail,
           unit,
           place,

@@ -1,7 +1,7 @@
 # 画面一覧表
 
-最終更新: 2026-08-13  
-対象: `app/**/page.tsx`（100画面）
+最終更新: 2026-10-09  
+対象: `app/**/page.tsx`（123画面。無効化済みルートを除く）
 
 ## 共通・認証（14画面）
 
@@ -44,7 +44,7 @@
 | 16 | 景品交換 | `/student/shop` | コイン景品交換（現在は利用停止案内） |
 | 17 | 設定・アカウント | `/student/settings` | 表示、通知、連携、パスワード等の設定 |
 
-## 講師・勤怠専用（20画面）
+## 講師・勤怠専用（21画面）
 
 | No. | 画面名 | URL | 主な機能 |
 |---:|---|---|---|
@@ -68,6 +68,7 @@
 | 18 | お知らせ詳細 | `/teacher/news/[id]` | お知らせ本文を表示 |
 | 19 | 通知 | `/teacher/notifications` | 自分宛て通知の一覧・既読化 |
 | 20 | 設定 | `/teacher/settings` | 通知、LINE、パスワード等の設定 |
+| 21 | 勤怠承認シフト管理 | `/teacher/shift-management` | 専任の校舎承認者が自校舎の専任・準専任の集団、個別、事務シフトを月・1週間・今日表示で管理 |
 
 ## 保護者（6画面）
 
@@ -111,7 +112,7 @@
 | 14 | シフト管理 | `/master/shifts` | 理社 | シフト登録、同期、Zoom情報管理 |
 | 15 | 月間予定管理 | `/master/monthly-schedules` | 理社 | 月間予定の登録・管理 |
 | 16 | 勤怠管理 | `/master/attendance` | 勤怠 | 勤務実績・交通費・集計を管理 |
-| 17 | 打刻修正承認 | `/master/attendance-corrections` | 勤怠 | 講師の打刻修正依頼を承認・却下 |
+| 17 | 勤怠承認（打刻修正承認を含む） | `/master/attendance-approvals` | 勤怠 | 勤務実績と勤務校舎を確認し、打刻修正依頼を承認・却下 |
 | 18 | 勤怠ミス候補 | `/master/attendance/diagnostics` | 勤怠 | 打刻・シフトの不整合候補を確認 |
 | 19 | 代行依頼管理 | `/master/substitutions` | 理社 | 代行募集の作成・管理 |
 | 20 | お知らせ配信 | `/master/announcements` | 理社 | 対象を指定してお知らせを配信 |
@@ -130,12 +131,44 @@
 | 33 | CSV一括登録 | `/master/imports` | 理社 | 年間予定、PF、スライド、交通費等の取込 |
 | 34 | 通知・LINE管理 | `/master/line` | 理社 | LINE連携状況・通知配信を管理 |
 | 35 | 英検Booster管理 | `/master/eiken` | 英検 | 講座、授業、タスク、教材を管理 |
-## 開発・保守（2画面）
+
+## 2026年10月追加・分離画面（24画面）
+
+既存カテゴリの内訳表を維持しつつ、追加された専用画面をここに集約する。全件は実ファイルとの機械突合で123画面に一致している。
+
+| No. | 画面名 | URL | 主な利用者・機能 |
+|---:|---|---|---|
+| 1 | 初回パスワード変更 | `/account/password-change` | 全ロール共通の初回パスワード変更 |
+| 2 | 共通マニュアル | `/manual` | ログイン前後の共通案内と役割別入口 |
+| 3 | 勤怠マニュアル | `/manual/attendance` | 講師・承認者向け勤怠操作案内 |
+| 4 | 専任勤怠申請 | `/master/attendance/dedicated-claims` | 専任勤務の申請確認 |
+| 5 | 専任授業実績 | `/master/attendance/employee-lessons` | 専任職員の授業実績管理 |
+| 6 | 勤怠分析 | `/master/attendance/insights` | 勤務・承認状況の分析 |
+| 7 | 給与集計 | `/master/attendance/payroll` | 新旧勤怠、単価、給与帳票の集計 |
+| 8 | オンライン校管理 | `/master/online-school` | オンライン校の問題・進捗管理 |
+| 9 | オンライン校問題管理 | `/master/online-school/problems` | 問題バンクの管理 |
+| 10 | オンライン校生徒詳細 | `/master/online-school/students/[studentId]` | 生徒別の学習状況確認 |
+| 11 | 復習期間管理 | `/master/review-periods` | 期間・科目・単元・CSV取込の管理 |
+| 12 | 突破ゼミ講座管理 | `/master/test-prep-courses` | 突破ゼミ講座と参加条件の管理 |
+| 13 | 保護者お知らせ一覧 | `/parent/news` | 保護者向けお知らせ一覧 |
+| 14 | 保護者お知らせ詳細 | `/parent/news/[id]` | 保護者向けお知らせ詳細 |
+| 15 | 保護者PF | `/parent/pf` | 連携生徒のPF状況確認 |
+| 16 | 生徒オンライン校 | `/student/online-school` | 科目選択と学習状況 |
+| 17 | 生徒オンライン校科目 | `/student/online-school/[subject]` | 科目別の問題選択 |
+| 18 | 生徒オンライン学習 | `/student/online-school/[subject]/learn` | 問題回答と学習セッション |
+| 19 | 生徒復習期間 | `/student/review-periods` | 復習講座の一覧・曜日・単元設定 |
+| 20 | 生徒突破ゼミ | `/student/test-prep` | 突破ゼミ講座の確認・登録 |
+| 21 | 講師勤怠承認 | `/teacher/attendance-approvals` | 専任承認者向けの自校舎勤怠承認 |
+| 22 | 専任勤怠 | `/teacher/attendance/dedicated` | 専任勤務の登録・確認 |
+| 23 | 講師オンライン校 | `/teacher/online-school` | 担当生徒のオンライン学習確認 |
+| 24 | 講師校舎別生徒 | `/teacher/school-students` | 自校舎生徒の状態・アカウント管理 |
+
+## 開発・保守（無効化済み2ルート）
 
 | No. | 画面名 | URL | 備考 |
 |---:|---|---|---|
-| 1 | 開発用ユーザー登録 | `/tmp-register` | 開発用。運用環境での公開可否を要確認 |
-| 2 | データベース修復 | `/fix-db` | 保守用。運用環境での公開可否を要確認 |
+| 1 | 開発用ユーザー登録 | `/tmp-register` | 常時404。本番・開発ともブラウザからのアカウント作成は不可 |
+| 2 | データベース修復 | `/fix-db` | 常時404。修復はレビュー済みの認証付きサーバー運用でのみ実施 |
 
 ## 注記
 

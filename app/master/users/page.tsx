@@ -3,13 +3,14 @@
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { auth, db } from '@/lib/firebase';
-import { collection, getDocs, doc, deleteDoc, query, orderBy, writeBatch } from 'firebase/firestore';
-import { Users, Search, Plus, Edit, Trash2, ArrowLeft, GraduationCap, UserCheck, Save, X, Loader2, FileUp, Shield, Printer } from 'lucide-react';
+import { collection, getDocs, query, orderBy } from 'firebase/firestore';
+import { Users, Search, Plus, Edit, ArrowLeft, GraduationCap, UserCheck, Save, X, Loader2, FileUp, Shield, Printer, Download, History } from 'lucide-react';
 import Link from 'next/link';
 import CsvSampleDownload from '@/app/components/CsvSampleDownload';
 import LastLoginCell from '@/app/components/LastLoginCell';
 import AccountGuideSheet, { ACCOUNT_GUIDE_PRINT_CSS } from '@/app/components/AccountGuideSheet';
 import { EMPLOYMENT_CATEGORY_LABELS, normalizeEmploymentCategory } from '@/lib/employment-category';
+import { ATTENDANCE_SCHOOL_OPTION_GROUPS, attendanceSchoolName, resolveAttendanceSchoolCode } from '@/lib/attendance-schools';
 
 // ユーザー型定義
 interface UserData {
@@ -37,15 +38,30 @@ interface UserData {
   parent_email?: string;
   student_ids?: string[];
   school_id?: string;
+  school_ids?: string[];
   school?: string;
   middle_school?: string;
   course_start_month?: string;
   employment_category?: 'dedicated' | 'semi_dedicated';
+  attendance_school_manager?: boolean;
   enabled_programs?: string[];
   prescribed_work_start?: string;
   prescribed_work_end?: string;
   prescribed_break_minutes?: number;
   prescribed_work_days?: number[];
+}
+
+interface AccountImportBatch {
+  id: string;
+  file_name: string;
+  role: 'student' | 'teacher' | 'master';
+  user_ids: string[];
+  success_count: number;
+  error_count: number;
+  errors: string[];
+  imported_at: string;
+  imported_by: string;
+  source: string;
 }
 
 const normalizedUserRole = (role: unknown) => ['attendance_admin', 'attendance_only', 'attendance_manager'].includes(String(role || '').toLowerCase()) ? 'teacher' : String(role || 'student');
@@ -59,9 +75,11 @@ export default function UserManagementPage() {
   const [activeTab, setActiveTab] = useState<'student' | 'teacher' | 'master'>('student');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [isBulkDeleting, setIsBulkDeleting] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [isPasswordSyncing, setIsPasswordSyncing] = useState(false);
+  const [importBatches, setImportBatches] = useState<AccountImportBatch[]>([]);
+  const [selectedImportBatchId, setSelectedImportBatchId] = useState('');
+  const [isImportHistoryLoading, setIsImportHistoryLoading] = useState(false);
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingUser, setEditingUser] = useState<UserData | null>(null);
@@ -70,18 +88,23 @@ export default function UserManagementPage() {
   const [isPrintModalOpen, setIsPrintModalOpen] = useState(false);
   const [printAccounts, setPrintAccounts] = useState<UserData[]>([]);
   const [qrBaseUrl, setQrBaseUrl] = useState('');
+  const [showParentCredentials, setShowParentCredentials] = useState(true);
+  const [isPdfExporting, setIsPdfExporting] = useState(false);
+  const [pdfProgress, setPdfProgress] = useState({ current: 0, total: 0 });
 
   const [formData, setFormData] = useState<Partial<UserData> & { displayName: string }>({
     role: 'student',
     displayName: '',
     lifetime_id: '',
     initial_password: '',
+    school_id: '',
     grade: '',
     classroom: '',
     subject_science: '',
     subject_social: '',
     day_of_week: '',
     employment_category: 'semi_dedicated',
+    attendance_school_manager: false,
     enabled_programs: [],
     prescribed_work_start: '09:00',
     prescribed_work_end: '18:00',
@@ -92,19 +115,19 @@ export default function UserManagementPage() {
   const csvSample = activeTab === 'student'
     ? {
         filename: 'ユーザー管理_生徒登録CSV例.csv',
-        headers: ['氏名', 'ID', 'パスワード', '理科', '社会'],
+        headers: ['氏名', 'ID', 'パスワード', '校舎番号', '理科', '社会'],
         rows: [
-          ['山田 太郎', '100001', '', '物理', '地理'],
-          ['佐藤 花子', '100002', '', '化学', '歴史'],
+          ['山田 太郎', '100001', '', '112', '物理', '地理'],
+          ['佐藤 花子', '100002', '', '161', '化学', '歴史'],
         ],
       }
     : activeTab === 'teacher'
       ? {
           filename: 'ユーザー管理_講師登録CSV例.csv',
-          headers: ['氏名', 'ID', 'パスワード', '専任区分', '理社講座'],
+          headers: ['氏名', 'ID', 'パスワード', '校舎番号', '専任区分', '理社講座'],
           rows: [
-            ['鈴木 一郎', 'T1001', '', '準専任', 'あり'],
-            ['田中 花子', 'T1002', '', '専任', 'なし'],
+            ['鈴木 一郎', 'T1001', '', '112', '準専任', 'あり'],
+            ['田中 花子', 'T1002', '', '161', '専任', 'なし'],
           ],
         }
       : {
@@ -134,11 +157,39 @@ export default function UserManagementPage() {
     } catch (e) { console.error(e); } finally { setLoading(false); }
   };
 
-  useEffect(() => { fetchUsers(); }, []);
+  const fetchImportBatches = async () => {
+    setIsImportHistoryLoading(true);
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) return;
+      const response = await fetch('/api/admin/account-import-batches', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok) throw new Error(result.error || '取込履歴を取得できませんでした');
+      setImportBatches(Array.isArray(result.batches) ? result.batches : []);
+    } catch (error) {
+      console.error('Account import history fetch failed:', error);
+    } finally {
+      setIsImportHistoryLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void fetchUsers();
+    void fetchImportBatches();
+  }, []);
 
   // フィルタリング
   useEffect(() => {
     let result = users.filter(u => normalizedUserRole(u.role) === activeTab);
+    if (selectedImportBatchId) {
+      const selectedBatch = importBatches.find(batch => batch.id === selectedImportBatchId);
+      if (selectedBatch) {
+        const importedIds = new Set(selectedBatch.user_ids);
+        result = result.filter(user => importedIds.has(user.id));
+      }
+    }
     if (searchQuery) {
       const lower = searchQuery.toLowerCase();
       result = result.filter(u => 
@@ -153,41 +204,26 @@ export default function UserManagementPage() {
     setFilteredUsers(result);
     const visibleIds = new Set(result.map(user => user.id));
     setSelectedIds(current => new Set(Array.from(current).filter(id => visibleIds.has(id))));
-  }, [users, activeTab, searchQuery]);
+  }, [users, activeTab, searchQuery, selectedImportBatchId, importBatches]);
 
-  // ▼▼▼ 重複削除機能 ▼▼▼
-  const handleDeduplicate = async () => {
-    if (!confirm('氏名とIDが同一の重複データを検索し、最新の1件を残して削除しますか？')) return;
-    
-    setLoading(true);
-    try {
-      const uniqueMap = new Map<string, UserData>();
-      const duplicates: string[] = [];
+  const selectedImportBatch = importBatches.find(batch => batch.id === selectedImportBatchId) || null;
 
-      users.forEach(u => {
-        const key = u.lifetime_id || u.email;
-        if (!key) return;
-        if (uniqueMap.has(key)) {
-          duplicates.push(u.id);
-        } else {
-          uniqueMap.set(key, u);
-        }
-      });
-
-      if (duplicates.length === 0) {
-        alert('重複データは見つかりませんでした。');
-      } else {
-        const batch = writeBatch(db);
-        duplicates.forEach(id => batch.delete(doc(db, 'users', id)));
-        await batch.commit();
-        alert(`${duplicates.length} 件の重複データを削除しました。`);
-        fetchUsers();
-      }
-    } catch (e: any) {
-      alert('エラー: ' + e.message);
-    } finally {
-      setLoading(false);
+  const handleImportBatchChange = (batchId: string) => {
+    setSelectedImportBatchId(batchId);
+    const batch = importBatches.find(item => item.id === batchId);
+    if (!batch) {
+      setSelectedIds(new Set());
+      return;
     }
+    setActiveTab(batch.role);
+    setSelectedIds(new Set(batch.user_ids));
+    setSearchQuery('');
+  };
+
+  const handleTabChange = (tab: 'student' | 'teacher' | 'master') => {
+    setActiveTab(tab);
+    setSelectedImportBatchId('');
+    setSelectedIds(new Set());
   };
 
   const syncPrintedPasswords = async (ids: string[]) => {
@@ -298,6 +334,7 @@ export default function UserManagementPage() {
     }
 
     setIsImporting(true);
+    const importBatchId = `account_import_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const reader = new FileReader();
     reader.readAsText(file, 'UTF-8');
 
@@ -310,15 +347,17 @@ export default function UserManagementPage() {
         const idxName = headers.findIndex(h => h.includes('氏名'));
         const idxID = headers.findIndex(h => h.includes('ID'));
         const idxPass = headers.findIndex(h => h.includes('パスワード'));
+        const idxSchool = headers.findIndex(h => h.includes('校舎番号') || h.includes('教室番号'));
         const idxScience = headers.findIndex(h => h.includes('理科'));
         const idxSocial = headers.findIndex(h => h.includes('社会'));
         const idxEmployment = headers.findIndex(h => h.includes('専任区分') || h.includes('雇用区分'));
         const idxScienceSocial = headers.findIndex(h => h.includes('理社講座'));
 
-        if (idxName === -1 || idxID === -1) throw new Error('CSVヘッダーに「氏名」「ID」が必要です');
+        if (idxName === -1 || idxID === -1 || (activeTab !== 'master' && idxSchool === -1)) throw new Error('CSVヘッダーに「氏名」「ID」「校舎番号」が必要です');
 
         let count = 0;
         const errors: string[] = [];
+        const importedUserIds: string[] = [];
         const token = await auth.currentUser?.getIdToken();
         if (!token) throw new Error('ログイン情報を確認できませんでした。再ログインしてください。');
 
@@ -329,12 +368,17 @@ export default function UserManagementPage() {
           const name = cols[idxName]?.trim();
           const loginId = cols[idxID]?.trim();
           const pass = idxPass !== -1 ? cols[idxPass]?.trim() : '';
+          const schoolId = idxSchool !== -1 ? resolveAttendanceSchoolCode(cols[idxSchool]?.trim()) : '';
           const valScience = idxScience !== -1 ? cols[idxScience]?.trim() : null;
           const valSocial = idxSocial !== -1 ? cols[idxSocial]?.trim() : null;
           const valEmployment = idxEmployment !== -1 ? cols[idxEmployment]?.trim() : '準専任';
           const valScienceSocial = idxScienceSocial !== -1 ? cols[idxScienceSocial]?.trim() : '';
 
           if (!name || !loginId) continue;
+          if (activeTab !== 'master' && !schoolId) {
+            errors.push(`${name}: 校舎番号が一覧にありません`);
+            continue;
+          }
 
           const existingUser = users.find(user => user.lifetime_id === loginId || user.email === loginId);
           const response = await fetch('/api/admin/accounts/create', {
@@ -349,11 +393,14 @@ export default function UserManagementPage() {
               display_name: name,
               login_id: loginId,
               password: pass,
+              school_id: schoolId,
               subject_science: valScience || '',
               subject_social: valSocial || '',
               employment_category: normalizeEmploymentCategory(valEmployment, activeTab),
               enabled_programs: activeTab === 'teacher' && ['あり', '有', 'yes', 'true', '1', '○'].includes(String(valScienceSocial || '').toLowerCase()) ? ['science_social'] : [],
               auto_create_parent: false,
+              import_batch_id: importBatchId,
+              import_file_name: file.name,
             }),
           });
           const result = await response.json().catch(() => ({}));
@@ -362,13 +409,37 @@ export default function UserManagementPage() {
             continue;
           }
           count++;
+          if (result.uid) importedUserIds.push(String(result.uid));
+        }
+
+        const historyResponse = await fetch('/api/admin/account-import-batches', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            batch_id: importBatchId,
+            file_name: file.name,
+            role: activeTab,
+            user_ids: importedUserIds,
+            success_count: count,
+            error_count: errors.length,
+            errors,
+          }),
+        });
+        const historyResult = await historyResponse.json().catch(() => ({}));
+        if (!historyResponse.ok || !historyResult.ok) {
+          throw new Error(`アカウントは登録されましたが、取込履歴を保存できませんでした: ${historyResult.error || '不明なエラー'}`);
         }
 
         const errorText = errors.length > 0
           ? `\n失敗: ${errors.length}件\n${errors.slice(0, 5).join('\n')}`
           : '';
-        alert(`${count} 件のユーザーをインポート/更新しました${errorText}`);
-        fetchUsers();
+        await Promise.all([fetchUsers(), fetchImportBatches()]);
+        setSelectedImportBatchId(importBatchId);
+        setSelectedIds(new Set(importedUserIds));
+        alert(`${count} 件のユーザーをインポート/更新しました。\n取込履歴から対象者を再選択できます。${errorText}`);
       } catch (e: any) {
         alert('インポートエラー: ' + e.message);
       } finally {
@@ -381,6 +452,7 @@ export default function UserManagementPage() {
   // 保存処理
   const handleSave = async () => {
     if (!formData.displayName || !formData.lifetime_id) return alert('名前とログインIDは必須です');
+    if (formData.role !== 'master' && !resolveAttendanceSchoolCode(formData.school_id)) return alert('所属校舎を選択してください');
     
     if (!editingUser) {
       const exists = users.some(u => (u.lifetime_id === formData.lifetime_id) || (u.email === formData.lifetime_id));
@@ -402,12 +474,15 @@ export default function UserManagementPage() {
           display_name: formData.displayName,
           login_id: formData.lifetime_id,
           password: formData.initial_password,
+          school_id: formData.school_id,
+          school_ids: formData.school_ids,
           grade: formData.grade,
           classroom: formData.classroom,
           subject_science: formData.subject_science,
           subject_social: formData.subject_social,
           day_of_week: formData.day_of_week,
           employment_category: formData.employment_category || 'semi_dedicated',
+          attendance_school_manager: formData.employment_category === 'dedicated' && formData.attendance_school_manager === true,
           enabled_programs: formData.enabled_programs || [],
           prescribed_work_start: formData.prescribed_work_start || '09:00',
           prescribed_work_end: formData.prescribed_work_end || '18:00',
@@ -432,10 +507,12 @@ export default function UserManagementPage() {
         ...user, 
         displayName: user.student_name || user.name || '',
         lifetime_id: user.lifetime_id || user.email || '', 
+        school_id: resolveAttendanceSchoolCode(user.school_id || user.school),
         subject_science: user.subject_science || '',
         subject_social: user.subject_social || '',
         employment_category: normalizeEmploymentCategory(user.employment_category, user.role) || 'semi_dedicated',
-        enabled_programs: Array.isArray(user.enabled_programs) ? user.enabled_programs.filter(value => value === 'science_social') : [],
+        attendance_school_manager: user.attendance_school_manager === true,
+        enabled_programs: Array.isArray(user.enabled_programs) ? user.enabled_programs.filter(value => ['science_social', 'online_school'].includes(value)) : [],
         prescribed_work_start: user.prescribed_work_start || '09:00',
         prescribed_work_end: user.prescribed_work_end || '18:00',
         prescribed_break_minutes: Number(user.prescribed_break_minutes ?? 60),
@@ -448,12 +525,14 @@ export default function UserManagementPage() {
         displayName: '',
         lifetime_id: '',
         initial_password: '',
+        school_id: '',
         grade: activeTab === 'student' ? '中1' : '',
         classroom: '',
         subject_science: '',
         subject_social: '',
         day_of_week: '',
         employment_category: 'semi_dedicated',
+        attendance_school_manager: false,
         enabled_programs: [],
         prescribed_work_start: '09:00',
         prescribed_work_end: '18:00',
@@ -466,17 +545,64 @@ export default function UserManagementPage() {
   const handleSelectAll = (c: boolean) => setSelectedIds(c ? new Set(filteredUsers.map(u => u.id)) : new Set());
   const handleSelectOne = (id: string, c: boolean) => { const n = new Set(selectedIds); c ? n.add(id) : n.delete(id); setSelectedIds(n); };
   
-  const handleBulkDelete = async () => {
-    if (!confirm(`${selectedIds.size}件削除しますか？`)) return;
-    setIsBulkDeleting(true);
-    const batch = writeBatch(db);
-    selectedIds.forEach(id => batch.delete(doc(db, 'users', id)));
-    await batch.commit();
-    setUsers(prev => prev.filter(u => !selectedIds.has(u.id)));
-    setSelectedIds(new Set());
-    setIsBulkDeleting(false);
+  const handleDownloadIndividualPdfs = async () => {
+    if (isPdfExporting || printAccounts.length === 0) return;
+    setIsPdfExporting(true);
+    setPdfProgress({ current: 0, total: printAccounts.length });
+
+    try {
+      if (document.fonts?.ready) await document.fonts.ready;
+      const pages = Array.from(document.querySelectorAll<HTMLElement>('#print-root .account-guide-print-page'));
+      if (pages.length !== printAccounts.length) throw new Error('書面の表示数とPDF対象数が一致しません');
+
+      const [{ default: html2canvas }, { jsPDF }, { default: JSZip }] = await Promise.all([
+        import('html2canvas'),
+        import('jspdf'),
+        import('jszip'),
+      ]);
+      const zip = new JSZip();
+      const usedNames = new Set<string>();
+
+      for (let index = 0; index < pages.length; index++) {
+        setPdfProgress({ current: index + 1, total: pages.length });
+        const account = printAccounts[index];
+        const canvas = await html2canvas(pages[index], {
+          scale: 2,
+          useCORS: true,
+          backgroundColor: '#ffffff',
+          logging: false,
+        });
+        const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4', compress: true });
+        pdf.addImage(canvas.toDataURL('image/jpeg', 0.95), 'JPEG', 0, 0, 210, 297, undefined, 'FAST');
+
+        const rawName = String(account.student_name || account.name || account.lifetime_id || `user_${index + 1}`).trim();
+        const safeName = (rawName || `user_${index + 1}`).replace(/[\\/:*?"<>|\u0000-\u001F]/g, '_').slice(0, 80);
+        let fileName = `${safeName}_アカウント案内.pdf`;
+        if (usedNames.has(fileName)) fileName = `${safeName}_${index + 1}_アカウント案内.pdf`;
+        usedNames.add(fileName);
+        zip.file(fileName, pdf.output('arraybuffer'));
+      }
+
+      const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
+      const batchBaseName = selectedImportBatch?.file_name
+        ? selectedImportBatch.file_name.replace(/\.[^.]+$/, '')
+        : `アカウント案内_${new Date().toISOString().slice(0, 10)}`;
+      const safeZipName = batchBaseName.replace(/[\\/:*?"<>|\u0000-\u001F]/g, '_').slice(0, 100);
+      const url = URL.createObjectURL(zipBlob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${safeZipName}_個別PDF.zip`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error: any) {
+      alert(`PDFの作成に失敗しました。\n${error?.message || error}`);
+    } finally {
+      setIsPdfExporting(false);
+      setPdfProgress({ current: 0, total: 0 });
+    }
   };
-  const handleDelete = async (id: string) => { if(confirm('削除しますか？')) { await deleteDoc(doc(db, 'users', id)); setUsers(prev => prev.filter(u => u.id !== id)); }};
 
   // =========================================================================
   // ★ 印刷用のコンポーネント (React Portalでbody直下にレンダリングさせます)
@@ -532,13 +658,30 @@ export default function UserManagementPage() {
         `}} />
 
         {/* コントロールバー (印刷時は非表示) */}
-        <div className="print-hide sticky top-0 z-50 bg-white border-b border-gray-300 p-4 shadow-sm flex justify-between items-center">
-          <h2 className="font-bold text-gray-800 text-lg flex items-center gap-2">
-            <Printer size={20} className="text-indigo-600"/> 印刷プレビュー ({printAccounts.length}名分)
-          </h2>
-          <div className="flex gap-3">
+        <div className="print-hide sticky top-0 z-50 flex flex-col gap-3 border-b border-gray-300 bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-wrap items-center gap-4">
+            <h2 className="font-bold text-gray-800 text-lg flex items-center gap-2">
+              <Printer size={20} className="text-indigo-600"/> 印刷プレビュー ({printAccounts.length}名分)
+            </h2>
+            {printAccounts.some(account => account.role === 'student') && (
+              <label className="flex cursor-pointer items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-black text-amber-900">
+                <input
+                  type="checkbox"
+                  checked={showParentCredentials}
+                  onChange={event => setShowParentCredentials(event.target.checked)}
+                  className="h-4 w-4 accent-amber-600"
+                />
+                保護者ID・初期パスワードを掲載する
+              </label>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-3">
             <button onClick={() => window.print()} className="bg-indigo-600 text-white px-6 py-2 rounded-xl font-bold hover:bg-indigo-700 flex items-center gap-2 shadow-sm transition-transform active:scale-95">
               <Printer size={18}/> 印刷する
+            </button>
+            <button onClick={handleDownloadIndividualPdfs} disabled={isPdfExporting} className="flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-2 font-bold text-white shadow-sm hover:bg-emerald-700 disabled:cursor-wait disabled:opacity-60">
+              {isPdfExporting ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
+              {isPdfExporting ? `PDF作成中 ${pdfProgress.current}/${pdfProgress.total}` : '個別PDFをまとめて保存'}
             </button>
             <button onClick={() => { setIsPrintModalOpen(false); setPrintAccounts([]); }} className="bg-white text-gray-600 border border-gray-300 px-5 py-2 rounded-xl font-bold hover:bg-gray-50 flex items-center gap-2 transition-colors">
               <X size={18}/> 閉じる
@@ -553,8 +696,9 @@ export default function UserManagementPage() {
               <AccountGuideSheet
                 key={user.id}
                 account={user}
-                school={user.school_id || user.school || user.classroom || ''}
+                school={attendanceSchoolName(user.school_id || user.school || user.classroom)}
                 loginUrl={qrBaseUrl || 'https://classbase-app.vercel.app'}
+                showParentCredentials={showParentCredentials}
               />
             );
           })}
@@ -601,16 +745,70 @@ export default function UserManagementPage() {
             </div>
           </div>
 
+          <section className="mb-6 grid gap-4 lg:grid-cols-2">
+            <div className="rounded-2xl border border-blue-100 bg-blue-50 p-5">
+              <div className="flex items-start gap-3">
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white"><FileUp size={20} /></span>
+                <div>
+                  <h2 className="font-black text-slate-900">CSVでアカウントを一括登録</h2>
+                  <p className="mt-1 text-xs font-bold leading-5 text-slate-500">現在の「{activeTab === 'student' ? '生徒' : activeTab === 'teacher' ? '講師' : '管理者'}」として取り込み、履歴を自動保存します。</p>
+                </div>
+              </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <CsvSampleDownload {...csvSample} label="CSV見本" className="border-blue-200 bg-white text-blue-700 hover:bg-blue-100" />
+                <label className={`relative inline-flex cursor-pointer items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-black text-white hover:bg-blue-700 ${isImporting ? 'pointer-events-none opacity-60' : ''}`}>
+                  {isImporting ? <Loader2 size={17} className="animate-spin" /> : <FileUp size={17} />}
+                  {isImporting ? '取り込み中' : 'CSVを選んで取り込む'}
+                  <input type="file" accept=".csv,text/csv" onChange={handleCSVImport} disabled={isImporting} className="absolute inset-0 cursor-pointer opacity-0" />
+                </label>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start gap-3">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-white"><History size={20} /></span>
+                  <div>
+                    <h2 className="font-black text-slate-900">CSV取込履歴から絞り込む</h2>
+                    <p className="mt-1 text-xs font-bold leading-5 text-slate-500">履歴を選ぶと、そのCSVの対象者を一括選択します。</p>
+                  </div>
+                </div>
+                <button type="button" onClick={() => void fetchImportBatches()} disabled={isImportHistoryLoading} className="rounded-lg border border-emerald-200 bg-white px-3 py-2 text-xs font-black text-emerald-700 disabled:opacity-50">
+                  {isImportHistoryLoading ? '更新中' : '更新'}
+                </button>
+              </div>
+              <select value={selectedImportBatchId} onChange={event => handleImportBatchChange(event.target.value)} className="mt-4 w-full rounded-xl border border-emerald-200 bg-white px-4 py-3 text-sm font-black text-slate-700 outline-none focus:ring-2 focus:ring-emerald-200">
+                <option value="">すべてのアカウントを表示</option>
+                {importBatches.map(batch => (
+                  <option key={batch.id} value={batch.id}>
+                    {batch.imported_at ? new Date(batch.imported_at).toLocaleString('ja-JP') : '日時不明'} ｜ {batch.file_name} ｜ {batch.success_count}件
+                  </option>
+                ))}
+              </select>
+              {selectedImportBatch && (
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-100 bg-white px-4 py-3">
+                  <p className="text-xs font-bold text-slate-600">
+                    <span className="font-black text-emerald-700">{selectedImportBatch.success_count}件成功</span>
+                    {selectedImportBatch.error_count > 0 && <span className="ml-2 font-black text-rose-600">{selectedImportBatch.error_count}件失敗</span>}
+                    <span className="ml-2 text-slate-400">対象を選択済み</span>
+                  </p>
+                  <button type="button" onClick={() => setSelectedIds(new Set(filteredUsers.map(user => user.id)))} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-black text-white hover:bg-emerald-700">現在の絞り込みを全選択</button>
+                </div>
+              )}
+              {importBatches.length === 0 && !isImportHistoryLoading && <p className="mt-3 text-xs font-bold text-slate-400">履歴保存機能の追加後に取り込んだCSVがここに表示されます。</p>}
+            </div>
+          </section>
+
           {/* タブ切り替えと操作ボタン */}
           <div className="flex flex-col sm:flex-row justify-between items-end sm:items-center mb-4 gap-4 border-b border-gray-200 pb-2">
             <div className="flex w-full gap-2 overflow-x-auto sm:w-auto">
-              <button onClick={() => setActiveTab('student')} className={`flex shrink-0 items-center gap-2 whitespace-nowrap border-b-2 px-6 py-3 text-sm font-bold -mb-2.5 transition-colors ${activeTab === 'student' ? 'border-blue-600 text-blue-600 bg-blue-50/50' : 'border-transparent text-gray-500'}`}>
+              <button onClick={() => handleTabChange('student')} className={`flex shrink-0 items-center gap-2 whitespace-nowrap border-b-2 px-6 py-3 text-sm font-bold -mb-2.5 transition-colors ${activeTab === 'student' ? 'border-blue-600 text-blue-600 bg-blue-50/50' : 'border-transparent text-gray-500'}`}>
                 <GraduationCap size={18}/> 生徒 ({users.filter(u => u.role === 'student').length})
               </button>
-              <button onClick={() => setActiveTab('teacher')} className={`flex shrink-0 items-center gap-2 whitespace-nowrap border-b-2 px-6 py-3 text-sm font-bold -mb-2.5 transition-colors ${activeTab === 'teacher' ? 'border-purple-600 text-purple-600 bg-purple-50/50' : 'border-transparent text-gray-500'}`}>
+              <button onClick={() => handleTabChange('teacher')} className={`flex shrink-0 items-center gap-2 whitespace-nowrap border-b-2 px-6 py-3 text-sm font-bold -mb-2.5 transition-colors ${activeTab === 'teacher' ? 'border-purple-600 text-purple-600 bg-purple-50/50' : 'border-transparent text-gray-500'}`}>
                 <UserCheck size={18}/> 講師 ({users.filter(u => normalizedUserRole(u.role) === 'teacher').length})
               </button>
-              <button onClick={() => setActiveTab('master')} className={`flex shrink-0 items-center gap-2 whitespace-nowrap border-b-2 px-6 py-3 text-sm font-bold -mb-2.5 transition-colors ${activeTab === 'master' ? 'border-gray-800 text-gray-800 bg-gray-100' : 'border-transparent text-gray-500'}`}>
+              <button onClick={() => handleTabChange('master')} className={`flex shrink-0 items-center gap-2 whitespace-nowrap border-b-2 px-6 py-3 text-sm font-bold -mb-2.5 transition-colors ${activeTab === 'master' ? 'border-gray-800 text-gray-800 bg-gray-100' : 'border-transparent text-gray-500'}`}>
                 <Shield size={18}/> 管理者 ({users.filter(u => u.role === 'master').length})
               </button>
             </div>
@@ -692,7 +890,7 @@ export default function UserManagementPage() {
                         </td>
                         {activeTab === 'teacher' && (() => {
                           const category = normalizeEmploymentCategory(user.employment_category, user.role) || 'semi_dedicated';
-                          return <><td className="p-4"><span className={`rounded-full px-3 py-1 text-xs font-black ${category === 'dedicated' ? 'bg-indigo-100 text-indigo-700' : 'bg-amber-100 text-amber-800'}`}>{EMPLOYMENT_CATEGORY_LABELS[category]}</span></td><td className="p-4 text-xs font-black text-slate-600">{Array.isArray(user.enabled_programs) && user.enabled_programs.includes('science_social') ? '理社講座＋勤怠' : '勤怠のみ'}</td></>;
+                          return <><td className="p-4"><span className={`rounded-full px-3 py-1 text-xs font-black ${category === 'dedicated' ? 'bg-indigo-100 text-indigo-700' : 'bg-amber-100 text-amber-800'}`}>{EMPLOYMENT_CATEGORY_LABELS[category]}</span></td><td className="p-4 text-xs font-black text-slate-600">{Array.isArray(user.enabled_programs) && user.enabled_programs.includes('science_social') ? '理社講座あり' : '理社講座なし'}</td></>;
                         })()}
                         
                         {activeTab === 'student' && (
@@ -748,6 +946,14 @@ export default function UserManagementPage() {
                 <label className="text-xs font-bold text-gray-500">氏名</label>
                 <input className="w-full p-2 border rounded mt-1" value={formData.displayName} onChange={e => setFormData({...formData, displayName: e.target.value})}/>
               </div>
+
+              {formData.role !== 'master' && <div>
+                <label className="text-xs font-bold text-gray-500">所属校舎</label>
+                <select required className="w-full p-2 border rounded mt-1 bg-gray-50" value={formData.school_id || ''} onChange={e => setFormData({ ...formData, school_id: e.target.value })}>
+                  <option value="">校舎を選択</option>
+                  {ATTENDANCE_SCHOOL_OPTION_GROUPS.map(group => <optgroup key={group.label} label={group.label}>{group.schools.map(item => <option key={item.code} value={item.code}>{item.name}</option>)}</optgroup>)}
+                </select>
+              </div>}
               
               <div>
                 <label className="text-xs font-bold text-gray-500">パスワード</label>
@@ -761,8 +967,9 @@ export default function UserManagementPage() {
                     <option value="dedicated">専任</option>
                     <option value="semi_dedicated">準専任</option>
                   </select>
-                  <label className="mt-3 flex cursor-pointer items-center gap-3 rounded-lg bg-white p-3 text-sm font-bold text-slate-700"><input type="checkbox" checked={formData.enabled_programs?.includes('science_social') || false} onChange={event => setFormData({ ...formData, enabled_programs: event.target.checked ? ['science_social'] : [] })} className="h-5 w-5 accent-indigo-600" /><span>理社講座を表示する<span className="block text-[10px] text-slate-400">OFFの場合は勤怠だけ表示</span></span></label>
+                  <label className="mt-3 flex cursor-pointer items-center gap-3 rounded-lg bg-white p-3 text-sm font-bold text-slate-700"><input type="checkbox" checked={formData.enabled_programs?.includes('science_social') || false} onChange={event => setFormData({ ...formData, enabled_programs: event.target.checked ? ['science_social'] : [] })} className="h-5 w-5 accent-indigo-600" /><span>理社講座を利用する<span className="block text-[10px] text-slate-400">ONの場合は理社講座画面から勤怠へ移動できます。OFFの場合は勤怠画面を直接開きます。</span></span></label>
                   {formData.employment_category === 'dedicated' && <div className="mt-3 rounded-lg bg-white p-3"><div className="grid grid-cols-3 gap-2"><label className="text-[10px] font-black text-slate-500">規定開始<input type="time" value={formData.prescribed_work_start || '09:00'} onChange={event => setFormData({ ...formData, prescribed_work_start: event.target.value })} className="mt-1 w-full rounded border p-2 text-xs" /></label><label className="text-[10px] font-black text-slate-500">規定終了<input type="time" value={formData.prescribed_work_end || '18:00'} onChange={event => setFormData({ ...formData, prescribed_work_end: event.target.value })} className="mt-1 w-full rounded border p-2 text-xs" /></label><label className="text-[10px] font-black text-slate-500">休憩（分）<input type="number" min="0" max="240" step="5" value={formData.prescribed_break_minutes ?? 60} onChange={event => setFormData({ ...formData, prescribed_break_minutes: Number(event.target.value) })} className="mt-1 w-full rounded border p-2 text-xs" /></label></div><div className="mt-2 flex flex-wrap gap-1">{['日', '月', '火', '水', '木', '金', '土'].map((label, day) => <label key={day} className={`cursor-pointer rounded border px-2 py-1 text-[10px] font-black ${(formData.prescribed_work_days || []).includes(day) ? 'bg-indigo-600 text-white' : 'text-slate-500'}`}><input type="checkbox" className="sr-only" checked={(formData.prescribed_work_days || []).includes(day)} onChange={event => setFormData({ ...formData, prescribed_work_days: event.target.checked ? [...(formData.prescribed_work_days || []), day].sort() : (formData.prescribed_work_days || []).filter(value => value !== day) })} />{label}</label>)}</div></div>}
+                  {formData.employment_category === 'dedicated' && <label className="mt-3 flex cursor-pointer items-start gap-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3"><input type="checkbox" checked={formData.attendance_school_manager === true} onChange={event => setFormData({ ...formData, attendance_school_manager: event.target.checked })} className="mt-0.5 h-5 w-5 accent-emerald-600" /><span><span className="block text-sm font-black text-emerald-900">自校舎の勤怠責任者</span><span className="mt-1 block text-[10px] font-bold leading-relaxed text-emerald-700">理社講座の利用設定にかかわらず、自校舎の打刻修正依頼と勤務詳細を承認できます。</span></span></label>}
                 </div>
               )}
               
@@ -800,6 +1007,7 @@ export default function UserManagementPage() {
                       />
                     </div>
                   </div>
+                  <label className="flex cursor-pointer items-center gap-3 rounded-lg border border-violet-200 bg-white p-3 text-sm font-bold text-violet-900"><input type="checkbox" checked={formData.enabled_programs?.includes('online_school') || false} onChange={event => setFormData({ ...formData, enabled_programs: event.target.checked ? ['online_school'] : [] })} className="h-5 w-5 accent-violet-600" /><span>オンライン校を利用する<span className="block text-[10px] text-violet-500">生徒のアプリ一覧に10分学習を表示</span></span></label>
                 </div>
               )}
               

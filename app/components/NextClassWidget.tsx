@@ -108,7 +108,9 @@ export default function NextClassWidget({ profile }: { profile: any }) {
               getDocs(query(
                 collection(db, 'shift_assignments'), 
                 where('user_id', 'in', idCandidates),
-                where('target_date', '>=', todayStr)
+                where('target_date', '>=', todayStr),
+                orderBy('target_date', 'asc'),
+                limit(100)
               ))
             );
           }
@@ -117,7 +119,8 @@ export default function NextClassWidget({ profile }: { profile: any }) {
         promises.push(
           getDocs(query(
             collection(db, 'shift_assignments'),
-            where('target_date', '==', todayStr)
+            where('target_date', '==', todayStr),
+            limit(200)
           ))
         );
 

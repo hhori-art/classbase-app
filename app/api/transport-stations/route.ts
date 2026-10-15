@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, jsonError, requireRole } from '@/lib/server-auth';
 import { normalizeTransportStation, normalizeTransportType } from '@/lib/transport-fares';
+import { unstable_cache } from 'next/cache';
 
 export const runtime = 'nodejs';
 
@@ -53,6 +54,18 @@ const stationTypeLabel = (value: unknown) => {
   return [type === 'train' ? '鉄道' : type, detail].filter(Boolean).join(' / ');
 };
 
+const loadTransportMasters = unstable_cache(async (transportType: string) => {
+  const db = adminDb();
+  const [stationSnap, fareSnap] = await Promise.all([
+    db.collection('transport_stations').where('transport_type', '==', transportType).limit(1200).get(),
+    db.collection('transport_fares').where('transport_type', '==', transportType).limit(1200).get(),
+  ]);
+  return {
+    stations: stationSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Record<string, any>)),
+    fares: fareSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Record<string, any>)),
+  };
+}, ['transport-masters-v1'], { revalidate: 900, tags: ['transport-masters'] });
+
 async function lookupEkispertStations(query: string): Promise<StationCandidate[]> {
   const key = process.env.EKISPERT_API_KEY || process.env.EKISPERT_ACCESS_KEY;
   if (!key || !query) return [];
@@ -98,16 +111,11 @@ export async function GET(request: NextRequest) {
       return Response.json({ ok: false, error: 'transport-type-required' }, { status: 400 });
     }
 
-    const db = adminDb();
     const candidates = new Map<string, StationCandidate>();
     const lineSet = new Set<string>();
-    const [stationSnap, fareSnap] = await Promise.all([
-      db.collection('transport_stations').where('transport_type', '==', transportType).limit(1200).get(),
-      db.collection('transport_fares').where('transport_type', '==', transportType).limit(1200).get(),
-    ]);
+    const masters = await loadTransportMasters(transportType);
 
-    stationSnap.docs.forEach(doc => {
-      const data = doc.data() || {};
+    masters.stations.forEach(data => {
       const stationName = String(data.station_name || '').trim();
       const canonicalName = String(data.canonical_name || stationName).trim();
       const line = String(data.line || '');
@@ -134,8 +142,7 @@ export async function GET(request: NextRequest) {
     });
 
     if (!lineFilter) {
-      fareSnap.docs.forEach(doc => {
-        const data = doc.data() || {};
+      masters.fares.forEach(data => {
         [data.from, data.to].forEach(value => {
           const name = String(value || '').trim();
           if (!name) return;

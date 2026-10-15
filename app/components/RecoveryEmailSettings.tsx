@@ -23,8 +23,14 @@ export default function RecoveryEmailSettings({ currentEmail, verified, compact 
     setMessage('');
     setError('');
     try {
-      const token = await auth.currentUser?.getIdToken();
-      if (!token) throw new Error('ログイン情報を確認できません。');
+      const currentUser = auth.currentUser;
+      if (!currentUser) throw new Error('ログイン情報を確認できません。');
+      let token = '';
+      try {
+        token = await currentUser.getIdToken(true);
+      } catch {
+        throw new Error('ログイン期限が切れています。一度ログアウトし、新しいパスワードでログインしてください。');
+      }
       const response = await fetch('/api/auth/recovery-email', {
         method: 'POST',
         headers: {
@@ -35,10 +41,14 @@ export default function RecoveryEmailSettings({ currentEmail, verified, compact 
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok || data.ok === false) {
+        if (response.status === 401) throw new Error('ログイン期限が切れています。一度ログアウトし、もう一度ログインしてください。');
         if (data.error === 'too-many-requests') throw new Error('送信回数が多いため、1時間ほど空けてお試しください。');
-        throw new Error('メールアドレスを確認して、もう一度お試しください。');
+        if (data.error === 'email-sender-not-verified') throw new Error('確認メールの送信元設定を確認中です。少し時間を空けてもう一度お試しください。');
+        if (data.error === 'email-delivery-failed') throw new Error('確認メールの送信に失敗しました。時間を空けてもう一度お試しください。');
+        if (data.error === 'invalid-email') throw new Error('受信可能なメールアドレスを入力してください。');
+        throw new Error(`確認メールを送信できませんでした（${String(data.error || response.status)}）。管理者へお知らせください。`);
       }
-      setMessage('確認メールを送信しました。メール内のボタンを30分以内に押してください。');
+      setMessage('創造学園アプリの確認メールを送信しました。30分以内にメール内のリンクを押してください。見つからない場合は迷惑メールもご確認ください。');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '確認メールを送信できませんでした。');
     } finally {
@@ -63,6 +73,9 @@ export default function RecoveryEmailSettings({ currentEmail, verified, compact 
           </div>
           <p className="mt-1 text-xs font-bold leading-relaxed text-slate-500">
             パスワードを忘れたときに使います。受信できる本人または保護者のメールを登録してください。
+          </p>
+          <p className="mt-2 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-[11px] font-bold leading-relaxed text-blue-800">
+            確認メールは「SOZO-GAKUEN-APP」名義で送られます。送信元は noreply@class-base-app.firebaseapp.com です。パスワードの入力を求めることはありません。
           </p>
         </div>
       </div>
@@ -97,4 +110,3 @@ export default function RecoveryEmailSettings({ currentEmail, verified, compact 
     </div>
   );
 }
-

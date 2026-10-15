@@ -1,7 +1,8 @@
 import { FieldValue } from 'firebase-admin/firestore';
+import { revalidateTag } from 'next/cache';
 import { NextRequest } from 'next/server';
 import { adminDb } from '@/lib/firebase-admin';
-import { canManageAttendance, getServerUser, jsonError } from '@/lib/server-auth';
+import { canManageAttendanceSystem, getServerUser, jsonError } from '@/lib/server-auth';
 import { TRANSPORT_TYPE_OPTIONS, normalizeTransportStation, transportFareDocId } from '@/lib/transport-fares';
 
 export const runtime = 'nodejs';
@@ -62,7 +63,7 @@ async function deleteCollection(collectionName: string) {
 export async function POST(request: NextRequest) {
   try {
     const user = await getServerUser(request);
-    if (!canManageAttendance(user)) throw new Error('forbidden');
+    if (!canManageAttendanceSystem(user)) throw new Error('forbidden');
 
     const body = await request.json().catch(() => ({}));
     const rows = Array.isArray(body.rows) ? body.rows as Record<string, unknown>[] : [];
@@ -122,6 +123,7 @@ export async function POST(request: NextRequest) {
       await batch.commit();
       imported += validRows.slice(i, i + 400).length;
     }
+    revalidateTag('transport-masters');
 
     return Response.json({
       ok: true,

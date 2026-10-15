@@ -3,7 +3,9 @@ rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
     function signedIn() {
-      return request.auth != null;
+      return request.auth != null &&
+        !(firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.get('account_status', 'active') in ['suspended', 'withdrawn', 'archived']) &&
+        !(firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.get('status', 'active') in ['suspended', 'withdrawn', 'archived']);
     }
 
     function role() {
@@ -17,8 +19,7 @@ service firebase.storage {
     }
 
     match /lesson_slides/{allPaths=**} {
-      allow read: if signedIn();
-      allow write: if isAdmin();
+      allow read, write: if false;
     }
 
     match /attendance_imports/{uid}/{fileName} {
@@ -26,8 +27,17 @@ service firebase.storage {
       allow create: if signedIn()
         && request.auth.uid == uid
         && role() in ['master', 'admin', 'school_admin', 'branch_admin', 'campus_admin', 'classroom_admin', 'test_admin', 'master_admin', 'super_admin', 'attendance_admin', 'attendance_only', 'attendance_manager']
-        && request.resource.size <= 12 * 1024 * 1024
-        && fileName.matches('.*\\.xls');
+        && (
+          (
+            fileName.matches('.*\\.xlsx')
+            && request.resource.size <= 6 * 1024 * 1024
+            && request.resource.contentType == 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+          ) || (
+            fileName.matches('.*\\.xls')
+            && request.resource.size <= 12 * 1024 * 1024
+            && request.resource.contentType == 'application/vnd.ms-excel'
+          )
+        );
       allow delete: if signedIn() && request.auth.uid == uid;
       allow update: if false;
     }

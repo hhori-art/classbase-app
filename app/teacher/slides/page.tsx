@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { auth, db } from '@/lib/firebase';
 import { collection, getDocs, orderBy, query, where } from 'firebase/firestore';
 import Link from 'next/link';
-import { ArrowLeft, BookOpen, CalendarCheck, Download, FileText, Loader2, Search } from 'lucide-react';
+import { AlertCircle, ArrowLeft, BookOpen, CalendarCheck, Download, FileText, Loader2, RefreshCw, Search } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
 
 type SlideItem = {
@@ -84,6 +84,9 @@ export default function TeacherSlidesPage() {
   const [slides, setSlides] = useState<SlideItem[]>([]);
   const [todayShifts, setTodayShifts] = useState<ShiftItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
+  const [shiftLoadError, setShiftLoadError] = useState('');
+  const [reloadKey, setReloadKey] = useState(0);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [grade, setGrade] = useState('all');
@@ -93,29 +96,40 @@ export default function TeacherSlidesPage() {
   useEffect(() => {
     const load = async () => {
       setLoading(true);
+      setLoadError('');
+      setShiftLoadError('');
       try {
         const snap = await getDocs(query(collection(db, 'lesson_slides'), orderBy('created_at', 'desc')));
         setSlides(snap.docs.map(d => ({ id: d.id, ...d.data() } as SlideItem)));
 
-        const shiftSnap = await getDocs(query(collection(db, 'shift_assignments'), where('target_date', '==', todayJst()))).catch(() => ({ docs: [] as any[] }));
-        const teacherName = normalize(profile?.name || profile?.teacher_name || user?.displayName || '');
-        const uid = user?.uid || '';
-        const shifts = shiftSnap.docs
-          .map((d: any) => ({ id: d.id, ...d.data() } as ShiftItem))
-          .filter(shift => {
-            if (shift.user_id && uid && shift.user_id === uid) return true;
-            if (!teacherName) return true;
-            return normalize(shift.teacher_name).includes(teacherName) || teacherName.includes(normalize(shift.teacher_name));
-          });
-        setTodayShifts(shifts);
+        try {
+          const shiftSnap = await getDocs(query(collection(db, 'shift_assignments'), where('target_date', '==', todayJst())));
+          const teacherName = normalize(profile?.name || profile?.teacher_name || user?.displayName || '');
+          const uid = user?.uid || '';
+          const shifts = shiftSnap.docs
+            .map(d => ({ id: d.id, ...d.data() } as ShiftItem))
+            .filter(shift => {
+              if (shift.user_id && uid && shift.user_id === uid) return true;
+              if (!teacherName) return true;
+              return normalize(shift.teacher_name).includes(teacherName) || teacherName.includes(normalize(shift.teacher_name));
+            });
+          setTodayShifts(shifts);
+        } catch (e) {
+          console.error(e);
+          setTodayShifts([]);
+          setShiftLoadError('本日の講師配置を読み込めませんでした。全教材の検索・保存は利用できます。');
+        }
       } catch (e) {
         console.error(e);
+        setSlides([]);
+        setTodayShifts([]);
+        setLoadError('授業PPTを読み込めませんでした。通信状態を確認して、もう一度お試しください。');
       } finally {
         setLoading(false);
       }
     };
     load();
-  }, [profile, user]);
+  }, [profile, user, reloadKey]);
 
   const yearOptions = useMemo(() => Array.from(new Set(slides.map(s => String(s.year || '')).filter(Boolean))).sort().reverse(), [slides]);
 
@@ -205,11 +219,16 @@ export default function TeacherSlidesPage() {
               <h2 className="text-lg font-black text-gray-800 flex items-center gap-2">
                 <CalendarCheck className="text-indigo-600" size={20} /> 本日の授業PPT
               </h2>
-              <p className="text-xs text-gray-500 mt-1">講師配置の学年・科目・単元と照合して表示しています。社外アクセスでも閲覧できます。</p>
+              <p className="text-xs text-gray-500 mt-1">講師配置の学年・科目・単元と照合して表示しています。校舎外からも、ログイン済み講師だけが閲覧できます。</p>
             </div>
             <span className="text-xs font-bold bg-indigo-50 text-indigo-700 px-3 py-1 rounded-full">{todayJst()}</span>
           </div>
-          {todaySlides.length === 0 ? (
+          {shiftLoadError ? (
+            <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-sm text-amber-800 font-bold flex items-start gap-2">
+              <AlertCircle size={18} className="shrink-0 mt-0.5" />
+              <span>{shiftLoadError}</span>
+            </div>
+          ) : todaySlides.length === 0 ? (
             <div className="bg-slate-50 rounded-2xl p-5 text-sm text-gray-500 font-bold">
               今日の講師配置に一致するPPTは見つかりませんでした。下の一覧から検索できます。
             </div>
@@ -245,6 +264,17 @@ export default function TeacherSlidesPage() {
           <div className="bg-white rounded-3xl p-16 text-center text-indigo-500">
             <Loader2 className="animate-spin mx-auto mb-3" size={32} />
             <p className="text-sm font-bold">読み込み中...</p>
+          </div>
+        ) : loadError ? (
+          <div className="bg-white rounded-3xl p-10 text-center border border-red-100">
+            <AlertCircle size={42} className="mx-auto mb-3 text-red-400" />
+            <p className="font-bold text-gray-700">{loadError}</p>
+            <button
+              onClick={() => setReloadKey(value => value + 1)}
+              className="mt-5 inline-flex items-center gap-2 bg-indigo-600 text-white px-5 py-3 rounded-xl text-sm font-bold hover:bg-indigo-700"
+            >
+              <RefreshCw size={16} /> 再読み込み
+            </button>
           </div>
         ) : filteredSlides.length === 0 ? (
           <div className="bg-white rounded-3xl p-16 text-center text-gray-400 border border-dashed border-gray-200">

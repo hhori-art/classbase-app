@@ -1,8 +1,8 @@
 // Google Cloud (Firebase) 接続設定
 import { initializeApp, getApps } from 'firebase/app';
-import { getFirestore } from 'firebase/firestore';
-import { getAuth } from 'firebase/auth';
-import { getStorage } from 'firebase/storage';
+import { connectFirestoreEmulator, getFirestore } from 'firebase/firestore';
+import { connectAuthEmulator, getAuth } from 'firebase/auth';
+import { connectStorageEmulator, getStorage } from 'firebase/storage';
 
 const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
@@ -21,5 +21,23 @@ const app = !getApps().length ? initializeApp(firebaseConfig) : getApps()[0];
 export const db = getFirestore(app); // データベース (Firestore)
 export const auth = getAuth(app);    // 認証 (Identity Platform)
 export const storage = getStorage(app); // ファイル保存 (Cloud Storage)
+
+type EmulatorGlobal = typeof globalThis & { __classbaseFirebaseEmulatorsConnected?: boolean };
+const emulatorGlobal = globalThis as EmulatorGlobal;
+const useEmulators = process.env.NEXT_PUBLIC_USE_FIREBASE_EMULATORS === 'true';
+
+if (useEmulators && typeof window !== 'undefined' && !emulatorGlobal.__classbaseFirebaseEmulatorsConnected) {
+  const authHost = process.env.NEXT_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST || '127.0.0.1';
+  const authPort = Number(process.env.NEXT_PUBLIC_FIREBASE_AUTH_EMULATOR_PORT || 9099);
+  const firestoreHost = process.env.NEXT_PUBLIC_FIRESTORE_EMULATOR_HOST || '127.0.0.1';
+  const firestorePort = Number(process.env.NEXT_PUBLIC_FIRESTORE_EMULATOR_PORT || 8085);
+  const storageHost = process.env.NEXT_PUBLIC_FIREBASE_STORAGE_EMULATOR_HOST || '127.0.0.1';
+  const storagePort = Number(process.env.NEXT_PUBLIC_FIREBASE_STORAGE_EMULATOR_PORT || 9199);
+
+  connectAuthEmulator(auth, `http://${authHost}:${authPort}`, { disableWarnings: true });
+  connectFirestoreEmulator(db, firestoreHost, firestorePort);
+  connectStorageEmulator(storage, storageHost, storagePort);
+  emulatorGlobal.__classbaseFirebaseEmulatorsConnected = true;
+}
 
 export default app;

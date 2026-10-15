@@ -4,10 +4,20 @@ import { useMemo, useState, useEffect } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { ArrowLeft, CheckCircle, Loader2, Send, MessageSquare, Info, ListChecks } from 'lucide-react';
 import Link from 'next/link';
-import CourseRegistrationCalendar, { getCourseDay, getCourseSlot, getCourseSubject } from '@/app/components/CourseRegistrationCalendar';
+import CourseRegistrationCalendar, { CourseOpeningMap, getCourseDay, getCourseSlot, getCourseSubject } from '@/app/components/CourseRegistrationCalendar';
 import { canStudentRegisterCourseOption } from '@/lib/course-registration-rules';
 import { loadCourseRegistrationOptions } from '@/lib/client-course-options';
 import { formatClassDays, parseClassDays } from '@/lib/class-days';
+import {
+  chooseCourseRegistrationTerm,
+  courseOptionMatchesLegacyCourseSelection,
+  courseOptionMatchesSelection,
+  filterCourseOptionsForRegistrationRequest,
+  getCourseOptionStableKey,
+  legacyCourseSelectionLabel,
+  resolveSelectedCourseOptionIds,
+  resolveSelectedCourseOptionIdsAcrossTerms,
+} from '@/lib/course-registration-selection';
 
 // 科目ごとの選択肢
 const OPTIONS_SOCIAL = ['地理', '歴史', '公民'];
@@ -86,15 +96,21 @@ const getTermDateRange = (term: string, options: any[], termRanges: Record<strin
   return { start: dates[0], end: dates[dates.length - 1] };
 };
 
-const getCurrentTermChoices = (
+const getStudentSelectableTermChoices = (
   options: any[],
   today = getTodayKey(),
   termRanges: Record<string, { start: string; end: string }> = {}
-) => getTermChoices(options)
-  .filter(term => {
-    const range = getTermDateRange(term, options, termRanges);
-    return Boolean(range && range.start <= today && today <= range.end);
+) => getTermChoices(options).filter(term => {
+  const termOptions = options.filter(option => getOptionTermKey(option) === term);
+  const range = getTermDateRange(term, options, termRanges);
+  const isCurrent = Boolean(range && range.start <= today && today <= range.end);
+  const isRegistrationOpen = termOptions.some(option => {
+    const opensAt = normalizeDateKey(option.registration_opens_at);
+    const closesAt = normalizeDateKey(option.registration_closes_at) || normalizeDateKey(option.term_start_date) || range?.start || '';
+    return Boolean(opensAt && closesAt && opensAt <= today && today <= closesAt);
   });
+  return isCurrent || isRegistrationOpen;
+});
 
 const getCourseSubjectValue = (option: any) => String(getCourseSubject(option) || option.course_name || option.title || '');
 
@@ -120,6 +136,10 @@ export default function StudentChangeRequestPage() {
   const [selectedCourseIds, setSelectedCourseIds] = useState<string[]>([]);
   const [selectedCourseKeys, setSelectedCourseKeys] = useState<string[]>([]);
   const [selectedTerm, setSelectedTerm] = useState('');
+  const [activeRegistrationRequestId, setActiveRegistrationRequestId] = useState('');
+  const [courseOptionsError, setCourseOptionsError] = useState('');
+  const [submitError, setSubmitError] = useState('');
+  const [historicalSelectionLabels, setHistoricalSelectionLabels] = useState<string[]>([]);
 
   // フォーム状態
   const [form, setForm] = useState({
@@ -133,6 +153,7 @@ export default function StudentChangeRequestPage() {
     const fetchProfile = async () => {
       if (!user || !authProfile) return;
       try {
+        setCourseOptionsError('');
         const data = authProfile;
         setProfile(data);
         setForm({
@@ -141,14 +162,35 @@ export default function StudentChangeRequestPage() {
           social: data.subject_social || OPTIONS_SOCIAL[0],
           reason: ''
         });
-        const selectedIds = Array.isArray(data.selected_course_ids) ? data.selected_course_ids.map(String) : [];
-        setSelectedCourseIds(selectedIds);
-
         const studentGradeForRanges = normalizeGrade(data.grade);
         const optionData = await loadCourseRegistrationOptions({
           grade: studentGradeForRanges,
-          getToken: () => user.getIdToken(),
+          getToken: forceRefresh => user.getIdToken(forceRefresh),
         });
+        const registrationSummaries = Array.isArray(optionData.registration_summaries) ? optionData.registration_summaries : [];
+        const regularRegistrations = registrationSummaries.filter((item: any) => (
+          String(item.registration_type || 'regular') === 'regular' &&
+          !['cancelled', 'canceled', 'inactive', 'archived'].includes(String(item.status || 'active').toLowerCase())
+        ));
+        const activeRegistrationId = String(data.active_course_registration_id || '');
+        const currentRegistration = regularRegistrations.find((item: any) => activeRegistrationId && item.id === activeRegistrationId)
+          || regularRegistrations.find((item: any) => item.is_current)
+          || regularRegistrations[0];
+        const selectedIds = Array.from(new Set([
+          ...(Array.isArray(data.selected_course_ids) ? data.selected_course_ids.map(String) : []),
+          ...(Array.isArray(data.selected_course_keys) ? data.selected_course_keys.map(String) : []),
+          ...(Array.isArray(currentRegistration?.selected_course_ids) ? currentRegistration.selected_course_ids.map(String) : []),
+          ...(Array.isArray(currentRegistration?.selected_course_keys) ? currentRegistration.selected_course_keys.map(String) : []),
+          ...(Array.isArray(data.selected_test_prep_course_ids) ? data.selected_test_prep_course_ids.map(String) : []),
+          ...(Array.isArray(data.selected_test_prep_course_keys) ? data.selected_test_prep_course_keys.map(String) : []),
+        ]));
+        const savedLabels = Array.isArray(currentRegistration?.selected_course_labels)
+          ? currentRegistration.selected_course_labels.map(String).filter(Boolean)
+          : [];
+        setHistoricalSelectionLabels(Array.from(new Set(
+          savedLabels.length > 0 ? savedLabels : selectedIds.map(legacyCourseSelectionLabel).filter(Boolean),
+        )));
+
         const enrichedOptions = Array.isArray(optionData.options) ? optionData.options : [];
         const nextTermRanges = optionData.term_ranges || {};
         setCourseOptions(enrichedOptions);
@@ -156,14 +198,26 @@ export default function StudentChangeRequestPage() {
 
         const studentGrade = normalizeGrade(data.grade);
         const gradeOptions = enrichedOptions.filter((option: any) => canStudentRegisterCourseOption(studentGrade, option));
-        const choices = getCurrentTermChoices(gradeOptions, getTodayKey(), nextTermRanges);
-        const selectedOptionTerm = selectedIds
-          .map((id: string) => gradeOptions.find((option: any) => option.id === id))
-          .map(getOptionTermKey)
-          .find(term => choices.includes(term));
-        setSelectedTerm(selectedOptionTerm || choices[0] || '');
+        const resolvedSelectedIds = resolveSelectedCourseOptionIdsAcrossTerms(gradeOptions, selectedIds);
+        setSelectedCourseIds(resolvedSelectedIds.length > 0 ? resolvedSelectedIds : selectedIds);
+        const choices = getStudentSelectableTermChoices(gradeOptions, getTodayKey(), nextTermRanges);
+        const today = getTodayKey();
+        const requestedRegistrationId = new URLSearchParams(window.location.search).get('request') || '';
+        const openRegistrationOption = requestedRegistrationId ? gradeOptions.find((option: any) => {
+          const opensAt = normalizeDateKey(option.registration_opens_at);
+          const closesAt = normalizeDateKey(option.registration_closes_at);
+          const requestMatches = String(option.registration_request_id || '') === requestedRegistrationId;
+          return requestMatches && opensAt && closesAt && opensAt <= today && today <= closesAt;
+        }) : null;
+        // 古い通知リンクの request ID で現在期の講座が0件にならないようにする。
+        setActiveRegistrationRequestId(openRegistrationOption ? requestedRegistrationId : '');
+        const openRegistrationTerm = getOptionTermKey(openRegistrationOption);
+        const selectedIdSet = new Set(selectedIds);
+        const selectedOptionTerm = getOptionTermKey(gradeOptions.find((option: any) => courseOptionMatchesSelection(option, selectedIdSet)));
+        setSelectedTerm(chooseCourseRegistrationTerm(choices, selectedOptionTerm, openRegistrationTerm));
       } catch (e) {
         console.error('Profile fetch error:', e);
+        setCourseOptionsError('受講講座を読み込めませんでした。通信状況を確認して画面を再読み込みしてください。');
       } finally {
         setFetching(false);
       }
@@ -179,12 +233,14 @@ export default function StudentChangeRequestPage() {
   }, [courseOptions, profile?.grade]);
 
   const todayKey = useMemo(() => getTodayKey(), []);
-  const termChoices = useMemo(() => getCurrentTermChoices(gradeCourseOptions, todayKey, termRanges), [gradeCourseOptions, todayKey, termRanges]);
+  const termChoices = useMemo(() => getStudentSelectableTermChoices(gradeCourseOptions, todayKey, termRanges), [gradeCourseOptions, todayKey, termRanges]);
   const activeTerm = termChoices.includes(selectedTerm) ? selectedTerm : termChoices[0] || '';
   const visibleCourseOptions = useMemo(() => {
     if (!activeTerm) return [];
-    return gradeCourseOptions.filter((option: any) => getOptionTermKey(option) === activeTerm);
-  }, [activeTerm, gradeCourseOptions]);
+    const termOptions = gradeCourseOptions.filter((option: any) => getOptionTermKey(option) === activeTerm);
+    return filterCourseOptionsForRegistrationRequest(termOptions, activeRegistrationRequestId);
+  }, [activeRegistrationRequestId, activeTerm, gradeCourseOptions]);
+  const activeRegistrationType = visibleCourseOptions.some((option: any) => option.registration_type === 'test_prep') ? 'test_prep' : 'regular';
 
   const courseKey = (option: any) => [
     option.grade || '',
@@ -223,7 +279,10 @@ export default function StudentChangeRequestPage() {
   useEffect(() => {
     const selectedKeys = Array.from(new Set(
       visibleCourseOptions
-        .filter((option: any) => selectedCourseIds.includes(option.id))
+        .filter((option: any) => (
+          courseOptionMatchesSelection(option, selectedCourseIds) ||
+          courseOptionMatchesLegacyCourseSelection(option, selectedCourseIds)
+        ))
         .map(courseKey)
     ));
     setSelectedCourseKeys(prev => {
@@ -242,7 +301,8 @@ export default function StudentChangeRequestPage() {
   ), [selectedCourseKeys, visibleCourseOptions]);
   const activeTermOptionIds = useMemo(() => new Set(visibleCourseOptions.map((option: any) => option.id)), [visibleCourseOptions]);
   const stepOptionIds = useMemo(() => new Set(stepCourseOptions.map((option: any) => option.id)), [stepCourseOptions]);
-  const visibleSelectedCourseIds = selectedCourseIds.filter(id => activeTermOptionIds.has(id));
+  const visibleSelectedCourseIds = resolveSelectedCourseOptionIds(visibleCourseOptions, selectedCourseIds)
+    .filter(id => activeTermOptionIds.has(id));
   const stepSelectedCourseIds = selectedCourseIds.filter(id => stepOptionIds.has(id));
   const selectedVisibleOptions = visibleCourseOptions.filter(option => visibleSelectedCourseIds.includes(option.id));
   const currentSelectionSummary = useMemo(() => {
@@ -275,15 +335,28 @@ export default function StudentChangeRequestPage() {
   }, {} as Record<string, { option: any; units: string[] }>)), [selectedVisibleOptions]);
 
   const toggleCourseKey = (key: string) => {
-    const targetOptionIds = new Set(visibleCourseOptions.filter((option: any) => courseKey(option) === key).map((option: any) => option.id));
-    setSelectedCourseKeys(prev => {
-      const selected = prev.includes(key);
-      const next = selected ? prev.filter(item => item !== key) : [...prev, key];
-      if (selected) {
-        setSelectedCourseIds(current => current.filter(id => !targetOptionIds.has(id)));
-      }
-      return next;
-    });
+    const targetOptions = visibleCourseOptions.filter((option: any) => courseKey(option) === key);
+    const targetOptionIds = new Set(targetOptions.map((option: any) => option.id));
+    const selected = selectedCourseKeys.includes(key);
+    setSelectedCourseKeys(prev => selected ? prev.filter(item => item !== key) : [...prev, key]);
+    if (selected) {
+      setSelectedCourseIds(current => current.filter(id => !targetOptionIds.has(id)));
+      return;
+    }
+    // 日時候補が1つだけなら、科目選択だけで登録まで完了させる。
+    const scheduleKeys = new Set(targetOptions.map(timeKey));
+    if (scheduleKeys.size === 1) {
+      setSelectedCourseIds(prev => {
+        const currentTermIds = new Set(visibleCourseOptions.map((option: any) => option.id));
+        const outsideActiveTerm = prev.filter(id => !currentTermIds.has(id));
+        const activeTermSelected = new Set(prev.filter(id => currentTermIds.has(id)));
+        visibleCourseOptions
+          .filter((option: any) => scheduleKeys.has(timeKey(option)))
+          .forEach((option: any) => activeTermSelected.delete(option.id));
+        targetOptions.forEach((option: any) => activeTermSelected.add(option.id));
+        return Array.from(new Set([...outsideActiveTerm, ...Array.from(activeTermSelected)]));
+      });
+    }
   };
 
   const toggleCourse = (id: string) => {
@@ -317,26 +390,56 @@ export default function StudentChangeRequestPage() {
     if (!user) return;
 
     setSubmitting(true);
+    setSubmitError('');
     try {
-      const token = await user.getIdToken();
-      const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
       if (!activeTerm || visibleCourseOptions.length === 0) {
-        alert('現在実施中の期に登録できる講座候補がありません');
-        setSubmitting(false);
+        alert('受付中または現在実施中の期に、登録できる講座候補がありません');
         return;
       }
       if (visibleCourseOptions.length > 0 && visibleSelectedCourseIds.length === 0) {
         alert(`${termLabel(activeTerm, gradeCourseOptions)}に受講する曜日・時間の講座を1つ以上選択してください`);
-        setSubmitting(false);
         return;
       }
-      const selected = visibleCourseOptions.filter(option => visibleSelectedCourseIds.includes(option.id));
+
+      const selectedBeforeRefresh = visibleCourseOptions.filter(option => visibleSelectedCourseIds.includes(option.id));
+      const selectedIdentityIds = new Set([
+        ...visibleSelectedCourseIds,
+        ...selectedBeforeRefresh.map(getCourseOptionStableKey).filter(Boolean),
+      ]);
+
+      // 保存許可トークンは短時間で失効するため、保存直前に最新候補を取得する。
+      // 講座IDが再生成されていても、安定講座キーで同じ曜日・時限へ復元する。
+      const refreshed = await loadCourseRegistrationOptions({
+        grade: normalizeGrade(profile.grade),
+        getToken: () => user.getIdToken(true),
+        force: true,
+      });
+      const refreshedTermOptions = (Array.isArray(refreshed.options) ? refreshed.options : [])
+        .filter((option: any) => option.is_active !== false)
+        .filter((option: any) => canStudentRegisterCourseOption(normalizeGrade(profile.grade), option))
+        .filter((option: any) => getOptionTermKey(option) === activeTerm);
+      const refreshedVisibleOptions = filterCourseOptionsForRegistrationRequest(
+        refreshedTermOptions,
+        activeRegistrationRequestId,
+      );
+      const selected = refreshedVisibleOptions.filter((option: any) => (
+        courseOptionMatchesSelection(option, selectedIdentityIds)
+      ));
+      if (selected.length === 0 || selected.some((option: any) => !option.registration_token)) {
+        throw new Error('講座候補が更新されました。画面を再読み込みして選択内容を確認してください。');
+      }
+
+      const freshSelectedCourseIds = Array.from(new Set(
+        selected.map((option: any) => String(option.id || '')).filter(Boolean),
+      ));
+      const token = await user.getIdToken(true);
+      const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
       const first = selected[0] || {};
       const selectedDays = parseClassDays(selected.map(getCourseDay));
       const effectiveDay = formatClassDays(selectedDays.length > 0 ? selectedDays : form.day, '、');
       const inferredScience = inferScienceFromSelections(selected) || form.science;
       const inferredSocial = inferSocialFromSelections(selected) || form.social;
-      if (visibleSelectedCourseIds.length > 0) {
+      if (freshSelectedCourseIds.length > 0) {
         const registrationRes = await fetch('/api/parent/course-registrations', {
           method: 'POST',
           headers,
@@ -344,8 +447,11 @@ export default function StudentChangeRequestPage() {
             student_id: user.uid,
             year: Number(first.year || new Date().getFullYear()),
             term: String(first.term || 'direct'),
-            selected_course_ids: visibleSelectedCourseIds,
-            request_id: `student-direct-change-${activeTerm || 'term'}`,
+            selected_course_ids: freshSelectedCourseIds,
+            selected_course_keys: selected.map(getCourseOptionStableKey).filter(Boolean),
+            registration_tokens: selected.map(option => option.registration_token).filter(Boolean),
+            request_id: String(first.registration_request_id || `student-direct-change-${activeTerm || 'term'}`),
+            registration_type: activeRegistrationType,
             course_settings: {
               day_of_week: effectiveDay,
               subject_science: inferredScience,
@@ -358,18 +464,26 @@ export default function StudentChangeRequestPage() {
       }
 
       window.dispatchEvent(new CustomEvent('classbase:user-profile-updated', {
-        detail: {
+        detail: activeRegistrationType === 'test_prep' ? {
+          selected_test_prep_course_ids: freshSelectedCourseIds,
+          selected_test_prep_course_keys: selected.map(getCourseOptionStableKey).filter(Boolean),
+        } : {
           day_of_week: effectiveDay,
           subject_science: inferredScience,
           subject_social: inferredSocial,
-          selected_course_ids: visibleSelectedCourseIds,
+          selected_course_ids: freshSelectedCourseIds,
+          selected_course_keys: selected.map(getCourseOptionStableKey).filter(Boolean),
         },
       }));
 
       setCompleted(true);
     } catch (err) {
       console.error(err);
-      alert('送信に失敗しました');
+      const message = err instanceof Error && err.message
+        ? err.message
+        : '受講講座の保存に失敗しました。';
+      setSubmitError(message);
+      alert(message);
     } finally {
       setSubmitting(false);
     }
@@ -408,11 +522,30 @@ export default function StudentChangeRequestPage() {
           </Link>
           <div>
             <h1 className="text-xl font-black leading-tight text-gray-800 sm:text-2xl">
-              受講講座・曜日時間の変更
+              受講講座の登録・変更
             </h1>
             <p className="text-xs font-bold text-gray-400">変更内容は保存後すぐに反映されます</p>
           </div>
         </div>
+
+        <div className="mb-6 grid grid-cols-3 overflow-hidden rounded-2xl border border-indigo-100 bg-white shadow-sm">
+          {([
+            ['1', '科目を選ぶ', selectedCourseKeys.length > 0],
+            ['2', '曜日・時間', visibleSelectedCourseIds.length > 0],
+            ['3', '内容を保存', false],
+          ] as const).map(([number, label, done]) => (
+            <div key={String(number)} className={`flex min-h-14 items-center justify-center gap-2 border-r border-indigo-100 px-2 text-center last:border-r-0 ${done ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500'}`}>
+              <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-black ${done ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-600'}`}>{done ? '✓' : number}</span>
+              <span className="text-xs font-black sm:text-sm">{label}</span>
+            </div>
+          ))}
+        </div>
+
+        {courseOptionsError && (
+          <div className="mb-6 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm font-bold text-red-700">
+            {courseOptionsError}
+          </div>
+        )}
 
         {/* フォームエリア */}
         <form onSubmit={handleSubmit} className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_320px] gap-6 md:gap-8 items-start">
@@ -430,7 +563,15 @@ export default function StudentChangeRequestPage() {
                     {currentSelectionSummary.days.length > 0 && <span className="bg-white/20 px-3 py-1 rounded-lg text-xs font-bold backdrop-blur-sm">曜日 {currentSelectionSummary.days.join('・')}</span>}
                     {currentSelectionSummary.science && <span className="bg-white/20 px-3 py-1 rounded-lg text-xs font-bold backdrop-blur-sm">理科 {currentSelectionSummary.science}</span>}
                     {currentSelectionSummary.social && <span className="bg-white/20 px-3 py-1 rounded-lg text-xs font-bold backdrop-blur-sm">社会 {currentSelectionSummary.social}</span>}
-                    {selectedVisibleOptions.length === 0 && <span className="bg-white/20 px-3 py-1 rounded-lg text-xs font-bold backdrop-blur-sm">現在の期の登録はありません</span>}
+                    {selectedVisibleOptions.length === 0 && historicalSelectionLabels.length > 0 && (
+                      <>
+                        {historicalSelectionLabels.slice(0, 3).map(label => (
+                          <span key={label} className="bg-amber-300/25 px-3 py-1 rounded-lg text-xs font-bold backdrop-blur-sm">前の期: {label}</span>
+                        ))}
+                        <span className="w-full text-xs font-bold text-indigo-50">現在期の曜日・時間を下から選び直して保存できます</span>
+                      </>
+                    )}
+                    {selectedVisibleOptions.length === 0 && historicalSelectionLabels.length === 0 && <span className="bg-white/20 px-3 py-1 rounded-lg text-xs font-bold backdrop-blur-sm">講座を選んで登録できます</span>}
                   </div>
                 </div>
               </div>
@@ -443,10 +584,10 @@ export default function StudentChangeRequestPage() {
                   <div>
                     <p className="flex items-center gap-2 text-sm font-black text-gray-800">
                       <span className="bg-indigo-100 text-indigo-600 p-1.5 rounded-lg"><ListChecks size={18} strokeWidth={3}/></span>
-                      現在実施中の期
+                      登録できる期
                     </p>
                     <p className="mt-2 text-xs font-bold text-gray-400">
-                      今日が含まれる期だけを表示します。過去や今後の期は選択肢に出さず、単元ごとの細かい処理は裏側でまとめます。
+                      現在実施中の期と、受付期間中の次期講座を表示します。自分が受講する講座を選んですぐに登録できます。
                     </p>
                   </div>
                   <div className="rounded-2xl bg-slate-50 px-4 py-3 text-xs font-black text-slate-600">
@@ -502,11 +643,23 @@ export default function StudentChangeRequestPage() {
             {gradeCourseOptions.length > 0 && activeTerm && (
               <div className="bg-white p-6 rounded-[32px] shadow-sm border border-gray-100">
                 <div className="space-y-5">
+                  {activeRegistrationType === 'test_prep' && (
+                    <div className="rounded-3xl border border-amber-200 bg-amber-50 p-4 text-sm font-bold text-amber-900">
+                      <p className="font-black">対策講座の受講登録</p>
+                      <p className="mt-1 text-xs leading-relaxed text-amber-700">通常講座の登録とは別に保存されます。管理者が設定した対策単元と開講日時から選択してください。</p>
+                    </div>
+                  )}
+                  <CourseOpeningMap
+                    options={visibleCourseOptions}
+                    selectedIds={visibleSelectedCourseIds}
+                    title={`${termLabel(activeTerm, gradeCourseOptions)}の開講状況`}
+                    description="週のどこで理科・社会が開講されているかを先に確認できます。"
+                  />
                   <div className="rounded-3xl border border-indigo-100 bg-indigo-50/70 p-4">
                     <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                       <div>
-                        <p className="text-xs font-black text-indigo-500">Step 1</p>
-                        <h2 className="text-base font-black text-gray-900">受講したい科目を選択</h2>
+                        <p className="text-xs font-black text-indigo-500">1. 科目</p>
+                        <h2 className="text-base font-black text-gray-900">受講したい講座を選ぶ</h2>
                         <p className="mt-1 text-xs font-bold text-gray-500">
                           先に受講する科目を選ぶと、次に選べる開講曜日・時間だけが表示されます。
                         </p>
@@ -530,6 +683,7 @@ export default function StudentChangeRequestPage() {
                               key={choice.key}
                               type="button"
                               onClick={() => toggleCourseKey(choice.key)}
+                              aria-pressed={active}
                               className={`rounded-2xl border-2 p-4 text-left transition ${
                                 active
                                   ? 'border-indigo-500 bg-white text-indigo-700 shadow-sm'
@@ -543,11 +697,10 @@ export default function StudentChangeRequestPage() {
                                     {daySlots.slice(0, 4).join(' / ') || '曜日・時間未設定'}
                                     {daySlots.length > 4 ? ` ほか${daySlots.length - 4}件` : ''}
                                   </p>
-                                  {units.length > 0 && (
-                                    <p className="mt-1 line-clamp-2 text-[11px] font-bold text-emerald-600">
-                                      単元: {units.slice(0, 3).join(' / ')}{units.length > 3 ? ` ほか${units.length - 3}件` : ''}
-                                    </p>
-                                  )}
+                                  <p className="mt-2 text-[11px] font-black text-emerald-600">
+                                    {daySlots.length === 1 ? '選ぶだけで曜日・時間も確定' : `${daySlots.length}個の曜日・時間から選択`}
+                                    {units.length > 0 ? ` ・ 全${units.length}単元` : ''}
+                                  </p>
                                 </div>
                                 {active && <CheckCircle size={18} className="shrink-0 text-indigo-600" strokeWidth={3} />}
                               </div>
@@ -561,8 +714,8 @@ export default function StudentChangeRequestPage() {
                   <div className="rounded-3xl border border-slate-100 bg-white p-4">
                     <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                       <div>
-                        <p className="text-xs font-black text-slate-500">Step 2</p>
-                        <h2 className="text-base font-black text-gray-900">開講曜日・時間を選択</h2>
+                        <p className="text-xs font-black text-slate-500">2. 曜日・時間</p>
+                        <h2 className="text-base font-black text-gray-900">通える曜日・時間を決める</h2>
                         <p className="mt-1 text-xs font-bold text-gray-400">
                           同じ曜日・同じ時限は1つだけ選べます。別の講座を選ぶと前の選択は自動で外れます。
                         </p>
@@ -642,13 +795,19 @@ export default function StudentChangeRequestPage() {
               />
             </div>
 
+            {submitError && (
+              <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm font-bold leading-relaxed text-red-700">
+                {submitError}
+              </div>
+            )}
+
             <button 
               type="submit" 
               disabled={submitting || visibleSelectedCourseIds.length === 0}
               className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-black text-base hover:bg-indigo-700 shadow-xl shadow-indigo-200 transition-all flex items-center justify-center gap-3 disabled:opacity-50 active:scale-95"
             >
               {submitting ? <Loader2 className="animate-spin" size={24}/> : <Send size={24} strokeWidth={3}/>}
-              すぐに変更する
+              {activeRegistrationType === 'test_prep' ? '対策講座を登録する' : 'すぐに変更する'}
             </button>
 
           </div>

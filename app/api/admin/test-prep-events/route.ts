@@ -3,27 +3,41 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { canManageSchool, getServerUser, isAdminLike, jsonError } from '@/lib/server-auth';
 import { writeLearningEvent } from '@/lib/events';
+import { weekdayFromDateKey } from '@/lib/date-key';
 
 export const runtime = 'nodejs';
 
 export async function POST(request: NextRequest) {
   try {
     const actor = await getServerUser(request);
+    if (actor.role !== 'master') throw new Error('forbidden');
     if (!isAdminLike(actor)) throw new Error('forbidden');
     const body = await request.json();
     const school = String(body.school_id || body.school || actor.school_ids[0] || actor.school || '').trim();
     const title = String(body.title || '').trim();
     const middleSchool = String(body.middle_school || '').trim();
     const eventDate = String(body.event_date || '').slice(0, 10);
-    const targetStudentIds: string[] = Array.isArray(body.target_student_ids) ? body.target_student_ids.map(String).filter(Boolean) : [];
+    const targetStudentIds: string[] = Array.from(new Set<string>(Array.isArray(body.target_student_ids) ? body.target_student_ids.map(String).filter(Boolean) : []));
     const message = String(body.message || `${title}を登録しました。`).slice(0, 1000);
 
     if (!school) return Response.json({ ok: false, error: 'school is required' }, { status: 400 });
     if (!title) return Response.json({ ok: false, error: 'title is required' }, { status: 400 });
+    if (title.length > 120 || middleSchool.length > 120) return Response.json({ ok: false, error: 'title or middle_school is too long' }, { status: 400 });
+    if (eventDate && !weekdayFromDateKey(eventDate)) return Response.json({ ok: false, error: 'event_date is invalid' }, { status: 400 });
+    if (targetStudentIds.length > 400) return Response.json({ ok: false, error: 'target students must be 400 or fewer' }, { status: 400 });
     if (!canManageSchool(actor, school)) throw new Error('forbidden');
 
     const db = adminDb();
     let studentIds: string[] = targetStudentIds;
+    if (studentIds.length > 0) {
+      const studentSnaps = await db.getAll(...studentIds.map(id => db.collection('users').doc(id)));
+      const invalid = studentSnaps.filter(snap => {
+        const data = snap.data() || {};
+        const studentSchool = String(data.school_id || data.school || '').trim();
+        return !snap.exists || String(data.role || '') !== 'student' || studentSchool !== school;
+      });
+      if (invalid.length > 0) return Response.json({ ok: false, error: 'target students include invalid or foreign-school accounts' }, { status: 400 });
+    }
     if (studentIds.length === 0 && middleSchool) {
       const snap = await db.collection('users')
         .where('role', '==', 'student')
@@ -74,6 +88,9 @@ export async function POST(request: NextRequest) {
       target_type: 'test_prep_event',
       school,
       metadata: { target_count: studentIds.length, middle_school: middleSchool, event_date: eventDate },
+    }).catch(error => {
+      console.error('test prep event audit write failed', error);
+      return null;
     });
 
     return Response.json({ ok: true, id: eventRef.id, target_count: studentIds.length, event_id: eventId });
@@ -90,7 +107,16 @@ export async function GET(request: NextRequest) {
     if (!canManageSchool(actor, school)) throw new Error('forbidden');
     const snap = await adminDb().collection('test_prep_events').where('school_id', '==', school).limit(50).get();
     const events = snap.docs
-      .map(doc => ({ id: doc.id, ...doc.data() }))
+      .map(doc => {
+        const data = doc.data();
+        const created = data.created_at;
+        const updated = data.updated_at;
+        return {
+          id: doc.id, ...data,
+          created_at: created?.toDate ? created.toDate().toISOString() : created || null,
+          updated_at: updated?.toDate ? updated.toDate().toISOString() : updated || null,
+        };
+      })
       .sort((a: any, b: any) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
     return Response.json({ ok: true, events });
   } catch (error) {

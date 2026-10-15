@@ -1,4 +1,5 @@
 import 'server-only';
+import { attendanceRangeIssue } from './attendance-date';
 
 export const normalizeAttendanceName = (value: unknown) =>
   String(value || '')
@@ -25,6 +26,19 @@ export function buildAttendanceWarnings(record: any, shifts: any[] = []) {
   const transportTotal = transport.reduce((sum: number, item: any) => sum + (Number(item?.cost) || 0), 0);
   const recordName = normalizeAttendanceName(record?.teacher_name);
 
+  const rangeIssue = attendanceRangeIssue(record?.start_time, record?.end_time, String(record?.date || ''));
+  if (rangeIssue) {
+    const dateMismatch = rangeIssue === 'date_mismatch';
+    warnings.push({
+      code: dateMismatch ? 'clock_date_mismatch' : 'invalid_clock_range',
+      label: dateMismatch ? '打刻日付の不一致' : '打刻時間の不整合',
+      severity: 'danger',
+      detail: dateMismatch
+        ? '申請日と出勤・退勤時刻の日付が一致していません。対象日の時刻に修正してください。'
+        : '退勤時刻が出勤時刻以下、または時刻形式が不正です。',
+    });
+  }
+
   if (hasEnded && workSegments.length === 0) {
     warnings.push({
       code: 'missing_detail',
@@ -34,7 +48,7 @@ export function buildAttendanceWarnings(record: any, shifts: any[] = []) {
     });
   }
 
-  if (hasEnded && transportTotal <= 0) {
+  if (hasEnded && transportTotal <= 0 && record?.transportation_status !== 'none') {
     warnings.push({
       code: 'missing_transportation',
       label: '交通費未入力',

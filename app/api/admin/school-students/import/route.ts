@@ -1,11 +1,13 @@
 import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
-import { adminAuth, adminDb } from '@/lib/firebase-admin';
-import { canManageSchool, getServerUser, jsonError, requireMaster } from '@/lib/server-auth';
+import { adminDb } from '@/lib/firebase-admin';
+import { canManageSchool, getServerUser, jsonError } from '@/lib/server-auth';
+import { prepareAuthAccountCredentials } from '@/lib/server/account-credentials';
 import { writeLearningEvent } from '@/lib/events';
 import { generateInitialPassword } from '@/lib/password';
 
 export const runtime = 'nodejs';
+export const maxDuration = 60;
 
 function parseCsv(text: string) {
   const rows: string[][] = [];
@@ -50,6 +52,16 @@ function normalizeGrade(value: string) {
     .replace(/[Ａ-Ｚａ-ｚ０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0));
 }
 
+function normalizeCourseStartMonth(value: unknown, fallback = '') {
+  const text = cleanCell(value).normalize('NFKC');
+  if (!text) return fallback;
+  const separated = text.match(/^(\d{4})[/.\-年](\d{1,2})(?:月)?$/);
+  if (separated) return `${separated[1]}-${separated[2].padStart(2, '0')}`;
+  const compact = text.match(/^(\d{4})(\d{2})$/);
+  if (compact) return `${compact[1]}-${compact[2]}`;
+  return text;
+}
+
 function findHeaderIndex(rows: string[][]) {
   return rows.findIndex((row, index) => index < 25 && row.some(cell => cell.includes('生涯番号') || cell.includes('ログインID') || cell === 'ID'));
 }
@@ -58,41 +70,18 @@ function indexOf(header: string[], patterns: string[]) {
   return header.findIndex(cell => patterns.some(pattern => cell.includes(pattern)));
 }
 
-function normalizeEmail(loginId: string, email?: string) {
-  const cleaned = String(email || '').trim();
-  if (cleaned.includes('@')) return cleaned;
-  return `${String(loginId).trim()}@classbase.local`;
-}
-
-function isNotFound(error: any) {
-  const message = String(error?.message || '').toLowerCase();
-  return error?.code === 'auth/user-not-found' || message.includes('no user record') || message.includes('not found');
-}
-
-async function upsertAuthUser(loginId: string, password: string, displayName: string, email?: string) {
-  const auth = adminAuth();
-  const normalizedEmail = normalizeEmail(loginId, email);
-  try {
-    const existing = await auth.getUserByEmail(normalizedEmail);
-    await auth.updateUser(existing.uid, { password, displayName, emailVerified: true, disabled: false });
-    return { uid: existing.uid, email: normalizedEmail, updated: true };
-  } catch (error: any) {
-    if (!isNotFound(error)) throw error;
-    const created = await auth.createUser({ email: normalizedEmail, password, displayName, emailVerified: true });
-    return { uid: created.uid, email: normalizedEmail, updated: false };
-  }
-}
-
 export async function POST(request: NextRequest) {
   try {
     const actor = await getServerUser(request);
-    requireMaster(actor);
+    if (actor.role !== 'master') throw new Error('forbidden');
 
     const body = await request.json();
     const csvText = String(body.csv_text || '');
     const requestedSchool = String(body.school_id || body.school || '').trim();
-    const school = actor.role === 'master' ? requestedSchool : actor.school_ids[0] || actor.school || '';
+    const school = requestedSchool || actor.school_ids[0] || actor.school || '';
     const requestedDefaultPassword = String(body.default_password || '').trim();
+    const defaultCourseStartMonth = normalizeCourseStartMonth(body.default_course_start_month);
+    const importFileName = String(body.file_name || '校舎別生徒アカウント.csv').trim().slice(0, 240);
 
     if (!csvText.trim()) return Response.json({ ok: false, error: 'csv_text is required' }, { status: 400 });
     if (!school) return Response.json({ ok: false, error: 'school is required' }, { status: 400 });
@@ -159,6 +148,10 @@ export async function POST(request: NextRequest) {
           ? cleanCell(cols[idx.trialEvents]).split(/[、,／/|]/).map(v => v.trim()).filter(Boolean)
           : [];
         const trialContinued = idx.trialContinued !== -1 && ['1', 'true', 'TRUE', '○', '〇', '有', 'はい', '継続'].includes(cleanCell(cols[idx.trialContinued]));
+        const courseStartMonth = normalizeCourseStartMonth(
+          idx.courseStartMonth !== -1 ? cols[idx.courseStartMonth] : '',
+          defaultCourseStartMonth,
+        );
         const studentPassword = idx.password !== -1 && cleanCell(cols[idx.password])
           ? cleanCell(cols[idx.password])
           : requestedDefaultPassword || generateInitialPassword();
@@ -169,8 +162,10 @@ export async function POST(request: NextRequest) {
           throw new Error('初期パスワードは6文字以上にしてください');
         }
 
-        const studentAuth = await upsertAuthUser(loginId, studentPassword, studentName);
-        const parentAuth = await upsertAuthUser(parentLoginId, parentPassword, parentName);
+        const syncStudent = await prepareAuthAccountCredentials({ actor, loginId, password: studentPassword, displayName: studentName });
+        const syncParent = await prepareAuthAccountCredentials({ actor, loginId: parentLoginId, password: parentPassword, displayName: parentName });
+        const studentAuth = await syncStudent();
+        const parentAuth = await syncParent();
         const now = FieldValue.serverTimestamp();
 
         await db.collection('users').doc(studentAuth.uid).set({
@@ -188,7 +183,7 @@ export async function POST(request: NextRequest) {
           school,
           classroom: idx.classroom !== -1 ? cols[idx.classroom] || '' : '',
           middle_school: idx.middleSchool !== -1 ? cols[idx.middleSchool] || '' : '',
-          course_start_month: idx.courseStartMonth !== -1 ? cols[idx.courseStartMonth] || '' : '',
+          course_start_month: courseStartMonth,
           sibling_group_key: siblingGroup || null,
           trial_event_ids: trialEventIds,
           trial_continued: trialContinued,
@@ -237,7 +232,7 @@ export async function POST(request: NextRequest) {
           school_id: school,
           classroom: idx.classroom !== -1 ? cols[idx.classroom] || '' : '',
           middle_school: idx.middleSchool !== -1 ? cols[idx.middleSchool] || '' : '',
-          course_start_month: idx.courseStartMonth !== -1 ? cols[idx.courseStartMonth] || '' : '',
+          course_start_month: courseStartMonth,
           sibling_group_key: siblingGroup || '',
           trial_event_ids: trialEventIds,
           trial_continued: trialContinued,
@@ -252,6 +247,7 @@ export async function POST(request: NextRequest) {
           parent_login_id: parentLoginId,
           parent_initial_password: parentPassword,
           account_status: 'active',
+          role: 'student',
         });
         if (siblingGroup) {
           siblingGroups.set(siblingGroup, [...(siblingGroups.get(siblingGroup) || []), { uid: studentAuth.uid, twin }]);
@@ -284,7 +280,21 @@ export async function POST(request: NextRequest) {
       metadata: { count: results.length, errors: errors.length },
     });
 
-    return Response.json({ ok: true, school, count: results.length, students: results, errors, event_id: eventId });
+    const importBatchRef = db.collection('account_import_batches').doc();
+    await importBatchRef.set({
+      file_name: importFileName,
+      role: 'student',
+      user_ids: results.map(student => String(student.id || student.uid || '')).filter(Boolean),
+      success_count: results.length,
+      error_count: errors.length,
+      errors: errors.map(item => `行${item.row}: ${item.error}`).slice(0, 20),
+      imported_at: FieldValue.serverTimestamp(),
+      imported_by: actor.uid,
+      source: 'school_students',
+      school,
+    });
+
+    return Response.json({ ok: true, school, count: results.length, students: results, errors, event_id: eventId, import_batch_id: importBatchRef.id });
   } catch (error) {
     return jsonError(error);
   }

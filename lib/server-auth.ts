@@ -1,6 +1,9 @@
 import { NextRequest } from 'next/server';
 import { adminAuth, adminDb } from '@/lib/firebase-admin';
 import { canManageAdminApp } from '@/lib/admin-app-access';
+import { isDedicatedAttendanceApproverProfile, isDedicatedProfile } from '@/lib/employment-category';
+import { attendanceSchoolName, resolveAttendanceSchoolCode } from '@/lib/attendance-schools';
+import { hasScienceSocialProgram } from '@/lib/teacher-programs';
 
 export type AppRole = 'student' | 'teacher' | 'master' | 'admin' | 'parent' | 'attendance_admin';
 
@@ -34,7 +37,7 @@ export async function getServerUser(request: NextRequest): Promise<ServerUser> {
     throw new Error('missing-token');
   }
 
-  const decoded = await adminAuth().verifyIdToken(token);
+  const decoded = await adminAuth().verifyIdToken(token, true);
   const profileSnap = await adminDb().collection('users').doc(decoded.uid).get();
 
   if (!profileSnap.exists) {
@@ -42,16 +45,26 @@ export async function getServerUser(request: NextRequest): Promise<ServerUser> {
   }
 
   const profile = profileSnap.data() || {};
+  if (['suspended', 'withdrawn', 'archived'].some(status =>
+    profile.account_status === status || profile.status === status)) throw new Error('forbidden');
   const role = normalizeRole(profile.role);
-  const schoolIds = Array.isArray(profile.school_ids)
-    ? profile.school_ids.filter(Boolean)
-    : [profile.school_id, profile.school].filter(Boolean);
+  const primarySchoolCode = resolveAttendanceSchoolCode(
+    profile.school_id || profile.school_code || profile.school_name || profile.school
+  ) || String(profile.school_id || profile.school_code || profile.school_name || profile.school || '').trim();
+  const primarySchoolName = attendanceSchoolName(primarySchoolCode);
+  const storedSchoolIds = Array.isArray(profile.school_ids)
+    ? profile.school_ids
+    : Array.isArray(profile.attendance_school_ids) ? profile.attendance_school_ids : [];
+  const schoolIds = Array.from(new Set([primarySchoolCode, primarySchoolName, ...storedSchoolIds.flatMap((value: unknown) => {
+    const code = resolveAttendanceSchoolCode(value) || String(value || '').trim();
+    return [code, attendanceSchoolName(code)];
+  })].filter(Boolean)));
 
   return {
     uid: decoded.uid,
     email: decoded.email,
     role,
-    school: profile.school || profile.school_id,
+    school: profile.school_name || profile.school || primarySchoolName || primarySchoolCode,
     school_ids: schoolIds,
     profile,
   };
@@ -61,8 +74,7 @@ export function normalizeRole(role: unknown): AppRole {
   const r = String(role || '').toLowerCase();
   if (r === 'teacher') return 'teacher';
   if (r === 'master') return 'master';
-  // 旧勤怠管理者は講師へ統合する。
-  if (ATTENDANCE_ADMIN_ALIASES.includes(r)) return 'teacher';
+  if (ATTENDANCE_ADMIN_ALIASES.includes(r)) return 'attendance_admin';
   if (ADMIN_ROLE_ALIASES.includes(r)) return 'admin';
   if (r === 'parent' || r === 'guardian') return 'parent';
   return 'student';
@@ -85,7 +97,36 @@ export function isAdminLike(user: ServerUser) {
 }
 
 export function canManageAttendance(user: ServerUser) {
+  return canManageAdminApp(user, 'attendance') || (
+    user.role === 'teacher' &&
+    isDedicatedProfile(user.profile) &&
+    user.profile.attendance_school_manager === true
+  );
+}
+
+export function canManageAttendanceSystem(user: ServerUser) {
   return canManageAdminApp(user, 'attendance');
+}
+
+export function canManageShifts(user: ServerUser) {
+  return user.role === 'master' || isDedicatedAttendanceApproverProfile(user.profile);
+}
+
+/** 勤怠シフトは理社講座の講師配置とは分離し、マスターと専任の校舎承認者だけが管理する。 */
+export function canManageAttendanceShiftPlans(user: ServerUser) {
+  return user.role === 'master' || isDedicatedAttendanceApproverProfile(user.profile);
+}
+
+export function canManageAttendanceSchool(user: ServerUser, targetSchool?: string | null) {
+  if (!canManageAttendance(user)) return false;
+  if (user.role === 'master') return true;
+  const allowed = new Set([user.school, ...user.school_ids].map(value =>
+    resolveAttendanceSchoolCode(value) || String(value || '').trim()
+  ).filter(Boolean));
+  // 校舎未設定の勤怠管理アカウントは全校担当として扱う（校舎を設定すればその校舎に限定）。
+  if (user.role === 'attendance_admin' && allowed.size === 0) return true;
+  const canonicalTarget = resolveAttendanceSchoolCode(targetSchool) || String(targetSchool || '').trim();
+  return Boolean(canonicalTarget && allowed.has(canonicalTarget));
 }
 
 export function canUseTeacherAttendance(user: ServerUser) {
@@ -96,16 +137,36 @@ export function canManageSchool(user: ServerUser, targetSchool?: string | null) 
   if (user.role === 'master') return true;
   if (user.role !== 'admin' || !canManageAdminApp(user, 'science_social')) return false;
   if (!targetSchool) return true;
-  return user.school_ids.includes(targetSchool);
+  const canonicalTarget = resolveAttendanceSchoolCode(targetSchool) || String(targetSchool).trim();
+  return user.school_ids.some(value =>
+    (resolveAttendanceSchoolCode(value) || String(value).trim()) === canonicalTarget
+  );
+}
+
+export function canViewSchoolStudents(user: ServerUser, targetSchool?: string | null) {
+  if (isAdminLike(user)) return canManageSchool(user, targetSchool);
+  if (user.role !== 'teacher' || !isDedicatedProfile(user.profile) || !hasScienceSocialProgram(user.profile)) return false;
+  if (!targetSchool) return true;
+  const canonicalTarget = resolveAttendanceSchoolCode(targetSchool) || String(targetSchool).trim();
+  return [user.school, ...user.school_ids].some(value =>
+    (resolveAttendanceSchoolCode(value) || String(value || '').trim()) === canonicalTarget
+  );
 }
 
 export function jsonError(error: unknown, status = 400) {
   const message = error instanceof Error ? error.message : String(error);
+  const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+  const authenticationExpired = message === 'missing-token' ||
+    ['auth/id-token-revoked', 'auth/id-token-expired', 'auth/user-disabled', 'auth/argument-error'].includes(code);
   const normalizedStatus =
-    message === 'missing-token' ? 401 :
+    authenticationExpired ? 401 :
     message === 'profile-not-found' ? 403 :
     message === 'forbidden' ? 403 :
     status;
 
-  return Response.json({ ok: false, error: message }, { status: normalizedStatus });
+  return Response.json({
+    ok: false,
+    error: authenticationExpired ? 'ログイン情報が失効しています。再度ログインしてください。' : message,
+    ...(authenticationExpired ? { code: 'reauth-required' } : {}),
+  }, { status: normalizedStatus });
 }

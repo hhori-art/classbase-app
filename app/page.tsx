@@ -1,11 +1,13 @@
 'use client';
 
 import { useRef, useState } from 'react';
-import { User as FirebaseUser, signInWithEmailAndPassword, signOut as firebaseSignOut } from 'firebase/auth';
-import { doc, getDoc } from 'firebase/firestore';
-import { auth, db } from '@/lib/firebase';
+import { User as FirebaseUser } from 'firebase/auth';
+import { auth } from '@/lib/firebase';
 import { LogIn, Loader2, User, AlertCircle, Eye, EyeOff, Lock, ArrowRight, GraduationCap } from 'lucide-react';
 import Link from 'next/link';
+import { targetPathForProfile } from '@/lib/auth-navigation';
+import { loadAuthenticatedProfile } from '@/lib/client-auth-profile';
+import { signInWithNetworkRetry } from '@/lib/client-auth-login';
 
 const EMAIL_DOMAINS = ['classbase.local', 'sozogakuen.co.jp'];
 const ADMIN_ROLE_ALIASES = [
@@ -23,14 +25,10 @@ const normalizeRole = (role: any): 'student' | 'teacher' | 'master' | 'admin' | 
   const r = String(role || '').toLowerCase();
   if (r === 'teacher') return 'teacher';
   if (r === 'master') return 'master';
-  if (['attendance_admin', 'attendance_only', 'attendance_manager'].includes(r)) return 'teacher';
+  if (['attendance_admin', 'attendance_only', 'attendance_manager'].includes(r)) return 'attendance_admin';
   if (ADMIN_ROLE_ALIASES.includes(r)) return 'admin';
   if (r === 'parent' || r === 'guardian') return 'parent';
   return 'student';
-};
-
-const targetPathByRole = (role: string) => {
-  return '/apps';
 };
 
 const cacheProfileForAuthContext = (uid: string, profile: Record<string, any>) => {
@@ -42,6 +40,8 @@ const cacheProfileForAuthContext = (uid: string, profile: Record<string, any>) =
 const LOGIN_FLOW_LOCK_KEY = 'classbase_login_flow_lock';
 const LOGIN_CREDENTIAL_ERROR_MESSAGE =
   'ログインIDまたはパスワードが一致しません。\n案内書面に記載されているID・初期パスワードをもう一度確認してください。\n英数字は半角で入力し、余分なスペースが入っていないかも確認してください。';
+const INITIAL_LOGIN_COMPLETED_MESSAGE =
+  'このアカウントは初回登録済みです。\n初回登録後に設定したパスワードでログインしてください。\n忘れた場合は「パスワードを忘れた方」から再設定してください。';
 
 export default function LoginPage() {
   const [loginInput, setLoginInput] = useState('');
@@ -59,8 +59,7 @@ export default function LoginPage() {
       .trim();
   const isValidLoginId = (s: string) => /^[0-9A-Za-z_-]+$/.test(s);
   const buildLoginEmails = (id: string) => {
-    const idCandidates = Array.from(new Set([id, id.toLowerCase(), id.toUpperCase()]));
-    return idCandidates.flatMap(candidate => EMAIL_DOMAINS.map(domain => `${candidate}@${domain}`));
+    return EMAIL_DOMAINS.map(domain => `${id.toLowerCase()}@${domain}`);
   };
 
   const firstLoginViaApi = async (lifetimeId: string, pass: string) => {
@@ -77,47 +76,21 @@ export default function LoginPage() {
       if (data?.error === 'not-registered') throw new Error('登録データが見つかりません。');
       if (data?.error === 'wrong-initial-password') throw new Error(LOGIN_CREDENTIAL_ERROR_MESSAGE);
       if (data?.error === 'missing-initial-password') throw new Error('初回パスワードが未設定です。管理者に連絡してください。');
+      if (data?.error === 'initial-login-not-allowed') throw new Error(INITIAL_LOGIN_COMPLETED_MESSAGE);
       throw new Error('初回登録処理に失敗しました。');
     }
 
     return data; // { ok:true, uid, email }
   };
 
-  const repairProfileViaApi = async () => {
-    const token = await auth.currentUser?.getIdToken();
-    if (!token) throw new Error('ログイン情報を確認できません。再ログインしてください。');
-    const res = await fetch('/api/auth/repair-profile', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || data.ok === false) throw new Error(data.error || 'ユーザー情報の自動修復に失敗しました。');
-    return data;
-  };
-
   const redirectLoggedInUser = async (firebaseUser: FirebaseUser) => {
-    const userDocRef = doc(db, 'users', firebaseUser.uid);
-    let snap = await getDoc(userDocRef);
+    const profile = await loadAuthenticatedProfile(firebaseUser);
+    const role = normalizeRole(profile.role);
+    const normalizedProfile = { ...profile, uid: firebaseUser.uid, role };
 
-    if (!snap.exists()) {
-      await repairProfileViaApi();
-      snap = await getDoc(userDocRef);
-    }
-
-    if (!snap.exists()) {
-      throw new Error('データベース上にユーザー情報が見つかりません。');
-    }
-
-    const role = normalizeRole(snap.data().role);
-
-    if (role === 'admin' || role === 'master') {
-      await firebaseSignOut(auth);
-      throw new Error('管理者アカウントは、画面下部の「管理者ログイン」からログインしてください。');
-    }
-
-    cacheProfileForAuthContext(firebaseUser.uid, { ...snap.data(), uid: firebaseUser.uid, role });
+    cacheProfileForAuthContext(firebaseUser.uid, normalizedProfile);
     sessionStorage.removeItem(LOGIN_FLOW_LOCK_KEY);
-    window.location.replace(targetPathByRole(role));
+    window.location.replace(targetPathForProfile(normalizedProfile));
   };
 
   const runLogin = async () => {
@@ -149,7 +122,7 @@ export default function LoginPage() {
         let lastSignInError: any = null;
         for (const email of loginEmails) {
           try {
-            const credential = await signInWithEmailAndPassword(auth, email, resolvedPassword);
+            const credential = await signInWithNetworkRetry(auth, email, resolvedPassword);
             loggedInUser = credential.user;
             break;
           } catch (candidateError: any) {
@@ -169,7 +142,7 @@ export default function LoginPage() {
           const restored = await firstLoginViaApi(id, resolvedPassword);
 
           // 3) 作成/復旧できたら改めてログイン
-          const credential = await signInWithEmailAndPassword(auth, restored.email || loginEmails[0], resolvedPassword);
+          const credential = await signInWithNetworkRetry(auth, restored.email || loginEmails[0], resolvedPassword);
           loggedInUser = credential.user;
         } else {
           throw signInError;
@@ -183,10 +156,14 @@ export default function LoginPage() {
       // Firebase Auth側エラー
       if (e?.code === 'auth/invalid-credential' || e?.code === 'auth/user-not-found' || e?.code === 'auth/wrong-password') {
         message = LOGIN_CREDENTIAL_ERROR_MESSAGE;
+      } else if (e?.code === 'auth/user-disabled') {
+        message = 'このアカウントは停止中です。校舎または管理者へお問い合わせください。';
       } else if (e?.code === 'auth/too-many-requests') {
         message = '試行回数が多すぎます。しばらく待ってください。';
       } else if (e?.code === 'auth/network-request-failed') {
-        message = 'ネットワークエラーです。通信環境をご確認ください。';
+        message = '認証サーバーへ接続できませんでした。通信環境を確認して、もう一度ログインしてください。改善しない場合は、校舎名・端末・発生時刻を管理者へお知らせください。';
+      } else if (e?.message === 'profile-service-unavailable' || e?.name === 'AbortError') {
+        message = '認証は完了しましたが、ユーザー情報の取得に失敗しました。少し待ってからもう一度ログインしてください。';
       } else if (e?.message) {
         // 初回API由来、または権限チェック時の分かりやすいメッセージ
         message = e.message;
@@ -284,6 +261,9 @@ export default function LoginPage() {
             className="flex items-center justify-center text-sm font-bold text-indigo-600 hover:text-indigo-800"
           >
             パスワードを忘れた方
+          </Link>
+          <Link href="/manual" className="flex items-center justify-center text-sm font-bold text-slate-500 hover:text-indigo-700">
+            共通ログインマニュアル
           </Link>
         </form>
 

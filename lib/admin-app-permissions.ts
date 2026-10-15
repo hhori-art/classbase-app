@@ -28,6 +28,11 @@ const MASTER_ONLY_ADMIN_PATHS = [
   '/master/delete',
   '/master/settings',
   '/master/stats',
+  '/master/announcements',
+  '/master/community',
+  '/master/parent-inquiries',
+  '/master/requests',
+  '/master/rewards',
 ] as const;
 
 export const ADMIN_APP_LABELS: Record<AdminAppId, string> = {
@@ -55,6 +60,20 @@ export function isConfigurableAdminRole(role: unknown) {
   return CONFIGURABLE_ADMIN_ROLES.has(String(role || '').toLowerCase());
 }
 
+const SCHOOL_ADMIN_ALLOWED_PATHS = [
+  '/master',
+  '/master/science-social',
+  '/master/school-students',
+  '/master/monthly-schedules',
+  '/master/shifts',
+] as const;
+
+export function isSchoolAdminAllowedPath(pathname: string) {
+  return SCHOOL_ADMIN_ALLOWED_PATHS.some(path =>
+    pathname === path || (path !== '/master' && pathname.startsWith(`${path}/`))
+  );
+}
+
 export function normalizeAdminAppPermissions(
   role: unknown,
   profile: Record<string, any> = {},
@@ -69,6 +88,8 @@ export function normalizeAdminAppPermissions(
     return { ...EMPTY_PERMISSIONS, attendance: true };
   }
 
+  if (!isConfigurableAdminRole(normalizedRole)) return { ...EMPTY_PERMISSIONS };
+
   const stored = profile.admin_permissions;
   if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
     return {
@@ -78,7 +99,7 @@ export function normalizeAdminAppPermissions(
     };
   }
 
-  if (normalizedRole === 'admin' || normalizedRole.includes('admin')) {
+  if (isConfigurableAdminRole(normalizedRole)) {
     const programs = programList(profile);
     return {
       science_social: true,
@@ -108,13 +129,15 @@ export function adminAppForPath(pathname: string): AdminAppId | null {
   if (
     pathname === '/master/attendance' ||
     pathname.startsWith('/master/attendance/') ||
-    pathname.startsWith('/master/attendance-corrections')
+    pathname.startsWith('/master/attendance-approvals')
   ) {
     return 'attendance';
   }
   if (pathname === '/master/eiken' || pathname.startsWith('/master/eiken/')) {
     return 'eiken';
   }
+  // シフトは理社講座管理者と、専任の勤怠承認者が共用する。
+  // 画面の基本所属は理社講座とし、layout側で専任承認者の例外入場を許可する。
   if (
     pathname === '/master' ||
     isMasterOnlyAdminPath(pathname)

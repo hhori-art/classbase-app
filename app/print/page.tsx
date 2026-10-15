@@ -110,13 +110,14 @@ export default function PrintPage() {
         {users.map((user) => {
           const loginId = user.lifetime_id || user.email || '';
           const isStudent = user.role === 'student';
-          const isTeacher = user.role === 'teacher';
+          const isTeacher = ['teacher', 'attendance_admin', 'attendance_only', 'attendance_manager'].includes(String(user.role || ''));
           const isAttendanceOnly = user.role === 'attendance_admin';
           const accountLabel = isTeacher ? '講師' : '管理者';
           const displayName = user.student_name || user.name || '名称未設定';
           const nameSuffix = isStudent ? 'さん' : isTeacher ? '先生' : '様';
           const baseUrl = qrBaseUrl || 'https://www.edic.jp';
           const safeBaseUrl = baseUrl;
+          const attendanceManualUrl = `${safeBaseUrl.replace(/\/+$/, '')}/manual`;
           const formattedDate = `${new Date().getFullYear()}年${new Date().getMonth() + 1}月${new Date().getDate()}日`;
           
           return (
@@ -154,16 +155,14 @@ export default function PrintPage() {
                       {isAttendanceOnly ? (
                         <p className="text-[13px] text-gray-700 leading-relaxed mt-2">
                           平素は当塾の業務にご協力いただき、誠にありがとうございます。<br/>
-                          この度、「創造学園アプリ」内の勤怠打刻・勤務詳細・交通費登録で使用するアカウントを発行いたしました。<br/>
-                          突破ゼミ勤務がある場合も同じ画面から登録できます。<br/>
-                          下記のアカウント情報を使って、初回ログインを行ってください。
+                          本アカウントは、創造学園での勤務に関する打刻・勤務詳細・交通費等を登録するためのものです。<br/>
+                          ログインIDには職員番号を使用し、通常の勤怠システムと同じ手順で登録できます。<br/>
+                          下記の職員番号と初期パスワードを使って、初回ログインを行ってください。
                         </p>
                       ) : (
                         <p className="text-[13px] text-gray-700 leading-relaxed mt-2">
                           平素は当塾の指導業務にご尽力いただき、誠にありがとうございます。<br/>
-                          この度、業務で使用する「創造学園アプリ」の{accountLabel}用アカウントを発行いたしました。<br/>
-                          お手持ちのスマートフォンやパソコンからアクセスできますので、<br/>
-                          下記のアカウント情報を使って、初回ログインを行ってください。
+                          {isTeacher ? <>本アカウントは、創造学園での勤務に関する打刻・勤務詳細・交通費等を登録するためのものです。<br/>担当する業務にかかわらず、ログインIDには職員番号を使用します。<br/>下記の職員番号と初期パスワードを使って、初回ログインを行ってください。</> : <>この度、業務で使用する「創造学園アプリ」の{accountLabel}用アカウントを発行いたしました。<br/>下記のアカウント情報を使って、初回ログインを行ってください。</>}
                         </p>
                       )}
                     </>
@@ -177,7 +176,7 @@ export default function PrintPage() {
                     </h2>
                     <div className="space-y-4">
                       <div>
-                        <p className="text-[11px] font-bold text-gray-500 mb-1">① ログインID (生涯番号)</p>
+                        <p className="text-[11px] font-bold text-gray-500 mb-1">① {isTeacher ? 'ログインID（職員番号）' : 'ログインID（生涯番号）'}</p>
                         <p className="text-xl font-mono font-black tracking-widest text-gray-800 bg-blue-50 px-3 py-1.5 rounded-xl inline-block border border-blue-100">{loginId}</p>
                       </div>
                       <div className="flex gap-4 items-end">
@@ -193,14 +192,14 @@ export default function PrintPage() {
                   </div>
                   
                   <div className="text-center ml-2 flex flex-col items-center justify-center bg-blue-50 p-3 rounded-2xl border-2 border-blue-100 w-40 shrink-0">
-                    <p className="text-[11px] font-bold text-blue-800 mb-1.5 bg-white px-3 py-1 rounded-full shadow-sm">ここからログイン！</p>
+                    <p className="text-[11px] font-bold text-blue-800 mb-1.5 bg-white px-3 py-1 rounded-full shadow-sm">{isTeacher ? '勤怠マニュアル' : 'ここからログイン！'}</p>
                     
                     {/* ★ 外部画像ではなく、内部でQRコードを描画する最強の方法 */}
                     <div className="bg-white p-1 rounded-lg mb-1 shadow-sm">
-                      <QRCodeSVG value={safeBaseUrl} size={72} />
+                      <QRCodeSVG value={isTeacher ? attendanceManualUrl : safeBaseUrl} size={72} />
                     </div>
                     
-                    <p className="text-[9px] font-bold text-gray-500 leading-tight">カメラで読み取れます</p>
+                    <p className="text-[9px] font-bold text-gray-500 leading-tight">{isTeacher ? '勤怠マニュアル（ログイン不要）' : 'カメラで読み取れます'}</p>
                   </div>
                 </div>
 
@@ -213,6 +212,31 @@ export default function PrintPage() {
                     QRコードが読み取れない場合は、上記URLをブラウザのアドレス欄に入力してください。
                   </p>
                 </div>
+
+                {isTeacher && (
+                  <div className="mb-4 rounded-2xl border-2 border-emerald-100 bg-emerald-50/70 p-3">
+                    <p className="text-[13px] font-black text-emerald-900">初回ログインの手順</p>
+                    <ol className="mt-2 grid grid-cols-3 gap-3 text-[10px] font-bold leading-relaxed text-slate-700">
+                      <li><b className="mr-1 text-emerald-700">1.</b>QRコードでマニュアルを開き、「ログイン画面へ」を押します。</li>
+                      <li><b className="mr-1 text-emerald-700">2.</b>職員番号と初期パスワードを入力します。</li>
+                      <li><b className="mr-1 text-emerald-700">3.</b>画面の案内に沿って新しいパスワードを設定します。</li>
+                    </ol>
+                  </div>
+                )}
+
+                {isTeacher && (
+                  <div className="mb-4 flex items-center gap-4 rounded-2xl border-2 border-cyan-100 bg-cyan-50/70 p-3">
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[13px] font-black text-cyan-900">創造学園 講師向け勤怠登録マニュアル</p>
+                      <p className="mt-1 text-[10px] font-bold leading-relaxed text-slate-600">通常の勤怠システムと同じ手順で、出勤・退勤、勤務詳細、交通費、打刻修正依頼を登録できます。</p>
+                      <p className="mt-1 break-all font-mono text-[8px] font-bold text-cyan-800">{attendanceManualUrl}</p>
+                    </div>
+                    <div className="shrink-0 rounded-xl bg-white p-2 text-center">
+                      <QRCodeSVG value={attendanceManualUrl} size={68} />
+                      <p className="mt-1 text-[8px] font-black text-cyan-900">ログイン不要</p>
+                    </div>
+                  </div>
+                )}
                 
                 <div className="bg-yellow-50/50 border-2 border-yellow-100 rounded-2xl p-4">
                   <h3 className="font-bold text-yellow-800 mb-2 flex items-center gap-2 text-[14px]">
@@ -229,7 +253,7 @@ export default function PrintPage() {
               <div className="print-footer flex justify-between items-end border-t-2 border-blue-100 pt-2">
                 <div className="text-[10px] text-gray-500 font-medium pb-1 leading-relaxed">
                   <p>※本用紙は大切に保管してください。</p>
-                  <p>お問い合わせ先：理社講座サポートセンター（078-321-4123）</p>
+                  <p>お問い合わせ先：創造学園アプリ サポート窓口（078-321-4123）</p>
                 </div>
                 <div className="text-xl font-black text-blue-900 tracking-widest">創造学園エディック</div>
               </div>

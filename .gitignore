@@ -38,6 +38,7 @@ firebase-debug.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.security.example
 
 # vercel
 .vercel
@@ -46,3 +47,11 @@ firebase-debug.log*
 *.tsbuildinfo
 next-env.d.ts
 .env*.local
+
+# local security test runtime / emulator data
+/.security-tools/
+/.security-emulator-data/
+/.security-diagnosis-accounts.json
+/.security-staging-service-account.json
+/firebase-security-debug.log
+/firestore-debug.log

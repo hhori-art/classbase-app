@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { auth, db } from '@/lib/firebase';
+import { signOut as firebaseSignOut } from 'firebase/auth';
 import { collection, getDocs, orderBy, query, where } from 'firebase/firestore';
 import {
   Building2,
@@ -10,6 +11,7 @@ import {
   ChevronRight,
   Loader2,
   LockKeyhole,
+  KeyRound,
   PauseCircle,
   Plus,
   Search,
@@ -24,6 +26,11 @@ import LastLoginCell from '@/app/components/LastLoginCell';
 import { normalizeAdminAppPermissions } from '@/lib/admin-app-permissions';
 import { EMPLOYMENT_CATEGORY_LABELS, isAttendanceUserRole, normalizeEmploymentCategory } from '@/lib/employment-category';
 import { useAuth } from '@/app/context/AuthContext';
+import {
+  ATTENDANCE_SCHOOL_OPTION_GROUPS,
+  attendanceSchoolName,
+  resolveAttendanceSchoolCode,
+} from '@/lib/attendance-schools';
 
 const STATUSES = [
   { id: 'active', label: '有効', icon: CheckCircle2, className: 'bg-emerald-50 text-emerald-700 border-emerald-100' },
@@ -41,6 +48,7 @@ const ROLES = [
 ];
 
 const initialForm = {
+  user_id: '',
   role: 'student',
   display_name: '',
   login_id: '',
@@ -50,6 +58,7 @@ const initialForm = {
   school_ids: '',
   account_status: 'active',
   employment_category: 'semi_dedicated',
+  attendance_school_manager: false,
   prescribed_work_start: '09:00',
   prescribed_work_end: '18:00',
   prescribed_break_minutes: 60,
@@ -69,7 +78,35 @@ const initialForm = {
 };
 
 const ACCOUNT_PAGE_SIZE = 50;
+const SESSION_EXPIRED_MESSAGE = 'ログイン情報が失効しています。再度ログインしてください。';
+const isExpiredSessionError = (error: unknown) => {
+  const code = String((error as any)?.code || '');
+  const message = String((error as any)?.message || error || '').toLowerCase();
+  return ['auth/id-token-revoked', 'auth/id-token-expired', 'auth/user-token-expired', 'auth/user-disabled', 'reauth-required'].includes(code) ||
+    message.includes('token has been revoked') || message.includes('token is expired') || message.includes('ログイン情報が失効');
+};
+const freshAdminToken = async () => {
+  const user = auth.currentUser;
+  if (!user) throw Object.assign(new Error(SESSION_EXPIRED_MESSAGE), { code: 'reauth-required' });
+  try {
+    return await user.getIdToken(true);
+  } catch (error) {
+    if (isExpiredSessionError(error)) throw Object.assign(new Error(SESSION_EXPIRED_MESSAGE), { code: 'reauth-required' });
+    throw error;
+  }
+};
 const accountRole = (value: unknown) => ['attendance_admin', 'attendance_only', 'attendance_manager'].includes(String(value || '').toLowerCase()) ? 'teacher' : String(value || 'student');
+const schoolCodeOf = (profile: any) => resolveAttendanceSchoolCode(
+  profile?.school_id || profile?.school_code || profile?.school_name || profile?.school || profile?.classroom
+);
+const schoolNameOf = (profile: any) => attendanceSchoolName(
+  profile?.school_id || profile?.school_code || profile?.school_name || profile?.school || profile?.classroom
+) || '校舎未設定';
+const schoolOptions = () => ATTENDANCE_SCHOOL_OPTION_GROUPS.map(group => (
+  <optgroup key={group.label} label={group.label}>
+    {group.schools.map(item => <option key={item.code} value={item.code}>{item.name}</option>)}
+  </optgroup>
+));
 
 export default function SsoAccountConsolePage() {
   const { profile } = useAuth();
@@ -90,21 +127,16 @@ export default function SsoAccountConsolePage() {
   const [updatingTeacherPrograms, setUpdatingTeacherPrograms] = useState(false);
   const [page, setPage] = useState(1);
   const [studentSearch, setStudentSearch] = useState('');
-
-  const schools = useMemo(() => {
-    const set = new Set<string>();
-    users.forEach(u => {
-      const value = u.school || u.school_id || u.classroom;
-      if (value) set.add(value);
-    });
-    return Array.from(set).sort();
-  }, [users]);
+  const [passwordTarget, setPasswordTarget] = useState<any | null>(null);
+  const [newPassword, setNewPassword] = useState('');
+  const [newPasswordConfirmation, setNewPasswordConfirmation] = useState('');
+  const [savingPassword, setSavingPassword] = useState(false);
 
   const students = useMemo(() => users.filter(u => u.role === 'student'), [users]);
 
   const filteredUsers = useMemo(() => {
     return users.filter(u => {
-      const schoolValue = u.school || u.school_id || u.classroom || '';
+      const schoolValue = schoolCodeOf(u);
       const statusValue = u.account_status || u.status || 'active';
       const name = `${u.student_name || ''} ${u.parent_name || ''} ${u.name || ''} ${u.email || ''} ${u.lifetime_id || ''}`;
       if (school !== 'all' && schoolValue !== school) return false;
@@ -183,20 +215,23 @@ export default function SsoAccountConsolePage() {
 
   const openEditModal = (target: any) => {
     setForm({
+      user_id: target.id,
       role: accountRole(target.role),
       display_name: target.student_name || target.parent_name || target.name || '',
       login_id: target.lifetime_id || target.initial_login_id || '',
-      password: target.initial_password || target.raw_password || '',
+      // 通常の情報更新で既存PWを再送しない。入力した場合だけPWを変更する。
+      password: '',
       email: target.email || '',
-      school_id: target.school_id || target.school || '',
-      school_ids: Array.isArray(target.school_ids) ? target.school_ids.join(',') : '',
+      school_id: schoolCodeOf(target),
+      school_ids: Array.isArray(target.school_ids) ? target.school_ids.map(resolveAttendanceSchoolCode).filter(Boolean).join(',') : '',
       account_status: target.account_status || target.status || 'active',
       employment_category: normalizeEmploymentCategory(target.employment_category || target.employment_type || target.worker_type, target.role) || 'semi_dedicated',
+      attendance_school_manager: target.attendance_school_manager === true,
       prescribed_work_start: target.prescribed_work_start || '09:00',
       prescribed_work_end: target.prescribed_work_end || '18:00',
       prescribed_break_minutes: Number(target.prescribed_break_minutes ?? 60),
       prescribed_work_days: Array.isArray(target.prescribed_work_days) ? target.prescribed_work_days.map(Number).filter((value: number) => value >= 0 && value <= 6) : [1, 2, 3, 4, 5],
-      enabled_programs: Array.isArray(target.enabled_programs) ? target.enabled_programs.filter((value: unknown) => value === 'science_social') : [],
+      enabled_programs: Array.isArray(target.enabled_programs) ? target.enabled_programs.filter((value: unknown) => ['science_social', 'online_school'].includes(String(value))) : [],
       grade: target.grade || '中1',
       classroom: target.classroom || '',
       day_of_week: target.day_of_week || '',
@@ -215,7 +250,7 @@ export default function SsoAccountConsolePage() {
     return students
       .filter(student => {
         if (!keyword) return selectedStudentIds.includes(student.id);
-        const haystack = `${student.student_name || student.name || ''} ${student.lifetime_id || student.initial_login_id || ''} ${student.school || student.school_id || student.classroom || ''}`.toLowerCase();
+        const haystack = `${student.student_name || student.name || ''} ${student.lifetime_id || student.initial_login_id || ''} ${schoolNameOf(student)}`.toLowerCase();
         return haystack.includes(keyword) || selectedStudentIds.includes(student.id);
       })
       .slice(0, 20);
@@ -228,11 +263,71 @@ export default function SsoAccountConsolePage() {
     setForm(prev => ({ ...prev, student_ids: next.join(',') }));
   };
 
+  const toggleManagedSchool = (schoolCode: string) => {
+    const selected = form.school_ids.split(',').map(value => value.trim()).filter(Boolean);
+    const next = selected.includes(schoolCode)
+      ? selected.filter(value => value !== schoolCode)
+      : [...selected, schoolCode];
+    setForm(prev => ({ ...prev, school_ids: next.join(',') }));
+  };
+
+  const openPasswordModal = (target: any) => {
+    setPasswordTarget(target);
+    setNewPassword('');
+    setNewPasswordConfirmation('');
+  };
+
+  const closePasswordModal = () => {
+    if (savingPassword) return;
+    setPasswordTarget(null);
+    setNewPassword('');
+    setNewPasswordConfirmation('');
+  };
+
+  const changePassword = async () => {
+    if (!passwordTarget) return;
+    if (newPassword.length < 6) return alert('新しいパスワードは6文字以上で入力してください。');
+    if (newPassword !== newPasswordConfirmation) return alert('確認用パスワードが一致しません。');
+    const targetName = passwordTarget.student_name || passwordTarget.parent_name || passwordTarget.name || passwordTarget.email || passwordTarget.id;
+    if (!confirm(`${targetName} のパスワードを変更しますか？\n変更後、対象者は新しいパスワードで再ログインが必要です。`)) return;
+    setSavingPassword(true);
+    try {
+      const token = await freshAdminToken();
+      const response = await fetch('/api/admin/accounts/password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ user_id: passwordTarget.id, password: newPassword }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || body.ok === false) throw Object.assign(new Error(body.error || 'パスワードを変更できませんでした。'), { code: body.code || '', status: response.status });
+      setPasswordTarget(null);
+      setNewPassword('');
+      setNewPasswordConfirmation('');
+      if (body.reauth_required) {
+        alert('パスワードを変更しました。新しいパスワードで再度ログインしてください。');
+        await firebaseSignOut(auth).catch(() => undefined);
+        window.location.replace('/admin/login?reason=credentials-changed');
+        return;
+      }
+      alert(`${targetName} のパスワードを変更しました。`);
+    } catch (error: any) {
+      if (isExpiredSessionError(error)) {
+        alert(SESSION_EXPIRED_MESSAGE);
+        await firebaseSignOut(auth).catch(() => undefined);
+        window.location.replace('/admin/login?reason=session-expired');
+        return;
+      }
+      alert(`パスワード変更に失敗しました: ${error.message || error}`);
+    } finally {
+      setSavingPassword(false);
+    }
+  };
+
   const updateStatus = async (target: any, nextStatus: string) => {
     if (!confirm(`${target.student_name || target.parent_name || target.name || target.email || target.id} を「${STATUSES.find(s => s.id === nextStatus)?.label}」に変更しますか？`)) return;
     setSavingId(target.id);
     try {
-      const token = await auth.currentUser?.getIdToken();
+      const token = await freshAdminToken();
       const res = await fetch('/api/admin/accounts/status', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -240,7 +335,13 @@ export default function SsoAccountConsolePage() {
       });
       if (!res.ok) throw new Error('failed');
       setUsers(prev => prev.map(u => u.id === target.id ? { ...u, account_status: nextStatus, status: nextStatus } : u));
-    } catch {
+    } catch (error) {
+      if (isExpiredSessionError(error)) {
+        alert(SESSION_EXPIRED_MESSAGE);
+        await firebaseSignOut(auth).catch(() => undefined);
+        window.location.replace('/admin/login?reason=session-expired');
+        return;
+      }
       alert('状態変更に失敗しました。権限または校舎設定を確認してください。');
     } finally {
       setSavingId('');
@@ -251,9 +352,13 @@ export default function SsoAccountConsolePage() {
     if (!form.display_name.trim()) return alert('氏名は必須です');
     if (!form.login_id.trim()) return alert('初期IDは必須です');
     if (form.password.trim() && form.password.length < 6) return alert('パスワードは6文字以上で入力してください');
-    if (form.role !== 'student' && !form.password.trim()) return alert('生徒以外はパスワードを入力してください');
+    if (!form.user_id && form.role !== 'student' && !form.password.trim()) return alert('生徒以外はパスワードを入力してください');
+    if (form.role !== 'master' && !resolveAttendanceSchoolCode(form.school_id)) return alert('所属校舎を選択してください');
     if ((form.role === 'admin' || form.role === 'master') && !form.school_ids.trim() && form.role === 'admin') {
       return alert('校舎管理者には管理できる校舎を入力してください');
+    }
+    if (form.role === 'teacher' && form.attendance_school_manager && !form.school_ids.trim()) {
+      return alert('勤怠承認者には承認できる校舎を選択してください');
     }
     if (form.role === 'parent' && !form.student_ids.trim()) {
       return alert('保護者には紐づく生徒IDを入力してください');
@@ -261,18 +366,30 @@ export default function SsoAccountConsolePage() {
 
     setSavingAccount(true);
     try {
-      const token = await auth.currentUser?.getIdToken();
+      const token = await freshAdminToken();
       const res = await fetch('/api/admin/accounts/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify(form),
       });
       const data = await res.json();
-      if (!res.ok || !data.ok) throw new Error(data.error || 'failed');
+      if (!res.ok || !data.ok) throw Object.assign(new Error(data.error || 'failed'), { code: data.code || '' });
       setModalOpen(false);
       await fetchUsers();
+      if (data.reauth_required) {
+        alert('アカウントを更新しました。認証情報を変更したため、再度ログインしてください。');
+        await firebaseSignOut(auth).catch(() => undefined);
+        window.location.replace('/admin/login?reason=credentials-changed');
+        return;
+      }
       alert(data.updated ? 'アカウントを更新しました' : 'アカウントを作成しました');
     } catch (error: any) {
+      if (isExpiredSessionError(error)) {
+        alert(SESSION_EXPIRED_MESSAGE);
+        await firebaseSignOut(auth).catch(() => undefined);
+        window.location.replace('/admin/login?reason=session-expired');
+        return;
+      }
       alert(`保存に失敗しました: ${error.message || error}`);
     } finally {
       setSavingAccount(false);
@@ -285,7 +402,7 @@ export default function SsoAccountConsolePage() {
     if (!confirm(`対象${targets}アカウントについて、旧勤怠管理者を講師へ統合し、区分未設定を「準専任」に設定しますか？`)) return;
     setInitializingCategories(true);
     try {
-      const token = await auth.currentUser?.getIdToken();
+      const token = await freshAdminToken();
       const response = await fetch('/api/admin/accounts/employment-category', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -317,7 +434,7 @@ export default function SsoAccountConsolePage() {
     if (!confirm(`選択した${userIds.length}名の理社講座を一括${actionLabel}にしますか？`)) return;
     setUpdatingTeacherPrograms(true);
     try {
-      const token = await auth.currentUser?.getIdToken();
+      const token = await freshAdminToken();
       const response = await fetch('/api/admin/accounts/programs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -410,7 +527,7 @@ export default function SsoAccountConsolePage() {
           </div>
           <select value={school} onChange={e => setSchool(e.target.value)} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-black outline-none">
             <option value="all">すべての校舎</option>
-            {schools.map(s => <option key={s} value={s}>{s}</option>)}
+            {schoolOptions()}
           </select>
           <select value={role} onChange={e => setRole(e.target.value)} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-black outline-none">
             <option value="all">すべての権限</option>
@@ -432,7 +549,7 @@ export default function SsoAccountConsolePage() {
           </select>
         </div>
         <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 px-4 py-3">
-          <p className="text-xs font-bold text-slate-500">旧勤怠管理者は講師へ統合します。理社講座を設定しない講師には勤怠だけが表示されます。</p>
+          <p className="text-xs font-bold text-slate-500">旧勤怠管理者は講師・職員アカウントへ統合します。理社講座を利用しない職員は、ログイン後に勤怠画面を直接開きます。</p>
           <button type="button" onClick={initializeEmploymentCategories} disabled={initializingCategories} className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2 text-xs font-black text-white disabled:opacity-50">{initializingCategories && <Loader2 size={14} className="animate-spin" />} 旧権限・未設定区分を一括移行</button>
         </div>
       </section>
@@ -491,12 +608,12 @@ export default function SsoAccountConsolePage() {
                       <td className="px-5 py-4">
                         {isAttendanceUserRole(u.role) ? (() => {
                           const category = normalizeEmploymentCategory(u.employment_category || u.employment_type || u.worker_type, u.role) || 'semi_dedicated';
-                          return <span className={`rounded-full px-3 py-1 text-xs font-black ${category === 'dedicated' ? 'bg-indigo-100 text-indigo-700' : 'bg-amber-100 text-amber-800'}`}>{EMPLOYMENT_CATEGORY_LABELS[category]}</span>;
+                          return <div className="flex flex-wrap gap-1"><span className={`rounded-full px-3 py-1 text-xs font-black ${category === 'dedicated' ? 'bg-indigo-100 text-indigo-700' : 'bg-amber-100 text-amber-800'}`}>{EMPLOYMENT_CATEGORY_LABELS[category]}</span>{u.attendance_school_manager === true && <span className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-black text-emerald-700">勤怠責任者</span>}</div>;
                         })() : <span className="text-slate-300">―</span>}
                       </td>
                       <td className="px-5 py-4">
                         <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-black text-slate-600">
-                          <Building2 size={12} /> {u.school || u.school_id || u.classroom || '未設定'}
+                          <Building2 size={12} /> {schoolNameOf(u)}
                         </span>
                       </td>
                       <td className="px-5 py-4 font-mono text-xs text-slate-500">{u.lifetime_id || u.initial_login_id || '-'}</td>
@@ -508,7 +625,9 @@ export default function SsoAccountConsolePage() {
                       </td>
                       <td className="px-5 py-4 text-xs font-bold text-slate-500">
                         {accountRole(u.role) === 'teacher'
-                          ? (Array.isArray(u.enabled_programs) && u.enabled_programs.includes('science_social') ? '理社講座＋勤怠' : '勤怠のみ')
+                          ? (Array.isArray(u.enabled_programs) && u.enabled_programs.includes('science_social') ? '理社講座あり' : '理社講座なし')
+                          : accountRole(u.role) === 'student'
+                            ? (Array.isArray(u.enabled_programs) && u.enabled_programs.includes('online_school') ? 'オンライン校 ON' : 'オンライン校 OFF')
                           : u.role === 'parent'
                             ? `${Array.isArray(u.student_ids) ? u.student_ids.length : 0}名の生徒`
                             : Array.isArray(u.school_ids) && u.school_ids.length ? `${u.school_ids.length}校舎` : '-'}
@@ -521,6 +640,7 @@ export default function SsoAccountConsolePage() {
                       <td className="px-5 py-4">
                         <div className="flex items-center gap-2">
                           <button onClick={() => openEditModal(u)} className="shrink-0 rounded-lg border border-indigo-200 px-3 py-2 text-xs font-black text-indigo-600 hover:bg-indigo-50">編集</button>
+                          {profile?.role === 'master' && <button onClick={() => openPasswordModal(u)} className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-black text-amber-700 hover:bg-amber-100"><KeyRound size={13} /> PW変更</button>}
                           <select
                             aria-label={`${displayName}のアカウント状態`}
                             value={currentStatus}
@@ -610,12 +730,22 @@ export default function SsoAccountConsolePage() {
                     <p className="mt-2 text-[11px] font-bold text-indigo-600">この時間より前・後の打刻実績を時間外候補として自動抽出します。</p>
                   </fieldset>
                 )}
+                {form.role === 'teacher' && form.employment_category === 'dedicated' && (
+                  <label className="sm:col-span-2 flex cursor-pointer items-start gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                    <input type="checkbox" checked={form.attendance_school_manager} onChange={event => setForm(prev => ({
+                      ...prev,
+                      attendance_school_manager: event.target.checked,
+                      school_ids: event.target.checked && !prev.school_ids && prev.school_id ? prev.school_id : prev.school_ids,
+                    }))} className="mt-0.5 h-5 w-5 accent-emerald-600" />
+                    <span><span className="block text-sm font-black text-emerald-950">勤怠承認者</span><span className="mt-1 block text-[11px] font-bold leading-relaxed text-emerald-700">下で登録した校舎の打刻修正依頼と勤務詳細を確認・承認できます。他校舎や給与設定は表示されません。</span></span>
+                  </label>
+                )}
                 {form.role === 'teacher' && (
                   <label className="space-y-1 sm:col-span-2">
                     <span className="text-xs font-black text-slate-500">利用する講座</span>
                     <span className="flex min-h-14 cursor-pointer items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4">
                       <input type="checkbox" checked={form.enabled_programs.includes('science_social')} onChange={event => setForm(prev => ({ ...prev, enabled_programs: event.target.checked ? ['science_social'] : [] }))} className="h-5 w-5 accent-indigo-600" />
-                      <span><span className="block text-sm font-black text-slate-800">理社講座</span><span className="block text-[11px] font-bold text-slate-400">ONなら理社講座と勤怠、OFFなら勤怠だけを表示</span></span>
+                      <span><span className="block text-sm font-black text-slate-800">理社講座</span><span className="block text-[11px] font-bold text-slate-400">ONの場合は理社講座画面内から勤怠も利用できます。OFFの場合はログイン後に勤怠画面を直接開きます。</span></span>
                     </span>
                   </label>
                 )}
@@ -627,22 +757,27 @@ export default function SsoAccountConsolePage() {
                   <span className="text-xs font-black text-slate-500">初期ID</span>
                   <input value={form.login_id} onChange={e => setForm(prev => ({ ...prev, login_id: e.target.value }))} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 font-mono text-sm font-bold outline-none" />
                 </label>
-                <label className="space-y-1">
+                {!form.user_id ? <label className="space-y-1">
                   <span className="text-xs font-black text-slate-500">初期パスワード</span>
                   <input
+                    type="password"
+                    autoComplete="new-password"
                     value={form.password}
                     onChange={e => setForm(prev => ({ ...prev, password: e.target.value }))}
                     placeholder={form.role === 'student' ? '空欄なら自動発行' : '6文字以上で入力'}
                     className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 font-mono text-sm font-bold outline-none"
                   />
-                </label>
+                </label> : <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-bold leading-5 text-amber-800">パスワードは一覧の「PW変更」から個別に変更できます。</div>}
                 <label className="space-y-1">
                   <span className="text-xs font-black text-slate-500">メール</span>
                   <input value={form.email} onChange={e => setForm(prev => ({ ...prev, email: e.target.value }))} placeholder="空欄なら 初期ID@classbase.local" className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none" />
                 </label>
                 <label className="space-y-1">
                   <span className="text-xs font-black text-slate-500">所属校舎</span>
-                  <input value={form.school_id} onChange={e => setForm(prev => ({ ...prev, school_id: e.target.value }))} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none" />
+                  <select required={form.role !== 'master'} value={form.school_id} onChange={e => setForm(prev => ({ ...prev, school_id: e.target.value }))} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none">
+                    <option value="">校舎を選択</option>
+                    {schoolOptions()}
+                  </select>
                 </label>
 
                 {form.role === 'student' && (
@@ -665,6 +800,10 @@ export default function SsoAccountConsolePage() {
                       <span className="text-xs font-black text-slate-500">社会科目</span>
                       <input value={form.subject_social} onChange={e => setForm(prev => ({ ...prev, subject_social: e.target.value }))} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none" />
                     </label>
+                    <label className="flex cursor-pointer items-center gap-3 rounded-2xl border border-violet-200 bg-violet-50 p-4 sm:col-span-2">
+                      <input type="checkbox" checked={form.enabled_programs.includes('online_school')} onChange={event => setForm(prev => ({ ...prev, enabled_programs: event.target.checked ? ['online_school'] : [] }))} className="h-5 w-5 accent-violet-600" />
+                      <span><span className="block text-sm font-black text-violet-950">オンライン校を利用する</span><span className="block text-[11px] font-bold text-violet-600">ONにすると、生徒のアプリ選択画面に10分学習が表示されます。</span></span>
+                    </label>
                   </>
                 )}
 
@@ -685,7 +824,7 @@ export default function SsoAccountConsolePage() {
                             <input type="checkbox" checked={checked} onChange={() => toggleParentStudent(student.id)} className="h-5 w-5 accent-indigo-600" />
                             <span className="min-w-0 flex-1">
                               <span className="block truncate text-sm font-black text-slate-800">{student.student_name || student.name || '氏名未設定'}</span>
-                              <span className="block truncate text-[11px] font-bold text-slate-400">{student.lifetime_id || student.initial_login_id || 'ID未設定'} / {student.school || student.school_id || student.classroom || '校舎未設定'}</span>
+                              <span className="block truncate text-[11px] font-bold text-slate-400">{student.lifetime_id || student.initial_login_id || 'ID未設定'} / {schoolNameOf(student)}</span>
                             </span>
                           </label>
                         );
@@ -696,12 +835,17 @@ export default function SsoAccountConsolePage() {
                   </div>
                 )}
 
-                {(form.role === 'admin' || form.role === 'master') && (
+                {(form.role === 'admin' || (form.role === 'teacher' && form.attendance_school_manager)) && (
                   <>
-                    <label className="space-y-1 sm:col-span-2">
-                      <span className="text-xs font-black text-slate-500">管理できる校舎</span>
-                      <input value={form.school_ids} onChange={e => setForm(prev => ({ ...prev, school_ids: e.target.value }))} placeholder="校舎IDをカンマ区切りで入力" className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none" />
-                    </label>
+                    <fieldset className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:col-span-2">
+                      <legend className="px-2 text-xs font-black text-slate-600">{form.role === 'admin' ? '管理できる校舎' : '勤怠を承認できる校舎'}</legend>
+                      <div className="max-h-64 space-y-4 overflow-y-auto pr-1">
+                        {ATTENDANCE_SCHOOL_OPTION_GROUPS.map(group => <div key={group.label}><p className="mb-2 text-[11px] font-black text-slate-400">{group.label}</p><div className="grid gap-2 sm:grid-cols-2">{group.schools.map(item => {
+                          const checked = form.school_ids.split(',').includes(item.code);
+                          return <label key={item.code} className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-xs font-bold ${checked ? 'border-indigo-300 bg-indigo-50 text-indigo-800' : 'border-slate-200 bg-white text-slate-600'}`}><input type="checkbox" checked={checked} onChange={() => toggleManagedSchool(item.code)} className="h-4 w-4 accent-indigo-600" /><span>{item.name}</span></label>;
+                        })}</div></div>)}
+                      </div>
+                    </fieldset>
                     {profile?.role === 'master' && form.role === 'admin' && (
                       <fieldset className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:col-span-2">
                         <legend className="px-2 text-xs font-black text-slate-600">利用できる管理画面</legend>
@@ -741,6 +885,29 @@ export default function SsoAccountConsolePage() {
                 アカウントを保存
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {passwordTarget && (
+        <div className="fixed inset-0 z-[1100] flex items-end justify-center bg-slate-950/55 p-0 backdrop-blur-sm sm:items-center sm:p-6">
+          <div className="w-full max-w-lg rounded-t-[28px] bg-white shadow-2xl sm:rounded-[28px]">
+            <div className="flex items-center justify-between border-b border-slate-100 px-6 py-4">
+              <div>
+                <p className="text-xs font-black uppercase tracking-wider text-amber-500">Master Password Change</p>
+                <h3 className="mt-1 text-xl font-black text-slate-900">パスワード変更</h3>
+                <p className="mt-1 text-xs font-bold text-slate-500">{passwordTarget.student_name || passwordTarget.parent_name || passwordTarget.name || passwordTarget.email || passwordTarget.id}</p>
+              </div>
+              <button onClick={closePasswordModal} disabled={savingPassword} className="rounded-full bg-slate-100 p-2 text-slate-500 disabled:opacity-50"><X size={18} /></button>
+            </div>
+            <div className="space-y-4 p-6">
+              <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-xs font-bold leading-6 text-amber-800">
+                初回ログイン済みのアカウントも変更できます。変更後は現在のログイン状態が失効し、新しいパスワードでの再ログインが必要です。
+              </div>
+              <label className="block space-y-1"><span className="text-xs font-black text-slate-600">新しいパスワード</span><input type="password" autoComplete="new-password" minLength={6} maxLength={128} value={newPassword} onChange={event => setNewPassword(event.target.value)} placeholder="6文字以上" className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 font-mono outline-none focus:border-amber-300" /></label>
+              <label className="block space-y-1"><span className="text-xs font-black text-slate-600">新しいパスワード（確認）</span><input type="password" autoComplete="new-password" minLength={6} maxLength={128} value={newPasswordConfirmation} onChange={event => setNewPasswordConfirmation(event.target.value)} placeholder="同じパスワードを再入力" className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 font-mono outline-none focus:border-amber-300" /></label>
+            </div>
+            <div className="border-t border-slate-100 bg-slate-50 px-6 py-4"><button onClick={changePassword} disabled={savingPassword || newPassword.length < 6 || newPassword !== newPasswordConfirmation} className="flex w-full items-center justify-center gap-2 rounded-2xl bg-amber-600 py-4 text-sm font-black text-white hover:bg-amber-700 disabled:opacity-40">{savingPassword ? <Loader2 className="animate-spin" size={18} /> : <KeyRound size={18} />}パスワードを変更</button></div>
           </div>
         </div>
       )}

@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
-import { getServerUser, isAdminLike, jsonError } from '@/lib/server-auth';
+import { getServerUser, jsonError, requireMaster } from '@/lib/server-auth';
 import { writeLearningEvent } from '@/lib/events';
 
 export const runtime = 'nodejs';
@@ -9,7 +9,7 @@ export const runtime = 'nodejs';
 export async function POST(request: NextRequest) {
   try {
     const user = await getServerUser(request);
-    if (!isAdminLike(user)) throw new Error('forbidden');
+    requireMaster(user);
 
     const body = await request.json();
     const action = String(body.action || 'create');

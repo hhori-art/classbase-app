@@ -10,7 +10,7 @@ export async function POST(request: NextRequest) {
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
     if (!token) return Response.json({ ok: false, error: 'missing-token' }, { status: 401 });
 
-    const decoded = await adminAuth().verifyIdToken(token);
+    const decoded = await adminAuth().verifyIdToken(token, true);
     const result = await repairUserProfileForAuth(decoded.uid, decoded.email || null);
     if (!result.ok) return Response.json(result, { status: 404 });
     return Response.json(result);

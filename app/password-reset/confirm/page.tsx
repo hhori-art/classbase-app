@@ -20,7 +20,7 @@ export default function PasswordResetConfirmPage() {
     event.preventDefault();
     setError('');
     if (password !== confirmPassword) return setError('確認用パスワードが一致しません。');
-    if (password.length < 10) return setError('パスワードは10文字以上で入力してください。');
+    if (password.length < 6) return setError('パスワードは6文字以上で入力してください。');
     setSaving(true);
     try {
       const response = await fetch('/api/auth/password-reset', {
@@ -58,7 +58,7 @@ export default function PasswordResetConfirmPage() {
               <div className="rounded-xl bg-indigo-100 p-3 text-indigo-600"><KeyRound size={24} /></div>
               <div>
                 <h1 className="text-xl font-black text-slate-900">新しいパスワード</h1>
-                <p className="mt-1 text-xs font-bold text-slate-500">10文字以上で設定してください</p>
+                <p className="mt-1 text-xs font-bold text-slate-500">6文字以上で設定してください</p>
               </div>
             </div>
             <form onSubmit={submit} className="mt-7 space-y-4">
@@ -75,4 +75,3 @@ export default function PasswordResetConfirmPage() {
     </main>
   );
 }
-

@@ -1,9 +1,9 @@
 'use client';
 // ... import は既存のまま ...
 import { useEffect, useState } from 'react';
-import { db } from '@/lib/firebase';
-import { doc, getDoc } from 'firebase/firestore';
-import { ArrowLeft, Calendar, Loader2, Tag, Clock, AlertTriangle, PartyPopper, Info } from 'lucide-react';
+import { loadAnnouncement } from '@/lib/client-announcements';
+import { auth } from '@/lib/firebase';
+import { ArrowLeft, Calendar, Loader2, Tag, Clock, AlertTriangle, PartyPopper, Info, Paperclip } from 'lucide-react';
 import Link from 'next/link';
 
 type Props = { id: string; backLink: string; };
@@ -12,15 +12,27 @@ export default function SharedNewsDetail({ id, backLink }: Props) {
   // ... fetchロジック ...
   const [news, setNews] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+
+  const downloadAttachment = async (file: any) => {
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) throw new Error('認証情報を取得できません');
+      const response = await fetch(`/api/announcements/${encodeURIComponent(id)}/attachments/${encodeURIComponent(file.id)}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!response.ok) throw new Error('ダウンロードに失敗しました');
+      const url = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement('a');
+      anchor.href = url; anchor.download = file.name || 'attachment'; anchor.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error: any) { alert(error.message || 'ダウンロードに失敗しました'); }
+  };
   
   // (省略: useEffectでのデータ取得ロジックは既存のまま)
   useEffect(() => {
     if (!id) return;
     const fetchNewsDetail = async () => {
       try {
-        const docRef = doc(db, 'announcements', id);
-        const docSnap = await getDoc(docRef);
-        if (docSnap.exists()) { setNews({ id: docSnap.id, ...docSnap.data() }); } else { setNews(null); }
+        const item = await loadAnnouncement(id);
+        setNews(item);
       } catch (e) { console.error(e); } finally { setLoading(false); }
     };
     fetchNewsDetail();
@@ -77,11 +89,11 @@ export default function SharedNewsDetail({ id, backLink }: Props) {
           
           <div className="flex flex-wrap gap-2 items-center mb-6 border-b border-gray-50 pb-6">
             <span className="flex items-center gap-1.5 text-xs font-bold text-gray-500 bg-gray-100 px-3 py-1.5 rounded-full">
-              <Calendar size={12} /> {news.created_at ? new Date(news.created_at).toLocaleDateString('ja-JP') : '-'}
+              <Calendar size={12} /> {news.publish_at || news.created_at ? new Date(news.publish_at || news.created_at).toLocaleDateString('ja-JP') : '-'}
             </span>
-            {news.created_at && (
+            {(news.publish_at || news.created_at) && (
               <span className="flex items-center gap-1.5 text-xs font-bold text-gray-400 bg-gray-50 px-3 py-1.5 rounded-full">
-                <Clock size={12} /> {new Date(news.created_at).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}
+                <Clock size={12} /> {new Date(news.publish_at || news.created_at).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}
               </span>
             )}
             {/* 詳細画面側でもすべてのバッジが出るように確認してください（getLabelBadge内のdefaultを設定） */}
@@ -96,6 +108,18 @@ export default function SharedNewsDetail({ id, backLink }: Props) {
             {/* ▼▼▼ 本文表示部分を関数呼び出しに変更 ▼▼▼ */}
             {formatContent(news.content)}
           </div>
+          {Array.isArray(news.attachments) && news.attachments.length > 0 && (
+            <div className="mt-8 border-t border-gray-100 pt-6">
+              <p className="mb-3 flex items-center gap-2 text-sm font-bold text-gray-600"><Paperclip size={16} /> 添付ファイル</p>
+              <div className="space-y-2">
+                {news.attachments.map((file: any) => (
+                  <button key={file.id} onClick={() => downloadAttachment(file)} className="flex w-full items-center justify-between rounded-xl bg-blue-50 px-4 py-3 text-left text-sm font-bold text-blue-700 hover:bg-blue-100">
+                    <span className="truncate">{file.name}</span><span className="ml-3 text-[10px]">{Math.ceil(Number(file.size || 0) / 1024)} KB</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

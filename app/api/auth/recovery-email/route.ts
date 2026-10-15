@@ -11,6 +11,7 @@ import {
   newSecretToken,
   normalizeEmail,
   queueRecoveryEmail,
+  releaseRateLimit,
   requestFingerprint,
 } from '@/lib/server/password-recovery';
 
@@ -25,8 +26,9 @@ export async function POST(request: NextRequest) {
       return Response.json({ ok: false, error: 'invalid-email' }, { status: 400 });
     }
 
+    const rateLimitKey = requestFingerprint(['verify-email', user.uid]);
     const allowed = await consumeRateLimit(
-      requestFingerprint(['verify-email', user.uid]),
+      rateLimitKey,
       3,
       60 * 60 * 1000
     );
@@ -34,7 +36,7 @@ export async function POST(request: NextRequest) {
 
     const token = newSecretToken();
     const expiresAt = new Date(Date.now() + EMAIL_VERIFICATION_TTL_MS);
-    await adminDb().collection('email_verification_tokens').add({
+    const tokenRef = await adminDb().collection('email_verification_tokens').add({
       user_id: user.uid,
       email,
       token_hash: hashSecret(token),
@@ -44,17 +46,27 @@ export async function POST(request: NextRequest) {
     });
 
     const actionUrl = `${getPublicBaseUrl(request)}/verify-email?token=${encodeURIComponent(token)}`;
-    await queueRecoveryEmail({
-      to: email,
-      subject: '【創造学園アプリ】連絡先メールの確認',
-      heading: '連絡先メールを確認してください',
-      body: 'このメールアドレスを、パスワードを忘れたときの本人確認先として登録します。',
-      actionLabel: 'メールアドレスを確認する',
-      actionUrl,
-      expiresIn: '30分',
-      kind: 'recovery_email_verification',
-      userId: user.uid,
-    });
+    try {
+      await queueRecoveryEmail({
+        to: email,
+        subject: '【創造学園アプリ】連絡先メールの確認',
+        heading: '連絡先メールを確認してください',
+        body: 'このメールアドレスを、パスワードを忘れたときの本人確認先として登録します。',
+        actionLabel: 'メールアドレスを確認する',
+        actionUrl,
+        expiresIn: '30分',
+        kind: 'recovery_email_verification',
+        userId: user.uid,
+      });
+    } catch (deliveryError) {
+      await Promise.allSettled([
+        tokenRef.delete(),
+        releaseRateLimit(rateLimitKey),
+      ]).then(results => results.forEach(result => {
+        if (result.status === 'rejected') console.error('Email verification failure cleanup failed:', result.reason);
+      }));
+      throw deliveryError;
+    }
 
     await adminDb().collection('users').doc(user.uid).set({
       pending_recovery_email: email,
@@ -64,6 +76,17 @@ export async function POST(request: NextRequest) {
 
     return Response.json({ ok: true });
   } catch (error) {
+    const message = error instanceof Error ? error.message : '';
+    console.error('[recovery-email] verification request failed', {
+      code: error && typeof error === 'object' && 'code' in error ? String(error.code) : '',
+      message,
+    });
+    if (message === 'email-sender-not-verified') {
+      return Response.json({ ok: false, error: 'email-sender-not-verified' }, { status: 503 });
+    }
+    if (message === 'email-service-not-configured' || message === 'email-delivery-failed') {
+      return Response.json({ ok: false, error: 'email-delivery-failed' }, { status: 503 });
+    }
     return jsonError(error);
   }
 }
@@ -106,4 +129,3 @@ export async function PATCH(request: NextRequest) {
     return jsonError(error);
   }
 }
-

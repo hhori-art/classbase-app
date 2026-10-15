@@ -177,7 +177,7 @@ flowchart TD
     end
 
     subgraph AttendanceAdmin["勤怠 管理権限"]
-      Attendance --> Corrections["打刻修正承認<br/>/master/attendance-corrections"]
+      Attendance --> Corrections["勤怠承認・打刻修正承認<br/>/master/attendance-approvals"]
       Attendance --> Diagnostics["勤怠ミス候補<br/>/master/attendance/diagnostics"]
       Diagnostics --> Attendance
     end

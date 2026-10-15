@@ -3,8 +3,9 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { useSettings } from '@/app/context/SettingsContext';
-import { db } from '@/lib/firebase';
+import { auth, db } from '@/lib/firebase';
 import { doc, updateDoc } from 'firebase/firestore';
+import { signInWithEmailAndPassword } from 'firebase/auth';
 import { 
   ArrowLeft, User, Lock, LogOut, ChevronRight, 
   Save, Loader2, Shield, Target, Type, 
@@ -212,17 +213,17 @@ export default function StudentSettingsPage() {
         '自分の登録授業がない時間は参加ボタンではなく、振替参加の案内が表示されます。',
       ],
       trouble: [
-        'ボタンが出ない場合は、受講講座・曜日時間の変更で登録内容が正しいか確認してください。',
+        'ボタンが出ない場合は、受講講座の登録・変更で登録内容が正しいか確認してください。',
         '登録内容が正しいのに出ない場合は、授業開始前後の表示時間外、または当日の授業予定がまだ反映されていない可能性があります。',
         '別の授業ボタンが出る場合は、学年・曜日・時限・講座の登録がずれている可能性があります。',
       ],
     },
-    visibility.changeRequest !== false && {
-      title: '受講講座・曜日時間を変更したいとき',
-      summary: '保存するとすぐに反映されます。科目を選んでから曜日・時間を選びます。',
+    {
+      title: '受講講座を登録・変更したいとき',
+      summary: '生徒本人が講座を選び、すぐに登録できます。現在期と受付中の次期が対象です。',
       steps: [
-        'ホーム画面または設定から「受講講座・曜日時間の変更」を開きます。',
-        '現在実施中の期だけが表示されます。過去や先の期は選べません。',
+        'ホーム画面または設定から「受講講座を登録・変更」を開きます。',
+        '現在実施中の期と、受付期間中の次期講座が表示されます。',
         'Step 1で受講したい科目を選びます。',
         'Step 2でその科目の開講曜日・時間を選びます。同じ曜日・同じ時限に複数講座は選べません。',
         '右側の「保存される講座」を確認し、「すぐに変更する」を押します。',
@@ -338,18 +339,18 @@ export default function StudentSettingsPage() {
         '案内書面に記載されたログインURLを開きます。',
         'IDとパスワードを半角で入力します。前後に空白が入っていないか確認します。',
         'ログイン後にパスワード変更が必要な場合は、設定画面の「セキュリティ」から変更します。',
-        '新しいパスワードは10文字以上で、確認欄にも同じものを入力します。',
+        '新しいパスワードは6文字以上で、確認欄にも同じものを入力します。',
       ],
       trouble: [
         '何度試しても入れない場合は、ID書面の再発行またはパスワード初期化が必要です。',
-        '自分で解決できない場合は、理社講座サポートセンター（078-321-4123）へ連絡してください。',
+        '自分で解決できない場合は、創造学園アプリ サポート窓口（078-321-4123）へ連絡してください。',
       ],
     },
   ].filter(Boolean) as ManualItem[];
 
   const handleChangePassword = async () => {
     if (!newPassword || newPassword !== confirmPassword) return showMessage('error', 'パスワード不一致');
-    if (newPassword.length < 10) return showMessage('error', 'パスワードは10文字以上で入力してください');
+    if (newPassword.length < 6) return showMessage('error', 'パスワードは6文字以上で入力してください');
     if (!user) return showMessage('error', 'ログイン情報を確認できません');
     setLoading(true);
     try {
@@ -361,7 +362,11 @@ export default function StudentSettingsPage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || 'password-change-failed');
-      showMessage('success', 'パスワードを変更しました');
+      if (!user.email) throw new Error('missing-auth-email');
+      sessionStorage.removeItem(`classbase_profile_cache:${user.uid}`);
+      const refreshedCredential = await signInWithEmailAndPassword(auth, user.email, newPassword);
+      await refreshedCredential.user.getIdToken(true);
+      showMessage('success', 'パスワードを変更し、ログイン状態を更新しました');
       setNewPassword(''); setConfirmPassword(''); setIsPasswordExpanded(false);
     } catch(e) { showMessage('error', 'パスワード変更に失敗しました'); }
     finally { setLoading(false); }
@@ -388,6 +393,12 @@ export default function StudentSettingsPage() {
         {message && (
           <div className={`p-4 rounded-2xl font-bold flex items-center gap-3 shadow-sm ${message.type === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
             <Shield size={20}/> {message.text}
+          </div>
+        )}
+
+        {profile?.isFirstLogin === true && (
+          <div className="rounded-2xl border-2 border-amber-300 bg-amber-50 p-4 text-sm font-black leading-relaxed text-amber-900">
+            初回ログインのため、下の「セキュリティ」から新しいパスワードを設定してください。
           </div>
         )}
 
@@ -684,6 +695,7 @@ export default function StudentSettingsPage() {
           <p className="mb-4 rounded-2xl bg-sky-50 px-4 py-3 text-xs font-bold leading-relaxed text-sky-700">
             困った時は、問い合わせ前に該当する項目を開いて確認してください。今表示されている機能に関係する手順だけを表示しています。
           </p>
+          <Link href="/manual" className="mb-4 flex min-h-12 items-center justify-between rounded-2xl bg-indigo-600 px-5 py-3 text-sm font-black text-white">生徒向け操作マニュアル <ChevronRight size={19} /></Link>
           <div className="space-y-3">
             {manualItems.map(item => (
               <details key={item.title} className="rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3">

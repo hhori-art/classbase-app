@@ -213,8 +213,11 @@ export async function POST(request: NextRequest) {
       const role = ['attendance_admin', 'attendance_only', 'attendance_manager'].includes(requestedRole)
         ? 'teacher'
         : requestedRole;
-      const enabledPrograms = role === 'teacher' && Array.isArray(user.enabled_programs)
-        ? user.enabled_programs.map(String).filter((value: string) => value === 'science_social')
+      const enabledPrograms = Array.isArray(user.enabled_programs)
+        ? user.enabled_programs.map(String).filter((value: string) => (
+            (role === 'teacher' && value === 'science_social') ||
+            (role === 'student' && value === 'online_school')
+          ))
         : [];
       const employmentCategory = role === 'teacher' ? normalizeEmploymentCategory(user.employment_category, role) : null;
       const prescribedWorkStart = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(user.prescribed_work_start || '')) ? String(user.prescribed_work_start) : '09:00';
@@ -256,6 +259,7 @@ export async function POST(request: NextRequest) {
 
       const matchingProfiles = await findAccountProfileDocs(strId, user.email || email);
       const authUser = await syncAuthAccountCredentials({
+          actor,
         loginId: strId,
         email: user.email || email,
         password,
@@ -291,7 +295,7 @@ export async function POST(request: NextRequest) {
           employment_category: role === 'teacher'
             ? employmentCategory
             : null,
-          enabled_programs: role === 'teacher' ? enabledPrograms : [],
+          enabled_programs: role === 'teacher' || role === 'student' ? enabledPrograms : [],
           prescribed_work_start: employmentCategory === 'dedicated' ? prescribedWorkStart : null,
           prescribed_work_end: employmentCategory === 'dedicated' ? prescribedWorkEnd : null,
           prescribed_break_minutes: employmentCategory === 'dedicated' ? prescribedBreakMinutes : null,

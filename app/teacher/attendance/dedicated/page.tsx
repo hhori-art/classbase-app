@@ -1,8 +1,10 @@
 'use client';
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
-import { BookOpen, CheckCircle2, Loader2, Play, RefreshCw, Send, Square, TimerReset, Train } from 'lucide-react';
+import { BookOpen, CalendarDays, CheckCircle2, ClipboardCheck, Loader2, Play, RefreshCw, Send, Square, TimerReset, Train } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
+import Link from 'next/link';
+import { SHIFT_CATEGORY_LABELS, type AttendanceShiftPlan } from '@/lib/attendance-shift-plan';
 
 type Interval = { kind: 'before' | 'after' | 'day_off'; start: string; end: string; minutes: number };
 type Claim = { id: string; decision: 'apply' | 'decline'; status: string; reason?: string; details?: string; review_note?: string };
@@ -23,10 +25,12 @@ const intervalKindLabel = (kind: Interval['kind']) => kind === 'before' ? '始�
 
 export default function DedicatedAttendancePage() {
   const { user, profile } = useAuth();
+  const canApproveAttendance = profile?.attendance_school_manager === true;
   const [month, setMonth] = useState(jstToday().slice(0, 7));
   const [records, setRecords] = useState<WorkRecord[]>([]);
   const [lessons, setLessons] = useState<LessonClaim[]>([]);
   const [transport, setTransport] = useState<TransportClaim[]>([]);
+  const [todayShiftPlans, setTodayShiftPlans] = useState<AttendanceShiftPlan[]>([]);
   const [schedule, setSchedule] = useState<Schedule>({ start_time: '09:00', end_time: '18:00', break_minutes: 60, work_days: [1, 2, 3, 4, 5] });
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
@@ -42,12 +46,20 @@ export default function DedicatedAttendancePage() {
     setLoading(true); setError('');
     try {
       const token = await user.getIdToken();
-      const response = await fetch(`/api/dedicated-attendance?month=${month}`, { cache: 'no-store', headers: { Authorization: `Bearer ${token}` } });
+      const today = jstToday();
+      const [response, shiftResponse] = await Promise.all([
+        fetch(`/api/dedicated-attendance?month=${month}`, { cache: 'no-store', headers: { Authorization: `Bearer ${token}` } }),
+        fetch(`/api/attendance-shifts?start=${today}&end=${today}&scope=mine`, { cache: 'no-store', headers: { Authorization: `Bearer ${token}` } }),
+      ]);
       const body = await response.json().catch(() => ({}));
       if (!response.ok || body.ok === false) throw new Error(body.error || '専任勤怠を取得できませんでした。');
+      const shiftBody = await shiftResponse.json().catch(() => ({}));
       setRecords(Array.isArray(body.records) ? body.records : []);
       setLessons(Array.isArray(body.lessons) ? body.lessons : []);
       setTransport(Array.isArray(body.transport) ? body.transport : []);
+      setTodayShiftPlans(shiftResponse.ok && shiftBody.ok
+        ? (shiftBody.shifts || []).filter((item: AttendanceShiftPlan) => item.reflect_to_attendance !== false)
+        : []);
       if (body.schedule) setSchedule(body.schedule);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : '専任勤怠を取得できませんでした。');
@@ -135,9 +147,11 @@ export default function DedicatedAttendancePage() {
   return (
     <main className="min-h-screen bg-slate-50 px-4 py-6 text-slate-900 sm:px-6">
       <div className="mx-auto max-w-5xl space-y-5">
-        <header className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-xs font-black tracking-widest text-indigo-500">DEDICATED EMPLOYEE</p><h1 className="text-2xl font-black">専任勤怠</h1><p className="mt-1 text-sm font-bold text-slate-500">{profile?.name || profile?.teacher_name || '専任'} / 規定 {schedule.start_time}〜{schedule.end_time}（休憩{schedule.break_minutes}分）</p></div><div className="flex items-center gap-2"><input type="month" value={month} onChange={event => setMonth(event.target.value)} className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-black" /><button onClick={load} className="grid h-10 w-10 place-items-center rounded-xl bg-slate-900 text-white"><RefreshCw size={17} className={loading ? 'animate-spin' : ''} /></button></div></header>
+        <header className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-xs font-black tracking-widest text-indigo-500">DEDICATED EMPLOYEE</p><h1 className="text-2xl font-black">専任勤怠</h1><p className="mt-1 text-sm font-bold text-slate-500">{profile?.name || profile?.teacher_name || '専任'} / 規定 {schedule.start_time}〜{schedule.end_time}（休憩{schedule.break_minutes}分）</p></div><div className="flex flex-wrap items-center justify-end gap-2">{canApproveAttendance && <Link href="/teacher/attendance-approvals" className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-black text-white shadow-sm hover:bg-emerald-700"><ClipboardCheck size={17} />自校舎の勤怠承認</Link>}<input type="month" value={month} onChange={event => setMonth(event.target.value)} className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-black" /><button onClick={load} className="grid h-10 w-10 place-items-center rounded-xl bg-slate-900 text-white"><RefreshCw size={17} className={loading ? 'animate-spin' : ''} /></button></div></header>
         {error && <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm font-bold text-rose-700">{error}</div>}
         {message && <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-bold text-emerald-700">{message}</div>}
+
+        {todayShiftPlans.length > 0 && <section className="rounded-2xl border border-indigo-100 bg-indigo-50 p-4 shadow-sm"><div className="flex items-center justify-between gap-3"><div><h2 className="flex items-center gap-2 font-black text-indigo-950"><CalendarDays size={18} />今日の勤務予定</h2><p className="mt-1 text-xs font-bold text-indigo-700">承認者が登録したシフトです。</p></div><span className="rounded-full bg-white px-3 py-1 text-xs font-black text-indigo-700 ring-1 ring-indigo-200">{todayShiftPlans.length}件</span></div><div className="mt-3 grid gap-2 sm:grid-cols-2">{todayShiftPlans.map(plan => <article key={plan.id} className="rounded-xl bg-white p-3 shadow-sm ring-1 ring-indigo-100"><div className="flex items-center gap-2"><span className="font-mono text-sm font-black">{plan.start}–{plan.end}</span><span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-black text-indigo-700">{SHIFT_CATEGORY_LABELS[plan.category]}</span></div><p className="mt-1 truncate text-xs font-bold text-slate-500">{[plan.title, plan.subject, plan.room].filter(Boolean).join(' ／ ') || '勤務予定'}</p></article>)}</div></section>}
 
         <section className="rounded-3xl bg-slate-950 p-5 text-white shadow-xl"><div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-xs font-black text-slate-400">本日の勤務</p><p className="mt-2 text-xl font-black">{activeRecord ? `${time(activeRecord.start_time)} 出勤中` : todayRecord?.end_time ? `${time(todayRecord.start_time)}〜${time(todayRecord.end_time)} 退勤済み` : '未打刻'}</p></div>{activeRecord ? <button disabled={working} onClick={() => clock('clock_out')} className="inline-flex min-h-14 items-center justify-center gap-2 rounded-2xl bg-rose-500 px-8 font-black disabled:opacity-50"><Square size={20} />退勤打刻</button> : <button disabled={working || Boolean(todayRecord)} onClick={() => clock('clock_in')} className="inline-flex min-h-14 items-center justify-center gap-2 rounded-2xl bg-indigo-500 px-8 font-black disabled:opacity-40"><Play size={20} />出勤打刻</button>}</div></section>
 

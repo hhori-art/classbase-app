@@ -1,10 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { db } from '@/lib/firebase';
-import { 
-  collection, query, getDocs, doc, getDoc, writeBatch, orderBy, updateDoc, increment, serverTimestamp 
-} from 'firebase/firestore';
+import { auth } from '@/lib/firebase';
 import { 
   FileCheck, ArrowLeft, Check, ArrowRight, X, Loader2, 
   Truck, Package, History, User, Calendar
@@ -14,7 +11,7 @@ import Link from 'next/link';
 // 型定義
 interface RequestData {
   id: string;
-  type: 'change' | 'exchange' | 'absence';
+  type: 'change' | 'exchange' | 'absence' | 'transfer';
   user_id?: string;
   userId?: string;
   status: 'pending' | 'approved' | 'completed' | 'rejected';
@@ -30,6 +27,12 @@ interface RequestData {
   target_subject_2?: string; // 旧: 理科
 
   reason?: string;
+  content?: string;
+  target_date?: string;
+  absence_date?: string;
+  absence_type?: 'absent' | 'late';
+  transfer_course_name?: string;
+  transfer_subject?: string;
   
   // exchange
   userName?: string;
@@ -43,8 +46,9 @@ interface RequestData {
 export default function MasterRequestsPage() {
   const [requests, setRequests] = useState<RequestData[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'pending' | 'history'>('pending');
+  const [activeTab, setActiveTab] = useState<'pending' | 'attendance' | 'history'>('pending');
   const [processingId, setProcessingId] = useState<string | null>(null);
+  const [canProcess, setCanProcess] = useState(false);
 
   useEffect(() => {
     fetchRequests();
@@ -53,36 +57,29 @@ export default function MasterRequestsPage() {
   const fetchRequests = async () => {
     setLoading(true);
     try {
-      const q = query(collection(db, 'requests'), orderBy('created_at', 'desc'));
-      const querySnapshot = await getDocs(q);
-
-      const requestsData = await Promise.all(querySnapshot.docs.map(async (reqDoc) => {
-        const reqData = reqDoc.data();
-        
-        if (reqData.type === 'absence') return null;
-
-        let profiles = {};
-        const uid = reqData.user_id || reqData.userId;
-        if (uid) {
-          const userSnap = await getDoc(doc(db, 'users', uid));
-          if (userSnap.exists()) {
-            profiles = userSnap.data();
-          }
-        }
-        
-        return {
-          id: reqDoc.id,
-          ...reqData,
-          profiles
-        } as RequestData;
-      }));
-      
-      setRequests(requestsData.filter((r): r is RequestData => r !== null));
+      const token = await auth.currentUser?.getIdToken();
+      const response = await fetch('/api/admin/requests', { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '申請を取得できませんでした');
+      setRequests(data.requests || []);
+      setCanProcess(data.can_process === true);
     } catch (e) {
       console.error(e);
     } finally {
       setLoading(false);
     }
+  };
+
+  const processRequest = async (requestId: string, action: 'approve_change' | 'complete_exchange' | 'reject') => {
+    const token = await auth.currentUser?.getIdToken();
+    const response = await fetch('/api/admin/requests', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ request_id: requestId, action }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '申請を処理できませんでした');
+    return data;
   };
 
   // ---------------------------------------------------------
@@ -94,64 +91,7 @@ export default function MasterRequestsPage() {
       
     setProcessingId(req.id);
     try {
-      const batch = writeBatch(db);
-      const updates: any = {};
-      
-      const currentDay = req.profiles?.day_of_week;
-      // 申請データを取得（新旧フィールド対応）
-      const reqDay = req.target_day;
-      const reqScience = req.target_science || req.target_subject_2; // 理科
-      const reqSocial = req.target_social || req.target_subject_1;   // 社会
-
-      const targetDay = reqDay || currentDay; // URL検索用に確定させる
-
-      // 曜日の更新
-      if (reqDay && reqDay !== currentDay) {
-        updates.day_of_week = reqDay;
-      }
-      
-      // 理科の更新 & URL自動取得
-      if (reqScience) {
-        updates.subject_science = reqScience;
-        // 旧フィールド(subject_2)も念のため更新
-        updates.subject_2 = reqScience; 
-        
-        const scienceKey = `${reqScience}_${targetDay}`;
-        const scienceSnap = await getDoc(doc(db, 'subject_urls', scienceKey));
-        if (scienceSnap.exists()) {
-          updates.science_url = scienceSnap.data().url;
-        } else {
-          updates.science_url = null; 
-        }
-      }
-
-      // 社会の更新 & URL自動取得
-      if (reqSocial) {
-        updates.subject_social = reqSocial;
-        // 旧フィールド(subject_1)も念のため更新
-        updates.subject_1 = reqSocial;
-
-        const socialKey = `${reqSocial}_${targetDay}`;
-        const socialSnap = await getDoc(doc(db, 'subject_urls', socialKey));
-        if (socialSnap.exists()) {
-          updates.social_url = socialSnap.data().url;
-        } else {
-          updates.social_url = null;
-        }
-      }
-
-      updates.updated_at = new Date().toISOString();
-
-      const uid = req.user_id || req.userId;
-      if (uid) {
-        const userRef = doc(db, 'users', uid);
-        batch.update(userRef, updates);
-      }
-
-      const reqRef = doc(db, 'requests', req.id);
-      batch.update(reqRef, { status: 'approved', processed_at: new Date().toISOString() });
-
-      await batch.commit();
+      await processRequest(req.id, 'approve_change');
       alert('承認しました。プロフィールとURLを更新しました。');
       
       setRequests(prev => prev.map(r => r.id === req.id ? { ...r, status: 'approved' } : r));
@@ -173,10 +113,7 @@ export default function MasterRequestsPage() {
     
     setProcessingId(req.id);
     try {
-      await updateDoc(doc(db, 'requests', req.id), {
-        status: 'completed',
-        updated_at: serverTimestamp()
-      });
+      await processRequest(req.id, 'complete_exchange');
       setRequests(prev => prev.map(r => r.id === req.id ? { ...r, status: 'completed' } : r));
     } catch (error) { console.error(error); } finally { setProcessingId(null); }
   };
@@ -194,19 +131,7 @@ export default function MasterRequestsPage() {
 
     setProcessingId(req.id);
     try {
-      const batch = writeBatch(db);
-      const reqRef = doc(db, 'requests', req.id);
-      batch.update(reqRef, { status: 'rejected', processed_at: new Date().toISOString() });
-
-      if (isExchange) {
-        const uid = req.userId || req.user_id;
-        if(uid) {
-          const userRef = doc(db, 'users', uid);
-          batch.update(userRef, { coins: increment(req.cost || 0) });
-        }
-      }
-
-      await batch.commit();
+      await processRequest(req.id, 'reject');
       setRequests(prev => prev.map(r => r.id === req.id ? { ...r, status: 'rejected' } : r));
       if (isExchange) alert('申請を却下し、コインを返還しました');
 
@@ -214,8 +139,10 @@ export default function MasterRequestsPage() {
   };
 
   const filteredRequests = requests.filter(r => {
-    if (activeTab === 'pending') return r.status === 'pending';
-    return r.status !== 'pending';
+    const attendanceNotice = r.type === 'absence' || r.type === 'transfer';
+    if (activeTab === 'attendance') return attendanceNotice;
+    if (activeTab === 'pending') return !attendanceNotice && r.status === 'pending';
+    return !attendanceNotice && r.status !== 'pending';
   });
 
   return (
@@ -243,6 +170,15 @@ export default function MasterRequestsPage() {
             未対応 ({requests.filter(r => r.status === 'pending').length})
           </button>
           <button
+            onClick={() => setActiveTab('attendance')}
+            className={`px-6 py-2 rounded-lg text-sm font-bold flex items-center gap-2 transition-all ${
+              activeTab === 'attendance' ? 'bg-orange-500 text-white' : 'text-gray-400 hover:bg-gray-50'
+            }`}
+          >
+            <Calendar size={16} />
+            欠席・遅刻・振替 ({requests.filter(r => r.type === 'absence' || r.type === 'transfer').length})
+          </button>
+          <button
             onClick={() => setActiveTab('history')}
             className={`px-6 py-2 rounded-lg text-sm font-bold flex items-center gap-2 transition-all ${
               activeTab === 'history' ? 'bg-gray-800 text-white' : 'text-gray-400 hover:bg-gray-50'
@@ -258,11 +194,12 @@ export default function MasterRequestsPage() {
             <div className="text-center py-20"><Loader2 className="animate-spin inline text-cyan-500" /></div>
           ) : filteredRequests.length === 0 ? (
             <div className="text-center py-20 bg-white rounded-2xl border border-dashed border-gray-200 text-gray-400">
-              {activeTab === 'pending' ? '未対応の申請はありません 🎉' : '履歴はありません'}
+              {activeTab === 'pending' ? '未対応の申請はありません 🎉' : activeTab === 'attendance' ? '欠席・遅刻・振替の連絡はありません' : '履歴はありません'}
             </div>
           ) : (
             filteredRequests.map(req => {
               const isExchange = req.type === 'exchange';
+              const isAttendanceNotice = req.type === 'absence' || req.type === 'transfer';
               const studentName = req.profiles?.student_name || req.userName || '不明な生徒';
               const grade = req.profiles?.grade || '';
 
@@ -278,7 +215,7 @@ export default function MasterRequestsPage() {
 
               return (
                 <div key={req.id} className={`bg-white p-6 rounded-2xl shadow-sm border-2 transition-all hover:shadow-md ${
-                  isExchange ? 'border-yellow-100' : 'border-cyan-100'
+                  isAttendanceNotice ? 'border-orange-100' : isExchange ? 'border-yellow-100' : 'border-cyan-100'
                 }`}>
                   <div className="flex flex-col md:flex-row gap-6 justify-between items-start">
                     
@@ -294,7 +231,7 @@ export default function MasterRequestsPage() {
                           <span className={`text-[10px] font-bold px-2 py-0.5 rounded text-white ${
                             isExchange ? 'bg-yellow-500' : 'bg-cyan-500'
                           }`}>
-                            {isExchange ? '景品交換' : '変更申請'}
+                            {isExchange ? '景品交換' : req.type === 'transfer' ? '振替確定' : req.type === 'absence' ? (req.absence_type === 'late' ? '遅刻連絡' : '欠席連絡') : '変更申請'}
                           </span>
                           <span className="text-xs text-gray-400">
                             {req.created_at?.toDate ? req.created_at.toDate().toLocaleString() : new Date(req.created_at).toLocaleDateString()}
@@ -325,7 +262,16 @@ export default function MasterRequestsPage() {
                           </div>
                         )}
 
-                        {!isExchange && (
+                        {isAttendanceNotice && (
+                          <div className="rounded-xl border border-orange-200 bg-orange-50 p-4 text-sm font-bold text-orange-950">
+                            <p><span className="text-xs text-orange-600">対象日：</span>{req.type === 'transfer' ? `${req.absence_date || '-'} → ${req.target_date || '-'}` : req.target_date || '-'}</p>
+                            {req.type === 'transfer' && <p className="mt-2"><span className="text-xs text-orange-600">振替先：</span>{[req.transfer_subject, req.transfer_course_name].filter(Boolean).join(' / ') || '詳細未設定'}</p>}
+                            <p className="mt-2 whitespace-pre-wrap"><span className="text-xs text-orange-600">連絡内容：</span>{req.reason || req.content || '記載なし'}</p>
+                            <p className="mt-2 text-xs text-slate-500">校舎：{req.profiles?.school_name || req.profiles?.school || req.profiles?.school_id || '未設定'}</p>
+                          </div>
+                        )}
+
+                        {!isExchange && !isAttendanceNotice && (
                           <div className="bg-cyan-50 p-4 rounded-xl border border-cyan-200 space-y-3">
                             <div className="flex items-center gap-3 text-sm">
                               <span className="text-cyan-700 font-bold w-12 text-xs uppercase tracking-wider">Day</span>
@@ -372,7 +318,7 @@ export default function MasterRequestsPage() {
                       </div>
                     </div>
 
-                    {req.status === 'pending' && (
+                    {canProcess && !isAttendanceNotice && req.status === 'pending' && (
                       <div className="flex flex-row md:flex-col gap-3 shrink-0 w-full md:w-auto mt-4 md:mt-0">
                         {isExchange ? (
                           <button 

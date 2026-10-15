@@ -1,5 +1,12 @@
 export type PayrollCategory = 'lesson' | 'office' | 'interview' | 'other';
 
+export const BREAKTHROUGH_LESSON_RATE_ADDITION = 500;
+
+export function breakthroughLessonRate(baseLessonRate: unknown) {
+  const base = Number(baseLessonRate || 0);
+  return Number.isFinite(base) && base > 0 ? base + BREAKTHROUGH_LESSON_RATE_ADDITION : 0;
+}
+
 export type PayrollRateMaster = {
   id?: string;
   person_code: string;
@@ -11,6 +18,7 @@ export type PayrollRateMaster = {
   breakthrough_lesson_rate?: number;
   hourly_rates: Record<PayrollCategory, number>;
   allowances: Record<PayrollCategory, number>;
+  rate_items?: Record<string, number>;
 };
 
 export type RegularAttendanceInterval = {
@@ -22,8 +30,40 @@ export type RegularAttendanceInterval = {
   start_time: string;
   end_time: string;
   work_type?: string;
+  school_code?: string;
+  school_name?: string;
+  course_code?: string;
+  course_name?: string;
+  work_code?: string;
+  actual_minutes?: number;
+  payroll_tier?: string;
+  attendance_program?: string;
   source_name?: string;
 };
+
+export function normalizeRegularAttendanceIntervalRecord(
+  value: Record<string, unknown>,
+  defaults: Partial<RegularAttendanceInterval> = {},
+): RegularAttendanceInterval {
+  return {
+    id: String(value.id || defaults.id || ''),
+    person_code: normalizePersonCode(value.person_code || value.personCode || value.employeeId || defaults.person_code),
+    person_name: String(value.person_name || value.personName || defaults.person_name || ''),
+    normalized_name: String(value.normalized_name || value.normalizedName || defaults.normalized_name || ''),
+    date: String(value.date || defaults.date || ''),
+    start_time: String(value.start_time || value.startTime || defaults.start_time || ''),
+    end_time: String(value.end_time || value.endTime || defaults.end_time || ''),
+    work_type: String(value.work_type || value.workType || defaults.work_type || ''),
+    school_code: String(value.school_code || value.schoolCode || defaults.school_code || ''),
+    school_name: String(value.school_name || value.schoolName || defaults.school_name || ''),
+    course_code: String(value.course_code || value.courseCode || defaults.course_code || ''),
+    course_name: String(value.course_name || value.courseName || defaults.course_name || ''),
+    work_code: String(value.work_code || value.workCode || defaults.work_code || ''),
+    actual_minutes: Number(value.actual_minutes || value.actualMinutes || defaults.actual_minutes || 0),
+    payroll_tier: String(value.payroll_tier || value.payrollTier || defaults.payroll_tier || ''),
+    source_name: String(value.source_name || value.sourceName || value.source || defaults.source_name || ''),
+  };
+}
 
 export type PayrollWorkRecord = {
   id: string;
@@ -42,7 +82,7 @@ export type PayrollWorkRecord = {
 };
 
 export type PayrollAlert = {
-  code: 'rate_missing' | 'rate_ambiguous' | 'time_overlap' | 'invalid_segment' | 'other_note_required';
+  code: 'rate_missing' | 'rate_ambiguous' | 'time_overlap' | 'invalid_segment' | 'other_note_required' | 'external_category_missing';
   severity: 'warning' | 'danger';
   person_code: string;
   person_name: string;
@@ -97,9 +137,9 @@ export const normalizePersonCode = (value: unknown) =>
 export function mapWorkTypeToPayrollCategory(type: unknown): PayrollCategory | null {
   const normalized = String(type || '').trim().toLowerCase();
   if (['break', '休憩'].includes(normalized)) return null;
-  if (['lesson', 'breakthrough', 'breakthrough_lesson', '授業', '突破ゼミの授業'].includes(normalized)) return 'lesson';
+  if (['lesson', 'individual', 'breakthrough', 'breakthrough_lesson', '授業', '個別授業', '突破ゼミの授業'].includes(normalized)) return 'lesson';
   if (['office', 'breakthrough_office', '事務', '研修', '突破ゼミの事務'].includes(normalized)) return 'office';
-  // 画面上の「サブ（面接）」と旧登録値を、給与上のサブ区分へまとめる。
+  // 画面上の「サブ（サポート）」と旧登録値を、給与上のサブ区分へまとめる。
   if (['interview', 'support', 'sub_staff', 'substaff', '面接', '面接指導', 'サポート', 'サブ', 'サブスタッフ'].includes(normalized)) return 'interview';
   return 'other';
 }
@@ -173,7 +213,10 @@ function selectLatestRate(
   return { rate: candidates[0], ambiguous: candidates.length > 1 && candidates[0].effective_from === candidates[1].effective_from };
 }
 
-const roundYen = (value: number) => Math.round((Number.isFinite(value) ? value : 0) + Number.EPSILON);
+// Excel ROUNDUP(value, 0): always round a fractional yen away from zero.
+const roundYen = (value: number) => Number.isFinite(value)
+  ? Math.sign(value) * Math.ceil(Math.abs(value) - 1e-9)
+  : 0;
 
 export function calculateAttendancePayroll(input: {
   month: string;
@@ -264,7 +307,7 @@ export function calculateAttendancePayroll(input: {
             alerts.push({
               code: 'time_overlap', severity: 'danger', person_code: current.person_code,
               person_name: current.person_name, date: record.date, work_record_id: record.id,
-              detail: `本システム ${segment.start}〜${segment.end} と通常勤怠 ${regular.start_time}〜${regular.end_time} が${overlap}分重複しています${regular.work_type ? `（${regular.work_type}）` : ''}。`,
+              detail: `新システム ${segment.start}〜${segment.end} と旧システム ${regular.start_time}〜${regular.end_time} が${overlap}分重複しています${regular.work_type ? `（${regular.work_type}）` : ''}。`,
             });
           });
       });
@@ -318,7 +361,7 @@ export function calculateAttendancePayroll(input: {
       school_name: person.school_name,
       tp_serial: person.tp_serial,
       normal_lesson_rate: Number(rate?.normal_lesson_rate ?? rate?.hourly_rates?.lesson ?? 0),
-      breakthrough_lesson_rate: Number(rate?.breakthrough_lesson_rate ?? rate?.hourly_rates?.lesson ?? 0),
+      breakthrough_lesson_rate: breakthroughLessonRate(rate?.normal_lesson_rate ?? rate?.hourly_rates?.lesson),
       rate_master_id: rate?.id,
       rate_effective_from: rate?.effective_from,
       work_days: new Set(person.records.map(record => record.date)).size,
@@ -404,6 +447,7 @@ const dateValue = (value: unknown) => {
 
 const timeValue = (value: unknown) => {
   const normalized = String(value || '').normalize('NFKC').trim().replace(/時/g, ':').replace(/分/g, '');
+  if (!normalized) return '';
   const matched = normalized.match(/^(\d{1,2}):(\d{1,2})/);
   if (matched) {
     const hour = Number(matched[1]);
@@ -416,13 +460,25 @@ const timeValue = (value: unknown) => {
   return `${String(Math.floor(minutes / 60) % 24).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
 };
 
+const durationMinutesValue = (value: unknown) => {
+  const normalized = String(value || '').normalize('NFKC').trim();
+  if (!normalized) return 0;
+  const matched = normalized.match(/^(\d{1,3}):(\d{1,2})$/);
+  if (matched) return Number(matched[1]) * 60 + Number(matched[2]);
+  const hours = Number(normalized);
+  return Number.isFinite(hours) && hours >= 0 ? Math.round(hours * 60) : 0;
+};
+
 export function resolveLegacyLessonRates(input: { edic?: number; sogaku?: number; individual1?: number; individual4?: number }) {
   const positive = (value: unknown) => {
     const parsed = Number(value || 0);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
   };
   const edicRate = positive(input.edic);
-  return { normal: edicRate, breakthrough: edicRate };
+  return {
+    normal: edicRate,
+    breakthrough: breakthroughLessonRate(edicRate),
+  };
 }
 
 function parseLegacyRateRows(sourceRows: string[][]) {
@@ -457,9 +513,21 @@ function parseLegacyRateRows(sourceRows: string[][]) {
       edic: rate(['EDIC授業_TANKA']),
       sogaku: rate(['創学授業_TANKA']),
       individual1: rate(['個別授業1_TANKA']),
+      individual2: rate(['個別授業2_TANKA']),
+      individual3: rate(['個別授業3_TANKA']),
       individual4: rate(['個別授業4_TANKA']),
+      individual5: rate(['個別授業5_TANKA']),
+      individual6: rate(['個別授業6_TANKA']),
       office: rate(['事務_TANKA']),
       interview: rate(['サブスタッフ_TANKA']),
+      mentor: rate(['メンター_TANKA']),
+      training1: rate(['研修1_TANKA']),
+      training2: rate(['研修2_TANKA']),
+      training3: rate(['研修3_TANKA']),
+      officePremium1: rate(['深夜事務_TANKA']),
+      officePremium2: rate(['深夜事務2_TANKA']),
+      privateTutor: rate(['個別ﾁｭｰﾀｰ']),
+      acStudy: rate(['ＡＣ自習室', 'AC自習室']),
     };
     if (Object.values(sourceRates).some(value => Number.isNaN(value))) {
       errors.push(`${line}行目: 単価は0以上の数値で入力してください。`);
@@ -475,8 +543,17 @@ function parseLegacyRateRows(sourceRows: string[][]) {
       school_code: normalizePersonCode(rowValue(headers, row, ['所属教室番号'])),
       normal_lesson_rate: lessonRates.normal,
       breakthrough_lesson_rate: lessonRates.breakthrough,
-      hourly_rates: { lesson: lessonRates.breakthrough, office: sourceRates.office, interview: interviewRate, other: sourceRates.office },
+      hourly_rates: { lesson: lessonRates.normal, office: sourceRates.office, interview: interviewRate, other: sourceRates.office },
       allowances: { lesson: 0, office: 0, interview: 0, other: 0 },
+      rate_items: {
+        group_lesson: sourceRates.edic, sogaku_lesson: sourceRates.sogaku,
+        individual_1: sourceRates.individual1, individual_2: sourceRates.individual2, individual_3: sourceRates.individual3,
+        individual_4: sourceRates.individual4, individual_5: sourceRates.individual5, individual_6: sourceRates.individual6,
+        mentor: sourceRates.mentor, sub_staff: sourceRates.interview,
+        training_1: sourceRates.training1, training_2: sourceRates.training2, training_3: sourceRates.training3,
+        office: sourceRates.office, office_premium_1: sourceRates.officePremium1, office_premium_2: sourceRates.officePremium2,
+        private_tutor: sourceRates.privateTutor, ac_study: sourceRates.acStudy,
+      },
     });
   });
   return { data, errors, format: 'legacy_rate_sheet' as const };
@@ -508,11 +585,31 @@ export function parseRateMasterCsv(text: string) {
       interview: numberValue(rowValue(headers, row, ['面接手当', 'サブスタッフ手当', 'interviewallowance'])),
       other: numberValue(rowValue(headers, row, ['その他手当', 'otherallowance'])),
     };
+    const rateItems = {
+      group_lesson: numberValue(rowValue(headers, row, ['EDIC授業_TANKA', '集団授業単価'])),
+      sogaku_lesson: numberValue(rowValue(headers, row, ['創学授業_TANKA', '創学授業単価'])),
+      individual_1: numberValue(rowValue(headers, row, ['個別授業1_TANKA', '個別1:1単価'])),
+      individual_2: numberValue(rowValue(headers, row, ['個別授業2_TANKA', '個別1:2単価'])),
+      individual_3: numberValue(rowValue(headers, row, ['個別授業3_TANKA', '個別1:3単価'])),
+      individual_4: numberValue(rowValue(headers, row, ['個別授業4_TANKA', '中高1:1単価'])),
+      individual_5: numberValue(rowValue(headers, row, ['個別授業5_TANKA', '中高1:2単価'])),
+      individual_6: numberValue(rowValue(headers, row, ['個別授業6_TANKA', '中高1:3単価'])),
+      mentor: numberValue(rowValue(headers, row, ['メンター_TANKA', 'メンター単価'])),
+      sub_staff: numberValue(rowValue(headers, row, ['サブスタッフ_TANKA', 'サブスタッフ単価'])),
+      training_1: numberValue(rowValue(headers, row, ['研修1_TANKA', '研修単価'])),
+      training_2: numberValue(rowValue(headers, row, ['研修2_TANKA', '割増研修1単価'])),
+      training_3: numberValue(rowValue(headers, row, ['研修3_TANKA', '割増研修2単価'])),
+      office: numberValue(rowValue(headers, row, ['事務_TANKA', '事務単価'])),
+      office_premium_1: numberValue(rowValue(headers, row, ['深夜事務_TANKA', '割増事務1単価'])),
+      office_premium_2: numberValue(rowValue(headers, row, ['深夜事務2_TANKA', '割増事務2単価'])),
+      private_tutor: numberValue(rowValue(headers, row, ['個別ﾁｭｰﾀｰ', '個別チューター単価'])),
+      ac_study: numberValue(rowValue(headers, row, ['ＡＣ自習室', 'AC自習室単価'])),
+    };
     const line = index + 2;
     if ((!personCode && !personName) || !effectiveFrom) errors.push(`${line}行目: 個人コード/氏名と適用開始日は必須です。`);
-    if ([...Object.values(values), ...Object.values(allowances)].some(value => Number.isNaN(value))) errors.push(`${line}行目: 単価・手当は0以上の数値で入力してください。`);
+    if ([...Object.values(values), ...Object.values(allowances), ...Object.values(rateItems)].some(value => Number.isNaN(value))) errors.push(`${line}行目: 単価・手当は0以上の数値で入力してください。`);
     if (errors.some(error => error.startsWith(`${line}行目`))) return;
-    data.push({ person_code: personCode, person_name: personName, normalized_name: normalizePayrollName(personName), effective_from: effectiveFrom, hourly_rates: values, allowances });
+    data.push({ person_code: personCode, person_name: personName, normalized_name: normalizePayrollName(personName), effective_from: effectiveFrom, hourly_rates: values, allowances, rate_items: rateItems });
   });
   return { data, errors, format: 'standard' as const };
 }
@@ -521,38 +618,98 @@ export function parseRegularAttendanceCsv(text: string) {
   return parseRegularAttendanceRows(parseCsv(text));
 }
 
+export function regularAttendancePersonKey(item: Pick<RegularAttendanceInterval, 'person_code' | 'person_name' | 'normalized_name'>) {
+  const code = normalizePersonCode(item.person_code);
+  const normalizedName = item.normalized_name || normalizePayrollName(item.person_name);
+  return code ? `code:${code}` : `name:${normalizedName}`;
+}
+
 export function parseRegularAttendanceRows(sourceRows: string[][]) {
   const [headers, ...rows] = sourceRows;
   const data: RegularAttendanceInterval[] = [];
   const errors: string[] = [];
-  if (!headers) return { data, errors: ['勤怠データが空です。'] };
+  const warnings: string[] = [];
+  if (!headers) return { data, errors: ['勤怠データが空です。'], warnings };
   const actualMinutesHeader = headers.find(header => [
-    '実働分', '実働時間分', '実働（分）ジツドウフン', '実働分ジツドウフン',
+    '実働分', '実働時間分', '実働（分）ジツドウフン', '実働分ジツドウフン', '勤怠情報②_work_time',
   ].map(normalizedHeader).includes(normalizedHeader(header)));
+  const isLegacyAttendanceList = headers.some(header => normalizedHeader(header) === normalizedHeader('出勤時刻')) &&
+    headers.some(header => normalizedHeader(header) === normalizedHeader('退勤時刻'));
   rows.forEach((row, index) => {
     const personCode = normalizePersonCode(rowValue(headers, row, [
-      '個人コード', '職員番号', '職員番号ショクインバンゴウ', 'スタッフid', 'staffid', 'personcode',
+      '個人コード', '職員番号', '職員番号ショクインバンゴウ', 'スタッフid', 'staffid', 'staff_code', 'personcode',
     ]));
     const personName = rowValue(headers, row, [
-      '氏名', '名前', '講師名', '職員氏名', '職員氏名ショクインシメイ', 'personname', 'name',
+      '氏名', '名前', '講師名', '職員氏名', '職員氏名ショクインシメイ', 'staff_name', 'personname', 'name',
     ]);
-    const date = dateValue(rowValue(headers, row, ['日付', '勤務日', '勤務日キンムビ', 'date']));
+    const date = dateValue(rowValue(headers, row, ['日付', '勤務日', '勤務日キンムビ', 'work_date', 'date']));
     const startTime = timeValue(rowValue(headers, row, [
-      '実働開始', '実働開始ジツドウカイシ', '開始', '開始時刻', '出勤', 'starttime',
+      '実働開始', '実働開始ジツドウカイシ', '勤怠情報②_start_time', '開始', '開始時刻', '出勤', '出勤時刻', 'starttime',
     ]));
     const endTime = timeValue(rowValue(headers, row, [
-      '実働終了', '実働終了ジツドウシュウリョウ', '終了', '終了時刻', '退勤', 'endtime',
+      '実働終了', '実働終了ジツドウシュウリョウ', '勤怠情報②_end_time', '終了', '終了時刻', '退勤', '退勤時刻', 'endtime',
     ]));
     const workType = firstRowValue(headers, row, [
-      '作業名', '作業名サギョウメイ', '講座名', '講座名コウザメイ', '勤務区分', '業務区分', 'worktype',
+      '作業名', '作業名サギョウメイ', 'work_name', '講座名', '講座名コウザメイ', 'course_name', '勤務区分', '業務区分', 'worktype',
     ]);
+    const schoolCode = firstRowValue(headers, row, ['勤務教室', '勤務教室キンムキョウシツ', '所属教室番号', '校舎番号', 'work_school_code', 'school_code', 'schoolcode']);
+    const schoolName = firstRowValue(headers, row, ['勤務教室名', '勤務教室名キンムキョウシツメイ', '所属教室名', 'mas_school_school_name', 'mas_school_1_school_name', 'school_name', 'schoolname']);
+    const courseCode = firstRowValue(headers, row, ['講座', '講座コウザ', 'course_code', 'coursecode']);
+    const courseName = firstRowValue(headers, row, ['講座名', '講座名コウザメイ', 'course_name', 'coursename']);
+    const workCode = firstRowValue(headers, row, ['作業', '作業サギョウ', 'work_code', 'workcode']);
+    const payrollTier = firstRowValue(headers, row, ['区分', '区分クブン', 'staff_kbn', 'payrolltier']);
     const line = index + 2;
     const actualMinutes = actualMinutesHeader ? numberValue(rowValue(headers, row, [actualMinutesHeader])) : null;
     if (/休憩/.test(workType) || actualMinutes === 0) return;
+    if (isLegacyAttendanceList && startTime && !endTime) {
+      warnings.push(`${line}行目: 退勤時刻がないため取り込み対象外にしました。`);
+      return;
+    }
     if ((!personCode && !personName) || !date || !startTime || !endTime) errors.push(`${line}行目: 個人コード/氏名、日付、開始、終了は必須です。`);
     if (startTime && endTime && !intervalMinutes(startTime, endTime)) errors.push(`${line}行目: 開始・終了時刻が不正です。`);
     if (errors.some(error => error.startsWith(`${line}行目`))) return;
-    data.push({ person_code: personCode, person_name: personName, normalized_name: normalizePayrollName(personName), date, start_time: startTime, end_time: endTime, work_type: workType });
+
+    const common = {
+      person_code: personCode, person_name: personName, normalized_name: normalizePayrollName(personName), date,
+      school_code: normalizePersonCode(schoolCode), school_name: schoolName,
+    };
+    if (isLegacyAttendanceList) {
+      const legacyKinds = [
+        { start: '授業(開始)', end: '授業(終了)', before: '授業時間(~22時)', after: '授業時間(22時~)', work_type: '授業', payroll_tier: 'group_lesson' },
+        { start: '事務・研修(開始)', end: '事務・研修(終了)', before: '事務・研修時間(~22時)', after: '事務・研修時間(22時~)', work_type: '事務・研修', payroll_tier: 'office' },
+        { start: 'サポート(開始)', end: 'サポート(終了)', before: 'サポート時間(~22時)', after: 'サポート時間(22時~)', work_type: 'サブスタッフ', payroll_tier: 'sub_staff' },
+      ];
+      let added = 0;
+      legacyKinds.forEach(kind => {
+        const categoryStart = timeValue(rowValue(headers, row, [kind.start]));
+        const categoryEnd = timeValue(rowValue(headers, row, [kind.end]));
+        const categoryMinutes = durationMinutesValue(rowValue(headers, row, [kind.before])) + durationMinutesValue(rowValue(headers, row, [kind.after]));
+        if (!categoryStart || !categoryEnd || categoryMinutes <= 0) return;
+        data.push({ ...common, start_time: categoryStart, end_time: categoryEnd, work_type: kind.work_type, actual_minutes: categoryMinutes, payroll_tier: kind.payroll_tier });
+        added += 1;
+      });
+      if (added > 0) return;
+    }
+    data.push({
+      ...common, start_time: startTime, end_time: endTime, work_type: workType,
+      course_code: normalizePersonCode(courseCode), course_name: courseName,
+      work_code: normalizePersonCode(workCode), actual_minutes: actualMinutes === null ? undefined : actualMinutes,
+      payroll_tier: payrollTier,
+    });
   });
-  return { data, errors };
+  const unique = new Map<string, RegularAttendanceInterval>();
+  data.forEach(item => {
+    const personKey = normalizePersonCode(item.person_code) || normalizePayrollName(item.person_name);
+    const key = [
+      personKey, item.date, item.start_time, item.end_time, item.work_type || '',
+      item.school_code || '', item.course_code || '', item.work_code || '',
+      String(item.actual_minutes ?? ''), item.payroll_tier || '',
+    ].join('\u001f');
+    if (unique.has(key)) {
+      warnings.push(`${item.date} ${item.person_name || item.person_code}: 同一の勤務行が重複していたため1件として取り込みました。`);
+      return;
+    }
+    unique.set(key, item);
+  });
+  return { data: Array.from(unique.values()), errors, warnings };
 }

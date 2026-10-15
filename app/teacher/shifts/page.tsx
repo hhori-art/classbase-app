@@ -3,9 +3,10 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs, deleteDoc, doc, writeBatch } from 'firebase/firestore';
-import { CalendarPlus, Trash2, ArrowLeft, Check, ChevronLeft, ChevronRight, X, Loader2, Clock, User, CheckSquare, MapPin } from 'lucide-react';
+import { collection, query, where, getDocs, deleteDoc, doc, writeBatch, getDoc, setDoc } from 'firebase/firestore';
+import { CalendarPlus, Trash2, ArrowLeft, Check, ChevronLeft, ChevronRight, X, Loader2, Clock, User, CheckSquare, MapPin, CalendarClock, GraduationCap } from 'lucide-react';
 import Link from 'next/link';
+import { DEFAULT_WEEKLY_DAY, WEEKDAY_KEYS, type TeacherAvailabilityProfile, type WeekdayKey, type WeeklyAvailabilityDay } from '@/lib/teacher-weekly-availability';
 
 // ロール定義
 const ROLES = [
@@ -16,6 +17,10 @@ const ROLES = [
 ];
 
 const WORK_LOCATIONS = ['元町', '本山', '西神南', '姫路', '加古川', '明石'];
+const WEEKDAY_LABELS: Record<WeekdayKey, string> = { sun: '日', mon: '月', tue: '火', wed: '水', thu: '木', fri: '金', sat: '土' };
+const createInitialWeekdays = () => Object.fromEntries(
+  WEEKDAY_KEYS.map(key => [key, { ...DEFAULT_WEEKLY_DAY, roles: [...DEFAULT_WEEKLY_DAY.roles] }]),
+) as Record<WeekdayKey, WeeklyAvailabilityDay>;
 
 export default function TeacherShiftSubmissionPage() {
   const { user } = useAuth();
@@ -45,6 +50,10 @@ export default function TeacherShiftSubmissionPage() {
   const [loading, setLoading] = useState(false);
   const [dataLoading, setDataLoading] = useState(true);
   const [currentMonth, setCurrentMonth] = useState(new Date());
+  const [weeklyModalOpen, setWeeklyModalOpen] = useState(false);
+  const [weeklySaving, setWeeklySaving] = useState(false);
+  const [weeklyProfile, setWeeklyProfile] = useState<Record<WeekdayKey, WeeklyAvailabilityDay>>(createInitialWeekdays);
+  const [hasWeeklyProfile, setHasWeeklyProfile] = useState(false);
 
   // シフト取得処理
   const fetchMyShifts = async () => {
@@ -62,13 +71,28 @@ export default function TeacherShiftSubmissionPage() {
         where('available_date', '>=', today)
       );
       
-      const [snapshot, legacySnapshot] = await Promise.all([getDocs(q), getDocs(legacyQ)]);
+      const [snapshot, legacySnapshot, profileSnapshot] = await Promise.all([
+        getDocs(q),
+        getDocs(legacyQ),
+        getDoc(doc(db, 'teacher_availability_profiles', user.uid)),
+      ]);
       const byId = new Map<string, any>();
       snapshot.docs.forEach(doc => byId.set(doc.id, { id: doc.id, ...doc.data() }));
       legacySnapshot.docs.forEach(doc => byId.set(doc.id, { id: doc.id, ...doc.data() }));
       const data = Array.from(byId.values());
       data.sort((a: any, b: any) => a.available_date.localeCompare(b.available_date));
       setSubmittedShifts(data);
+      if (profileSnapshot.exists()) {
+        const profile = profileSnapshot.data() as TeacherAvailabilityProfile;
+        const next = createInitialWeekdays();
+        WEEKDAY_KEYS.forEach(key => {
+          if (profile.weekdays?.[key]) next[key] = { ...next[key], ...profile.weekdays[key] };
+        });
+        setWeeklyProfile(next);
+        setHasWeeklyProfile(true);
+      } else {
+        setWeeklyModalOpen(true);
+      }
     } catch (e) {
       console.error('Fetch error:', e);
     } finally {
@@ -168,6 +192,43 @@ export default function TeacherShiftSubmissionPage() {
     }
   };
 
+  const updateWeeklyDay = (key: WeekdayKey, patch: Partial<WeeklyAvailabilityDay>) => {
+    setWeeklyProfile(previous => ({
+      ...previous,
+      [key]: { ...previous[key], ...patch },
+    }));
+  };
+
+  const saveWeeklyProfile = async () => {
+    if (!user) return;
+    const missingCommitment = WEEKDAY_KEYS.find(key => {
+      const day = weeklyProfile[key];
+      return day.status !== 'available' && (!day.commitment_type || !day.commitment_end_time);
+    });
+    if (missingCommitment) {
+      alert(`${WEEKDAY_LABELS[missingCommitment]}曜日の予定種別と終了時刻を入力してください。`);
+      return;
+    }
+    setWeeklySaving(true);
+    try {
+      await setDoc(doc(db, 'teacher_availability_profiles', user.uid), {
+        teacher_id: user.uid,
+        user_id: user.uid,
+        teacher_name: user.displayName || '講師',
+        weekdays: weeklyProfile,
+        updated_at: new Date().toISOString(),
+        ...(hasWeeklyProfile ? {} : { created_at: new Date().toISOString() }),
+      }, { merge: true });
+      setHasWeeklyProfile(true);
+      setWeeklyModalOpen(false);
+      alert('基本勤務可能日を保存しました。');
+    } catch (error: any) {
+      alert(`保存できませんでした: ${error.message}`);
+    } finally {
+      setWeeklySaving(false);
+    }
+  };
+
   // カレンダーロジック
   const getDaysInMonth = (year: number, month: number) => new Date(year, month + 1, 0).getDate();
   const getFirstDayOfMonth = (year: number, month: number) => new Date(year, month, 1).getDay();
@@ -202,7 +263,8 @@ export default function TeacherShiftSubmissionPage() {
       <div className="max-w-5xl mx-auto">
         
         {/* ヘッダー */}
-        <div className="flex items-center gap-4 mb-6">
+        <div className="flex flex-col gap-3 mb-6 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-4">
           {/* ★修正: リンク先を /teacher から /teacher/work に変更 */}
           <Link href="/teacher/work" className="bg-white p-2 rounded-full shadow hover:bg-gray-50 text-gray-600 transition-colors">
             <ArrowLeft size={20} />
@@ -210,6 +272,14 @@ export default function TeacherShiftSubmissionPage() {
           <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
             <CalendarPlus className="text-green-600" /> シフト希望提出
           </h1>
+          </div>
+          <button
+            type="button"
+            onClick={() => setWeeklyModalOpen(true)}
+            className="flex items-center justify-center gap-2 rounded-xl border border-green-200 bg-white px-4 py-2.5 text-sm font-bold text-green-700 shadow-sm transition-colors hover:bg-green-50"
+          >
+            <CalendarClock size={17} /> 基本勤務可能日を設定
+          </button>
         </div>
 
         <div className="grid md:grid-cols-2 gap-8">
@@ -434,6 +504,84 @@ export default function TeacherShiftSubmissionPage() {
 
         </div>
       </div>
+
+      {weeklyModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/55 p-3" role="dialog" aria-modal="true" aria-labelledby="weekly-availability-title">
+          <div className="max-h-[94vh] w-full max-w-5xl overflow-hidden rounded-2xl bg-white shadow-2xl">
+            <div className="flex items-start justify-between border-b border-slate-200 bg-slate-50 px-5 py-4">
+              <div>
+                <h2 id="weekly-availability-title" className="flex items-center gap-2 text-lg font-black text-slate-800">
+                  <CalendarClock className="text-green-600" size={21} /> 基本勤務可能日・時間
+                </h2>
+                <p className="mt-1 text-xs font-medium text-slate-500">通常の一週間を登録してください。日付ごとの提出がある場合は、そちらが優先されます。</p>
+              </div>
+              <button type="button" onClick={() => setWeeklyModalOpen(false)} className="rounded-full p-2 text-slate-400 hover:bg-slate-200 hover:text-slate-700" aria-label="閉じる"><X size={20} /></button>
+            </div>
+
+            <div className="max-h-[calc(94vh-150px)] space-y-3 overflow-y-auto p-4 sm:p-5">
+              {WEEKDAY_KEYS.map(key => {
+                const day = weeklyProfile[key];
+                const needsCommitment = day.status !== 'available';
+                return (
+                  <div key={key} className="rounded-xl border border-slate-200 p-3 shadow-sm">
+                    <div className="grid gap-3 lg:grid-cols-[48px_180px_1fr] lg:items-center">
+                      <div className={`flex h-10 w-10 items-center justify-center rounded-full text-sm font-black ${key === 'sun' ? 'bg-rose-50 text-rose-600' : key === 'sat' ? 'bg-blue-50 text-blue-600' : 'bg-slate-100 text-slate-700'}`}>
+                        {WEEKDAY_LABELS[key]}
+                      </div>
+                      <select
+                        value={day.status}
+                        onChange={event => updateWeeklyDay(key, { status: event.target.value as WeeklyAvailabilityDay['status'] })}
+                        className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-700"
+                        aria-label={`${WEEKDAY_LABELS[key]}曜日の勤務可否`}
+                      >
+                        <option value="available">勤務可能</option>
+                        <option value="after_commitment">予定終了後なら可能</option>
+                        <option value="unavailable">勤務不可</option>
+                      </select>
+
+                      {!needsCommitment ? (
+                        <div className="grid gap-2 sm:grid-cols-[1fr_auto_1fr_1.2fr] sm:items-center">
+                          <input type="time" value={day.start_time} onChange={event => updateWeeklyDay(key, { start_time: event.target.value })} className="rounded-lg border border-slate-300 px-3 py-2 text-sm" aria-label={`${WEEKDAY_LABELS[key]}曜日の勤務開始時刻`} />
+                          <span className="text-center text-slate-400">〜</span>
+                          <input type="time" value={day.end_time} onChange={event => updateWeeklyDay(key, { end_time: event.target.value })} className="rounded-lg border border-slate-300 px-3 py-2 text-sm" aria-label={`${WEEKDAY_LABELS[key]}曜日の勤務終了時刻`} />
+                          <select value={day.workplace} onChange={event => updateWeeklyDay(key, { workplace: event.target.value })} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm" aria-label={`${WEEKDAY_LABELS[key]}曜日の勤務地`}>
+                            {WORK_LOCATIONS.map(location => <option key={location}>{location}</option>)}
+                          </select>
+                        </div>
+                      ) : (
+                        <div className="grid gap-2 sm:grid-cols-[1fr_1fr_1.5fr]">
+                          <label className="relative">
+                            <GraduationCap className="pointer-events-none absolute left-3 top-2.5 text-slate-400" size={16} />
+                            <select value={day.commitment_type} onChange={event => updateWeeklyDay(key, { commitment_type: event.target.value as WeeklyAvailabilityDay['commitment_type'] })} className="w-full rounded-lg border border-slate-300 bg-white py-2 pl-9 pr-3 text-sm" aria-label={`${WEEKDAY_LABELS[key]}曜日の予定`}>
+                              <option value="">予定を選択</option>
+                              <option value="university">大学</option>
+                              <option value="club">サークル</option>
+                              <option value="other">その他</option>
+                            </select>
+                          </label>
+                          <label className="flex items-center gap-2 rounded-lg border border-slate-300 px-3">
+                            <Clock size={15} className="text-slate-400" />
+                            <input type="time" value={day.commitment_end_time} onChange={event => updateWeeklyDay(key, { commitment_end_time: event.target.value })} className="min-w-0 flex-1 py-2 text-sm outline-none" aria-label={`${WEEKDAY_LABELS[key]}曜日の予定終了時刻`} />
+                            <span className="whitespace-nowrap text-xs text-slate-500">まで</span>
+                          </label>
+                          <input value={day.note} onChange={event => updateWeeklyDay(key, { note: event.target.value })} placeholder="補足（移動時間など・任意）" className="rounded-lg border border-slate-300 px-3 py-2 text-sm" aria-label={`${WEEKDAY_LABELS[key]}曜日の補足`} />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="flex items-center justify-end gap-3 border-t border-slate-200 bg-white px-5 py-4">
+              <button type="button" onClick={() => setWeeklyModalOpen(false)} className="rounded-xl px-4 py-2.5 text-sm font-bold text-slate-600 hover:bg-slate-100">キャンセル</button>
+              <button type="button" onClick={saveWeeklyProfile} disabled={weeklySaving} className="flex items-center gap-2 rounded-xl bg-green-600 px-5 py-2.5 text-sm font-bold text-white shadow-sm hover:bg-green-700 disabled:opacity-50">
+                {weeklySaving ? <Loader2 className="animate-spin" size={17} /> : <Check size={17} />} 保存する
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

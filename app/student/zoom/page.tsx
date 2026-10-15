@@ -1,12 +1,12 @@
 import { redirect } from 'next/navigation';
 
-export default function LegacyStudentZoomPage({
+export default async function LegacyStudentZoomPage({
   searchParams,
 }: {
-  searchParams?: Record<string, string | string[] | undefined>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const params = new URLSearchParams();
-  Object.entries(searchParams || {}).forEach(([key, value]) => {
+  Object.entries((await searchParams) || {}).forEach(([key, value]) => {
     if (Array.isArray(value)) {
       value.forEach(item => params.append(key, item));
     } else if (value) {

@@ -2,15 +2,17 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
-import { AlertCircle, AlertTriangle, ArrowDown, ArrowLeft, Calculator, CheckCircle2, Download, FileUp, Loader2, RefreshCw, Wallet } from 'lucide-react';
+import { AlertCircle, AlertTriangle, ArrowDown, ArrowLeft, Calculator, CheckCircle2, Download, FileUp, Loader2, PlusCircle, RefreshCw, Save, Settings2, Trash2, Wallet } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
-import { storage } from '@/lib/firebase';
-import { deleteObject, ref, uploadBytes } from 'firebase/storage';
 import { buildOriginalPayrollHtml } from '@/lib/attendance-original-export';
 import type { PayrollPersonSummary } from '@/lib/attendance-payroll';
+import { decodeCsvBytes } from '@/lib/csv-text';
+import type { IndividualRateMapping, IntegratedPayrollRow, IntegratedPayrollScope, PayrollAdjustment, PremiumCalculationRule, PremiumRuleKey } from '@/lib/attendance-integrated-payroll';
+import { buildQ141PayrollWorkbook } from '@/lib/payroll-q141-xlsx';
+import type { ScienceSocialWorkSummary } from '@/lib/science-social-work-summary';
 
 type CategoryKey = 'lesson' | 'office' | 'interview' | 'other';
-type PayrollRow = PayrollPersonSummary;
+type PayrollRow = PayrollPersonSummary & IntegratedPayrollRow;
 
 type PayrollAlert = {
   code: string;
@@ -25,19 +27,28 @@ type PayrollAlert = {
 type PayrollResponse = {
   ok: boolean;
   month: string;
-  scope: 'breakthrough' | 'all';
+  scope: IntegratedPayrollScope;
+  program: AttendanceProgramFilter;
   rows: PayrollRow[];
   alerts: PayrollAlert[];
-  totals: { people: number; total_minutes: number; total_payment: number; transportation_amount: number; gross_payment: number; danger: number; warning: number };
-  imports: { rate_master_rows: number; regular_attendance_rows: number };
+  totals: { people: number; total_minutes: number; total_payment: number; transportation_amount: number; gross_payment: number; danger: number; warning: number; excluded_without_rate: number };
+  imports: { rate_master_rows: number; regular_attendance_rows: number; school_distribution_rows: number; allowance_query_rows: number };
+  adjustments: PayrollAdjustment[];
+  premium_rules: PremiumCalculationRule[];
+  individual_rate_mappings: IndividualRateMapping[];
+  science_social_work_summary: ScienceSocialWorkSummary[];
   error?: string;
 };
 
+type AttendanceProgramFilter = 'all' | 'normal' | 'science_social' | 'breakthrough';
+const PROGRAM_LABELS: Record<AttendanceProgramFilter, string> = { all: '全部', normal: '通常', science_social: '理社講座', breakthrough: '突破ゼミ' };
+
 const CATEGORY_LABELS: Record<CategoryKey, string> = { lesson: '授業', office: '事務', interview: 'サブ', other: 'その他' };
+const PREMIUM_KEYS: PremiumRuleKey[] = ['training_2', 'training_3', 'office_premium_1', 'office_premium_2', 'incidental_premium_1', 'incidental_premium_2'];
 const PAYROLL_MAPPING_RULES = [
   { attendance: '授業', payroll: '授業', rate: 'EDIC授業_TANKA', tone: 'border-indigo-200 bg-indigo-50 text-indigo-900' },
   { attendance: '事務', payroll: '事務', rate: '事務_TANKA', tone: 'border-orange-200 bg-orange-50 text-orange-900' },
-  { attendance: 'サブ（面接）', payroll: 'サブ', rate: 'サブスタッフ_TANKA', tone: 'border-violet-200 bg-violet-50 text-violet-900' },
+  { attendance: 'サブ（サポート）', payroll: 'サブ', rate: 'サブスタッフ_TANKA', tone: 'border-violet-200 bg-violet-50 text-violet-900' },
   { attendance: 'その他', payroll: 'その他', rate: '事務_TANKA', tone: 'border-slate-200 bg-slate-50 text-slate-900' },
 ] as const;
 const ALERT_LABELS: Record<string, string> = {
@@ -46,10 +57,42 @@ const ALERT_LABELS: Record<string, string> = {
   time_overlap: '勤務時間の重複',
   invalid_segment: '勤務時間エラー',
   other_note_required: '業務内容未入力',
+  external_category_missing: '旧システム区分不足',
 };
 const yen = new Intl.NumberFormat('ja-JP', { style: 'currency', currency: 'JPY', maximumFractionDigits: 0 });
 const hours = (minutes: number) => `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, '0')}`;
+const premiumSummary = (row: PayrollRow) => PREMIUM_KEYS.reduce((total, key) => ({ minutes: total.minutes + row.q141[key].minutes, amount: total.amount + row.q141[key].amount }), { minutes: 0, amount: 0 });
+const lessonBreakdown = (row: PayrollRow) => ({
+  group: {
+    minutes: row.q141.group_lesson.minutes + row.q141.sogaku_lesson.minutes,
+    amount: row.q141.group_lesson.amount + row.q141.sogaku_lesson.amount,
+  },
+  individual: {
+    minutes: row.q141.individual_1.minutes + row.q141.individual_2.minutes + row.q141.individual_3.minutes + row.q141.individual_4.minutes + row.q141.individual_5.minutes + row.q141.individual_6.minutes,
+    amount: row.q141.individual_1.amount + row.q141.individual_2.amount + row.q141.individual_3.amount + row.q141.individual_4.amount + row.q141.individual_5.amount + row.q141.individual_6.amount,
+  },
+});
+const officeBreakdown = (row: PayrollRow) => {
+  const normal = row.q141.office;
+  const premium1 = row.q141.office_premium_1;
+  const premium2 = row.q141.office_premium_2;
+  const categorizedMinutes = normal.minutes + premium1.minutes + premium2.minutes;
+  const categorizedAmount = normal.amount + premium1.amount + premium2.amount;
+  return {
+    normal,
+    premium1,
+    premium2,
+    other: {
+      minutes: Math.max(0, row.categories.office.minutes - categorizedMinutes),
+      amount: Math.max(0, row.categories.office.amount - categorizedAmount),
+    },
+  };
+};
 const csvCell = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+const MAX_DIRECT_XLS_BYTES = 4 * 1024 * 1024;
+const LEGACY_XLS_CHUNK_BYTES = 2 * 1024 * 1024;
+const MAX_LEGACY_XLS_BYTES = 12 * 1024 * 1024;
+const MAX_XLSX_BYTES = 6 * 1024 * 1024;
 
 function downloadCsv(filename: string, rows: unknown[][]) {
   const content = `\uFEFF${rows.map(row => row.map(csvCell).join(',')).join('\r\n')}`;
@@ -70,19 +113,17 @@ function downloadExcelHtml(filename: string, html: string) {
   URL.revokeObjectURL(url);
 }
 
+function downloadBlob(filename: string, blob: Blob) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 async function readCsvText(file: File) {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  const hasKnownHeader = (text: string) => /個人コード|職員コード|支給年月|適用開始日|勤務日|実働開始|日付/.test(text.slice(0, 4000));
-  if (bytes[0] === 0xff && bytes[1] === 0xfe) return new TextDecoder('utf-16le').decode(bytes);
-  const utf8 = new TextDecoder('utf-8').decode(bytes);
-  if (hasKnownHeader(utf8)) return utf8;
-  try {
-    const shiftJis = new TextDecoder('shift_jis').decode(bytes);
-    if (hasKnownHeader(shiftJis)) return shiftJis;
-  } catch {
-    // The browser may not expose Shift-JIS on some runtimes; the UTF-8 result remains the fallback.
-  }
-  return utf8;
+  return decodeCsvBytes(new Uint8Array(await file.arrayBuffer()));
 }
 
 function downloadTemplate(type: 'rates' | 'regular') {
@@ -92,7 +133,7 @@ function downloadTemplate(type: 'rates' | 'regular') {
       '事業手当', '事務手当', 'サブスタッフ手当', 'その他手当',
     ], ['0001', '山田 太郎', '2026-04-01', 2500, 1200, 1500, 1200, 500, 0, 0, 0]]);
   } else {
-    downloadCsv('通常勤怠_テンプレート.csv', [
+    downloadCsv('旧システム勤怠_テンプレート.csv', [
       ['個人コード', '氏名', '日付', '開始', '終了', '勤務区分'],
       ['0001', '山田 太郎', '2026-08-01', '09:00', '17:00', '通常勤務'],
     ]);
@@ -102,14 +143,22 @@ function downloadTemplate(type: 'rates' | 'regular') {
 export default function AttendancePayrollPage() {
   const { user } = useAuth();
   const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));
-  const [scope, setScope] = useState<'breakthrough' | 'all'>('breakthrough');
+  const [scope, setScope] = useState<IntegratedPayrollScope>('combined');
+  const [program, setProgram] = useState<AttendanceProgramFilter>('all');
   const [data, setData] = useState<PayrollResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [importing, setImporting] = useState<'rates' | 'regular' | ''>('');
+  const [importing, setImporting] = useState<'rates' | 'regular' | 'school_distribution' | 'allowances' | ''>('');
+  const [outputFormat, setOutputFormat] = useState<'q141' | 'summary' | 'original' | 'science_social_work'>('q141');
+  const [adjustmentSaving, setAdjustmentSaving] = useState(false);
+  const [premiumRules, setPremiumRules] = useState<PremiumCalculationRule[]>([]);
+  const [premiumRulesSaving, setPremiumRulesSaving] = useState(false);
+  const [individualRateMappings, setIndividualRateMappings] = useState<IndividualRateMapping[]>([]);
+  const [individualRateMappingsSaving, setIndividualRateMappingsSaving] = useState(false);
+  const [adjustment, setAdjustment] = useState({ person_code: '', person_name: '', label: '', category: 'special_4', amount: '', reason: '' });
   const [error, setError] = useState('');
   const [alertFilter, setAlertFilter] = useState<'all' | 'danger' | 'warning'>('all');
   const requestSequence = useRef(0);
-  const viewData = data?.month === month && data.scope === scope ? data : null;
+  const viewData = data?.month === month && data.scope === scope && data.program === program ? data : null;
 
   const load = useCallback(async () => {
     if (!user) return;
@@ -119,89 +168,197 @@ export default function AttendancePayrollPage() {
     setData(null);
     try {
       const token = await user.getIdToken();
-      const response = await fetch(`/api/attendance-payroll?month=${month}&scope=${scope}`, { cache: 'no-store', headers: { Authorization: `Bearer ${token}` } });
+      const response = await fetch(`/api/attendance-payroll?month=${month}&scope=${scope}&program=${program}`, { cache: 'no-store', headers: { Authorization: `Bearer ${token}` } });
       const body = await response.json().catch(() => ({}));
       if (requestId !== requestSequence.current) return;
       if (!response.ok || body.ok === false) throw new Error(body.error || '給与集計を取得できませんでした。');
-      if (body.month !== month || body.scope !== scope) throw new Error('選択月と異なる集計結果を受信しました。再読み込みしてください。');
+      if (body.month !== month || body.scope !== scope || body.program !== program) throw new Error('選択条件と異なる集計結果を受信しました。再読み込みしてください。');
       setData(body);
+      setPremiumRules(Array.isArray(body.premium_rules) ? body.premium_rules : []);
+      setIndividualRateMappings(Array.isArray(body.individual_rate_mappings) ? body.individual_rate_mappings : []);
     } catch (loadError) {
       if (requestId === requestSequence.current) setError(loadError instanceof Error ? loadError.message : '給与集計を取得できませんでした。');
     } finally {
       if (requestId === requestSequence.current) setLoading(false);
     }
-  }, [month, scope, user]);
+  }, [month, program, scope, user]);
 
   useEffect(() => { load(); }, [load]);
 
-  const importCsv = async (kind: 'rates' | 'regular', file: File) => {
+  const importCsv = async (kind: 'rates' | 'regular' | 'school_distribution' | 'allowances', file: File) => {
     if (!user) return;
     const extension = file.name.toLowerCase().split('.').pop();
-    const valid = kind === 'regular' ? extension === 'csv' || extension === 'xlsx' : extension === 'csv' || extension === 'xls';
+    const valid = kind === 'regular' ? extension === 'csv' || extension === 'xlsx' : kind === 'rates' ? extension === 'csv' || extension === 'xls' : kind === 'allowances' ? extension === 'xls' : extension === 'csv';
     if (!valid) {
-      setError(kind === 'regular' ? '通常勤怠はCSVまたは.xlsx形式を選択してください。' : '単価マスターはCSVまたは原本.xlsを選択してください。');
+      setError(kind === 'regular' ? '旧システム勤怠はCSVまたは.xlsx形式を選択してください。' : kind === 'rates' ? '単価マスターはCSVまたは原本.xlsを選択してください。' : kind === 'allowances' ? 'Q042の.xlsファイルを選択してください。' : '校前配布申請はCSVを選択してください。');
       return;
     }
     setImporting(kind);
     setError('');
-    let temporaryStoragePath = '';
+    let legacyChunkUploadId = '';
+    let legacyChunkCount = 0;
     try {
       const token = await user.getIdToken();
       const isXlsx = extension === 'xlsx';
-      const isLegacyRateXls = kind === 'rates' && extension === 'xls';
-      if (isLegacyRateXls) {
-        const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_').replace(/\.xls$/i, '.xls');
-        temporaryStoragePath = `attendance_imports/${user.uid}/${Date.now()}_${crypto.randomUUID()}_${safeName}`;
-        await uploadBytes(ref(storage, temporaryStoragePath), file, { contentType: 'application/vnd.ms-excel' });
+      const isLegacyRateXls = (kind === 'rates' || kind === 'allowances') && extension === 'xls';
+      if (isXlsx && file.size > MAX_XLSX_BYTES) throw new Error('勤怠Excelは6MB以下にしてください。');
+      if (isLegacyRateXls && file.size > MAX_LEGACY_XLS_BYTES) throw new Error('旧Excelファイルは12MB以下にしてください。');
+      const directLegacyXls = isLegacyRateXls && file.size <= MAX_DIRECT_XLS_BYTES;
+      const chunkedLegacyXls = isLegacyRateXls && !directLegacyXls;
+      const usesChunkUpload = isXlsx || chunkedLegacyXls;
+      if (usesChunkUpload) {
+        legacyChunkUploadId = crypto.randomUUID();
+        legacyChunkCount = Math.ceil(file.size / LEGACY_XLS_CHUNK_BYTES);
+        for (let index = 0; index < legacyChunkCount; index += 1) {
+          const chunkResponse = await fetch('/api/attendance-payroll', {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': 'application/octet-stream',
+              'X-Attendance-Upload-Id': legacyChunkUploadId,
+              'X-Attendance-Chunk-Index': String(index),
+              'X-Attendance-Chunk-Count': String(legacyChunkCount),
+            },
+            body: file.slice(index * LEGACY_XLS_CHUNK_BYTES, (index + 1) * LEGACY_XLS_CHUNK_BYTES),
+          });
+          const chunkBody = await chunkResponse.json().catch(() => ({}));
+          if (!chunkResponse.ok || chunkBody.ok === false) throw new Error(chunkBody.error || 'Excelファイルの送信に失敗しました。');
+        }
       }
-      const requestBody = isXlsx ? new FormData() : null;
-      if (requestBody) {
-        requestBody.append('action', 'import_regular_attendance');
-        requestBody.append('source_name', file.name);
-        requestBody.append('replace_month', 'true');
-        requestBody.append('file', file);
+      const directForm = directLegacyXls ? new FormData() : null;
+      if (directForm) {
+        directForm.append('action', kind === 'allowances' ? 'import_allowance_query' : 'import_rate_master');
+        directForm.append('source_name', file.name);
+        directForm.append('file', file);
       }
       const response = await fetch('/api/attendance-payroll', {
         method: 'POST',
-        headers: isXlsx ? { Authorization: `Bearer ${token}` } : { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: requestBody || JSON.stringify(isLegacyRateXls ? {
-          action: 'import_rate_master', source_name: file.name, storage_path: temporaryStoragePath,
+        headers: directForm ? { Authorization: `Bearer ${token}` } : { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: directForm || JSON.stringify(usesChunkUpload ? {
+          action: isXlsx ? 'import_regular_attendance' : kind === 'allowances' ? 'import_allowance_query' : 'import_rate_master',
+          source_name: file.name,
+          chunk_upload_id: legacyChunkUploadId,
+          chunk_count: legacyChunkCount,
+          replace_month: true,
         } : {
-          action: kind === 'rates' ? 'import_rate_master' : 'import_regular_attendance',
+          action: kind === 'rates' ? 'import_rate_master' : kind === 'school_distribution' ? 'import_school_distribution' : 'import_regular_attendance',
           csv_text: await readCsvText(file), source_name: file.name, replace_month: true,
         }),
       });
       const body = await response.json().catch(() => ({}));
       if (!response.ok || body.ok === false) {
+        if (response.status === 504) {
+          throw new Error('旧システム勤怠の保存が制限時間を超えました。再度実行せず、発生時刻を管理者にお知らせください。');
+        }
         const details = Array.isArray(body.errors) ? `\n${body.errors.slice(0, 8).join('\n')}` : '';
         throw new Error(`${body.error || '取込に失敗しました。'}${details}`);
       }
-      alert(`${body.imported}件を取り込みました。`);
-      await load();
+      const importWarnings = Array.isArray(body.warnings) ? body.warnings.map(String).slice(0, 5) : [];
+      const importedMonth = /^\d{4}-\d{2}$/.test(String(body.month || '')) ? String(body.month) : '';
+      alert(`${body.imported}件を取り込みました。${importedMonth ? ` 対象月: ${importedMonth}` : ''}${body.skipped ? `\n${body.skipped}件の注意事項があります。${importWarnings.length ? `\n${importWarnings.join('\n')}` : ''}` : ''}${importedMonth && importedMonth !== month ? `\n画面を${importedMonth}の集計へ切り替えます。` : ''}`);
+      if (importedMonth && importedMonth !== month) {
+        setMonth(importedMonth);
+      } else {
+        await load();
+      }
     } catch (importError) {
       setError(importError instanceof Error ? importError.message : '取込に失敗しました。');
     } finally {
-      if (temporaryStoragePath) await deleteObject(ref(storage, temporaryStoragePath)).catch(() => undefined);
+      if (legacyChunkUploadId) {
+        const token = await user.getIdToken().catch(() => '');
+        if (token) await fetch('/api/attendance-payroll', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ action: 'delete_upload_chunks', chunk_upload_id: legacyChunkUploadId, chunk_count: legacyChunkCount }),
+        }).catch(() => undefined);
+      }
       setImporting('');
     }
+  };
+
+  const savePremiumRules = async () => {
+    if (!user || !premiumRules.length) return;
+    setPremiumRulesSaving(true);
+    setError('');
+    try {
+      const token = await user.getIdToken();
+      const response = await fetch('/api/attendance-payroll', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action: 'save_premium_rules', csv_text: JSON.stringify(premiumRules) }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || body.ok === false) throw new Error(body.error || '割増計算式を保存できませんでした。');
+      await load();
+    } catch (saveError) { setError(saveError instanceof Error ? saveError.message : '割増計算式を保存できませんでした。'); }
+    finally { setPremiumRulesSaving(false); }
+  };
+
+  const saveIndividualRateMappings = async () => {
+    if (!user || !individualRateMappings.length) return;
+    setIndividualRateMappingsSaving(true);
+    setError('');
+    try {
+      const token = await user.getIdToken();
+      const response = await fetch('/api/attendance-payroll', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action: 'save_individual_rate_mappings', csv_text: JSON.stringify(individualRateMappings) }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || body.ok === false) throw new Error(body.error || '個別指導の単価紐付けを保存できませんでした。');
+      await load();
+    } catch (saveError) { setError(saveError instanceof Error ? saveError.message : '個別指導の単価紐付けを保存できませんでした。'); }
+    finally { setIndividualRateMappingsSaving(false); }
+  };
+
+  const saveAdjustment = async () => {
+    if (!user) return;
+    setAdjustmentSaving(true);
+    setError('');
+    try {
+      const token = await user.getIdToken();
+      const response = await fetch('/api/attendance-payroll', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action: 'save_adjustment', csv_text: JSON.stringify({ ...adjustment, month, amount: Number(adjustment.amount) }) }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || body.ok === false) throw new Error(body.error || '手当を保存できませんでした。');
+      setAdjustment({ person_code: '', person_name: '', label: '', category: 'special_4', amount: '', reason: '' });
+      await load();
+    } catch (saveError) { setError(saveError instanceof Error ? saveError.message : '手当を保存できませんでした。'); }
+    finally { setAdjustmentSaving(false); }
+  };
+
+  const deleteAdjustment = async (id: string) => {
+    if (!user || !confirm('この追加手当を削除しますか？')) return;
+    const token = await user.getIdToken();
+    const response = await fetch('/api/attendance-payroll', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ action: 'delete_adjustment', csv_text: JSON.stringify({ id }) }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || body.ok === false) return setError(body.error || '手当を削除できませんでした。');
+    await load();
   };
 
   const exportSummary = () => {
     if (!viewData?.rows.length) return;
     const header = [
       '個人コード', '氏名', '勤務日数', '総時間',
+      '集団授業時間', '集団授業支給額', '個別授業時間', '個別授業支給額',
       ...Object.values(CATEGORY_LABELS).flatMap(label => [`${label}時間`, `${label}単価`, `${label}手当回数`, `${label}支給額`]),
       '交通費', '支給額計', 'グロス', 'アラート数', '単価適用日',
     ];
     const rows = viewData.rows.map(row => [
       row.person_code, row.person_name, row.work_days, hours(row.total_minutes),
+      hours(lessonBreakdown(row).group.minutes), lessonBreakdown(row).group.amount,
+      hours(lessonBreakdown(row).individual.minutes), lessonBreakdown(row).individual.amount,
       ...Object.keys(CATEGORY_LABELS).flatMap(key => {
         const category = row.categories[key as CategoryKey];
         return [hours(category.minutes), category.hourly_rate, category.allowance_count, category.amount];
       }),
       row.transportation_amount, row.total_payment, row.gross_payment, row.alert_count, row.rate_effective_from || '',
     ]);
-    downloadCsv(`勤怠給与集計_${viewData.month}_${viewData.scope}.csv`, [header, ...rows]);
+    downloadCsv(`職員別給与一覧_${viewData.month.replace('-', '')}_${PROGRAM_LABELS[viewData.program]}_${viewData.scope}.csv`, [header, ...rows]);
   };
 
   const exportAlerts = () => {
@@ -212,9 +369,41 @@ export default function AttendancePayrollPage() {
     ]);
   };
 
+  const exportScienceSocialWorkSummary = () => {
+    if (!viewData?.science_social_work_summary?.length) return;
+    downloadCsv(`オンライン理社講座_職員別勤務集計_${viewData.month.replace('-', '')}.csv`, [
+      [
+        '対象月', '個人コード', '氏名', '勤務日数合計（旧勤怠重複除外後）', '勤務日（旧勤怠重複除外後）',
+        '勤務時間合計（旧勤怠重複除外後）', '深夜時間（22:00〜5:00・内数）',
+        '除外前勤務日数', '旧勤怠重複で除外した日数', '旧勤怠重複で除外した日',
+      ],
+      ...viewData.science_social_work_summary.map(row => [
+        viewData.month,
+        row.person_code,
+        row.person_name,
+        row.work_days,
+        row.work_dates.join(' / '),
+        hours(row.total_minutes),
+        hours(row.late_night_minutes),
+        row.before_exclusion_work_days,
+        row.excluded_duplicate_days,
+        row.excluded_duplicate_dates.join(' / '),
+      ]),
+    ]);
+  };
+
   const exportOriginalWorkbook = () => {
     if (!viewData?.rows.length) return;
-    downloadExcelHtml(`突破ゼミ給与_${viewData.month}_原本形式.xls`, buildOriginalPayrollHtml(viewData.month, viewData.rows));
+    downloadExcelHtml(`${PROGRAM_LABELS[viewData.program]}給与_${viewData.month}_原本形式.xls`, buildOriginalPayrollHtml(viewData.month, viewData.rows));
+  };
+
+  const exportSelected = async () => {
+    if (outputFormat === 'science_social_work') return exportScienceSocialWorkSummary();
+    if (!viewData?.rows.length) return;
+    if (outputFormat === 'summary') return exportSummary();
+    if (outputFormat === 'original') return exportOriginalWorkbook();
+    const blob = await buildQ141PayrollWorkbook(viewData.month, viewData.rows);
+    downloadBlob(`給与計算_TP取込_照合_${viewData.month.replace('-', '')}_${PROGRAM_LABELS[viewData.program]}.xlsx`, blob);
   };
 
   const monthAlerts = useMemo(() => (viewData?.alerts || []).filter(alert => !alert.date || alert.date.startsWith(month)), [month, viewData?.alerts]);
@@ -232,15 +421,19 @@ export default function AttendancePayrollPage() {
           <div className="flex items-center gap-3">
             <Link href="/master/attendance" className="grid h-11 w-11 place-items-center rounded-full border border-slate-200 bg-white text-slate-500 shadow-sm"><ArrowLeft size={19} /></Link>
             <div>
-              <h1 className="flex items-center gap-2 text-2xl font-black"><Calculator className="text-indigo-600" /> 準専任・給与自動計算</h1>
-              <p className="mt-1 text-sm font-bold text-slate-500">実績、最新単価、通常勤怠を照合し、支給額と不整合を算出します。</p>
+              <h1 className="flex items-center gap-2 text-2xl font-black"><Calculator className="text-indigo-600" /> 勤怠・給与統合集計</h1>
+              <p className="mt-1 text-sm font-bold text-slate-500">新システム、旧システム勤怠、校前配布、追加手当を個人コードで合算します。</p>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <input type="month" value={month} onChange={event => setMonth(event.target.value)} className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-black" />
-            <select value={scope} onChange={event => setScope(event.target.value as 'breakthrough' | 'all')} className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-black">
-              <option value="breakthrough">突破ゼミのみ</option>
-              <option value="all">全勤怠</option>
+            <select value={scope} onChange={event => setScope(event.target.value as IntegratedPayrollScope)} className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-black">
+              <option value="combined">旧＋新を合算</option>
+              <option value="external">旧システム勤怠のみ</option>
+              <option value="system">新システム勤怠のみ</option>
+            </select>
+            <select value={program} onChange={event => setProgram(event.target.value as AttendanceProgramFilter)} className="rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-black text-indigo-900" aria-label="勤務区分">
+              {(Object.keys(PROGRAM_LABELS) as AttendanceProgramFilter[]).map(value => <option key={value} value={value}>{PROGRAM_LABELS[value]}</option>)}
             </select>
             <button onClick={load} disabled={loading} className="grid h-10 w-10 place-items-center rounded-xl bg-slate-900 text-white disabled:opacity-50"><RefreshCw size={17} className={loading ? 'animate-spin' : ''} /></button>
           </div>
@@ -274,7 +467,7 @@ export default function AttendancePayrollPage() {
               </div>
             ))}
           </div>
-          <p className="whitespace-normal break-words border-t border-slate-100 px-5 py-3 text-xs font-bold leading-relaxed text-slate-500">「面接」は勤怠で「サブ（面接）」を選択してください。給与明細・集計表では「サブ」として表示されます。</p>
+          <p className="whitespace-normal break-words border-t border-slate-100 px-5 py-3 text-xs font-bold leading-relaxed text-slate-500">サポート業務は勤怠で「サブ（サポート）」を選択してください。給与明細・集計表では「サブ」として表示されます。</p>
         </details>
 
         <section className="mb-6 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -287,30 +480,90 @@ export default function AttendancePayrollPage() {
           </button>
         </section>
 
-        <section className="mb-6 grid gap-4 lg:grid-cols-2">
-          <ImportCard title="単価マスター" description={`登録済み ${viewData?.imports.rate_master_rows || 0}件。授業はEDIC授業_TANKA、事務は事務_TANKA、サブ（面接）はサブスタッフ_TANKAを使用します。`} kind="rates" busy={importing === 'rates'} onImport={importCsv} />
-          <ImportCard title="通常勤怠データ" description={`選択月 ${viewData?.imports.regular_attendance_rows || 0}件。.xlsxは「勤務日・職員番号・職員氏名・実働開始・実働終了」を自動認識し、休憩行を除外します。同じ月を再取込すると既存データを置換します。`} kind="regular" busy={importing === 'regular'} onImport={importCsv} />
+        <section className="mb-6 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+          <div className="border-b border-slate-100 p-5"><h2 className="flex items-center gap-2 text-lg font-black"><FileUp size={19} className="text-indigo-600" /> 給与計算データの取込</h2><p className="mt-1 text-xs font-bold leading-relaxed text-slate-500">上から順に取り込めば計算できます。同じ月を再取込すると、その月のデータを安全に入れ替えます。</p></div>
+          <div className="grid gap-4 p-5 lg:grid-cols-2">
+            <ImportCard step="1・必須" title="単価マスターを更新" description={`登録済み ${viewData?.imports.rate_master_rows || 0}件。ここに存在し、選択月に有効な職員だけを給与集計へ表示します。`} kind="rates" busy={importing === 'rates'} onImport={importCsv} />
+            <ImportCard step="2・必須" title="旧システム勤怠を更新" description={`選択月 ${viewData?.imports.regular_attendance_rows || 0}件。講座・作業・実働分から通常給と割増給を自動計算します。`} kind="regular" busy={importing === 'regular'} onImport={importCsv} />
+          </div>
+          <details className="group border-t border-slate-100">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 bg-slate-50 px-5 py-4"><div><p className="font-black text-slate-800">3・必要な場合だけ　補助手当データ</p><p className="mt-1 text-xs font-bold text-slate-500">校前配布・理社講座・交通費などがある月に使用します。</p></div><ArrowDown size={17} className="transition-transform group-open:rotate-180" /></summary>
+            <div className="grid gap-4 p-5 lg:grid-cols-2">
+              <ImportCard step="3-A・任意" title="校前配布申請" description={`選択月 ${viewData?.imports.school_distribution_rows || 0}件。CSVの手当計と交通費計を個人コードで合算します。`} kind="school_distribution" busy={importing === 'school_distribution'} onImport={importCsv} />
+              <ImportCard step="3-B・任意" title="旧資料の補助手当（Q042）" description={`登録済み ${viewData?.imports.allowance_query_rows || 0}名。校前・理社・移動費を更新します。割増給は勤怠時間から自動計算するため取り込みません。`} kind="allowances" busy={importing === 'allowances'} onImport={importCsv} />
+            </div>
+          </details>
         </section>
+
+        <details className="group mb-6 overflow-hidden rounded-2xl border border-sky-200 bg-white shadow-sm">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 bg-sky-50 px-5 py-4"><div><h2 className="flex items-center gap-2 font-black text-sky-950"><Settings2 size={18} /> 個別指導の単価紐付け</h2><p className="mt-1 text-xs font-bold text-sky-700">個別指導の勤務区分ごとに、単価マスターのどの列を使用するか設定します。</p></div><span className="inline-flex items-center gap-1 text-xs font-black text-sky-800"><span className="group-open:hidden">設定する</span><span className="hidden group-open:inline">閉じる</span><ArrowDown size={16} className="transition-transform group-open:rotate-180" /></span></summary>
+          <div className="grid gap-3 border-t border-sky-100 p-5 md:grid-cols-2 xl:grid-cols-3">
+            {individualRateMappings.map((mapping, index) => <label key={mapping.attendance_key} className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <span className="block text-xs font-black text-slate-700">{mapping.attendance_label}</span>
+              <span className="my-2 block text-center text-xs font-black text-slate-300">↓ 使用する単価</span>
+              <select value={mapping.rate_item_key} onChange={event => setIndividualRateMappings(items => items.map((item, itemIndex) => itemIndex === index ? { ...item, rate_item_key: event.target.value as IndividualRateMapping['rate_item_key'] } : item))} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm font-black text-sky-800">
+                <option value="individual_1">個別授業1_TANKA</option><option value="individual_2">個別授業2_TANKA</option><option value="individual_3">個別授業3_TANKA</option><option value="individual_4">個別授業4_TANKA</option><option value="individual_5">個別授業5_TANKA</option><option value="individual_6">個別授業6_TANKA</option>
+              </select>
+            </label>)}
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 p-4"><p className="text-xs font-bold leading-relaxed text-slate-500">初期設定：通常1対1〜1対3は単価1〜3、中受・高1対1〜1対3は単価4〜6です。</p><button onClick={() => void saveIndividualRateMappings()} disabled={individualRateMappingsSaving || !individualRateMappings.length} className="inline-flex items-center gap-2 rounded-xl bg-sky-700 px-4 py-2.5 text-xs font-black text-white disabled:opacity-40">{individualRateMappingsSaving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />} 紐付けを保存して再計算</button></div>
+        </details>
+
+        <details className="group mb-6 overflow-hidden rounded-2xl border border-violet-200 bg-white shadow-sm">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 bg-violet-50 px-5 py-4"><div><h2 className="flex items-center gap-2 font-black text-violet-950"><Settings2 size={18} /> 割増計算式</h2><p className="mt-1 text-xs font-bold text-violet-700">打刻の22:00〜翌5:00に重なる時間を自動抽出し、「基準単価 × 倍率 ＋ 1時間あたり固定額」で計算します。</p></div><span className="inline-flex items-center gap-1 text-xs font-black text-violet-800"><span className="group-open:hidden">設定する</span><span className="hidden group-open:inline">閉じる</span><ArrowDown size={16} className="transition-transform group-open:rotate-180" /></span></summary>
+          <div className="overflow-x-auto border-t border-violet-100">
+            <table className="min-w-[760px] w-full text-left text-xs">
+              <thead className="bg-slate-50 text-slate-500"><tr><th className="px-4 py-3 font-black">割増区分</th><th className="px-4 py-3 font-black">基準単価</th><th className="px-4 py-3 font-black">倍率</th><th className="px-4 py-3 font-black">固定加算／時</th><th className="px-4 py-3 font-black">端数処理</th><th className="px-4 py-3 font-black">使用</th></tr></thead>
+              <tbody className="divide-y divide-slate-100">{premiumRules.map((rule, index) => <tr key={rule.key}>
+                <td className="px-4 py-3 font-black">{rule.label}</td>
+                <td className="px-4 py-3 font-bold text-slate-500">{rule.base_key === 'training_1' ? '通常研修' : rule.base_key === 'office' ? '通常事務' : '通常付随'}</td>
+                <td className="px-4 py-3"><div className="flex items-center gap-2"><input type="number" min="0" max="10" step="0.01" value={rule.multiplier} onChange={event => setPremiumRules(items => items.map((item, itemIndex) => itemIndex === index ? { ...item, multiplier: Number(event.target.value) } : item))} className="w-24 rounded-lg border border-slate-200 px-3 py-2 font-mono font-black" /><span className="font-bold text-slate-400">倍</span></div></td>
+                <td className="px-4 py-3"><div className="flex items-center gap-2"><input type="number" min="-100000" max="100000" step="1" value={rule.fixed_hourly_addition} onChange={event => setPremiumRules(items => items.map((item, itemIndex) => itemIndex === index ? { ...item, fixed_hourly_addition: Number(event.target.value) } : item))} className="w-28 rounded-lg border border-slate-200 px-3 py-2 font-mono font-black" /><span className="font-bold text-slate-400">円</span></div></td>
+                <td className="px-4 py-3 font-bold text-slate-700">切り上げ（固定）</td>
+                <td className="px-4 py-3"><input type="checkbox" checked={rule.enabled} onChange={event => setPremiumRules(items => items.map((item, itemIndex) => itemIndex === index ? { ...item, enabled: event.target.checked } : item))} className="h-5 w-5 accent-violet-600" /></td>
+              </tr>)}</tbody>
+            </table>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 p-4"><p className="text-xs font-bold text-slate-500">例：事務単価1,200円 × 1.25倍 ＋ 0円 ＝ 割増単価1,500円／時</p><button onClick={() => void savePremiumRules()} disabled={premiumRulesSaving || !premiumRules.length} className="inline-flex items-center gap-2 rounded-xl bg-violet-700 px-4 py-2.5 text-xs font-black text-white disabled:opacity-40">{premiumRulesSaving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />} 計算式を保存して再計算</button></div>
+        </details>
+
+        <details className="group mb-6 overflow-hidden rounded-2xl border border-amber-200 bg-white shadow-sm">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 bg-amber-50 px-5 py-4">
+            <div><h2 className="font-black text-amber-950">個別追加手当</h2><p className="mt-1 text-xs font-bold text-amber-700">自動計算できない紹介礼金・特別勤務・交通費だけを入力します。割増給は上の計算式で自動計算されます。</p></div>
+            <span className="text-xs font-black text-amber-800"><span className="group-open:hidden">入力する</span><span className="hidden group-open:inline">閉じる</span></span>
+          </summary>
+          <div className="grid gap-3 border-t border-amber-100 p-5 md:grid-cols-2 xl:grid-cols-6">
+            <input value={adjustment.person_code} onChange={event => setAdjustment(prev => ({ ...prev, person_code: event.target.value }))} placeholder="個人コード" className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-bold" />
+            <input value={adjustment.person_name} onChange={event => setAdjustment(prev => ({ ...prev, person_name: event.target.value }))} placeholder="氏名" className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-bold" />
+            <input value={adjustment.label} onChange={event => setAdjustment(prev => ({ ...prev, label: event.target.value }))} placeholder="手当名（例：紹介礼金）" className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-bold" />
+            <select value={adjustment.category} onChange={event => setAdjustment(prev => ({ ...prev, category: event.target.value }))} className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-bold"><option value="special_4">その他4（紹介礼金等）</option><option value="special_1">特別勤務1</option><option value="special_2">その他2（校前等）</option><option value="special_3">その他3（理社等）</option><option value="transportation">非課税交通費</option></select>
+            <input type="number" value={adjustment.amount} onChange={event => setAdjustment(prev => ({ ...prev, amount: event.target.value }))} placeholder="金額" className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-bold" />
+            <button onClick={saveAdjustment} disabled={adjustmentSaving} className="inline-flex items-center justify-center gap-2 rounded-xl bg-amber-500 px-4 py-2 text-sm font-black text-amber-950 disabled:opacity-50">{adjustmentSaving ? <Loader2 size={16} className="animate-spin" /> : <PlusCircle size={16} />} 追加</button>
+            <input value={adjustment.reason} onChange={event => setAdjustment(prev => ({ ...prev, reason: event.target.value }))} placeholder="理由・備考" className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-bold md:col-span-2 xl:col-span-6" />
+          </div>
+          {!!viewData?.adjustments.length && <div className="border-t border-slate-100 p-4"><div className="flex flex-wrap gap-2">{viewData.adjustments.map(item => <span key={item.id} className="inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-2 text-xs font-black text-slate-700"><span>{item.person_code || item.person_name}・{item.label}・{yen.format(item.amount)}</span><button onClick={() => item.id && deleteAdjustment(item.id)} aria-label="削除" className="text-rose-600"><Trash2 size={14} /></button></span>)}</div></div>}
+        </details>
 
         <section className="mb-6 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 p-4">
-            <div><h2 className="flex items-center gap-2 text-lg font-black"><Wallet size={19} className="text-indigo-600" /> 月次支給グロス</h2><p className="mt-1 text-xs font-bold text-slate-400">勤務時間が0分の対象者は除外されています。</p></div>
-            <div className="flex flex-wrap gap-2"><button onClick={exportOriginalWorkbook} disabled={!viewData?.rows.length} className="flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-black text-white disabled:opacity-40"><Download size={15} /> 原本形式Excel</button><button onClick={exportSummary} disabled={!viewData?.rows.length} className="flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-black text-white disabled:opacity-40"><Download size={15} /> CSV出力</button></div>
+            <div><h2 className="flex items-center gap-2 text-lg font-black"><Wallet size={19} className="text-indigo-600" /> 月次支給グロス</h2><p className="mt-1 text-xs font-bold text-slate-400">単価マスター登録者のうち、勤務時間または追加支給がある職員だけを表示します。{viewData?.totals.excluded_without_rate ? ` 単価未登録の${viewData.totals.excluded_without_rate}名は対象外です。` : ''}</p></div>
+            <div className="flex flex-wrap gap-2"><select value={outputFormat} onChange={event => setOutputFormat(event.target.value as typeof outputFormat)} className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-black"><option value="q141">給与計算・TP取込・照合（Excel）</option><option value="summary">職員別給与一覧（CSV）</option><option value="science_social_work">オンライン理社講座・職員別勤務集計（CSV）</option><option value="original">突破ゼミ原本形式（Excel）</option></select><button onClick={() => void exportSelected()} disabled={outputFormat === 'science_social_work' ? !viewData?.science_social_work_summary?.length : !viewData?.rows.length} className="flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-black text-white disabled:opacity-40"><Download size={15} /> 選択形式で出力</button></div>
           </div>
           <div className="overflow-x-auto">
             <table className="min-w-[1200px] w-full text-left text-xs">
-              <thead className="bg-slate-100 text-slate-600"><tr>{['個人コード / 氏名', '日数 / 総時間', '授業', '事務', 'サブ', 'その他', '交通費', '支給額計', 'グロス', '状態'].map(label => <th key={label} className="whitespace-nowrap px-3 py-3 font-black">{label}</th>)}</tr></thead>
+              <thead className="bg-slate-100 text-slate-600"><tr>{['個人コード / 氏名', '日数 / 総時間', '授業（集団・個別）', '事務', 'サブ', 'その他', '割増（内数）', '交通費', '支給額計', 'グロス', '状態'].map(label => <th key={label} className="whitespace-nowrap px-3 py-3 font-black">{label}</th>)}</tr></thead>
               <tbody className="divide-y divide-slate-100">
                 {viewData?.rows.map(row => <tr key={row.teacher_id || `${row.person_code}_${row.person_name}`} className={row.alert_count ? 'bg-rose-50/70' : ''}>
-                  <td className={`px-3 py-3 ${row.alert_count ? 'border-l-4 border-l-rose-500' : ''}`}><p className="font-mono text-[10px] text-slate-400">{row.person_code || 'コード未設定'}</p><p className="mt-1 font-black">{row.person_name}</p><p className="mt-1 text-[10px] text-slate-400">単価: {row.rate_effective_from || '未登録'}</p></td>
+                  <td className={`px-3 py-3 ${row.alert_count ? 'border-l-4 border-l-rose-500' : ''}`}><p className="font-mono text-[10px] text-slate-400">{row.person_code || 'コード未設定'}</p><p className="mt-1 font-black">{row.person_name}</p><p className="mt-1 text-[10px] text-slate-400">単価: {row.rate_effective_from || '未登録'}</p><p className="mt-1 text-[10px] font-bold text-indigo-500">新システム {yen.format(row.source_amounts?.system || 0)} / 旧システム {yen.format(row.source_amounts?.external || 0)}</p></td>
                   <td className="px-3 py-3 font-black">{row.work_days}日<br /><span className="font-mono text-indigo-600">{hours(row.total_minutes)}</span></td>
-                  {(Object.keys(CATEGORY_LABELS) as CategoryKey[]).map(key => <td key={key} className="px-3 py-3"><p className="font-mono font-black">{hours(row.categories[key].minutes)}</p><p className="mt-1 text-[10px] text-slate-400">@{row.categories[key].hourly_rate.toLocaleString()} / 手当{row.categories[key].allowance_count}回</p><p className="mt-1 font-black text-slate-700">{yen.format(row.categories[key].amount)}</p></td>)}
+                  {(Object.keys(CATEGORY_LABELS) as CategoryKey[]).map(key => key === 'lesson' ? <LessonBreakdownCell key={key} row={row} /> : key === 'office' ? <OfficeBreakdownCell key={key} row={row} /> : <td key={key} className="px-3 py-3"><p className="font-mono font-black">{hours(row.categories[key].minutes)}</p><p className="mt-1 text-[10px] text-slate-400">@{row.categories[key].hourly_rate.toLocaleString()} / 手当{row.categories[key].allowance_count}回</p><p className="mt-1 font-black text-slate-700">{yen.format(row.categories[key].amount)}</p></td>)}
+                  <td className="bg-violet-50/60 px-3 py-3"><p className="font-mono font-black text-violet-800">{hours(premiumSummary(row).minutes)}</p><p className="mt-1 font-black text-violet-700">{yen.format(premiumSummary(row).amount)}</p></td>
                   <td className="px-3 py-3 font-black">{yen.format(row.transportation_amount)}</td>
                   <td className="px-3 py-3 font-black text-indigo-700">{yen.format(row.total_payment)}</td>
                   <td className="px-3 py-3 text-sm font-black text-emerald-700">{yen.format(row.gross_payment)}</td>
                   <td className="px-3 py-3">{row.alert_count ? <button type="button" onClick={scrollToAlerts} className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-2 font-black text-white shadow-sm hover:bg-rose-700"><AlertCircle size={14} /> 要確認 {row.alert_count}件</button> : <span className="inline-flex items-center gap-1 text-emerald-600"><CheckCircle2 size={14} /> OK</span>}</td>
                 </tr>)}
-                {!loading && !viewData?.rows.length && <tr><td colSpan={10} className="p-10 text-center font-bold text-slate-400">対象月の勤務実績がありません。</td></tr>}
+                {!loading && !viewData?.rows.length && <tr><td colSpan={11} className="p-10 text-center font-bold text-slate-400">単価マスター登録者の対象月勤務実績がありません。</td></tr>}
               </tbody>
             </table>
           </div>
@@ -332,6 +585,21 @@ export default function AttendancePayrollPage() {
   );
 }
 
+function LessonBreakdownCell({ row }: { row: PayrollRow }) {
+  const breakdown = lessonBreakdown(row);
+  return <td className="min-w-52 px-3 py-3"><div className="flex items-center justify-between gap-3"><span className="text-[10px] font-black text-slate-400">授業合計</span><span className="font-mono font-black">{hours(row.categories.lesson.minutes)} / {yen.format(row.categories.lesson.amount)}</span></div><div className="mt-2 grid grid-cols-2 gap-2"><div className="rounded-lg bg-indigo-50 p-2"><p className="text-[10px] font-black text-indigo-500">集団授業</p><p className="mt-1 font-mono font-black text-indigo-900">{hours(breakdown.group.minutes)}</p><p className="mt-1 font-black text-indigo-700">{yen.format(breakdown.group.amount)}</p></div><div className="rounded-lg bg-sky-50 p-2"><p className="text-[10px] font-black text-sky-600">個別授業</p><p className="mt-1 font-mono font-black text-sky-950">{hours(breakdown.individual.minutes)}</p><p className="mt-1 font-black text-sky-700">{yen.format(breakdown.individual.amount)}</p></div></div></td>;
+}
+
+function OfficeBreakdownCell({ row }: { row: PayrollRow }) {
+  const breakdown = officeBreakdown(row);
+  const items = [
+    { key: 'normal', label: '通常事務', value: breakdown.normal, tone: 'bg-orange-50 text-orange-900', labelTone: 'text-orange-600' },
+    { key: 'premium1', label: '深夜事務', value: breakdown.premium1, tone: 'bg-violet-50 text-violet-950', labelTone: 'text-violet-600' },
+    { key: 'premium2', label: '深夜事務2', value: breakdown.premium2, tone: 'bg-fuchsia-50 text-fuchsia-950', labelTone: 'text-fuchsia-600' },
+  ].filter(item => item.value.minutes > 0 || item.key === 'normal');
+  return <td className="min-w-56 px-3 py-3"><div className="flex items-center justify-between gap-3"><span className="text-[10px] font-black text-slate-400">事務系合計</span><span className="font-mono font-black">{hours(row.categories.office.minutes)} / {yen.format(row.categories.office.amount)}</span></div><div className="mt-2 space-y-1.5">{items.map(item => <div key={item.key} className={`grid grid-cols-[1fr_auto] items-center gap-x-3 rounded-lg px-2.5 py-2 ${item.tone}`}><p className={`text-[10px] font-black ${item.labelTone}`}>{item.label}</p><p className="text-right font-mono text-[10px] font-black">{hours(item.value.minutes)}</p><p className="text-[10px] font-bold">@{item.value.rate.toLocaleString()}</p><p className="text-right text-[10px] font-black">{yen.format(item.value.amount)}</p></div>)}{breakdown.other.minutes > 0 && <div className="grid grid-cols-[1fr_auto] items-center gap-x-3 rounded-lg bg-slate-50 px-2.5 py-2 text-slate-700"><p className="text-[10px] font-black">研修・メンター等</p><p className="text-right font-mono text-[10px] font-black">{hours(breakdown.other.minutes)}</p><p className="text-[10px] font-bold">区分別単価</p><p className="text-right text-[10px] font-black">{yen.format(breakdown.other.amount)}</p></div>}</div></td>;
+}
+
 function AlertFilterButton({ active, onClick, label, count, tone }: { active: boolean; onClick: () => void; label: string; count: number; tone: 'slate' | 'rose' | 'amber' }) {
   const colors = {
     slate: active ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300 bg-white text-slate-700',
@@ -341,8 +609,9 @@ function AlertFilterButton({ active, onClick, label, count, tone }: { active: bo
   return <button type="button" onClick={onClick} className={`rounded-full border px-3.5 py-2 text-xs font-black shadow-sm transition hover:-translate-y-0.5 ${colors[tone]}`}>{label}<span className={`ml-2 rounded-full px-2 py-0.5 ${active ? 'bg-white/20' : 'bg-slate-100'}`}>{count}</span></button>;
 }
 
-function ImportCard({ title, description, kind, busy, onImport }: { title: string; description: string; kind: 'rates' | 'regular'; busy: boolean; onImport: (kind: 'rates' | 'regular', file: File) => void }) {
+function ImportCard({ step, title, description, kind, busy, onImport }: { step: string; title: string; description: string; kind: 'rates' | 'regular' | 'school_distribution' | 'allowances'; busy: boolean; onImport: (kind: 'rates' | 'regular' | 'school_distribution' | 'allowances', file: File) => void }) {
   const acceptsExcel = kind === 'regular';
-  const accept = acceptsExcel ? '.xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv' : '.xls,.csv,application/vnd.ms-excel,text/csv';
-  return <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-start justify-between gap-3"><div><h2 className="text-base font-black">{title}</h2><p className="mt-2 text-xs font-bold leading-relaxed text-slate-500">{description}</p></div><FileUp className="shrink-0 text-indigo-500" /></div><div className="mt-4 flex flex-wrap gap-2"><label className={`flex cursor-pointer items-center gap-2 rounded-xl bg-slate-900 px-4 py-2 text-xs font-black text-white ${busy ? 'pointer-events-none opacity-50' : ''}`}>{busy ? <Loader2 className="animate-spin" size={14} /> : <FileUp size={14} />} Excel / CSV取込<input type="file" accept={accept} className="hidden" onChange={event => { const file = event.target.files?.[0]; if (file) onImport(kind, file); event.currentTarget.value = ''; }} /></label><button onClick={() => downloadTemplate(kind)} className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-black text-slate-600 hover:bg-slate-50">テンプレート</button></div><p className="mt-3 text-[10px] font-bold text-amber-600">{acceptsExcel ? '通常勤怠はマクロなしの.xlsx（6MB以下）またはCSVに対応しています。' : '原本.xls（12MB以下）の「単価」シート、またはCSV UTF-8に対応しています。'}</p></div>;
+  const accept = acceptsExcel ? '.xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv' : kind === 'rates' ? '.xls,.csv,application/vnd.ms-excel,text/csv' : kind === 'allowances' ? '.xls,application/vnd.ms-excel' : '.csv,text/csv';
+  const format = acceptsExcel ? '.xlsx または .csv' : kind === 'rates' ? '原本 .xls または .csv' : kind === 'allowances' ? 'Q042 .xls' : '.csv';
+  return <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-start justify-between gap-3"><div><span className="inline-flex rounded-full bg-indigo-100 px-2.5 py-1 text-[10px] font-black text-indigo-700">{step}</span><h3 className="mt-2 text-base font-black">{title}</h3><p className="mt-2 text-xs font-bold leading-relaxed text-slate-500">{description}</p></div><FileUp className="shrink-0 text-indigo-500" /></div><div className="mt-4 flex flex-wrap items-center gap-2"><label className={`flex cursor-pointer items-center gap-2 rounded-xl bg-slate-900 px-4 py-2 text-xs font-black text-white ${busy ? 'pointer-events-none opacity-50' : ''}`}>{busy ? <Loader2 className="animate-spin" size={14} /> : <FileUp size={14} />} ファイルを選んで取込<input type="file" accept={accept} className="hidden" onChange={event => { const file = event.target.files?.[0]; if (file) onImport(kind, file); event.currentTarget.value = ''; }} /></label>{(kind === 'rates' || kind === 'regular') && <button onClick={() => downloadTemplate(kind)} className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-black text-slate-600 hover:bg-slate-50">CSV見本</button>}<span className="text-[10px] font-black text-slate-400">対応：{format}</span></div><p className="mt-3 text-[10px] font-bold leading-relaxed text-amber-600">{acceptsExcel ? '「打刻勤怠情報.xlsx」に対応しています。1か月分ずつ取り込み、講座コード・作業コード・実働時間から集団授業、個別授業、事務、サブ、休憩を自動判定します。' : kind === 'rates' ? '原本は「単価」シートを読み取ります。CSVはUTF-8またはShift-JISに対応します。' : kind === 'allowances' ? '割増・紹介礼金の混在列は二重計上防止のため取り込みません。紹介礼金は「個別追加手当」で入力してください。' : '年月、職員コード、手当計、交通費計を自動認識します。'}</p></div>;
 }

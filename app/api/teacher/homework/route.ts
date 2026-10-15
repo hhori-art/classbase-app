@@ -2,11 +2,27 @@ import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, jsonError, requireRole } from '@/lib/server-auth';
+import { jstDateKey, weekdayFromDateKey } from '@/lib/date-key';
 
 export const runtime = 'nodejs';
 
 const scienceKeywords = ['理科', '物理', '化学', '生物', '地学'];
 const socialKeywords = ['社会', '地理', '歴史', '公民'];
+const allowedSubjects = ['理科', '社会'];
+const allowedGrades = ['中1', '中2', '中3'];
+const dateKeyPattern = /^\d{4}-\d{2}-\d{2}$/;
+
+const isSafeStampUrl = (value: unknown) => {
+  if (value == null || value === '') return true;
+  try {
+    const url = new URL(String(value));
+    if (url.protocol !== 'https:') return false;
+    if (url.hostname === 'placehold.co') return true;
+    return url.hostname === 'firebasestorage.googleapis.com' && decodeURIComponent(url.pathname).includes('/o/stamps/');
+  } catch {
+    return false;
+  }
+};
 
 export async function POST(request: NextRequest) {
   try {
@@ -26,6 +42,9 @@ export async function POST(request: NextRequest) {
 
       if (!title || !deadline || !targetGrade) {
         return Response.json({ ok: false, error: 'title/deadline/target_grade is required' }, { status: 400 });
+      }
+      if (title.length > 120 || description.length > 2000 || !allowedSubjects.includes(subject) || !allowedGrades.includes(targetGrade) || !dateKeyPattern.test(deadline) || !weekdayFromDateKey(deadline) || deadline < jstDateKey()) {
+        return Response.json({ ok: false, error: 'invalid homework fields' }, { status: 400 });
       }
 
       const ref = await db.collection('homework_assignments').add({
@@ -49,7 +68,19 @@ export async function POST(request: NextRequest) {
     if (action === 'delete') {
       const assignmentId = String(body.assignment_id || '');
       if (!assignmentId) return Response.json({ ok: false, error: 'assignment_id is required' }, { status: 400 });
-      await db.collection('homework_assignments').doc(assignmentId).delete();
+      const assignmentRef = db.collection('homework_assignments').doc(assignmentId);
+      await db.runTransaction(async transaction => {
+        const assignmentSnapshot = await transaction.get(assignmentRef);
+        if (!assignmentSnapshot.exists) throw new Error('assignment-not-found');
+        const assignment = assignmentSnapshot.data() || {};
+        if (user.role === 'teacher' && String(assignment.created_by || '') !== user.uid) throw new Error('forbidden');
+        transaction.set(assignmentRef, {
+          status: 'archived',
+          archived: true,
+          archived_at: FieldValue.serverTimestamp(),
+          archived_by: user.uid,
+        }, { merge: true });
+      });
       return Response.json({ ok: true });
     }
 
@@ -70,6 +101,9 @@ export async function POST(request: NextRequest) {
 
       const assignment = assignmentSnap.data() || {};
       const submission = submissionSnap.data() || {};
+      if (String(submission.assignment_id || '') !== assignmentId) throw new Error('submission-assignment-mismatch');
+      if (assignment.archived === true || assignment.status === 'archived') throw new Error('assignment-archived');
+      if (!isSafeStampUrl(body.stamp_url)) return Response.json({ ok: false, error: 'invalid stamp URL' }, { status: 400 });
 
       if (status === 'checked') {
         await db.collection('submissions').doc(submissionId).set({

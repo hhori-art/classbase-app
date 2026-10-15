@@ -3,14 +3,17 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { adminBucket, adminDb } from '@/lib/firebase-admin';
 import { getServerUser, isAdminLike, jsonError } from '@/lib/server-auth';
 import { extractPptxText } from '@/lib/pptx';
+import { normalizeGeneratedSlideQuestion, type NormalizedSlideQuestion } from '@/lib/server/slide-questions';
 import OpenAI from 'openai';
 
 export const runtime = 'nodejs';
 
 const PPTX_TYPE = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+const MAX_FILE_BYTES = 25 * 1024 * 1024;
 const PREBUILT_QUESTION_COUNT = 60;
 const QUESTION_CHUNK_CHARS = 9000;
 const SUBJECTS = ['物理', '化学', '生物', '地学', '地理', '歴史', '公民', '漢字', '語句', '古文単語', '文法'];
+const GRADES = new Set(['中1', '中2', '中3']);
 const SUBJECT_ALIASES: Record<string, string[]> = {
   物理: ['物理', '力学', '電流', '電圧', '電気', '音', '光', '運動', '圧力'],
   化学: ['化学', '物質', '気体', '水溶液', '化合', '分解', '酸化', '還元', 'イオン', '原子', '分子'],
@@ -27,6 +30,15 @@ const SUBJECT_ALIASES: Record<string, string[]> = {
 
 function clean(value: FormDataEntryValue | null, fallback = '') {
   return String(value || fallback).trim();
+}
+
+function isZipFile(buffer: ArrayBuffer) {
+  const bytes = new Uint8Array(buffer.slice(0, 4));
+  return bytes.length === 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && (
+    (bytes[2] === 0x03 && bytes[3] === 0x04) ||
+    (bytes[2] === 0x05 && bytes[3] === 0x06) ||
+    (bytes[2] === 0x07 && bytes[3] === 0x08)
+  );
 }
 
 function normalizeText(value: unknown) {
@@ -173,41 +185,43 @@ export async function POST(request: NextRequest) {
       return Response.json({ ok: false, error: 'PPTX形式のファイルを選択してください' }, { status: 400 });
     }
 
+    if (file.size <= 0 || file.size > MAX_FILE_BYTES) {
+      return Response.json({ ok: false, error: 'PPTXファイルは25MB以下にしてください' }, { status: 400 });
+    }
+
     const grade = clean(form.get('grade'), '中1');
     const submittedSubject = clean(form.get('subject'), '理科');
-    const submittedCategory = clean(form.get('category'), 'science');
-    const unitName = clean(form.get('unit_name'), file.name.replace(/\.pptx$/i, ''));
-    const term = clean(form.get('term'));
+    const unitName = clean(form.get('unit_name'), file.name.replace(/\.pptx$/i, '')).slice(0, 120);
+    const term = clean(form.get('term')).slice(0, 40);
     const year = clean(form.get('year'), String(new Date().getFullYear()));
-    const month = clean(form.get('month'));
-    const tags = clean(form.get('tags')).split(/[,\s、]+/).map(v => v.trim()).filter(Boolean);
+    const month = clean(form.get('month')).slice(0, 20);
+    const tags = clean(form.get('tags')).split(/[,\s、]+/).map(v => v.trim().slice(0, 30)).filter(Boolean).slice(0, 20);
     const shouldGenerateQuestions = clean(form.get('generate_questions'), 'true') !== 'false';
 
+    if (!GRADES.has(grade) || !SUBJECTS.includes(submittedSubject) || !unitName) {
+      return Response.json({ ok: false, error: '学年・科目・単元名を確認してください' }, { status: 400 });
+    }
+    if (!/^20\d{2}$/.test(year)) {
+      return Response.json({ ok: false, error: '年度は西暦4桁で入力してください' }, { status: 400 });
+    }
+
     const buffer = await file.arrayBuffer();
+    if (!isZipFile(buffer)) {
+      return Response.json({ ok: false, error: '正しいPPTXファイルを選択してください' }, { status: 400 });
+    }
     const extracted = await extractPptxText(buffer);
     if (!extracted.text) {
       return Response.json({ ok: false, error: 'PPTXから文字情報を読み取れませんでした' }, { status: 400 });
     }
 
     const inferredSubject = inferSubjectFromLeadingText(file.name, extracted.slides[0]?.text, extracted.text.slice(0, 800));
-    const subject = inferredSubject || submittedSubject;
-    const category = inferredSubject ? categoryFromSubject(inferredSubject) : submittedCategory;
+    // The administrator reviews this value before upload. Detection is retained
+    // as metadata only so a filename/content guess cannot silently change it.
+    const subject = submittedSubject;
+    const category = categoryFromSubject(subject);
 
     const db = adminDb();
     const slideRef = db.collection('lesson_slides').doc();
-    const filePath = `lesson_slides/${year}/${slideRef.id}_${safeFileName(file.name)}`;
-
-    await adminBucket().file(filePath).save(Buffer.from(buffer), {
-      metadata: {
-        contentType: file.type || PPTX_TYPE,
-        metadata: {
-          originalName: file.name,
-          uploadedBy: user.uid,
-        },
-      },
-      resumable: false,
-    });
-
     const unitRef = db.collection('learning_units').doc();
     const now = FieldValue.serverTimestamp();
     const shared = {
@@ -220,30 +234,51 @@ export async function POST(request: NextRequest) {
       year,
       month: month || null,
       tags,
+      inferred_subject: inferredSubject || null,
       source_type: 'pptx',
       source_slide_id: slideRef.id,
       updated_at: now,
     };
+    const filePath = `lesson_slides/${year}/${slideRef.id}_${safeFileName(file.name)}`;
 
-    await db.runTransaction(async tx => {
-      tx.set(slideRef, {
-        ...shared,
-        file_name: file.name,
-        file_path: filePath,
-        file_size: file.size,
-        mime_type: file.type || PPTX_TYPE,
-        slide_count: extracted.slide_count,
-        extracted_slides: extracted.slides.slice(0, 80),
-        learning_unit_id: unitRef.id,
-        created_by: user.uid,
-        created_by_role: user.role,
-        created_at: now,
+    const storedFile = adminBucket().file(filePath);
+    let fileSaved = false;
+    try {
+      await storedFile.save(Buffer.from(buffer), {
+        metadata: {
+          contentType: PPTX_TYPE,
+          metadata: {
+            originalName: file.name,
+            uploadedBy: user.uid,
+          },
+        },
+        resumable: false,
       });
-      tx.set(unitRef, {
-        ...shared,
-        created_at: now,
+      fileSaved = true;
+
+      await db.runTransaction(async tx => {
+        tx.set(slideRef, {
+          ...shared,
+          file_name: file.name,
+          file_path: filePath,
+          file_size: file.size,
+          mime_type: PPTX_TYPE,
+          slide_count: extracted.slide_count,
+          extracted_slides: extracted.slides.slice(0, 80),
+          learning_unit_id: unitRef.id,
+          created_by: user.uid,
+          created_by_role: user.role,
+          created_at: now,
+        });
+        tx.set(unitRef, {
+          ...shared,
+          created_at: now,
+        });
       });
-    });
+    } catch (storageOrDatabaseError) {
+      if (fileSaved) await storedFile.delete({ ignoreNotFound: true }).catch(() => undefined);
+      throw storageOrDatabaseError;
+    }
 
     let prebuiltQuestionCount = 0;
     if (shouldGenerateQuestions) {
@@ -256,21 +291,22 @@ export async function POST(request: NextRequest) {
         });
 
         const validQuestions = generated
-          .filter((q: any) => q?.question && q?.correct_answer && Array.isArray(q?.wrong_answers))
+          .map(normalizeGeneratedSlideQuestion)
+          .filter((q): q is NormalizedSlideQuestion => Boolean(q))
           .slice(0, PREBUILT_QUESTION_COUNT);
 
         if (validQuestions.length > 0) {
           let batch = db.batch();
           let batchCount = 0;
-          validQuestions.forEach((q: any, index: number) => {
+          validQuestions.forEach((q, index) => {
             const quizRef = db.collection('quizzes').doc();
             batch.set(quizRef, {
-              question: String(q.question || '').trim(),
-              correct_answer: String(q.correct_answer || '').trim(),
-              wrong_answers: q.wrong_answers.map((ans: unknown) => String(ans || '').trim()).filter(Boolean).slice(0, 3),
-              explanation: String(q.explanation || '').trim(),
-              difficulty: Math.max(1, Math.min(5, Number(q.difficulty || 3))),
-              skill: String(q.skill || '').trim(),
+              question: q.question,
+              correct_answer: q.correct_answer,
+              wrong_answers: q.wrong_answers,
+              explanation: q.explanation,
+              difficulty: q.difficulty,
+              skill: q.skill,
               grade,
               subject,
               unit_name: unitName,

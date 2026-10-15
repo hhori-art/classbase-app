@@ -1,5 +1,7 @@
 import { getCourseSubjectGroup, normalizeCourseText, toAsciiDigits } from '@/lib/course-text';
 import { weekdayFromDateKey } from '@/lib/date-key';
+import { getCourseOptionStableKey } from '@/lib/course-registration-selection';
+import { isTestPrepShift } from '@/lib/class-button-settings';
 
 const normalize = normalizeCourseText;
 
@@ -13,6 +15,30 @@ const normalizeGrade = (value: any) => {
 
 const subjectGroup = (value: any) => {
   return getCourseSubjectGroup(value);
+};
+
+export const fixedPeriodForGradeCourse = (gradeValue: any, courseValue: any): 1 | 2 | null => {
+  const grade = normalizeGrade(gradeValue);
+  const course = normalize(courseValue);
+  if (grade === '中3' && (course.includes('物理') || course.includes('生物'))) return 1;
+  // 登録上は同じ「公民」でも、配置表では枝番ごとに時限が分かれる。
+  if (grade === '中3' && course.includes('公民')) {
+    if (/公民(?:3|4)(?:$|[^0-9])/.test(course)) return 1;
+    if (/公民(?:1|2)(?:$|[^0-9])/.test(course)) return 2;
+  }
+  return null;
+};
+
+export const canonicalPeriodForGradeSubject = (gradeValue: any, subjectValue: any, courseValue: any = ''): 1 | 2 | null => {
+  const grade = normalizeGrade(gradeValue);
+  const subject = subjectGroup(subjectValue);
+  const fixedCoursePeriod = fixedPeriodForGradeCourse(gradeValue, courseValue || subjectValue);
+  if (fixedCoursePeriod) return fixedCoursePeriod;
+  if (grade === '中1' && subject === '社会') return 1;
+  if (grade === '中1' && subject === '理科') return 2;
+  if (grade === '中2' && subject === '理科') return 1;
+  if (grade === '中2' && subject === '社会') return 2;
+  return null;
 };
 
 const isMainShift = (shift: any) => {
@@ -73,16 +99,10 @@ const subjectMatchesShift = (rowSubject: any, shift: any) => {
 
 const fallbackSlotsForClass = (gradeValue: any, subjectValue: any) => {
   const grade = normalizeGrade(gradeValue);
-  const subject = subjectGroup(subjectValue);
-  if (grade === '中3') return ['1時間目', '2時間目'];
-  if (grade === '中1') {
-    if (subject === '社会') return ['1時間目'];
-    if (subject === '理科') return ['2時間目'];
-  }
-  if (grade === '中2') {
-    if (subject === '理科') return ['1時間目'];
-    if (subject === '社会') return ['2時間目'];
-  }
+  // 中3は講師配置の実データから時限を決定するため、推測で補完しない。
+  if (grade === '中3') return [];
+  const canonicalPeriod = canonicalPeriodForGradeSubject(gradeValue, subjectValue);
+  if (canonicalPeriod) return [`${canonicalPeriod}時間目`];
   return [];
 };
 
@@ -104,43 +124,69 @@ const slotFromShift = (shift: any) => {
     if (/^1$/.test(raw) || raw.includes('1限') || raw.includes('1時間目') || raw.includes('1時限') || raw.includes('1コマ')) return '1時間目';
     if (/^2$/.test(raw) || raw.includes('2限') || raw.includes('2時間目') || raw.includes('2時限') || raw.includes('2コマ')) return '2時間目';
   }
+  // 同期元が明示した時限を正とし、固定時間割は時限が欠損した旧データだけに使う。
+  const fixedCoursePeriod = fixedPeriodForGradeCourse(getShiftGrade(shift), getShiftDetail(shift));
+  if (fixedCoursePeriod) return `${fixedCoursePeriod}時間目`;
+  const canonicalPeriod = canonicalPeriodForGradeSubject(
+    getShiftGrade(shift),
+    getShiftSubject(shift) || getShiftDetail(shift),
+    getShiftDetail(shift),
+  );
+  if (canonicalPeriod) return `${canonicalPeriod}時間目`;
   return '';
 };
 
 const hasSheetSource = (shift: any) => Boolean(
   String(shift.source_spreadsheet_id || '').trim() ||
-  String(shift.sync_source || '').trim() ||
-  String(shift.sync_key || '').trim()
+  ['google_sheet', 'google_sheets', 'gas'].includes(String(shift.sync_source || '').trim().toLowerCase())
 );
 
 const preferSheetSyncedShiftsByDatePeriod = (shifts: any[]) => {
-  const groups = new Map<string, any[]>();
-  shifts.forEach(shift => {
-    const key = `${shift.target_date || ''}_${slotFromShift(shift) || ''}`;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key)!.push(shift);
+  // Google配置表同期が1件でもある年度では、登録候補の基準をその同期元へ
+  // 完全に統一する。旧CSV・手動取込を混在させると、同期済み期間の外側や
+  // 誤った別時限の旧配置が講座登録へ復活してしまう。
+  const sheetSynced = shifts.filter(hasSheetSource);
+  return sheetSynced.length > 0 ? sheetSynced : shifts;
+};
+
+const canonicalTermAliases = (options: any[]) => {
+  const termsByLabel = new Map<string, Map<string, number>>();
+  options.forEach(option => {
+    const term = String(option.term || '').trim();
+    const label = normalize(option.term_label || term);
+    if (!term || !label) return;
+    if (!termsByLabel.has(label)) termsByLabel.set(label, new Map());
+    const counts = termsByLabel.get(label)!;
+    counts.set(term, (counts.get(term) || 0) + 1);
   });
-  return Array.from(groups.values()).flatMap(group => {
-    const sheetSynced = group.filter(hasSheetSource);
-    return sheetSynced.length > 0 ? sheetSynced : group;
+
+  const aliases = new Map<string, string>();
+  termsByLabel.forEach(counts => {
+    const canonical = Array.from(counts.entries()).sort((a, b) => {
+      const countDiff = b[1] - a[1];
+      if (countDiff) return countDiff;
+      const stableDiff = Number(/^term\d+$/.test(b[0])) - Number(/^term\d+$/.test(a[0]));
+      return stableDiff || a[0].localeCompare(b[0]);
+    })[0]?.[0];
+    if (canonical) counts.forEach((_count, term) => aliases.set(term, canonical));
   });
+  return aliases;
 };
 
 const expandShiftSlots = (shift: any, fallbackSource: any = {}) => {
   const day = weekdayFromDateKey(shift.target_date);
   if (!day) return [];
   const explicitSlot = slotFromShift(shift);
-  const slots = explicitSlot
-    ? [explicitSlot]
-    : fallbackSlotsForClass(
-      fallbackSource.grade || getShiftGrade(shift),
-      fallbackSource.subject || getShiftSubject(shift) || getShiftDetail(shift)
-    );
+  const fallbackSlots = fallbackSlotsForClass(
+    fallbackSource.grade || getShiftGrade(shift),
+    fallbackSource.subject || getShiftSubject(shift) || getShiftDetail(shift)
+  );
+  const slots = explicitSlot ? [explicitSlot] : fallbackSlots;
   return slots.map(slot => ({
     ...shift,
     _day: day,
     _slot: slot,
-    _slot_source: explicitSlot ? 'shift_assignment' : 'grade_subject_fallback',
+    _slot_source: explicitSlot === slot ? 'shift_assignment' : 'grade_subject_fallback',
   }));
 };
 
@@ -181,17 +227,26 @@ const courseMatches = (left: any, right: any) => {
   return a === b || a.includes(b) || b.includes(a);
 };
 
-const isTestPrepCourse = (value: any) => normalize(value).includes('対策');
-
 const normalizeRegistrationCourse = (value: any) => normalize(value)
   .replace(/^通常/, '')
+  // 講師配置の「対策」は別講座ではなく、通常講座の実施区分として扱う。
+  .replace(/定期テスト対策|テスト対策|対策/g, '')
   .replace(/[①②③④⑤⑥⑦⑧⑨⑩]+$/g, '');
+
+const registrationCourseDisplayName = (value: any) => String(value || '')
+  .replace(/[【\[]\s*(?:定期テスト|テスト)?対策\s*[】\]]/g, '')
+  .replace(/^(?:定期テスト|テスト)?対策[\s・:：-]*/, '')
+  .replace(/^通常[\s・:：-]*/, '')
+  // 公民①/公民②、生物I/生物IIなどの末尾番号は実施枝番とし、
+  // 受講登録上は同一講座名にまとめる。
+  .replace(/[①②③④⑤⑥⑦⑧⑨⑩ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅰⅱⅲⅳⅴⅵⅶⅷⅸⅹ]+$/g, '')
+  .replace(/[０-９0-9]+$/g, '')
+  .trim();
 
 const registrationCourseMatches = (curriculumCourse: any, shiftCourse: any) => {
   const curriculum = normalizeRegistrationCourse(curriculumCourse);
   const shift = normalizeRegistrationCourse(shiftCourse);
   if (!curriculum || !shift) return false;
-  if (isTestPrepCourse(curriculumCourse) !== isTestPrepCourse(shiftCourse)) return false;
   if (curriculum === shift) return true;
 
   const suffix = shift.startsWith(curriculum) ? shift.slice(curriculum.length) : '';
@@ -280,11 +335,9 @@ const findShiftsForCurriculum = (
         _unitStrong: unitMatches(unit, shift.unit),
         _courseStrong: registrationCourseMatches(course, shiftCourse),
         _subjectStrong: subjectMatchesShift(row.subject, shift),
-        _courseTypeStrong: isTestPrepCourse(course) === isTestPrepCourse(shiftCourse),
       }));
     })
     .filter(shift => shift._subjectStrong)
-    .filter(shift => shift._courseTypeStrong)
     .filter(shift => shift._unitStrong || shift._courseStrong)
     .filter(shift => shift._day && shift._slot);
 
@@ -306,7 +359,7 @@ const pickRepresentativeShift = (row: any, shifts: any[]) => {
 const findRelatedCurriculum = (source: any, curriculumRows: any[], optionYear = 0) => {
   const grade = normalizeGrade(source.grade || getShiftGrade(source));
   const subject = normalize(source.subject || getShiftSubject(source));
-  const course = normalize(source.course_name || getShiftDetail(source) || source.title);
+  const course = source.course_name || getShiftDetail(source) || source.title || '';
   const unit = normalize(source.unit);
   const term = source.term || '';
 
@@ -316,10 +369,10 @@ const findRelatedCurriculum = (source: any, curriculumRows: any[], optionYear = 
     .filter(row => sameTerm(row.term, term))
     .filter(row => {
       const rowSubject = normalize(row.subject);
-      const rowCourse = normalize(row.course_name || row.title);
+      const rowCourse = row.course_name || row.title || '';
       const rowUnit = normalize(row.unit);
       const subjectOk = !subject || rowSubject === subject;
-      const courseOk = !course || rowCourse === course || course.includes(rowCourse) || rowCourse.includes(course);
+      const courseOk = !course || registrationCourseMatches(rowCourse, course);
       const unitOk = !unit || rowUnit === unit || rowUnit.includes(unit) || unit.includes(rowUnit);
       return subjectOk && (courseOk || unitOk);
     });
@@ -328,29 +381,50 @@ const findRelatedCurriculum = (source: any, curriculumRows: any[], optionYear = 
 const findBaseOption = (shift: any, options: any[], relatedCurriculum: any[]) => {
   const grade = getShiftGrade(shift);
   const subject = normalize(getShiftSubject(shift));
-  const detail = normalize(getShiftDetail(shift));
+  const detail = getShiftDetail(shift);
   const terms = new Set(relatedCurriculum.map(row => row.term).filter(Boolean));
   return options.find(option => {
-    const optionCourse = normalize(option.course_name || option.title);
+    const optionCourse = option.course_name || option.title;
     const optionSubject = normalize(option.subject);
     const termOk = terms.size === 0 || !option.term || terms.has(option.term);
     return normalizeGrade(option.grade) === grade &&
       (!optionSubject || optionSubject === subject) &&
-      (!optionCourse || optionCourse === detail || detail.includes(optionCourse) || optionCourse.includes(detail)) &&
+      (!optionCourse || registrationCourseMatches(optionCourse, detail)) &&
       termOk;
-  }) || options.find(option => normalizeGrade(option.grade) === grade && normalize(option.subject) === subject);
+  }) || options.find(option => (
+    normalizeGrade(option.grade) === grade &&
+    normalize(option.subject) === subject &&
+    (terms.size === 0 || !option.term || terms.has(option.term))
+  ));
 };
 
-const buildShiftClassOptions = (options: any[], curriculumRows: any[], shifts: any[]) => {
+const buildShiftClassOptions = (
+  options: any[],
+  curriculumRows: any[],
+  shifts: any[],
+  termRanges: Record<string, { start: string; end: string }> = {},
+) => {
   const mainShifts = shifts
     .filter(isMainShift)
-    .filter(shift => getShiftGrade(shift) && getShiftSubject(shift) && getShiftDetail(shift))
+    .filter(shift => getShiftGrade(shift) && getShiftSubject(shift))
+    .filter(shift => {
+      if (Object.keys(termRanges).length === 0 || curriculumRows.length === 0) return true;
+      const relatedScopes = curriculumRows
+        .filter(row => normalizeGrade(row.grade) === getShiftGrade(shift))
+        .filter(row => subjectMatchesShift(row.subject, shift));
+      return relatedScopes.some(row => shiftIsInsideTerm(row, shift, termRanges));
+    })
     .flatMap(shift => expandShiftSlots(shift))
     .filter(shift => shift._day && shift._slot);
 
   const groups = new Map<string, any[]>();
   mainShifts.forEach(shift => {
-    const relatedCurriculum = findRelatedCurriculum(shift, curriculumRows, 0);
+    const stronglyRelated = findRelatedCurriculum(shift, curriculumRows, 0)
+      .filter(row => shiftIsInsideTerm(row, shift, termRanges));
+    const relatedCurriculum = stronglyRelated.length > 0 ? stronglyRelated : curriculumRows
+      .filter(row => normalizeGrade(row.grade) === getShiftGrade(shift))
+      .filter(row => subjectMatchesShift(row.subject, shift))
+      .filter(row => shiftIsInsideTerm(row, shift, termRanges));
     const term = relatedCurriculum[0]?.term || 'term';
     const year = Number(relatedCurriculum[0]?.year || new Date(`${shift.target_date}T00:00:00+09:00`).getFullYear() || new Date().getFullYear());
     const key = sanitizeId([
@@ -358,7 +432,7 @@ const buildShiftClassOptions = (options: any[], curriculumRows: any[], shifts: a
       term,
       getShiftGrade(shift),
       getShiftSubject(shift),
-      getShiftDetail(shift),
+      registrationCourseDisplayName(getShiftDetail(shift)),
       shift._day,
       shift._slot,
     ].join('_'));
@@ -369,7 +443,12 @@ const buildShiftClassOptions = (options: any[], curriculumRows: any[], shifts: a
   return Array.from(groups.entries()).map(([id, group]) => {
     const sorted = group.sort((a, b) => String(a.target_date || '').localeCompare(String(b.target_date || '')));
     const first = sorted[0];
-    const relatedCurriculum = findRelatedCurriculum(first, curriculumRows, 0);
+    const stronglyRelated = findRelatedCurriculum(first, curriculumRows, 0)
+      .filter(row => shiftIsInsideTerm(row, first, termRanges));
+    const relatedCurriculum = stronglyRelated.length > 0 ? stronglyRelated : curriculumRows
+      .filter(row => normalizeGrade(row.grade) === getShiftGrade(first))
+      .filter(row => subjectMatchesShift(row.subject, first))
+      .filter(row => shiftIsInsideTerm(row, first, termRanges));
     const baseOption = findBaseOption(first, options, relatedCurriculum);
     const units = Array.from(new Set([
       ...sorted.map(shift => String(shift.unit || '').trim()),
@@ -381,7 +460,7 @@ const buildShiftClassOptions = (options: any[], curriculumRows: any[], shifts: a
     const termLabel = baseOption?.term_label || relatedCurriculum[0]?.term_label || relatedCurriculum[0]?.notes?.split(' / ')[0] || '';
     const year = Number(baseOption?.year || relatedCurriculum[0]?.year || new Date(`${first.target_date}T00:00:00+09:00`).getFullYear() || new Date().getFullYear());
 
-    return {
+    const result = {
       ...(baseOption || {}),
       id: `shift_class_${id}`,
       parent_course_option_id: baseOption?.id || '',
@@ -390,8 +469,8 @@ const buildShiftClassOptions = (options: any[], curriculumRows: any[], shifts: a
       term_label: termLabel,
       grade: getShiftGrade(first),
       subject: getShiftSubject(first) || baseOption?.subject || '',
-      course_name: getShiftDetail(first) || baseOption?.course_name || '講座',
-      title: `${getShiftGrade(first)} ${getShiftSubject(first) || ''} ${getShiftDetail(first) || ''}`,
+      course_name: registrationCourseDisplayName(getShiftDetail(first)) || baseOption?.course_name || getShiftSubject(first) || '講座',
+      title: `${getShiftGrade(first)} ${getShiftSubject(first) || ''} ${registrationCourseDisplayName(getShiftDetail(first)) || ''}`.trim(),
       curriculum_units: units,
       matched_shift_ids: sorted.map(shift => shift.id).filter(Boolean),
       matched_detail_subjects: detailSubjects,
@@ -405,6 +484,7 @@ const buildShiftClassOptions = (options: any[], curriculumRows: any[], shifts: a
       representative_policy: 'shift_class_day_slot',
       source: 'shift_class',
     };
+    return { ...result, stable_course_key: getCourseOptionStableKey(result) };
   });
 };
 
@@ -414,20 +494,48 @@ export const buildRegistrationClassOptions = (
   shifts: any[],
   termRanges: Record<string, { start: string; end: string }> = {},
 ) => {
-  const scopedShifts = preferSheetSyncedShiftsByDatePeriod(shifts);
+  // 通常受講登録に対策配置を混ぜない。対策は
+  // test_prep_course_options と buildTestPrepRegistrationOptions で別管理する。
+  const scopedShifts = preferSheetSyncedShiftsByDatePeriod(shifts).filter(shift => !isTestPrepShift(shift));
+  const termAliases = canonicalTermAliases(options);
+  const canonicalOptions = options.filter(option => {
+    const term = String(option.term || '').trim();
+    return !term || !termAliases.has(term) || termAliases.get(term) === term;
+  });
+  const canonicalRanges = Object.entries(termRanges).reduce((result, [key, range]) => {
+    const separator = key.indexOf('__');
+    const year = separator >= 0 ? key.slice(0, separator) : '';
+    const term = separator >= 0 ? key.slice(separator + 2) : key;
+    const canonicalTerm = termAliases.get(term) || term;
+    const canonicalKey = `${year}__${canonicalTerm}`;
+    const current = result[canonicalKey];
+    result[canonicalKey] = current
+      ? { start: current.start < range.start ? current.start : range.start, end: current.end > range.end ? current.end : range.end }
+      : range;
+    return result;
+  }, {} as Record<string, { start: string; end: string }>);
   const activeCurriculum = curriculumRows
     .filter(row => row && row.grade && row.subject && (row.course_name || row.unit))
+    .map(row => ({ ...row, term: termAliases.get(String(row.term || '').trim()) || row.term }))
     .sort((a, b) => {
       const scope = `${a.year || 0}_${a.term || ''}_${normalizeGrade(a.grade)}_${a.subject || ''}_${a.course_name || ''}`
         .localeCompare(`${b.year || 0}_${b.term || ''}_${normalizeGrade(b.grade)}_${b.subject || ''}_${b.course_name || ''}`, 'ja', { numeric: true });
       return scope || compareCurriculumOrder(a, b);
     });
 
+  // 曜日・時限・講座の組み合わせは講師配置だけを正とする。カリキュラムは
+  // 期・単元・既存option IDを補うために利用し、未配置の講座を登録候補にはしない。
+  const placementOptions = buildShiftClassOptions(canonicalOptions, activeCurriculum, scopedShifts, canonicalRanges);
+  if (placementOptions.length > 0) {
+    return placementOptions.sort((a, b) => `${a.year}_${a.term}_${a.grade}_${a.subject}_${a.resolved_day}_${a.resolved_slot}_${a.course_name}`
+      .localeCompare(`${b.year}_${b.term}_${b.grade}_${b.subject}_${b.resolved_day}_${b.resolved_slot}_${b.course_name}`, 'ja', { numeric: true }));
+  }
+
   if (activeCurriculum.length > 0) {
     const curriculumOptions: any[] = [];
     activeCurriculum.forEach(row => {
-      const matchedShifts = findShiftsForCurriculum(row, scopedShifts, termRanges);
-      const baseOption = findCurriculumOption(row, options);
+      const matchedShifts = findShiftsForCurriculum(row, scopedShifts, canonicalRanges);
+      const baseOption = findCurriculumOption(row, canonicalOptions);
 
       if (matchedShifts.length === 0) {
         const id = curriculumFallbackOptionId(row);
@@ -531,24 +639,27 @@ export const buildRegistrationClassOptions = (
       return map;
     }, new Map<string, any>()).values()) as any[];
 
-    return uniqueOptions.sort((a, b) => {
+    return uniqueOptions.map(option => ({
+      ...option,
+      stable_course_key: getCourseOptionStableKey(option),
+    })).sort((a, b) => {
       const scope = `${a.year}_${a.term}_${a.grade}_${a.subject}_${a.course_name}_${a.resolved_day}_${a.resolved_slot}`
         .localeCompare(`${b.year}_${b.term}_${b.grade}_${b.subject}_${b.course_name}_${b.resolved_day}_${b.resolved_slot}`, 'ja', { numeric: true });
       return scope || compareCurriculumOrder(a, b);
     });
   }
 
-  const classOptions = buildShiftClassOptions(options, curriculumRows, scopedShifts);
+  const classOptions = buildShiftClassOptions(canonicalOptions, curriculumRows, scopedShifts, canonicalRanges);
 
   if (classOptions.length > 0) {
     return classOptions.sort((a, b) => `${a.year}_${a.term}_${a.grade}_${a.resolved_day}_${a.resolved_slot}_${a.course_name}`.localeCompare(`${b.year}_${b.term}_${b.grade}_${b.resolved_day}_${b.resolved_slot}_${b.course_name}`));
   }
 
-  return options.map(option => {
+  return canonicalOptions.map(option => {
     const optionYear = Number(option.year || 0);
     const relatedCurriculum = findRelatedCurriculum(option, curriculumRows, optionYear);
     const units = Array.from(new Set(relatedCurriculum.map(row => String(row.unit || '').trim()).filter(Boolean)));
-    return {
+    const result = {
       ...option,
       curriculum_units: units,
       matched_units: units,
@@ -558,6 +669,7 @@ export const buildRegistrationClassOptions = (
       resolved_unit: units[0] || option.unit || '',
       shift_match_status: 'unmatched',
     };
+    return { ...result, stable_course_key: getCourseOptionStableKey(result) };
   });
 };
 

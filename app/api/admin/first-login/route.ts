@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { adminAuth, adminDb } from '@/lib/firebase-admin';
+import { consumeRateLimit, getClientIp, requestFingerprint } from '@/lib/server/password-recovery';
 
 export const runtime = 'nodejs';
 
@@ -62,6 +63,24 @@ function isAdminRole(role: unknown) {
   return ADMIN_ROLE_ALIASES.includes(String(role || '').toLowerCase());
 }
 
+async function verifyExistingFirebasePassword(email: string, password: string) {
+  const apiKey = String(process.env.NEXT_PUBLIC_FIREBASE_API_KEY || '').trim();
+  if (!apiKey) throw new Error('firebase-api-key-missing');
+  const response = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(apiKey)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password, returnSecureToken: true }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (response.ok && result?.localId) return true;
+  const reason = String(result?.error?.message || '');
+  if (['INVALID_LOGIN_CREDENTIALS', 'INVALID_PASSWORD', 'EMAIL_NOT_FOUND'].some(code => reason.includes(code))) return false;
+  if (reason.includes('USER_DISABLED')) throw new Error('account-inactive');
+  if (reason.includes('TOO_MANY_ATTEMPTS')) throw new Error('too-many-attempts');
+  throw new Error(`firebase-password-check-failed:${reason || response.status}`);
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => ({}));
@@ -70,6 +89,14 @@ export async function POST(req: Request) {
 
     if (!login || !password) {
       return NextResponse.json({ ok: false, error: 'invalid-params' }, { status: 400 });
+    }
+
+    const [ipAllowed, accountAllowed] = await Promise.all([
+      consumeRateLimit(requestFingerprint(['admin-first-login-ip', getClientIp(req)]), 8, 15 * 60 * 1000),
+      consumeRateLimit(requestFingerprint(['admin-first-login-account', login]), 5, 15 * 60 * 1000),
+    ]);
+    if (!ipAllowed || !accountAllowed) {
+      return NextResponse.json({ ok: false, error: 'too-many-attempts' }, { status: 429 });
     }
 
     const db = adminDb();
@@ -82,8 +109,30 @@ export async function POST(req: Request) {
     }
 
     const profile = userDoc.data() || {};
+    if (['suspended', 'withdrawn', 'archived'].some(status =>
+      profile.account_status === status || profile.status === status)) {
+      return NextResponse.json({ ok: false, error: 'initial-login-not-allowed' }, { status: 403 });
+    }
     if (!isAdminRole(profile.role)) {
       return NextResponse.json({ ok: false, error: 'not-admin' }, { status: 403 });
+    }
+
+    // 初回登録後の管理者は初期PWを保持しない。ログインIDとAuthの
+    // メールが異なる旧アカウントだけ、現在PWの検証後に実メールを返す。
+    if (profile.isFirstLogin === false) {
+      let authUser;
+      try {
+        authUser = await auth.getUser(String(profile.uid || userDoc.id));
+      } catch (error: any) {
+        if (error?.code !== 'auth/user-not-found' || !profile.email) throw error;
+        authUser = await auth.getUserByEmail(normalizeLogin(profile.email));
+      }
+      if (authUser.disabled) return NextResponse.json({ ok: false, error: 'initial-login-not-allowed' }, { status: 403 });
+      const email = normalizeLogin(authUser.email);
+      if (!email || !await verifyExistingFirebasePassword(email, password)) {
+        return NextResponse.json({ ok: false, error: 'wrong-password' }, { status: 401 });
+      }
+      return NextResponse.json({ ok: true, uid: authUser.uid, email, existing_account: true });
     }
 
     const savedPassword = normalizePassword(profile.initial_password || profile.raw_password || profile.password);
@@ -97,11 +146,12 @@ export async function POST(req: Request) {
     let uid = '';
     try {
       const existing = await auth.getUserByEmail(email);
+      const target = await db.collection('users').doc(existing.uid).get();
+      if (target.exists && target.id !== userDoc.id) throw new Error('account-identity-conflict');
       uid = existing.uid;
       await auth.updateUser(uid, {
         password,
         displayName,
-        emailVerified: true,
         disabled: profile.account_status === 'suspended' || profile.status === 'suspended',
       });
     } catch (error: any) {
@@ -113,7 +163,6 @@ export async function POST(req: Request) {
         email,
         password,
         displayName,
-        emailVerified: true,
         disabled: profile.account_status === 'suspended' || profile.status === 'suspended',
       });
       uid = created.uid;
@@ -129,13 +178,17 @@ export async function POST(req: Request) {
       updated_at: new Date().toISOString(),
     }, { merge: true });
 
-    await Promise.all(userDocs
-      .filter(doc => doc.id !== uid)
-      .map(doc => doc.ref.delete().catch(() => {})));
+    if (userDoc.id !== uid) await userDoc.ref.delete();
 
     return NextResponse.json({ ok: true, uid, email });
   } catch (error: any) {
     console.error('[admin-first-login] error:', error);
+    if (error?.message === 'account-inactive') {
+      return NextResponse.json({ ok: false, error: 'initial-login-not-allowed' }, { status: 403 });
+    }
+    if (error?.message === 'too-many-attempts') {
+      return NextResponse.json({ ok: false, error: 'too-many-attempts' }, { status: 429 });
+    }
     return NextResponse.json({ ok: false, error: `server-error:${error?.message || 'unknown'}` }, { status: 500 });
   }
 }

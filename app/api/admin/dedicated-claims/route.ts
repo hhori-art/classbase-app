@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
-import { canManageAttendance, getServerUser, jsonError } from '@/lib/server-auth';
+import { canManageAttendance, canManageAttendanceSchool, getServerUser, jsonError } from '@/lib/server-auth';
 
 export const runtime = 'nodejs';
 const clean = (value: unknown, max = 500) => String(value ?? '').normalize('NFKC').trim().slice(0, max);
@@ -9,6 +9,13 @@ const monthRange = (month: string) => {
   const value = /^\d{4}-\d{2}$/.test(month) ? month : new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 7);
   return { month: value, start: `${value}-01`, end: `${value}-31` };
 };
+
+
+async function claimSchools(db: ReturnType<typeof adminDb>, documents: FirebaseFirestore.DocumentSnapshot[]) {
+  const ids = Array.from(new Set(documents.map(doc => String(doc.data()?.user_id || '')).filter(Boolean)));
+  const profiles = await Promise.all(ids.map(id => db.collection('users').doc(id).get()));
+  return new Map(profiles.map(profile => [profile.id, String(profile.data()?.school_id || profile.data()?.school || '')]));
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -21,9 +28,11 @@ export async function GET(request: NextRequest) {
       db.collection('dedicated_lesson_claims').where('lesson_date', '>=', start).where('lesson_date', '<=', end).limit(3000).get(),
       db.collection('dedicated_transport_claims').where('expense_date', '>=', start).where('expense_date', '<=', end).limit(3000).get(),
     ]);
-    const overtime = overtimeSnap.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a: any, b: any) => String(b.work_date).localeCompare(String(a.work_date)));
-    const lessons = lessonSnap.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a: any, b: any) => String(b.lesson_date).localeCompare(String(a.lesson_date)));
-    const transport = transportSnap.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a: any, b: any) => String(b.expense_date).localeCompare(String(a.expense_date)));
+    const schools = await claimSchools(db, [...overtimeSnap.docs, ...lessonSnap.docs, ...transportSnap.docs]);
+    const allowed = (doc: FirebaseFirestore.DocumentSnapshot) => canManageAttendanceSchool(user, schools.get(String(doc.data()?.user_id || '')));
+    const overtime = overtimeSnap.docs.filter(allowed).map(doc => ({ id: doc.id, ...doc.data() })).sort((a: any, b: any) => String(b.work_date).localeCompare(String(a.work_date)));
+    const lessons = lessonSnap.docs.filter(allowed).map(doc => ({ id: doc.id, ...doc.data() })).sort((a: any, b: any) => String(b.lesson_date).localeCompare(String(a.lesson_date)));
+    const transport = transportSnap.docs.filter(allowed).map(doc => ({ id: doc.id, ...doc.data() })).sort((a: any, b: any) => String(b.expense_date).localeCompare(String(a.expense_date)));
     return Response.json({ ok: true, month, overtime, lessons, transport }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {
     return jsonError(error);
@@ -47,6 +56,16 @@ export async function POST(request: NextRequest) {
     const refs = items.map(item => db.collection(collectionFor(item.kind)).doc(item.id));
     const snapshots = await db.getAll(...refs);
     if (snapshots.some(snapshot => !snapshot.exists)) return Response.json({ ok: false, error: '申請が見つかりません。' }, { status: 404 });
+    const schools = await claimSchools(db, snapshots);
+    for (const snapshot of snapshots) {
+      const data = snapshot.data() || {};
+      if (!canManageAttendanceSchool(user, schools.get(String(data.user_id || ''))) ||
+          (user.role !== 'master' && data.user_id === user.uid)) throw new Error('forbidden');
+      if (data.work_record_id) {
+        const record = await db.collection('work_records').doc(String(data.work_record_id)).get();
+        if (!record.exists || record.data()?.teacher_id !== data.user_id) throw new Error('forbidden');
+      }
+    }
     const batch = db.batch();
     snapshots.forEach((snapshot, index) => {
       const item = items[index];

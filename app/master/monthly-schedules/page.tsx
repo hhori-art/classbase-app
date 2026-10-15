@@ -59,6 +59,7 @@ export default function MasterMonthlySchedulesPage() {
   const [cloningGlobalTitle, setCloningGlobalTitle] = useState('');
 
   const isMaster = profile?.role === 'master';
+  const readOnly = !isMaster;
   const mySchool = useMemo(() => {
     const ids = Array.isArray(profile?.school_ids) ? profile.school_ids : [];
     return ids[0] || profile?.school_id || profile?.school || '';
@@ -211,8 +212,8 @@ export default function MasterMonthlySchedulesPage() {
             </Link>
             <div>
               <p className="text-xs font-black uppercase tracking-[0.25em] text-indigo-300">Monthly Schedule</p>
-              <h1 className="text-2xl font-black">月間予定管理</h1>
-              <p className="mt-1 text-sm font-bold text-slate-300">登録した予定は生徒・保護者のカレンダーに表示されます。複数日にまたがる予定にも対応しています。</p>
+              <h1 className="text-2xl font-black">月間予定{readOnly ? '（閲覧のみ）' : '管理'}</h1>
+              <p className="mt-1 text-sm font-bold text-slate-300">{readOnly ? '自校舎と全体の予定を確認できます。登録・変更はマスター管理者へ依頼してください。' : '登録した予定は生徒・保護者のカレンダーに表示されます。複数日にまたがる予定にも対応しています。'}</p>
               {!isMaster && (
                 <div className="mt-3 flex flex-wrap gap-2">
                   <div className="inline-flex rounded-2xl bg-white/10 px-4 py-2 text-xs font-black text-indigo-100 ring-1 ring-white/10">
@@ -231,8 +232,8 @@ export default function MasterMonthlySchedulesPage() {
         </div>
       </section>
 
-      <section className="grid gap-6 xl:grid-cols-[380px_1fr]">
-        <div className="rounded-[28px] bg-white p-5 shadow-sm">
+      <section className={`grid gap-6 ${readOnly ? '' : 'xl:grid-cols-[380px_1fr]'}`}>
+        {!readOnly ? <div className="rounded-[28px] bg-white p-5 shadow-sm">
           <div className="mb-4 flex items-center justify-between gap-3">
             <h2 className="flex items-center gap-2 text-lg font-black text-slate-900"><CalendarPlus className="text-indigo-500" /> {editingId ? '予定を編集' : '予定を追加'}</h2>
             {editingId && (
@@ -299,14 +300,14 @@ export default function MasterMonthlySchedulesPage() {
               {saving ? <Loader2 className="animate-spin" size={18} /> : editingId || cloningGlobalTitle ? <Pencil size={18} /> : <Plus size={18} />} {editingId ? '更新する' : cloningGlobalTitle ? '校舎用に保存する' : '登録する'}
             </button>
           </div>
-        </div>
+        </div> : null}
 
         <div className="rounded-[28px] bg-white p-5 shadow-sm">
           <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <h2 className="text-lg font-black text-slate-900">予定カレンダー</h2>
             <div className="flex flex-col gap-2 sm:items-end">
               <input type="month" value={month} onChange={e => setMonth(e.target.value)} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-black outline-none focus:ring-2 focus:ring-indigo-100" />
-              <p className="text-[11px] font-bold text-slate-400">日付をクリックすると開始日・終了日に反映します。</p>
+              <p className="text-[11px] font-bold text-slate-400">{readOnly ? '予定名・期間・対象校舎を確認できます。' : '日付をクリックすると開始日・終了日に反映します。'}</p>
             </div>
           </div>
           {loading ? (
@@ -318,14 +319,14 @@ export default function MasterMonthlySchedulesPage() {
               </div>
               <div className="grid grid-cols-7 gap-1.5">
                 {days.map(day => day.blank ? <div key={day.key} className="min-h-24 rounded-2xl bg-slate-50/50" /> : (
-                  <div key={day.key} role="button" tabIndex={0} onClick={() => selectCalendarDate(day.date)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') selectCalendarDate(day.date); }} className={`min-h-24 cursor-pointer rounded-2xl border p-2 text-left transition ${scheduleCoversDate({ id: 'draft', title: '', target_date: form.start_date, start_date: form.start_date, end_date: form.end_date }, day.date) ? 'border-indigo-200 bg-indigo-50' : 'border-slate-100 bg-slate-50 hover:border-slate-200'}`}>
+                  <div key={day.key} {...(!readOnly ? { role: 'button', tabIndex: 0, onClick: () => selectCalendarDate(day.date), onKeyDown: (e: React.KeyboardEvent<HTMLDivElement>) => { if (e.key === 'Enter' || e.key === ' ') selectCalendarDate(day.date); } } : {})} className={`min-h-24 rounded-2xl border p-2 text-left transition ${!readOnly && scheduleCoversDate({ id: 'draft', title: '', target_date: form.start_date, start_date: form.start_date, end_date: form.end_date }, day.date) ? 'border-indigo-200 bg-indigo-50' : 'border-slate-100 bg-slate-50'} ${readOnly ? '' : 'cursor-pointer hover:border-slate-200'}`}>
                     <p className="mb-2 text-sm font-black text-slate-600">{day.day}</p>
                     <div className="space-y-1">
                       {schedules.filter(item => scheduleCoversDate(item, day.date)).map(item => (
                         <div key={item.id} className="group rounded-xl bg-white p-2 shadow-sm">
                           <div className="flex items-start justify-between gap-1">
                             <p className="line-clamp-2 text-[10px] font-black text-slate-700">{item.title}</p>
-                            {(isMaster || !item.school_id || item.school_id === mySchool) && (
+                            {!readOnly && (isMaster || !item.school_id || item.school_id === mySchool) && (
                               <div className="flex shrink-0 items-center gap-1">
                                 <button onClick={(event) => { event.stopPropagation(); editSchedule(item); }} className="text-slate-300 hover:text-indigo-500" title="編集"><Pencil size={12} /></button>
                                 {(isMaster || item.school_id === mySchool) && (

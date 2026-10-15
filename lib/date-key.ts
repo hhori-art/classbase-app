@@ -1,5 +1,8 @@
 const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'] as const;
 
+export const jstDateKey = (date = new Date()) =>
+  new Date(date.getTime() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
 export const weekdayFromDateKey = (value: unknown) => {
   const dateKey = String(value || '').slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return '';

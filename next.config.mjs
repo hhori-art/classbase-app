@@ -19,6 +19,9 @@ const contentSecurityPolicy = [
 const nextConfig = {
   // 必要に応じて設定を追加しますが、基本は空でOKです
   reactStrictMode: true,
+  // Next.js 15 の組み込みlintはFlat Configへ旧CLIオプションを渡すため、
+  // buildスクリプトで先に `npm run lint` を実行してからビルドする。
+  eslint: { ignoreDuringBuilds: true },
   async headers() {
     return [
       {

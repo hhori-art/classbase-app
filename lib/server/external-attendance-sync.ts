@@ -183,6 +183,13 @@ export async function syncExternalAttendance(options: SyncOptions) {
           start_time: item.start_time,
           end_time: item.end_time,
           work_type: item.work_type || '',
+          school_code: item.school_code || '',
+          school_name: item.school_name || '',
+          course_code: item.course_code || '',
+          course_name: item.course_name || '',
+          work_code: item.work_code || '',
+          actual_minutes: Number(item.actual_minutes || 0),
+          payroll_tier: item.payroll_tier || '',
           source_name: settings.sourceName,
           source_type: 'api_sync',
           external_record_id: item.external_record_id,
@@ -225,14 +232,16 @@ export async function syncExternalAttendance(options: SyncOptions) {
 
 export async function getExternalAttendanceStatus(start: string, end: string) {
   const db = adminDb();
+  const selectedMonthQuery = db.collection(REGULAR_COLLECTION)
+    .where('date', '>=', start)
+    .where('date', '<=', end);
   const [stateSnap, countSnap] = await Promise.all([
     db.collection(STATE_COLLECTION).doc(STATE_ID).get(),
-    db.collection(REGULAR_COLLECTION)
-      .where('date', '>=', start)
-      .where('date', '<=', end)
-      .limit(5000)
-      .get(),
+    selectedMonthQuery.count().get(),
   ]);
-  const externalCount = countSnap.docs.filter(doc => doc.data().source_type === 'api_sync').length;
-  return { config: externalAttendanceConfigStatus(), state: stateSnap.data() || null, selected_month_record_count: externalCount };
+  return {
+    config: externalAttendanceConfigStatus(),
+    state: stateSnap.data() || null,
+    selected_month_record_count: countSnap.data().count,
+  };
 }

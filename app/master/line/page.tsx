@@ -1,8 +1,7 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
-import { auth, db } from '@/lib/firebase';
-import { collection, getDocs, query, where } from 'firebase/firestore';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { auth } from '@/lib/firebase';
 import {
   AlertCircle,
   ArrowLeft,
@@ -38,7 +37,7 @@ type AppUser = {
   school?: string;
   school_id?: string;
   classroom?: string;
-  line_user_id?: string;
+  line_linked?: boolean;
   notification_preferences?: Record<string, boolean>;
 };
 
@@ -51,8 +50,8 @@ const ROLE_OPTIONS: { key: RoleKey; label: string; icon: React.ReactNode; color:
 
 const CHANNEL_OPTIONS: { key: ChannelKey; label: string; icon: React.ReactNode; description: string }[] = [
   { key: 'line', label: 'LINE', icon: <MessageCircle size={16} />, description: '連携済みユーザーへ即時送信します' },
-  { key: 'in_app', label: 'アプリ内', icon: <Bell size={16} />, description: 'お知らせと通知ジョブを作成します' },
-  { key: 'email', label: 'メール', icon: <Mail size={16} />, description: 'メール送信用の通知ジョブを作成します' },
+  { key: 'in_app', label: 'アプリ内', icon: <Bell size={16} />, description: '選択した対象の通知一覧へすぐに追加します' },
+  { key: 'email', label: 'メール', icon: <Mail size={16} />, description: '登録メールアドレスへ即時送信します' },
 ];
 
 const KIND_OPTIONS = [
@@ -99,10 +98,6 @@ function normalizeRole(role: unknown): RoleKey {
   return 'student';
 }
 
-function userName(data: any) {
-  return data.name || data.display_name || data.student_name || data.parent_name || data.teacher_name || data.email || '名称未設定';
-}
-
 function schoolOf(user: AppUser) {
   return user.school || user.school_id || user.classroom || '';
 }
@@ -113,7 +108,7 @@ function roleLabel(role: RoleKey) {
 
 export default function MasterLineBroadcastPage() {
   const [users, setUsers] = useState<AppUser[]>([]);
-  const [shifts, setShifts] = useState<any[]>([]);
+  const [todayTeacherIds, setTodayTeacherIds] = useState<string[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [selectedRoles, setSelectedRoles] = useState<RoleKey[]>(['teacher']);
   const [selectedChannels, setSelectedChannels] = useState<ChannelKey[]>(['line']);
@@ -128,6 +123,10 @@ export default function MasterLineBroadcastPage() {
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState('');
+  const [resultHasError, setResultHasError] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const sendAttemptId = useRef('');
+  const [campaigns, setCampaigns] = useState<any[]>([]);
 
   useEffect(() => {
     fetchData();
@@ -135,33 +134,29 @@ export default function MasterLineBroadcastPage() {
 
   const fetchData = async () => {
     setLoading(true);
+    setLoadError('');
     try {
-      const userSnap = await getDocs(collection(db, 'users'));
-      const loaded = userSnap.docs.map(d => {
-        const data = d.data() as any;
-        return {
-          id: d.id,
-          role: normalizeRole(data.role),
-          rawRole: data.role,
-          name: userName(data),
-          email: data.email,
-          grade: data.grade || data.student_grade,
-          school: data.school,
-          school_id: data.school_id,
-          classroom: data.classroom,
-          line_user_id: data.line_user_id,
-          notification_preferences: data.notification_preferences,
-        } satisfies AppUser;
-      });
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) return;
+      const [response, campaignResponse] = await Promise.all([
+        fetch('/api/admin/notifications?view=recipients', { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' }),
+        fetch('/api/admin/notifications', { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' }),
+      ]);
+      const [data, campaignData] = await Promise.all([response.json().catch(() => ({})), campaignResponse.json().catch(() => ({}))]);
+      if (!response.ok || !data.ok) throw new Error(data.error || 'recipients-load-failed');
+      if (!campaignResponse.ok || !campaignData.ok) throw new Error(campaignData.error || 'campaigns-load-failed');
+      const loaded: AppUser[] = (Array.isArray(data.recipients) ? data.recipients : []).map((item: any) => ({
+        id: String(item.id || ''), role: normalizeRole(item.role), rawRole: String(item.raw_role || ''),
+        name: String(item.name || '名称未設定'), email: String(item.email || ''), grade: String(item.grade || ''),
+        school: String(item.school || ''), line_linked: item.line_linked === true,
+        notification_preferences: item.notification_preferences || {},
+      }));
       setUsers(loaded);
-
-      const today = new Date().toISOString().split('T')[0];
-      const sQ = query(collection(db, 'shift_assignments'), where('target_date', '==', today));
-      const sSnap = await getDocs(sQ);
-      setShifts(sSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+      setTodayTeacherIds(Array.isArray(data.today_teacher_ids) ? data.today_teacher_ids.map(String) : []);
+      setCampaigns(Array.isArray(campaignData.campaigns) ? campaignData.campaigns.slice(0, 20) : []);
     } catch (error) {
       console.error(error);
-      alert('ユーザー情報の取得に失敗しました。');
+      setLoadError('ユーザー情報または配信履歴を取得できませんでした。通信状況を確認して再取得してください。');
     } finally {
       setLoading(false);
     }
@@ -183,7 +178,7 @@ export default function MasterLineBroadcastPage() {
       if (!selectedRoles.includes(user.role)) return false;
       if (school !== 'all' && schoolOf(user) !== school) return false;
       if (grade !== 'all' && user.grade !== grade) return false;
-      if (lineOnly && !user.line_user_id) return false;
+      if (lineOnly && !user.line_linked) return false;
       if (!keyword) return true;
       return [user.name, user.email, user.grade, schoolOf(user), user.rawRole]
         .filter(Boolean)
@@ -196,7 +191,7 @@ export default function MasterLineBroadcastPage() {
     return users.filter(user => selected.has(user.id));
   }, [selectedIds, users]);
 
-  const lineTargets = selectedUsers.filter(user => user.line_user_id && user.notification_preferences?.line !== false);
+  const lineTargets = selectedUsers.filter(user => user.line_linked && user.notification_preferences?.line !== false);
 
   const stats = useMemo(() => {
     return ROLE_OPTIONS.map(role => {
@@ -204,7 +199,7 @@ export default function MasterLineBroadcastPage() {
       return {
         ...role,
         total: roleUsers.length,
-        line: roleUsers.filter(user => user.line_user_id).length,
+        line: roleUsers.filter(user => user.line_linked).length,
       };
     });
   }, [users]);
@@ -251,6 +246,7 @@ export default function MasterLineBroadcastPage() {
   };
 
   const sendCampaign = async (channels: ChannelKey[]) => {
+    if (!sendAttemptId.current) sendAttemptId.current = crypto.randomUUID();
     const token = await auth.currentUser?.getIdToken();
     const res = await fetch('/api/admin/notifications', {
       method: 'POST',
@@ -265,10 +261,14 @@ export default function MasterLineBroadcastPage() {
         school: school === 'all' ? '' : school,
         grade: grade === 'all' ? '' : grade,
         include_name: includeName,
+        request_id: sendAttemptId.current,
       }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.ok) throw new Error(data.error || '通知作成に失敗しました。');
+    if (Number(data.line_failed_count || 0) === 0 && Number(data.email_failed_count || 0) === 0) {
+      sendAttemptId.current = '';
+    }
     return data;
   };
 
@@ -281,9 +281,11 @@ export default function MasterLineBroadcastPage() {
 
     setSending(true);
     setResult('');
+    setResultHasError(false);
     try {
       const data = await sendCampaign(channels);
-      setResult(`通知を作成しました。アプリ内: ${data.in_app_count || 0}件 / メールジョブ: ${data.email_job_count || 0}件`);
+      setResultHasError(Number(data.email_failed_count || 0) > 0);
+      setResult(`通知を作成しました。アプリ内: ${data.in_app_count || 0}件 / メール送信: ${data.email_sent_count || 0}件 / 失敗: ${data.email_failed_count || 0}件`);
     } catch (error: any) {
       alert(error.message || '通知作成に失敗しました。');
     } finally {
@@ -298,9 +300,12 @@ export default function MasterLineBroadcastPage() {
 
     setSending(true);
     setResult('');
+    setResultHasError(false);
     try {
       const data = await sendCampaign(selectedChannels);
-      setResult(`通知を作成しました。アプリ内: ${data.in_app_count || 0}件 / LINE: ${data.line_sent_count || 0}名 / メールジョブ: ${data.email_job_count || 0}件`);
+      const hasError = Number(data.line_failed_count || 0) > 0 || Number(data.email_failed_count || 0) > 0;
+      setResultHasError(hasError);
+      setResult(`通知を作成しました。アプリ内: ${data.in_app_count || 0}件 / LINE: ${data.line_sent_count || 0}名（失敗${data.line_failed_count || 0}名） / メール: ${data.email_sent_count || 0}件（失敗${data.email_failed_count || 0}件）${hasError ? '。23時間以内に同じ内容で再度送信すると、失敗分を安全に再試行します。' : ''}`);
     } catch (error: any) {
       alert(error.message || '送信に失敗しました。');
     } finally {
@@ -309,7 +314,7 @@ export default function MasterLineBroadcastPage() {
   };
 
   const handleTodayTeacherReminder = () => {
-    const teacherIds = new Set(shifts.map(shift => shift.user_id).filter(Boolean));
+    const teacherIds = new Set(todayTeacherIds);
     setSelectedRoles(['teacher']);
     setSelectedIds(users.filter(user => user.role === 'teacher' && teacherIds.has(user.id)).map(user => user.id));
     setSelectedChannels(['line']);
@@ -358,6 +363,13 @@ export default function MasterLineBroadcastPage() {
           ))}
         </div>
 
+        {loadError && (
+          <div role="alert" className="flex flex-col gap-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-bold text-rose-700 sm:flex-row sm:items-center sm:justify-between">
+            <span className="flex items-center gap-2"><AlertCircle size={17} />{loadError}</span>
+            <button onClick={fetchData} className="rounded-xl bg-white px-4 py-2 text-xs font-black shadow-sm">再取得</button>
+          </div>
+        )}
+
         <div className="grid gap-6 xl:grid-cols-12">
           <section className="space-y-4 xl:col-span-5">
             <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -374,6 +386,7 @@ export default function MasterLineBroadcastPage() {
                       <button
                         key={role.key}
                         onClick={() => toggleRole(role.key)}
+                        aria-pressed={selectedRoles.includes(role.key)}
                         className={`flex items-center justify-center gap-1.5 rounded-2xl border px-3 py-3 text-xs font-black transition-all ${
                           selectedRoles.includes(role.key) ? role.color : 'border-slate-100 bg-slate-50 text-slate-400'
                         }`}
@@ -423,6 +436,7 @@ export default function MasterLineBroadcastPage() {
                       <button
                         key={user.id}
                         onClick={() => toggleUser(user.id)}
+                        aria-pressed={selected}
                         className={`w-full rounded-2xl border p-3 text-left transition-all ${selected ? 'border-[#06C755] bg-green-50' : 'border-slate-100 bg-white hover:bg-slate-50'}`}
                       >
                         <div className="flex items-start justify-between gap-3">
@@ -430,7 +444,7 @@ export default function MasterLineBroadcastPage() {
                             <div className="flex flex-wrap items-center gap-2">
                               <span className="truncate text-sm font-black text-slate-800">{user.name}</span>
                               <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-black text-slate-500">{roleLabel(user.role)}</span>
-                              {user.line_user_id && <span className="rounded-full bg-[#06C755]/10 px-2 py-0.5 text-[10px] font-black text-[#06C755]">LINE</span>}
+                              {user.line_linked && <span className="rounded-full bg-[#06C755]/10 px-2 py-0.5 text-[10px] font-black text-[#06C755]">LINE</span>}
                             </div>
                             <p className="mt-1 truncate text-xs font-bold text-slate-400">{[schoolOf(user), user.grade, user.email].filter(Boolean).join(' / ') || '詳細なし'}</p>
                           </div>
@@ -450,7 +464,7 @@ export default function MasterLineBroadcastPage() {
             <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
               <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <h2 className="flex items-center gap-2 text-lg font-black"><Megaphone size={18} className="text-[#06C755]" /> 通知作成</h2>
-                {result && <span className="rounded-full bg-green-50 px-3 py-1 text-xs font-black text-green-700"><CheckCircle size={13} className="mr-1 inline" />{result}</span>}
+                {result && <span role="status" className={`rounded-2xl px-3 py-2 text-xs font-black ${resultHasError ? 'bg-amber-50 text-amber-800' : 'bg-green-50 text-green-700'}`}>{resultHasError ? <AlertCircle size={13} className="mr-1 inline" /> : <CheckCircle size={13} className="mr-1 inline" />}{result}</span>}
               </div>
 
               <div className="mb-5 grid gap-2 md:grid-cols-4">
@@ -470,6 +484,7 @@ export default function MasterLineBroadcastPage() {
                       <button
                         key={channel.key}
                         onClick={() => toggleChannel(channel.key)}
+                        aria-pressed={selectedChannels.includes(channel.key)}
                         className={`rounded-2xl border p-4 text-left transition-all ${selectedChannels.includes(channel.key) ? 'border-[#06C755] bg-green-50 text-green-800' : 'border-slate-100 bg-slate-50 text-slate-500'}`}
                       >
                         <span className="flex items-center gap-2 text-sm font-black">{channel.icon}{channel.label}</span>
@@ -480,13 +495,13 @@ export default function MasterLineBroadcastPage() {
                 </div>
 
                 <div className="grid gap-3 md:grid-cols-2">
-                  <input value={title} onChange={e => setTitle(e.target.value)} placeholder="タイトル" className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-black outline-none focus:ring-2 focus:ring-green-100" />
-                  <select value={kind} onChange={e => setKind(e.target.value)} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-black outline-none">
+                  <input aria-label="通知タイトル" value={title} onChange={e => setTitle(e.target.value)} placeholder="タイトル" className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-black outline-none focus:ring-2 focus:ring-green-100" />
+                  <select aria-label="通知の種類" value={kind} onChange={e => setKind(e.target.value)} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-black outline-none">
                     {KIND_OPTIONS.map(item => <option key={item.key} value={item.key}>{item.label}</option>)}
                   </select>
                 </div>
 
-                <textarea value={body} onChange={e => setBody(e.target.value)} placeholder="本文を入力してください" className="min-h-56 resize-y rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm font-bold leading-relaxed outline-none focus:ring-2 focus:ring-green-100" />
+                <textarea aria-label="通知本文" value={body} onChange={e => setBody(e.target.value)} placeholder="本文を入力してください" className="min-h-56 resize-y rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm font-bold leading-relaxed outline-none focus:ring-2 focus:ring-green-100" />
 
                 <label className="flex items-center justify-between rounded-2xl bg-slate-50 px-4 py-3">
                   <span className="text-sm font-black text-slate-600">LINE本文の先頭に宛名を入れる</span>
@@ -530,6 +545,11 @@ export default function MasterLineBroadcastPage() {
             </div>
           </section>
         </div>
+
+        <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="flex items-center justify-between gap-3"><div><h2 className="text-lg font-black text-slate-900">最近の配信履歴</h2><p className="mt-1 text-xs font-bold text-slate-400">完了件数と外部配信の失敗件数を確認できます。</p></div><span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-600">{campaigns.length}件</span></div>
+          <div className="mt-4 overflow-x-auto"><table className="min-w-[760px] w-full text-left text-xs"><thead><tr className="border-b border-slate-200 text-slate-400">{['状態', 'タイトル', '対象', 'アプリ内', 'LINE', 'メール', '除外'].map(label => <th key={label} className="px-3 py-3 font-black">{label}</th>)}</tr></thead><tbody>{campaigns.map(item => <tr key={item.id} className="border-b border-slate-100"><td className="px-3 py-3"><span className={`rounded-full px-2 py-1 font-black ${item.status === 'processing' ? 'bg-amber-100 text-amber-700' : item.status === 'failed' ? 'bg-rose-100 text-rose-700' : item.status === 'completed_with_errors' ? 'bg-orange-100 text-orange-700' : 'bg-emerald-100 text-emerald-700'}`}>{item.status === 'processing' ? '処理中' : item.status === 'failed' ? '失敗' : item.status === 'completed_with_errors' ? '一部失敗' : '完了'}</span></td><td className="px-3 py-3 font-black text-slate-800">{item.title || '無題'}</td><td className="px-3 py-3 font-bold">{Number(item.target_count || 0)}名</td><td className="px-3 py-3 font-bold">{Number(item.in_app_count || 0)}件</td><td className="px-3 py-3 font-bold text-[#06C755]">成功{Number(item.line_sent_count || 0)} / 失敗{Number(item.line_failed_count || 0)}</td><td className="px-3 py-3 font-bold text-indigo-600">成功{Number(item.email_sent_count || 0)} / 失敗{Number(item.email_failed_count || 0)}</td><td className="px-3 py-3 font-bold text-slate-500">{Number(item.skipped_count || 0)}件</td></tr>)}</tbody></table>{campaigns.length === 0 && <p className="py-8 text-center text-sm font-bold text-slate-400">配信履歴はまだありません。</p>}</div>
+        </section>
       </div>
     </div>
   );

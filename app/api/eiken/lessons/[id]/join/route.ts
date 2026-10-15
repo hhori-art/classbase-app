@@ -14,10 +14,10 @@ const timestampMillis = (value: any) => {
   return Number.isNaN(time) ? null : time;
 };
 
-export async function POST(request: NextRequest, context: { params: { id: string } }) {
+export async function POST(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   try {
     const user = await getServerUser(request);
-    const lessonRef = adminDb().collection('eiken_lessons').doc(String(context.params.id || ''));
+    const lessonRef = adminDb().collection('eiken_lessons').doc(String((await context.params).id || ''));
     const lessonSnap = await lessonRef.get();
     if (!lessonSnap.exists) throw new Error('lesson-not-found');
     const lesson = lessonSnap.data() || {};
@@ -51,4 +51,3 @@ export async function POST(request: NextRequest, context: { params: { id: string
     return jsonError(error);
   }
 }
-

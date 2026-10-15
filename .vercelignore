@@ -1,0 +1,14 @@
+.git
+.next
+node_modules
+.security-tools
+.security-emulator-data
+.security-diagnosis-accounts.json
+.security-staging-service-account.json
+.codex_tmp
+outputs
+firebase-debug.log
+firestore-debug.log
+*.log
+*.tsbuildinfo
+~$*

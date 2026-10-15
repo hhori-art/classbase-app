@@ -1,4 +1,5 @@
 import ReadablePassword from '@/app/components/ReadablePassword';
+import { QRCodeSVG } from 'qrcode.react';
 
 export const ACCOUNT_GUIDE_PRINT_CSS = `
   @media print {
@@ -45,6 +46,7 @@ type AccountGuideSheetProps = {
   account: Record<string, any>;
   school?: string;
   loginUrl: string;
+  showParentCredentials?: boolean;
 };
 
 const displayValue = (value: unknown, fallback = '-') => {
@@ -52,7 +54,7 @@ const displayValue = (value: unknown, fallback = '-') => {
   return text || fallback;
 };
 
-export default function AccountGuideSheet({ account, school = '', loginUrl }: AccountGuideSheetProps) {
+export default function AccountGuideSheet({ account, school = '', loginUrl, showParentCredentials = true }: AccountGuideSheetProps) {
   const isStudent = account.role === 'student';
   const isTeacher = ['teacher', 'attendance_admin', 'attendance_only', 'attendance_manager'].includes(String(account.role || ''));
   const name = displayValue(account.student_name || account.name || account.teacher_name, '名称未設定');
@@ -62,7 +64,8 @@ export default function AccountGuideSheet({ account, school = '', loginUrl }: Ac
   const parentPassword = displayValue(account.parent_initial_password, '');
   const hasParentAccount = isStudent && Boolean(parentLoginId || parentPassword);
   const normalizedLoginUrl = displayValue(loginUrl, 'https://classbase-app.vercel.app');
-  const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(normalizedLoginUrl)}`;
+  const attendanceManualUrl = `${normalizedLoginUrl.replace(/\/+$/, '')}/manual`;
+  const primaryQrUrl = isTeacher ? attendanceManualUrl : normalizedLoginUrl;
   const today = new Date();
   const issuedAt = `${today.getFullYear()}年${today.getMonth() + 1}月${today.getDate()}日`;
   const accountKind = isStudent ? '生徒' : isTeacher ? '講師' : '管理者';
@@ -97,7 +100,9 @@ export default function AccountGuideSheet({ account, school = '', loginUrl }: Ac
           {name} <span className="text-sm">{isStudent ? 'さん・保護者 様' : isTeacher ? '先生' : '様'}</span>
         </p>
         <p className="mt-1.5 text-[12px] font-bold leading-relaxed text-slate-600">
-          創造学園アプリの{accountKind}アカウントをご用意しました。下記のIDと初期パスワードでログインしてください。
+          {isTeacher
+            ? '本アカウントは、創造学園での勤務に関する打刻・勤務詳細・交通費等を登録するためのものです。担当する業務にかかわらず、下記の職員番号と初期パスワードでログインしてください。'
+            : `創造学園アプリの${accountKind}アカウントをご用意しました。下記のIDと初期パスワードでログインしてください。`}
         </p>
       </section>
 
@@ -106,17 +111,18 @@ export default function AccountGuideSheet({ account, school = '', loginUrl }: Ac
           <div className="min-w-0 flex-1">
             <p className="text-sm font-black text-blue-800">{accountKind}アカウント</p>
             <div className="mt-3 grid grid-cols-[130px_1fr] gap-x-3 gap-y-2">
-              <GuideLabel>ログインID</GuideLabel>
+              <GuideLabel>{isTeacher ? 'ログインID（職員番号）' : 'ログインID'}</GuideLabel>
               <GuideValue value={loginId} />
               <GuideLabel>初期パスワード</GuideLabel>
               <div className="min-w-0"><ReadablePassword value={password === '-' ? '' : password} compact /></div>
             </div>
           </div>
           <div className="flex w-36 shrink-0 flex-col items-center justify-center rounded-2xl border-2 border-blue-100 bg-blue-50 p-3 text-center">
-            <p className="mb-1 text-[10px] font-black text-blue-800">ログインはこちら</p>
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={qrUrl} alt="ログイン用QRコード" className="h-24 w-24 bg-white" crossOrigin="anonymous" />
-            <p className="mt-1 text-[9px] font-bold text-slate-500">カメラで読み取れます</p>
+            <p className="mb-1 text-[10px] font-black text-blue-800">{isTeacher ? '勤怠マニュアル' : 'ログインはこちら'}</p>
+            <div className="bg-white p-1" aria-label={isTeacher ? '勤怠マニュアル用QRコード' : 'ログイン用QRコード'}>
+              <QRCodeSVG value={primaryQrUrl} size={88} />
+            </div>
+            <p className="mt-1 text-[9px] font-bold text-slate-500">{isTeacher ? 'ログイン不要で開けます' : 'カメラで読み取れます'}</p>
           </div>
         </div>
 
@@ -127,7 +133,7 @@ export default function AccountGuideSheet({ account, school = '', loginUrl }: Ac
       </section>
 
       {isStudent && (
-        <section className="mt-4 grid grid-cols-2 gap-3">
+        <section className={`mt-4 grid gap-3 ${showParentCredentials ? 'grid-cols-2' : 'grid-cols-1'}`}>
           <div className="rounded-2xl border-2 border-slate-100 p-3">
             <p className="text-xs font-black text-slate-700">受講情報</p>
             <p className="mt-2 text-[11px] font-bold leading-relaxed text-slate-600">
@@ -140,31 +146,55 @@ export default function AccountGuideSheet({ account, school = '', loginUrl }: Ac
             )}
           </div>
 
-          <div className="rounded-2xl border-2 border-slate-100 p-3">
-            <p className="text-xs font-black text-slate-700">保護者アカウント</p>
-            {hasParentAccount ? (
-              <div className="mt-2 space-y-1.5 text-[10px] font-bold text-slate-500">
-                <p>ログインID: <span className="font-mono text-[12px] font-black text-slate-800">{parentLoginId || '-'}</span></p>
-                <div className="flex items-start gap-2">
-                  <span className="shrink-0 pt-2">初期パスワード:</span>
-                  <ReadablePassword value={parentPassword} compact />
+          {showParentCredentials && (
+            <div className="rounded-2xl border-2 border-slate-100 p-3">
+              <p className="text-xs font-black text-slate-700">保護者アカウント</p>
+              {hasParentAccount ? (
+                <div className="mt-2 space-y-1.5 text-[10px] font-bold text-slate-500">
+                  <p>ログインID: <span className="font-mono text-[12px] font-black text-slate-800">{parentLoginId || '-'}</span></p>
+                  <div className="flex items-start gap-2">
+                    <span className="shrink-0 pt-2">初期パスワード:</span>
+                    <ReadablePassword value={parentPassword} compact />
+                  </div>
                 </div>
-              </div>
-            ) : (
-              <p className="mt-2 text-[11px] font-bold text-slate-500">保護者アカウントが発行されている場合は、別途ご案内します。</p>
-            )}
-          </div>
+              ) : (
+                <p className="mt-2 text-[11px] font-bold text-slate-500">保護者アカウントが発行されている場合は、別途ご案内します。</p>
+              )}
+            </div>
+          )}
         </section>
       )}
 
       <section className="mt-4 rounded-2xl border-2 border-emerald-100 bg-emerald-50/60 p-3">
         <p className="text-xs font-black text-emerald-800">初回ログインの手順</p>
         <ol className="mt-2 grid grid-cols-3 gap-3 text-[10px] font-bold leading-relaxed text-slate-700">
-          <li><b className="mr-1 text-emerald-700">1.</b>QRコードを読み取るか、ログインURLを開きます。</li>
-          <li><b className="mr-1 text-emerald-700">2.</b>記載されたIDと初期パスワードを入力します。</li>
+          <li><b className="mr-1 text-emerald-700">1.</b>{isTeacher ? 'QRコードでマニュアルを開き、「ログイン画面へ」を押します。' : 'QRコードを読み取るか、ログインURLを開きます。'}</li>
+          <li><b className="mr-1 text-emerald-700">2.</b>{isTeacher ? '職員番号と初期パスワードを入力します。' : '記載されたIDと初期パスワードを入力します。'}</li>
           <li><b className="mr-1 text-emerald-700">3.</b>画面の案内に沿って新しいパスワードを設定します。</li>
         </ol>
       </section>
+
+      {isTeacher && (
+        <section className="mt-4 rounded-2xl border-2 border-cyan-100 bg-cyan-50/60 p-3">
+          <div className="flex items-center gap-4">
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-black text-cyan-900">創造学園 講師向け勤怠登録マニュアル</p>
+              <p className="mt-1 text-[10px] font-black leading-relaxed text-cyan-800">通常の勤怠システムと同じ手順で登録できます。</p>
+              <ol className="mt-2 space-y-1 text-[10px] font-bold leading-relaxed text-slate-700">
+                <li><b className="mr-1 text-cyan-700">1.</b>勤務開始時に「出勤する」、勤務終了時に「退勤する」を押します。</li>
+                <li><b className="mr-1 text-cyan-700">2.</b>退勤後、「詳細・交通費を入力」から業務区分と時間を登録します。</li>
+                <li><b className="mr-1 text-cyan-700">3.</b>入力内容を確認し、「保存して完了」を押します。</li>
+              </ol>
+              <p className="mt-2 break-all font-mono text-[8px] font-bold text-cyan-800">{attendanceManualUrl}</p>
+            </div>
+            <div className="flex w-28 shrink-0 flex-col items-center rounded-xl border border-cyan-200 bg-white p-2 text-center">
+              <QRCodeSVG value={attendanceManualUrl} size={76} />
+              <p className="mt-1 text-[9px] font-black text-cyan-900">詳しい操作方法</p>
+              <p className="text-[8px] font-bold text-slate-500">ログイン不要</p>
+            </div>
+          </div>
+        </section>
+      )}
 
       <section className="mt-3 rounded-2xl border-2 border-amber-100 bg-amber-50/60 p-3">
         <p className="text-xs font-black text-amber-800">大切なお願い</p>
@@ -178,7 +208,7 @@ export default function AccountGuideSheet({ account, school = '', loginUrl }: Ac
       <footer className="absolute bottom-[11mm] left-[16mm] right-[16mm] flex items-end justify-between border-t-2 border-blue-100 pt-2">
         <div className="text-[9px] font-bold leading-relaxed text-slate-500">
           <p>※本用紙は大切に保管してください。</p>
-          <p>お問い合わせ先：理社講座サポートセンター（078-321-4123）</p>
+          <p>お問い合わせ先：創造学園アプリ サポート窓口（078-321-4123）</p>
         </div>
         <p className="text-lg font-black tracking-widest text-blue-900">創造学園エディック</p>
       </footer>

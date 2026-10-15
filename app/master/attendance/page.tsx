@@ -2,17 +2,17 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { db } from '@/lib/firebase';
-import { collection, query, orderBy, getDocs, doc, updateDoc, where, deleteDoc, limit, writeBatch, addDoc } from 'firebase/firestore';
+import { collection, query, orderBy, getDocs, doc, updateDoc, where, limit, addDoc } from 'firebase/firestore';
 import {
   Briefcase, ArrowLeft, CheckCircle, Edit, Trash2, Search, Filter, Save, X, Plus, Train, Download,
-  Loader2, Clock, Layout, Copy, AlertCircle, ChevronRight, Calendar, User, DollarSign, CheckSquare, FileText, Coffee, BookOpen
+  Loader2, Clock, Layout, Copy, AlertCircle, ChevronRight, Calendar, User, DollarSign, CheckSquare, FileText, Coffee, BookOpen, BarChart3
 } from 'lucide-react';
 import Link from 'next/link';
 import { useAuth } from '@/app/context/AuthContext';
 import { TRANSPORT_TYPE_OPTIONS } from '@/lib/transport-fares';
 import TransportLineSelect from '@/app/components/TransportLineSelect';
 import TransportStationSearchInput from '@/app/components/TransportStationSearchInput';
-import { isSemiDedicatedProfile } from '@/lib/employment-category';
+import { attendanceRangeIssue } from '@/lib/attendance-date';
 
 // 型定義
 interface WorkSegment {
@@ -29,9 +29,9 @@ type SegmentGroup = 'normal' | 'breakthrough';
 const segmentTypeLabel = (type: WorkSegment['type'], short = false) => {
   const labels: Record<WorkSegment['type'], string> = {
     lesson: '授業',
-    support: short ? 'サブ' : 'サブ（面接）',
+    support: short ? 'サブ' : 'サブ（サポート）',
     office: '事務',
-    interview: short ? 'サブ' : 'サブ（面接）',
+    interview: short ? 'サブ' : 'サブ（サポート）',
     grading: short ? '成績' : '成績集約',
     other: 'その他',
     breakthrough_lesson: short ? '突破授業' : '突破ゼミの授業',
@@ -111,7 +111,7 @@ const segmentToneClass = (type: WorkSegment['type'], variant: 'chip' | 'row' | '
 const NORMAL_WORK_SEGMENT_OPTIONS: Array<{ value: WorkSegment['type']; label: string }> = [
   { value: 'lesson', label: '授業' },
   { value: 'office', label: '事務' },
-  { value: 'support', label: 'サブ（面接）［サブ給与］' },
+  { value: 'support', label: 'サブ（サポート）［サブ給与］' },
   { value: 'other', label: 'その他' },
   { value: 'break', label: '休憩' },
 ];
@@ -239,20 +239,6 @@ interface UserInfo {
   staff_id: string;
 }
 
-interface CorrectionRequest {
-  id: string;
-  work_record_id?: string | null;
-  request_type?: string;
-  teacher_id: string;
-  teacher_name?: string;
-  target_date?: string | null;
-  requested_start_time?: string | null;
-  requested_end_time?: string | null;
-  reason?: string;
-  status: string;
-  created_at?: any;
-}
-
 type AttendanceDiagnostic = {
   type: string;
   date: string;
@@ -264,7 +250,8 @@ type AttendanceDiagnostic = {
 };
 
 export default function MasterAttendancePage() {
-  const { user: authUser } = useAuth();
+  const { user: authUser, profile } = useAuth();
+  const isMaster = profile?.role === 'master';
   const [records, setRecords] = useState<any[]>([]);
   const [usersMap, setUsersMap] = useState<{[key:string]: UserInfo}>({});
   const [loading, setLoading] = useState(true);
@@ -272,8 +259,6 @@ export default function MasterAttendancePage() {
   const [filterName, setFilterName] = useState('');
   const [showOnlyPending, setShowOnlyPending] = useState(false);
   const [isCsvGenerating, setIsCsvGenerating] = useState(false);
-  const [correctionRequests, setCorrectionRequests] = useState<CorrectionRequest[]>([]);
-  const [processingCorrectionId, setProcessingCorrectionId] = useState('');
   const [attendanceDiagnostics, setAttendanceDiagnostics] = useState<AttendanceDiagnostic[]>([]);
 
   const [filterDate, setFilterDate] = useState('');
@@ -294,33 +279,34 @@ export default function MasterAttendancePage() {
   const [newRecordData, setNewRecordData] = useState({ teacher_id: '', date: new Date().toISOString().slice(0, 10) });
 
   useEffect(() => {
-    fetchUsers();
-  }, []);
+    if (authUser) fetchUsers();
+  }, [authUser]);
 
   useEffect(() => {
     fetchRecords();
-    fetchCorrectionRequests();
     fetchAttendanceDiagnostics();
     setSelectedRecordIds(new Set()); // 月が切り替わったら選択をリセット
   }, [filterMonth, authUser]);
 
   const fetchUsers = async () => {
     try {
-      // 講師アカウントと勤怠アプリ利用者を勤怠登録の対象にする
-      const q = query(collection(db, 'users'), where('role', 'in', ['teacher', 'attendance_admin']));
-      const snap = await getDocs(q);
-      const map: {[key:string]: UserInfo} = {};
-
-      snap.forEach(doc => {
-        const d = doc.data();
-        if (!isSemiDedicatedProfile(d)) return;
-        map[doc.id] = {
-          name: d.student_name || d.name || d.displayName || '名称未設定',
-          school_code: d.school_code || d.schoolCode || d.school_id || d.school_number || '999',
-          school_name: d.school_name || d.schoolName || d.school || d.classroom || d.affiliation || d.department || '',
-          staff_id: d.lifetime_id || d.staff_id || d.staffId || d.employee_id || d.employeeId || d.teacher_code || '9999'
-        };
+      const token = await authUser?.getIdToken();
+      if (!token) return;
+      const response = await fetch('/api/attendance-detail-approvals?staff_only=1', {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: 'no-store',
       });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || body.ok === false) throw new Error(body.error || '職員一覧を取得できませんでした。');
+      const map: {[key:string]: UserInfo} = {};
+      for (const staff of Array.isArray(body.staff) ? body.staff : []) {
+        map[staff.id] = {
+          name: staff.name || '名称未設定',
+          school_code: staff.school_id || '999',
+          school_name: staff.school_name || '',
+          staff_id: staff.login_id || '9999',
+        };
+      }
       setUsersMap(map);
     } catch (e) { console.error("Users fetch error:", e); }
   };
@@ -328,38 +314,20 @@ export default function MasterAttendancePage() {
   const fetchRecords = async () => {
     setLoading(true);
     try {
-      const [y, m] = filterMonth.split('-').map(Number);
-      const lastDay = new Date(y, m, 0).getDate();
-      const start = `${filterMonth}-01`;
-      const end = `${filterMonth}-${lastDay}`;
-
-      const q = query(
-        collection(db, 'work_records'),
-        where('date', '>=', start),
-        where('date', '<=', end),
-        orderBy('date', 'desc'),
-        orderBy('start_time', 'desc')
-      );
-      const snap = await getDocs(q);
-      setRecords(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      const token = await authUser?.getIdToken();
+      if (!token) return;
+      const response = await fetch(`/api/attendance-detail-approvals?month=${encodeURIComponent(filterMonth)}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: 'no-store',
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || body.ok === false) throw new Error(body.error || '勤務記録を取得できませんでした。');
+      setRecords(Array.isArray(body.records) ? body.records : []);
     } catch (e) {
-      console.error("Fetch fallback:", e);
-      const q2 = query(collection(db, 'work_records'), orderBy('created_at', 'desc'));
-      const snap2 = await getDocs(q2);
-      setRecords(snap2.docs.map(d => ({ id: d.id, ...d.data() })).filter((r: any) => r.date && r.date.startsWith(filterMonth)));
+      console.error('Attendance records fetch error:', e);
+      setRecords([]);
     } finally {
       setLoading(false);
-    }
-  };
-
-  const fetchCorrectionRequests = async () => {
-    try {
-      const q = query(collection(db, 'attendance_correction_requests'), orderBy('created_at', 'desc'), limit(30));
-      const snap = await getDocs(q);
-      setCorrectionRequests(snap.docs.map(d => ({ id: d.id, ...d.data() } as CorrectionRequest)));
-    } catch (e) {
-      console.warn('Correction requests fetch error:', e);
-      setCorrectionRequests([]);
     }
   };
 
@@ -375,38 +343,6 @@ export default function MasterAttendancePage() {
     } catch (e) {
       console.warn('Attendance diagnostics fetch error:', e);
       setAttendanceDiagnostics([]);
-    }
-  };
-
-  const handleCorrectionReview = async (requestId: string, status: 'approved' | 'rejected') => {
-    const label = status === 'approved' ? '承認' : '却下';
-    if (!confirm(`この打刻修正依頼を${label}しますか？`)) return;
-
-    setProcessingCorrectionId(requestId);
-    try {
-      const token = await authUser?.getIdToken();
-      if (!token) throw new Error('ログイン情報を確認できません。再ログインしてください。');
-      const res = await fetch('/api/attendance-corrections', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ action: 'review', request_id: requestId, status }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data.ok === false) {
-        const message = data.error === 'work_record_id is missing on correction request'
-          ? '対象の勤務記録が見つかりません。この依頼は古い形式か壊れているため、勤務記録から再申請してください。'
-          : data.error === 'target_date is missing on correction request'
-          ? '申請日が記録されていないため反映できません。却下して再申請してください。'
-          : data.error || 'failed';
-        throw new Error(message);
-      }
-      await fetchCorrectionRequests();
-      await fetchRecords();
-      await fetchAttendanceDiagnostics();
-    } catch (e: any) {
-      alert(`修正依頼の${label}に失敗しました: ${e.message || e}`);
-    } finally {
-      setProcessingCorrectionId('');
     }
   };
 
@@ -428,35 +364,31 @@ export default function MasterAttendancePage() {
 
   const handleBulkApprove = async () => {
     if (selectedRecordIds.size === 0) return;
-    if (!confirm(`${selectedRecordIds.size}件の記録を一括承認しますか？`)) return;
-
-    setIsBulkProcessing(true);
-    try {
-      const batch = writeBatch(db);
-      selectedRecordIds.forEach(id => {
-        batch.update(doc(db, 'work_records', id), { status: 'approved' });
-      });
-      await batch.commit();
-      setRecords(prev => prev.map(r => selectedRecordIds.has(r.id) ? { ...r, status: 'approved' } : r));
-      setSelectedRecordIds(new Set());
-    } catch (e: any) {
-      alert('承認エラー: ' + e.message);
-    } finally {
-      setIsBulkProcessing(false);
-    }
+    alert('勤務校舎ごとの承認が必要です。次の画面で勤務実績を1件ずつ確認してください。');
+    window.location.href = '/master/attendance-approvals';
   };
 
   const handleBulkDelete = async () => {
+    if (!isMaster) {
+      window.location.href = '/master/attendance-approvals';
+      return;
+    }
     if (selectedRecordIds.size === 0) return;
     if (!confirm(`${selectedRecordIds.size}件の記録を本当に削除しますか？\nこの操作は取り消せません。`)) return;
 
     setIsBulkProcessing(true);
     try {
-      const batch = writeBatch(db);
-      selectedRecordIds.forEach(id => {
-        batch.delete(doc(db, 'work_records', id));
-      });
-      await batch.commit();
+      const token = await authUser?.getIdToken();
+      if (!token) throw new Error('ログイン情報を確認できません。');
+      for (const id of selectedRecordIds) {
+        const response = await fetch('/api/attendance-detail-approvals', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ action: 'delete_record', work_record_id: id }),
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok || body.ok === false) throw new Error(body.error || '削除できない勤務実績がありました。');
+      }
       setRecords(prev => prev.filter(r => !selectedRecordIds.has(r.id)));
       setSelectedRecordIds(new Set());
     } catch (e: any) {
@@ -468,23 +400,36 @@ export default function MasterAttendancePage() {
 
   // --- 単体操作関数 ---
   const handleApprove = async (id: string) => {
-    if (!confirm('承認しますか？')) return;
-    try {
-      await updateDoc(doc(db, 'work_records', id), { status: 'approved' });
-      setRecords(prev => prev.map(r => r.id === id ? { ...r, status: 'approved' } : r));
-    } catch (e) { alert('承認エラー'); }
+    void id;
+    window.location.href = '/master/attendance-approvals';
   };
 
   const handleDelete = async (id: string) => {
+    if (!isMaster) {
+      window.location.href = '/master/attendance-approvals';
+      return;
+    }
     if (!confirm('本当に削除しますか？この操作は取り消せません。')) return;
     try {
-      await deleteDoc(doc(db, 'work_records', id));
+      const token = await authUser?.getIdToken();
+      if (!token) throw new Error('ログイン情報を確認できません。');
+      const response = await fetch('/api/attendance-detail-approvals', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action: 'delete_record', work_record_id: id }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || body.ok === false) throw new Error(body.error || '削除できませんでした。');
       setRecords(prev => prev.filter(r => r.id !== id));
       setSelectedRecordIds(prev => { const n = new Set(prev); n.delete(id); return n; });
     } catch (e) { alert('削除エラー'); }
   };
 
   const openEditor = (rec: any) => {
+    if (!isMaster) {
+      window.location.href = '/master/attendance-approvals';
+      return;
+    }
     setEditingRecord(rec);
     const toLocalISO = (iso: string) => {
       if (!iso) return '';
@@ -711,10 +656,22 @@ export default function MasterAttendancePage() {
 
   const saveAll = async () => {
     if (!editingRecord) return;
+    if (!isMaster) {
+      setEditingRecord(null);
+      window.location.href = '/master/attendance-approvals';
+      return;
+    }
     try {
       const ref = doc(db, 'work_records', editingRecord.id);
       const newStartISO = mainTime.start ? new Date(mainTime.start).toISOString() : editingRecord.start_time;
       const newEndISO = mainTime.end ? new Date(mainTime.end).toISOString() : null;
+      const rangeIssue = attendanceRangeIssue(newStartISO, newEndISO, String(editingRecord.date || ''));
+      if (rangeIssue === 'date_mismatch') {
+        return alert('【エラー】出勤・退勤時刻は勤務日と同じ日付で入力してください。');
+      }
+      if (rangeIssue) {
+        return alert('【エラー】退勤時刻は出勤時刻より後にしてください。');
+      }
 
       // ★ 修正: 詳細(業務内訳)の入力のみ5分単位であることをチェック
       const isTimeStrMultipleOf5 = (timeStr: string) => {
@@ -786,17 +743,24 @@ export default function MasterAttendancePage() {
 
       const formattedExpenses = formatTransportationForSave(expenses);
       const nextAttendanceKind: AttendanceKind = filledSegments.some(seg => isBreakthroughSegment(seg)) ? 'breakthrough' : 'normal';
+      const resetApprovalSegments = filledSegments.map((segment: any) => {
+        const { review_note, reviewed_by, reviewed_at, can_review, ...rest } = segment;
+        void review_note; void reviewed_by; void reviewed_at; void can_review;
+        return segment.type === 'break' ? rest : { ...rest, approval_status: 'pending' };
+      });
 
       await updateDoc(ref, {
         start_time: newStartISO,
         end_time: newEndISO,
         attendance_kind: nextAttendanceKind,
-        work_segments: filledSegments,
-        transportation: formattedExpenses
+        work_segments: resetApprovalSegments,
+        transportation: formattedExpenses,
+        detail_approval_status: 'pending',
+        status: 'pending',
       });
 
       setRecords(prev => prev.map(r => r.id === editingRecord.id ? {
-        ...r, start_time: newStartISO, end_time: newEndISO, attendance_kind: nextAttendanceKind, work_segments: filledSegments, transportation: formattedExpenses
+        ...r, start_time: newStartISO, end_time: newEndISO, attendance_kind: nextAttendanceKind, work_segments: resetApprovalSegments, transportation: formattedExpenses, detail_approval_status: 'pending', status: 'pending'
       } : r));
       fetchAttendanceDiagnostics();
 
@@ -807,6 +771,11 @@ export default function MasterAttendancePage() {
 
   // 新規勤務データ作成処理
   const handleCreateNewRecord = async () => {
+    if (!isMaster) {
+      setIsNewRecordModalOpen(false);
+      window.location.href = '/master/attendance-approvals';
+      return;
+    }
     if (!newRecordData.teacher_id) return alert('先生を選択してください');
     if (!newRecordData.date) return alert('日付を選択してください');
 
@@ -1106,7 +1075,7 @@ export default function MasterAttendancePage() {
         <body>
           <table>
             <tr><td class="title" colspan="14">2025年度 高校入試突破ゼミ出勤簿</td></tr>
-            <tr><td class="note" colspan="14">出力日: ${escapeHtml(filterDate)} / Classbase準専任勤怠管理から出力</td></tr>
+            <tr><td class="note" colspan="14">出力日: ${escapeHtml(filterDate)} / Classbase勤怠管理から出力</td></tr>
             <tr><td class="note" colspan="14">※勤怠の業務内訳で「突破ゼミの授業」「突破ゼミの事務」として登録された時間のみを出力しています。</td></tr>
             <tr>
               <th class="head" rowspan="2">実施日</th>
@@ -1192,24 +1161,10 @@ export default function MasterAttendancePage() {
     };
   }, [records, usersMap]);
 
-  const pendingCorrectionRequests = useMemo(
-    () => correctionRequests.filter(req => Boolean(usersMap[req.teacher_id]) && (req.status || 'pending') === 'pending'),
-    [correctionRequests, usersMap]
-  );
-
   const visibleAttendanceDiagnostics = useMemo(
     () => attendanceDiagnostics.filter(item => !item.teacher_id || Boolean(usersMap[item.teacher_id])),
     [attendanceDiagnostics, usersMap]
   );
-
-  const formatCorrectionTime = (value?: string | null) => {
-    if (!value) return '変更なし';
-    const d = new Date(value);
-    if (Number.isNaN(d.getTime())) return '変更なし';
-    return d.toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-  };
-
-  const getRecordById = (id: string) => records.find(record => record.id === id);
 
   // CSV一括出力
   const handleBulkDownload = async () => {
@@ -1566,13 +1521,21 @@ export default function MasterAttendancePage() {
             </Link>
             <div>
               <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
-                <Briefcase className="text-indigo-600" /> 準専任勤怠管理
+                <Briefcase className="text-indigo-600" /> 勤怠一覧・集計
               </h1>
-              <p className="text-xs text-gray-500 mt-1">講師の出勤記録の確認と承認を行います</p>
+              <p className="text-xs text-gray-500 mt-1">勤務記録の検索・修正・出力を行います。実績承認は専用画面から行ってください。</p>
             </div>
           </div>
 
           <div className="flex gap-4 flex-wrap">
+            <Link href={`/master/attendance/insights?month=${filterMonth}`} className="bg-cyan-600 px-5 py-3 rounded-xl shadow-sm flex flex-col items-center min-w-[140px] text-white hover:bg-cyan-700 transition-colors ring-2 ring-cyan-200 ring-offset-2">
+              <span className="text-[10px] font-bold uppercase flex items-center gap-1"><BarChart3 size={12}/> 勤務日の分析</span>
+              <span className="text-sm font-black">職員×曜日を見る</span>
+            </Link>
+            <Link href="/master/attendance-approvals" className="bg-slate-900 px-5 py-3 rounded-xl shadow-sm flex flex-col items-center min-w-[140px] text-white hover:bg-slate-800 transition-colors ring-2 ring-emerald-300 ring-offset-2">
+              <span className="text-[10px] font-bold uppercase flex items-center gap-1"><CheckSquare size={12}/> 最初に確認</span>
+              <span className="text-sm font-black">勤務実績を承認</span>
+            </Link>
             <Link href={`/master/attendance/dedicated-claims?month=${filterMonth}`} className="bg-sky-600 px-5 py-3 rounded-xl shadow-sm flex flex-col items-center min-w-[120px] text-white hover:bg-sky-700 transition-colors">
               <span className="text-[10px] font-bold uppercase flex items-center gap-1"><Clock size={12}/> 専任申請</span>
               <span className="text-sm font-black">時間外・授業・交通</span>
@@ -1584,10 +1547,6 @@ export default function MasterAttendancePage() {
             <Link href={`/master/attendance/payroll?month=${filterMonth}`} className="bg-indigo-600 px-5 py-3 rounded-xl shadow-sm flex flex-col items-center min-w-[120px] text-white hover:bg-indigo-700 transition-colors">
               <span className="text-[10px] font-bold uppercase flex items-center gap-1"><DollarSign size={12}/> 給与計算</span>
               <span className="text-sm font-black">集計・照合</span>
-            </Link>
-            <Link href="/master/attendance-corrections" className="bg-amber-500 px-5 py-3 rounded-xl shadow-sm flex flex-col items-center min-w-[120px] text-white hover:bg-amber-600 transition-colors">
-              <span className="text-[10px] font-bold uppercase flex items-center gap-1"><CheckSquare size={12}/> 打刻修正</span>
-              <span className="text-xl font-black">{pendingCorrectionRequests.length}</span>
             </Link>
             <Link href={`/master/attendance/diagnostics?month=${filterMonth}`} className="bg-white px-5 py-3 rounded-xl border border-rose-200 shadow-sm flex flex-col items-center min-w-[120px] hover:bg-rose-50 transition-colors">
               <span className="text-[10px] text-rose-500 font-bold uppercase flex items-center gap-1"><AlertCircle size={12}/> 要確認</span>
@@ -1608,86 +1567,6 @@ export default function MasterAttendancePage() {
           </div>
         </div>
 
-        {pendingCorrectionRequests.length > 0 && (
-          <details className="group mb-6 rounded-3xl border border-amber-200 bg-amber-50/70 p-4 shadow-sm">
-            <summary className="flex cursor-pointer list-none flex-col gap-2 rounded-2xl outline-none focus-visible:ring-2 focus-visible:ring-amber-500 sm:flex-row sm:items-center sm:justify-between">
-              <div className="min-w-0 flex-1">
-                <h2 className="flex min-w-0 flex-wrap items-center gap-2 text-lg font-black leading-snug text-amber-900">
-                  <AlertCircle size={20} className="shrink-0" /> <span className="min-w-0 whitespace-normal break-words">打刻修正依頼</span>
-                </h2>
-                <p className="mt-1 whitespace-normal break-words text-xs font-bold leading-relaxed text-amber-700">講師から届いた出退勤時刻の修正申請です。承認すると勤務記録へ反映されます。</p>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="inline-flex w-fit rounded-full bg-white px-3 py-1 text-xs font-black text-amber-700 ring-1 ring-amber-200">未処理 {pendingCorrectionRequests.length}件</span>
-                <span className="inline-flex items-center gap-1 text-xs font-black text-amber-800"><span className="group-open:hidden">表示する</span><span className="hidden group-open:inline">閉じる</span><ChevronRight size={16} className="transition-transform group-open:rotate-90" /></span>
-              </div>
-            </summary>
-
-            <div className="mt-4 grid gap-3 lg:grid-cols-2">
-              {pendingCorrectionRequests.map(req => {
-                const rec = req.work_record_id ? getRecordById(req.work_record_id) : undefined;
-                const teacher = usersMap[req.teacher_id];
-                const isMissingClock = req.request_type === 'missing_clock' || !req.work_record_id;
-                return (
-                  <div key={req.id} className="rounded-2xl border border-amber-100 bg-white p-4 shadow-sm">
-                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <p className="text-sm font-black text-slate-900">{teacher?.name || req.teacher_name || rec?.teacher_name || '講師未設定'}</p>
-                          {isMissingClock && <span className="rounded-full bg-rose-50 px-2 py-1 text-[10px] font-black text-rose-600">打刻なし新規</span>}
-                        </div>
-                        <p className="mt-1 text-xs font-bold text-slate-400">{rec?.date || req.target_date || '日付未取得'} / 申請ID: {req.id.slice(0, 8)}</p>
-                      </div>
-                      <span className="w-fit rounded-full bg-amber-100 px-3 py-1 text-[10px] font-black text-amber-700">承認待ち</span>
-                    </div>
-
-                    <div className="mt-4 grid grid-cols-2 gap-2">
-                      <div className="rounded-xl bg-slate-50 p-3">
-                        <p className="text-[10px] font-black text-slate-400">現在の出勤</p>
-                        <p className="mt-1 text-xs font-black text-slate-700">{isMissingClock ? '記録なし' : formatCorrectionTime(rec?.start_time)}</p>
-                      </div>
-                      <div className="rounded-xl bg-indigo-50 p-3">
-                        <p className="text-[10px] font-black text-indigo-400">修正後の出勤</p>
-                        <p className="mt-1 text-xs font-black text-indigo-700">{formatCorrectionTime(req.requested_start_time)}</p>
-                      </div>
-                      <div className="rounded-xl bg-slate-50 p-3">
-                        <p className="text-[10px] font-black text-slate-400">現在の退勤</p>
-                        <p className="mt-1 text-xs font-black text-slate-700">{isMissingClock ? '記録なし' : formatCorrectionTime(rec?.end_time)}</p>
-                      </div>
-                      <div className="rounded-xl bg-indigo-50 p-3">
-                        <p className="text-[10px] font-black text-indigo-400">修正後の退勤</p>
-                        <p className="mt-1 text-xs font-black text-indigo-700">{formatCorrectionTime(req.requested_end_time)}</p>
-                      </div>
-                    </div>
-
-                    <div className="mt-3 rounded-xl bg-slate-50 p-3">
-                      <p className="text-[10px] font-black text-slate-400">理由</p>
-                      <p className="mt-1 text-sm font-bold leading-relaxed text-slate-700">{req.reason || '理由未入力'}</p>
-                    </div>
-
-                    <div className="mt-4 flex justify-end gap-2">
-                      <button
-                        onClick={() => handleCorrectionReview(req.id, 'rejected')}
-                        disabled={processingCorrectionId === req.id}
-                        className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-black text-slate-500 hover:bg-slate-50 disabled:opacity-50"
-                      >
-                        却下
-                      </button>
-                      <button
-                        onClick={() => handleCorrectionReview(req.id, 'approved')}
-                        disabled={processingCorrectionId === req.id}
-                        className="flex items-center gap-2 rounded-xl bg-amber-500 px-4 py-2 text-xs font-black text-white hover:bg-amber-600 disabled:opacity-50"
-                      >
-                        {processingCorrectionId === req.id ? <Loader2 className="animate-spin" size={14} /> : <CheckSquare size={14} />} 承認して反映
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </details>
-        )}
-
         {visibleAttendanceDiagnostics.length > 0 && (
           <details className="group mb-6 rounded-3xl border border-rose-200 bg-rose-50/70 p-4 shadow-sm">
             <summary className="flex cursor-pointer list-none flex-col gap-2 rounded-2xl outline-none focus-visible:ring-2 focus-visible:ring-rose-500 sm:flex-row sm:items-center sm:justify-between">
@@ -1695,7 +1574,7 @@ export default function MasterAttendancePage() {
                 <h2 className="flex min-w-0 flex-wrap items-center gap-2 text-lg font-black leading-snug text-rose-900">
                   <AlertCircle size={20} className="shrink-0" /> <span className="min-w-0 whitespace-normal break-words">勤怠ミス候補</span>
                 </h2>
-                <p className="mt-1 whitespace-normal break-words text-xs font-bold leading-relaxed text-rose-700">講師配置との不一致、業務詳細未入力、交通費未入力など、確認が必要な可能性がある記録です。</p>
+                <p className="mt-1 whitespace-normal break-words text-xs font-bold leading-relaxed text-rose-700">{isMaster ? '講師配置との不一致、' : ''}業務詳細未入力、交通費未入力など、確認が必要な可能性がある記録です。</p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <span className="inline-flex w-fit rounded-full bg-white px-3 py-1 text-xs font-black text-rose-700 ring-1 ring-rose-200">要確認 {visibleAttendanceDiagnostics.length}件</span>
@@ -1979,7 +1858,7 @@ export default function MasterAttendancePage() {
                                   </button>
                                 ) : (
                                   <button onClick={() => handleApprove(rec.id)} className="w-full bg-indigo-600 text-white px-4 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-2 hover:bg-indigo-700 shadow-sm transition-all active:scale-95">
-                                    <CheckCircle size={16}/> 承認する
+                                    <CheckCircle size={16}/> 実績ごとに承認
                                   </button>
                                 )}
                                 <button onClick={() => openEditor(rec)} className="w-full bg-white border border-gray-200 text-gray-600 px-4 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-2 hover:bg-gray-50 transition-colors">
@@ -2084,11 +1963,11 @@ export default function MasterAttendancePage() {
                 <div className="grid grid-cols-2 gap-6">
                   <div>
                     <label className="text-xs font-bold text-gray-400 mb-1 block">出勤時刻</label>
-                    <input type="datetime-local" className="w-full bg-gray-50 border border-gray-200 rounded-xl p-3 text-sm font-mono font-bold focus:ring-2 focus:ring-indigo-500 outline-none" value={mainTime.start} onChange={e => setMainTime({...mainTime, start: e.target.value})} />
+                    <input type="datetime-local" min={`${editingRecord.date}T00:00`} max={`${editingRecord.date}T23:59`} className="w-full bg-gray-50 border border-gray-200 rounded-xl p-3 text-sm font-mono font-bold focus:ring-2 focus:ring-indigo-500 outline-none" value={mainTime.start} onChange={e => setMainTime({...mainTime, start: e.target.value})} />
                   </div>
                   <div>
                     <label className="text-xs font-bold text-gray-400 mb-1 block">退勤時刻</label>
-                    <input type="datetime-local" className="w-full bg-gray-50 border border-gray-200 rounded-xl p-3 text-sm font-mono font-bold focus:ring-2 focus:ring-indigo-500 outline-none" value={mainTime.end} onChange={e => setMainTime({...mainTime, end: e.target.value})} />
+                    <input type="datetime-local" min={`${editingRecord.date}T00:00`} max={`${editingRecord.date}T23:59`} className="w-full bg-gray-50 border border-gray-200 rounded-xl p-3 text-sm font-mono font-bold focus:ring-2 focus:ring-indigo-500 outline-none" value={mainTime.end} onChange={e => setMainTime({...mainTime, end: e.target.value})} />
                   </div>
                 </div>
               </div>

@@ -1,10 +1,13 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { ChevronLeft, ChevronRight, Loader2, BookOpen, Megaphone, CalendarPlus, Download, Clock, MapPin } from 'lucide-react';
+import { useState, useEffect, useMemo } from 'react';
+import { ChevronLeft, ChevronRight, Loader2, BookOpen, Megaphone, CalendarPlus, Download, Clock, MapPin, CalendarX2, HelpCircle } from 'lucide-react';
 import { db } from '@/lib/firebase';
 import { collection, query, where, getDocs, orderBy } from 'firebase/firestore';
 import { parseClassDays } from '@/lib/class-days';
+import { selectDisplayShiftAssignments } from '@/lib/shift-assignment-display';
+import { loadStudentCalendar } from '@/lib/client-student-homework';
+import { calendarScheduleKind, calendarScheduleLabel } from '@/lib/calendar-schedule-display';
 
 // 曜日の数値変換マップ
 const DAY_MAP: { [key: string]: number } = { '日': 0, '月': 1, '火': 2, '水': 3, '木': 4, '金': 5, '土': 6 };
@@ -18,6 +21,7 @@ interface Props {
   role?: 'student' | 'parent' | 'teacher';
   profile?: any;
   studentShiftIds?: string[] | null;
+  studentShiftDates?: string[] | null;
 }
 
 type TeacherShiftEvent = {
@@ -52,12 +56,12 @@ type CalendarMonthData = {
   schedules: any[];
 };
 
-const CALENDAR_CACHE_TTL_MS = 3 * 60 * 1000;
+const CALENDAR_CACHE_TTL_MS = 15 * 60 * 1000;
 const calendarMonthCache = new Map<string, { expiresAt: number; data: CalendarMonthData }>();
 const calendarMonthRequests = new Map<string, Promise<CalendarMonthData>>();
 
-const loadCalendarMonth = async (startStr: string, endStr: string) => {
-  const cacheKey = `${startStr}_${endStr}`;
+const loadCalendarMonth = async (startStr: string, endStr: string, includeShifts: boolean, role: Props['role']) => {
+  const cacheKey = `${role}_${startStr}_${endStr}_${includeShifts ? 'with-shifts' : 'without-shifts'}`;
   const cached = calendarMonthCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.data;
   const pending = calendarMonthRequests.get(cacheKey);
@@ -69,11 +73,7 @@ const loadCalendarMonth = async (startStr: string, endStr: string) => {
       where('target_date', '>=', startStr),
       where('target_date', '<=', endStr)
     );
-    const homeworkQuery = query(
-      collection(db, 'homework_assignments'),
-      where('deadline', '>=', startStr),
-      where('deadline', '<=', endStr)
-    );
+    const homeworkQuery = query(collection(db, 'homework_assignments'), where('deadline', '>=', startStr), where('deadline', '<=', endStr));
     const rangeScheduleQuery = query(
       collection(db, 'monthly_schedules'),
       where('start_date', '<=', endStr),
@@ -85,11 +85,15 @@ const loadCalendarMonth = async (startStr: string, endStr: string) => {
       where('target_date', '<=', endStr)
     );
 
-    const [shiftSnap, homeworkSnap, rangeScheduleSnap, legacyScheduleSnap] = await Promise.all([
-      getDocs(shiftQuery),
-      getDocs(homeworkQuery),
-      getDocs(rangeScheduleQuery).catch(() => ({ docs: [] as any[] })),
-      getDocs(legacyScheduleQuery).catch(() => ({ docs: [] as any[] })),
+    const studentDataPromise = role === 'student'
+      ? loadStudentCalendar(startStr, endStr)
+      : Promise.resolve({ homeworks: [] as any[], schedules: [] as any[] });
+    const [shiftSnap, homeworkSnap, rangeScheduleSnap, legacyScheduleSnap, studentData] = await Promise.all([
+      includeShifts ? getDocs(shiftQuery) : Promise.resolve({ docs: [] as any[] }),
+      role === 'teacher' ? getDocs(homeworkQuery) : Promise.resolve({ docs: [] as any[] }),
+      role === 'teacher' ? getDocs(rangeScheduleQuery).catch(() => ({ docs: [] as any[] })) : Promise.resolve({ docs: [] as any[] }),
+      role === 'teacher' ? getDocs(legacyScheduleQuery).catch(() => ({ docs: [] as any[] })) : Promise.resolve({ docs: [] as any[] }),
+      studentDataPromise,
     ]);
     const scheduleMap = new Map<string, any>();
     [...rangeScheduleSnap.docs, ...legacyScheduleSnap.docs].forEach((snapshot: any) => {
@@ -97,9 +101,11 @@ const loadCalendarMonth = async (startStr: string, endStr: string) => {
       if (scheduleStart(item) <= endStr && scheduleEnd(item) >= startStr) scheduleMap.set(item.id, item);
     });
     const data = {
-      shifts: shiftSnap.docs.map(snapshot => ({ id: snapshot.id, ...snapshot.data() })),
-      homeworks: homeworkSnap.docs.map(snapshot => ({ id: snapshot.id, ...snapshot.data() })),
-      schedules: Array.from(scheduleMap.values()),
+      shifts: selectDisplayShiftAssignments(
+        shiftSnap.docs.map(snapshot => ({ id: snapshot.id, ...snapshot.data() })),
+      ),
+      homeworks: role === 'student' ? studentData.homeworks : homeworkSnap.docs.map(snapshot => ({ id: snapshot.id, ...snapshot.data() })),
+      schedules: role === 'student' ? studentData.schedules : Array.from(scheduleMap.values()),
     };
     calendarMonthCache.set(cacheKey, { expiresAt: Date.now() + CALENDAR_CACHE_TTL_MS, data });
     return data;
@@ -113,7 +119,7 @@ const loadCalendarMonth = async (startStr: string, endStr: string) => {
   }
 };
 
-export default function CalendarWidget({ classDay, grade, role = 'student', profile, studentShiftIds }: Props) {
+export default function CalendarWidget({ classDay, grade, role = 'student', profile, studentShiftIds, studentShiftDates }: Props) {
   const [currentDate, setCurrentDate] = useState(new Date());
   const [shifts, setShifts] = useState<string[]>([]);
   const [teacherShiftEvents, setTeacherShiftEvents] = useState<TeacherShiftEvent[]>([]);
@@ -124,7 +130,10 @@ export default function CalendarWidget({ classDay, grade, role = 'student', prof
   const profileId = String(profile?.id || profile?.uid || '');
   const profileName = String(profile?.student_name || profile?.teacher_name || profile?.name || '');
   const classDayIndexes = new Set(parseClassDays(classDay).map(day => DAY_MAP[day]));
-  const registeredShiftIdSet = new Set((studentShiftIds || []).map(String));
+  const registeredShiftIdSet = useMemo(
+    () => new Set((studentShiftIds || []).map(String)),
+    [studentShiftIds],
+  );
 
   // 表示月が変わったらデータを取得
   useEffect(() => {
@@ -134,11 +143,12 @@ export default function CalendarWidget({ classDay, grade, role = 'student', prof
       const month = currentDate.getMonth() + 1;
       const startStr = `${year}-${String(month).padStart(2, '0')}-01`;
       const endStr = `${year}-${String(month).padStart(2, '0')}-31`;
-      const cached = calendarMonthCache.get(`${startStr}_${endStr}`);
+      const includeShifts = role === 'teacher';
+      const cached = calendarMonthCache.get(`${role}_${startStr}_${endStr}_${includeShifts ? 'with-shifts' : 'without-shifts'}`);
       setLoading(!(cached && cached.expiresAt > Date.now()));
 
       try {
-        const monthData = await loadCalendarMonth(startStr, endStr);
+        const monthData = await loadCalendarMonth(startStr, endStr, includeShifts, role);
         if (cancelled) return;
         const rawShifts = monthData.shifts;
         const teacherName = normalizeName(profileName);
@@ -179,6 +189,8 @@ export default function CalendarWidget({ classDay, grade, role = 'student', prof
 
         const shiftDates = role === 'teacher'
           ? teacherEvents.map(event => event.date)
+          : studentShiftDates !== undefined
+            ? (studentShiftDates || []).filter(date => startStr <= date && date <= endStr)
           : studentShiftIds !== undefined
             ? rawShifts
               .filter((shift: any) => registeredShiftIdSet.has(String(shift.id)))
@@ -192,9 +204,10 @@ export default function CalendarWidget({ classDay, grade, role = 'student', prof
         setShifts(shiftDates);
 
         const hwDates = monthData.homeworks
-          .filter(data => !grade || data.target_grade === grade) // 学年で絞り込み
-          .map(data => data.deadline as string);
-        setHomeworks([...new Set(hwDates)]);
+          .filter((data: any) => role === 'student' || !grade || data.target_grade === grade)
+          .map((data: any) => String(data.deadline || ''))
+          .filter(Boolean);
+        setHomeworks([...new Set<string>(hwDates)]);
 
         setMonthlySchedules(monthData.schedules
           .filter((data: any) => !data.archived)
@@ -216,7 +229,7 @@ export default function CalendarWidget({ classDay, grade, role = 'student', prof
 
     fetchData();
     return () => { cancelled = true; };
-  }, [currentDate, grade, role, profileId, profileName, studentShiftIds]);
+  }, [currentDate, grade, role, profileId, profileName, registeredShiftIdSet, studentShiftDates, studentShiftIds]);
 
   // カレンダー生成ロジック
   const year = currentDate.getFullYear();
@@ -350,6 +363,8 @@ export default function CalendarWidget({ classDay, grade, role = 'student', prof
           const dayTeacherEvents = role === 'teacher' ? teacherShiftEvents.filter(event => event.date === currentDayStr) : [];
           const hasHomework = homeworks.includes(currentDayStr); // 宿題あり判定
           const daySchedules = monthlySchedules.filter(item => scheduleCoversDate(item, currentDayStr));
+          const hasImportedLesson = daySchedules.some(item => calendarScheduleKind(item) === 'lesson');
+          const hasImportedClosed = daySchedules.some(item => calendarScheduleKind(item) === 'closed');
 
           let shiftStatus = 'none';
           if (isMyClassDay) {
@@ -366,6 +381,10 @@ export default function CalendarWidget({ classDay, grade, role = 'student', prof
                 ? 'bg-indigo-50 border-indigo-200 shadow-inner' 
                 : selectedDate === currentDayStr
                   ? 'bg-slate-900 border-slate-900 shadow-md'
+                  : hasImportedClosed
+                    ? 'bg-rose-50 border-rose-200'
+                    : hasImportedLesson
+                      ? 'bg-sky-50 border-sky-200'
                   : 'bg-white border-transparent hover:border-gray-100'
             } ${role === 'teacher' ? 'cursor-pointer hover:shadow-sm active:scale-[0.98]' : 'cursor-default'}`}>
               {/* 日付 */}
@@ -400,11 +419,20 @@ export default function CalendarWidget({ classDay, grade, role = 'student', prof
                     <BookOpen size={8} className="shrink-0"/> 提出
                   </div>
                 )}
-                {daySchedules.slice(0, 2).map(item => (
-                  <div key={item.id} className="bg-emerald-100 text-emerald-700 text-[9px] font-black py-0.5 rounded shadow-sm border border-emerald-200 flex items-center justify-center gap-0.5 truncate" title={item.title}>
-                    <Megaphone size={8} className="shrink-0"/> {item.title}
-                  </div>
-                ))}
+                {daySchedules.slice(0, 2).map(item => {
+                  const kind = calendarScheduleKind(item);
+                  const style = kind === 'closed'
+                    ? 'border-rose-300 bg-rose-100 text-rose-700'
+                    : kind === 'lesson'
+                      ? 'border-sky-300 bg-sky-100 text-sky-800'
+                      : 'border-emerald-200 bg-emerald-100 text-emerald-700';
+                  const Icon = kind === 'closed' ? CalendarX2 : kind === 'lesson' ? BookOpen : Megaphone;
+                  return (
+                    <div key={item.id} className={`${style} flex min-w-0 items-center justify-center gap-0.5 truncate rounded border py-0.5 text-[9px] font-black shadow-sm`} title={calendarScheduleLabel(item)}>
+                      <Icon size={8} className="shrink-0"/> {calendarScheduleLabel(item)}
+                    </div>
+                  );
+                })}
               </div>
             </button>
           );
@@ -475,6 +503,11 @@ export default function CalendarWidget({ classDay, grade, role = 'student', prof
         </div>
       )}
       
+      <details className="mt-4 rounded-xl border border-sky-100 bg-sky-50/70 px-4 py-3 text-left">
+        <summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-black text-sky-900"><HelpCircle size={15} />カレンダーの見方</summary>
+        <p className="mt-2 text-xs font-bold leading-6 text-sky-800">一括登録した年間予定は、授業実施日を青、休み・休講・休館日を赤で表示します。緑は模試などのその他予定です。「授業」は自分の登録講座、「配置」は講師配置を表します。</p>
+      </details>
+
       {/* 凡例 */}
       <div className="flex items-center justify-center gap-3 mt-6 px-2 bg-gray-50 py-3 rounded-xl border border-gray-100 flex-wrap">
         {classDay && (
@@ -500,10 +533,9 @@ export default function CalendarWidget({ classDay, grade, role = 'student', prof
           <div className="bg-orange-100 text-orange-700 text-[9px] font-black px-1.5 py-0.5 rounded border border-orange-200 flex items-center gap-0.5"><BookOpen size={8}/> 提出</div>
           <span className="text-[10px] text-gray-500 font-bold">宿題期限</span>
         </div>
-        <div className="flex items-center gap-1">
-          <div className="bg-emerald-100 text-emerald-700 text-[9px] font-black px-1.5 py-0.5 rounded border border-emerald-200 flex items-center gap-0.5"><Megaphone size={8}/> 予定</div>
-          <span className="text-[10px] text-gray-500 font-bold">月間予定</span>
-        </div>
+        <div className="flex items-center gap-1"><div className="flex items-center gap-0.5 rounded border border-sky-300 bg-sky-100 px-1.5 py-0.5 text-[9px] font-black text-sky-800"><BookOpen size={8}/> 実施</div><span className="text-[10px] font-bold text-gray-500">授業実施日</span></div>
+        <div className="flex items-center gap-1"><div className="flex items-center gap-0.5 rounded border border-rose-300 bg-rose-100 px-1.5 py-0.5 text-[9px] font-black text-rose-700"><CalendarX2 size={8}/> 休み</div><span className="text-[10px] font-bold text-gray-500">休み・休講</span></div>
+        <div className="flex items-center gap-1"><div className="flex items-center gap-0.5 rounded border border-emerald-200 bg-emerald-100 px-1.5 py-0.5 text-[9px] font-black text-emerald-700"><Megaphone size={8}/> 予定</div><span className="text-[10px] font-bold text-gray-500">その他予定</span></div>
       </div>
     </div>
   );

@@ -1,13 +1,25 @@
 'use client';
 
-import { useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { usePathname } from 'next/navigation';
 import { auth } from '@/lib/firebase';
 import { useAuth } from '@/app/context/AuthContext';
 
 type BetaEventType = 'page_view' | 'page_leave' | 'click' | 'error' | 'visibility' | 'performance';
 
+type QueuedBetaEvent = {
+  type: BetaEventType;
+  path: string;
+  session_id: string;
+  metadata: Record<string, unknown>;
+  feature: unknown;
+  duration_ms: unknown;
+};
+
 const SESSION_KEY = 'classbase_beta_session_id';
+const FLUSH_INTERVAL_MS = 30_000;
+const MAX_BATCH_SIZE = 25;
+const MAX_QUEUED_EVENTS = 100;
 
 const getSessionId = () => {
   if (typeof window === 'undefined') return '';
@@ -30,33 +42,53 @@ export default function BetaAnalyticsTracker() {
   const { user, profile, loading } = useAuth();
   const startedAtRef = useRef(Date.now());
   const lastClickAtRef = useRef(0);
+  const queueRef = useRef<QueuedBetaEvent[]>([]);
+  const flushingRef = useRef(false);
   const sessionId = useMemo(getSessionId, []);
+  const analyticsLevel = String(process.env.NEXT_PUBLIC_BETA_ANALYTICS_LEVEL || 'summary').toLowerCase();
+  const analyticsEnabled = analyticsLevel !== 'off';
+  const detailedAnalytics = analyticsLevel === 'detailed';
 
-  const sendEvent = async (type: BetaEventType, payload: Record<string, unknown> = {}, useBeacon = false) => {
-    if (!user || loading || !profile) return;
-    const body = {
+  const flushEvents = useCallback(async (useKeepalive = false) => {
+    if (!user || loading || flushingRef.current || queueRef.current.length === 0) return;
+    const events = queueRef.current.splice(0, MAX_BATCH_SIZE);
+    flushingRef.current = true;
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) throw new Error('missing-token');
+      const response = await fetch('/api/beta/events', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ events }),
+        keepalive: useKeepalive,
+      });
+      if (!response.ok) throw new Error(`beta-analytics-${response.status}`);
+    } catch {
+      queueRef.current = [...events, ...queueRef.current].slice(-MAX_QUEUED_EVENTS);
+      // 計測失敗で利用者操作を止めない
+    } finally {
+      flushingRef.current = false;
+    }
+  }, [loading, user]);
+
+  const sendEvent = useCallback((type: BetaEventType, payload: Record<string, unknown> = {}, flushNow = false) => {
+    if (!analyticsEnabled || !user || loading || !profile) return;
+    // 通常運用では画面利用・滞在・エラーだけを記録する。クリック単位の詳細計測は
+    // NEXT_PUBLIC_BETA_ANALYTICS_LEVEL=detailed の期間だけ有効にする。
+    if (!detailedAnalytics && (type === 'click' || type === 'visibility' || type === 'performance')) return;
+    queueRef.current.push({
       type,
       path: pathname || window.location.pathname,
       session_id: sessionId,
       metadata: payload,
       feature: payload.feature || payload.label || payload.href || pathname,
       duration_ms: payload.duration_ms || 0,
-    };
-
-    try {
-      const token = await auth.currentUser?.getIdToken();
-      if (!token) return;
-      const data = JSON.stringify(body);
-      await fetch('/api/beta/events', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: data,
-        keepalive: useBeacon,
-      });
-    } catch {
-      // 計測失敗で利用者操作を止めない
+    });
+    if (queueRef.current.length > MAX_QUEUED_EVENTS) {
+      queueRef.current.splice(0, queueRef.current.length - MAX_QUEUED_EVENTS);
     }
-  };
+    if (flushNow || queueRef.current.length >= MAX_BATCH_SIZE) void flushEvents(flushNow);
+  }, [analyticsEnabled, detailedAnalytics, flushEvents, loading, pathname, profile, sessionId, user]);
 
   useEffect(() => {
     if (!user || loading || !profile) return;
@@ -83,7 +115,7 @@ export default function BetaAnalyticsTracker() {
       const duration = Date.now() - startedAtRef.current;
       sendEvent('page_leave', { duration_ms: duration }, true);
     };
-  }, [pathname, user?.uid, loading, profile?.role]);
+  }, [pathname, user, loading, profile, sendEvent]);
 
   useEffect(() => {
     if (!user || loading || !profile) return;
@@ -119,7 +151,8 @@ export default function BetaAnalyticsTracker() {
       sendEvent('visibility', {
         state: document.visibilityState,
         duration_ms: Date.now() - startedAtRef.current,
-      }, document.visibilityState === 'hidden');
+      });
+      if (document.visibilityState === 'hidden') void flushEvents(true);
     };
 
     document.addEventListener('click', handleClick, true);
@@ -132,7 +165,15 @@ export default function BetaAnalyticsTracker() {
       window.removeEventListener('unhandledrejection', handleRejection);
       document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, [user?.uid, loading, profile?.role, pathname]);
+  }, [user, loading, profile, pathname, sendEvent, flushEvents]);
+
+  useEffect(() => {
+    if (!analyticsEnabled || !user || loading || !profile) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void flushEvents();
+    }, FLUSH_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [analyticsEnabled, flushEvents, loading, profile, user]);
 
   return null;
 }

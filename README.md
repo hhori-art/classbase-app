@@ -7,6 +7,10 @@
 - [権限別機能・デモアカウント早見表](docs/role-feature-demo-accounts.md)
 - [データモデル・移行メモ](docs/data-model-and-migration.md)
 - [Google スプレッドシート講師配置同期 GAS 手順](docs/google-shift-sync-gas.md)
+- [本番監視・障害対応ランブック](docs/production-incident-runbook.md)
+- [バックアップ・復旧ランブック](docs/backup-and-restore-runbook.md)
+- [Firebase Rules 反映・切り戻し手順](docs/firebase-rules-release-runbook.md)
+- [本番運用研修・リハーサル計画](docs/operations-training-plan.md)
 
 ## 交通費API連携
 
@@ -77,3 +81,5 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+MySQL通常勤怠連携の設定と検証手順は [docs/attendance-mysql-integration.md](docs/attendance-mysql-integration.md) を参照してください。

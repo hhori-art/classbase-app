@@ -24,7 +24,7 @@ export default function TeacherStudentsPage() {
   const [filterClassroom, setFilterClassroom] = useState('');
 
   // ★変更点: 簡易出席確認用 (setIntervalは使いません)
-  const [monitorMeetingId, setMonitorMeetingId] = useState('');
+  const [monitorShiftId, setMonitorShiftId] = useState('');
   const [attendingStudentIds, setAttendingStudentIds] = useState<string[]>([]); // 出席者のIDリストのみ管理
   const [monitorLoading, setMonitorLoading] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
@@ -117,8 +117,9 @@ export default function TeacherStudentsPage() {
 
   // ★変更点: 手動更新ロジック (ボタンを押した時だけAPIを叩く)
   const checkAttendance = async () => {
-    const cleanId = monitorMeetingId.replace(/\s+/g, '');
-    if (!cleanId) return alert("授業を選択してください");
+    const selectedShift = todayShifts.find(shift => shift.id === monitorShiftId);
+    const cleanId = String(selectedShift?.target_meeting_id || '').replace(/\s+/g, '');
+    if (!selectedShift || !cleanId) return alert("授業を選択してください");
 
     setMonitorLoading(true);
     try {
@@ -129,7 +130,7 @@ export default function TeacherStudentsPage() {
       const res = await fetch('/api/get-zoom-live-status', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ meetingId: cleanId })
+        body: JSON.stringify({ meetingId: cleanId, shiftId: selectedShift.id })
       });
       const data = await res.json();
 
@@ -262,9 +263,9 @@ export default function TeacherStudentsPage() {
               <div className="relative">
                 <select
                   className="bg-slate-800 border border-slate-600 text-white text-sm rounded-lg p-2.5 w-full md:w-80 pr-8 appearance-none cursor-pointer hover:bg-slate-700 transition-colors"
-                  value={monitorMeetingId}
+                  value={monitorShiftId}
                   onChange={(e) => {
-                    setMonitorMeetingId(e.target.value);
+                    setMonitorShiftId(e.target.value);
                     setAttendingStudentIds([]); // 授業を変更したらリセット
                     setLastUpdated(null);
                   }}
@@ -274,7 +275,7 @@ export default function TeacherStudentsPage() {
                     todayShifts.map((shift) => {
                       const note = shift.note?.replace(/[【】]/g, '') || '';
                       return (
-                        <option key={shift.id} value={shift.target_meeting_id}>
+                        <option key={shift.id} value={shift.id}>
                           {note} | {shift.target_grade} {shift.target_subject} ({shift.teacher_name})
                         </option>
                       );
@@ -289,7 +290,7 @@ export default function TeacherStudentsPage() {
               {/* 手動更新ボタン */}
               <button 
                 onClick={checkAttendance} 
-                disabled={!monitorMeetingId || monitorLoading}
+                disabled={!monitorShiftId || monitorLoading}
                 className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2.5 rounded-lg font-bold flex items-center gap-2 transition-colors text-sm whitespace-nowrap shadow-lg shadow-blue-900/20"
               >
                 {monitorLoading ? <Loader2 size={16} className="animate-spin"/> : <RefreshCw size={16}/>}

@@ -21,11 +21,15 @@ export default function NotificationBell({ href, className = '' }: Props) {
   const { play } = useSound(profile?.settings?.sound_se !== false);
   const [items, setItems] = useState<NotificationItem[]>([]);
   const previousUnreadRef = useRef<number | null>(null);
+  const requestInFlightRef = useRef(false);
+  const lastLoadedAtRef = useRef(0);
 
   useEffect(() => {
     if (!user) return;
     let cancelled = false;
     const load = async () => {
+      if (requestInFlightRef.current) return;
+      requestInFlightRef.current = true;
       try {
         const token = await user.getIdToken();
         if (!token) return;
@@ -41,16 +45,24 @@ export default function NotificationBell({ href, className = '' }: Props) {
           }
           previousUnreadRef.current = unreadCount;
           setItems(nextItems);
+          lastLoadedAtRef.current = Date.now();
         }
       } catch (e) {
         console.warn('Notification load failed:', e);
+      } finally {
+        requestInFlightRef.current = false;
       }
     };
-    load();
-    const interval = window.setInterval(load, 60 * 1000);
+    void load();
+    const loadIfVisible = () => {
+      if (document.visibilityState === 'visible' && Date.now() - lastLoadedAtRef.current >= 5 * 60 * 1000) void load();
+    };
+    const interval = window.setInterval(loadIfVisible, 5 * 60 * 1000);
+    document.addEventListener('visibilitychange', loadIfVisible);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', loadIfVisible);
     };
   }, [user, play]);
 

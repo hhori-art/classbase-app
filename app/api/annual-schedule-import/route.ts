@@ -64,6 +64,9 @@ const UNIT_KEYS = ['単元', '単元名', 'カリキュラム', 'unit'];
 const LESSON_KEYS = ['回', '回数', '講座回', 'No', 'no', 'lesson_no'];
 const SCHOOL_KEYS = ['校舎', '校舎ID', 'school', 'school_id'];
 const NOTE_KEYS = ['備考', 'メモ', 'note', 'notes'];
+const MAX_IMPORT_BODY_BYTES = 10 * 1024 * 1024;
+const MAX_IMPORT_ROWS = 20_000;
+const MAX_MATRIX_COLUMNS = 500;
 
 const pick = (row: Record<string, unknown>, keys: string[]) => {
   for (const key of keys) {
@@ -74,6 +77,12 @@ const pick = (row: Record<string, unknown>, keys: string[]) => {
 };
 
 const sanitizeId = (value: string) => value.replace(/[^\p{Letter}\p{Number}_-]+/gu, '_').slice(0, 140);
+
+const calendarDate = (year: number, month: number, day: number) => {
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return '';
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+};
 
 const normalizeDate = (value: string, defaultYear: number) => {
   const raw = String(value || '').trim();
@@ -87,10 +96,10 @@ const normalizeDate = (value: string, defaultYear: number) => {
 
   const normalized = raw.replace(/[年月.]/g, '/').replace(/日/g, '').replace(/-/g, '/');
   const full = normalized.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
-  if (full) return `${full[1]}-${full[2].padStart(2, '0')}-${full[3].padStart(2, '0')}`;
+  if (full) return calendarDate(Number(full[1]), Number(full[2]), Number(full[3]));
 
   const short = normalized.match(/^(\d{1,2})\/(\d{1,2})$/);
-  if (short) return `${defaultYear}-${short[1].padStart(2, '0')}-${short[2].padStart(2, '0')}`;
+  if (short) return calendarDate(defaultYear, Number(short[1]), Number(short[2]));
 
   return '';
 };
@@ -216,12 +225,13 @@ const googleSheetCsvUrl = (value: string) => {
   if (!raw) return '';
   try {
     const url = new URL(raw);
-    const match = url.pathname.match(/\/spreadsheets\/d\/([^/]+)/);
-    if (!match) return raw;
+    if (url.protocol !== 'https:' || url.hostname !== 'docs.google.com') return '';
+    const match = url.pathname.match(/^\/spreadsheets\/d\/([a-zA-Z0-9_-]+)(?:\/|$)/);
+    if (!match) return '';
     const gid = url.searchParams.get('gid') || '0';
     return `https://docs.google.com/spreadsheets/d/${match[1]}/export?format=csv&gid=${encodeURIComponent(gid)}`;
   } catch {
-    return raw;
+    return '';
   }
 };
 
@@ -476,13 +486,16 @@ const normalizeGenericRows = (type: ImportType, rows: Record<string, unknown>[],
   });
 };
 
-const deleteCollectionQuery = async (
+const queryCollectionTargets = async (
   query: FirebaseFirestore.Query,
   shouldDelete: (data: FirebaseFirestore.DocumentData) => boolean = () => true,
 ) => {
-  let deleted = 0;
   const snap = await query.get();
-  const targets = snap.docs.filter(doc => shouldDelete(doc.data()));
+  return snap.docs.filter(doc => shouldDelete(doc.data()));
+};
+
+const deleteDocumentTargets = async (targets: FirebaseFirestore.QueryDocumentSnapshot[]) => {
+  let deleted = 0;
   for (let i = 0; i < targets.length; i += 400) {
     const chunk = targets.slice(i, i + 400);
     const batch = adminDb().batch();
@@ -497,22 +510,40 @@ export async function POST(request: NextRequest) {
   try {
     const user = await getServerUser(request);
     if (user.role !== 'master') throw new Error('forbidden');
+    if (Number(request.headers.get('content-length') || 0) > MAX_IMPORT_BODY_BYTES) {
+      return Response.json({ ok: false, error: '取込データは10MB以下にしてください。' }, { status: 413 });
+    }
 
     const body = await request.json();
     const type = String(body.type || '') as ImportType;
-    let rows = Array.isArray(body.rows) ? body.rows : [];
-    let matrix = isMatrix(body.matrix) ? body.matrix : [];
+    let rows: unknown[] = Array.isArray(body.rows) ? body.rows : [];
+    let matrix: string[][] = isMatrix(body.matrix) ? body.matrix : [];
     const defaultYear = Number(body.year || new Date().getFullYear());
     if (!['lesson_schedule', 'curriculum'].includes(type)) {
       return Response.json({ ok: false, error: 'type must be lesson_schedule or curriculum' }, { status: 400 });
+    }
+    if (!Number.isInteger(defaultYear) || defaultYear < 2020 || defaultYear > 2100) {
+      return Response.json({ ok: false, error: '年度は2020〜2100の西暦4桁で指定してください。' }, { status: 400 });
+    }
+    if (rows.length > MAX_IMPORT_ROWS || matrix.length > MAX_IMPORT_ROWS || matrix.some(row => row.length > MAX_MATRIX_COLUMNS)) {
+      return Response.json({ ok: false, error: `取込行数は${MAX_IMPORT_ROWS.toLocaleString()}行以下、列数は${MAX_MATRIX_COLUMNS}列以下にしてください。` }, { status: 413 });
     }
 
     const sheetUrl = String(body.sheet_url || body.sheetUrl || '').trim();
     if (sheetUrl && rows.length === 0 && matrix.length === 0) {
       const csvUrl = googleSheetCsvUrl(sheetUrl);
+      if (!csvUrl) {
+        return Response.json({ ok: false, error: 'GoogleスプレッドシートのURLを指定してください。' }, { status: 400 });
+      }
       const csvRes = await fetch(csvUrl, { redirect: 'follow' });
+      if (Number(csvRes.headers.get('content-length') || 0) > MAX_IMPORT_BODY_BYTES) {
+        return Response.json({ ok: false, error: 'GoogleシートのCSVは10MB以下にしてください。' }, { status: 413 });
+      }
       const contentType = csvRes.headers.get('content-type') || '';
       const text = (await csvRes.text()).replace(/^\uFEFF/, '');
+      if (Buffer.byteLength(text, 'utf8') > MAX_IMPORT_BODY_BYTES) {
+        return Response.json({ ok: false, error: 'GoogleシートのCSVは10MB以下にしてください。' }, { status: 413 });
+      }
       if (!csvRes.ok || contentType.includes('text/html') || /accounts\.google\.com|ServiceLogin|InteractiveLogin/i.test(text)) {
         return Response.json({
           ok: false,
@@ -522,6 +553,9 @@ export async function POST(request: NextRequest) {
       const parsed = parseCsv(text);
       rows = parsed.rows;
       matrix = parsed.matrix;
+      if (rows.length > MAX_IMPORT_ROWS || matrix.length > MAX_IMPORT_ROWS || matrix.some(row => row.length > MAX_MATRIX_COLUMNS)) {
+        return Response.json({ ok: false, error: `取込行数は${MAX_IMPORT_ROWS.toLocaleString()}行以下、列数は${MAX_MATRIX_COLUMNS}列以下にしてください。` }, { status: 413 });
+      }
     }
 
     if (rows.length === 0 && matrix.length === 0) return Response.json({ ok: false, error: 'rows is required' }, { status: 400 });
@@ -548,17 +582,31 @@ export async function POST(request: NextRequest) {
     if (normalizedRows.length === 0) {
       return Response.json({ ok: false, error: 'CSV形式を判定できませんでした。指定の年間授業予定またはカリキュラム原案CSVを選択してください。' }, { status: 400 });
     }
+    if (normalizedRows.length > MAX_IMPORT_ROWS) {
+      return Response.json({ ok: false, error: `取込件数は${MAX_IMPORT_ROWS.toLocaleString()}件以下にしてください。` }, { status: 413 });
+    }
+    const selectedYearPrefix = `${defaultYear}-`;
+    if (normalizedRows.some(row => [row.startDate, row.endDate].some(date => date && !date.startsWith(selectedYearPrefix)))) {
+      return Response.json({ ok: false, error: `日付は選択年度（${defaultYear}年）の範囲内にしてください。` }, { status: 400 });
+    }
+    if (type === 'lesson_schedule' && !normalizedRows.some(row => row.startDate && (row.endDate || row.startDate) >= row.startDate)) {
+      return Response.json({ ok: false, error: '有効な授業日がありません。日付と期間を確認してください。' }, { status: 400 });
+    }
 
-    const deletedAnnual = await deleteCollectionQuery(db.collection(collectionName).where('year', '==', defaultYear));
-    let deletedRelated = 0;
+    // Load replacement candidates first. Existing data is removed only after all
+    // new writes succeed, so a timeout or batch failure cannot empty the year.
+    const existingAnnual = await queryCollectionTargets(db.collection(collectionName).where('year', '==', defaultYear));
+    let existingRelated: FirebaseFirestore.QueryDocumentSnapshot[] = [];
     if (type === 'lesson_schedule') {
-      deletedRelated += await deleteCollectionQuery(
+      existingRelated = await queryCollectionTargets(
         db.collection('monthly_schedules').where('year', '==', defaultYear),
         data => data.schedule_source === type,
       );
     } else {
-      deletedRelated += await deleteCollectionQuery(db.collection('course_registration_options')
-        .where('year', '==', defaultYear));
+      existingRelated = await queryCollectionTargets(
+        db.collection('course_registration_options').where('year', '==', defaultYear),
+        data => data.source === 'curriculum_import',
+      );
     }
 
     const lessonSnap = type === 'curriculum'
@@ -587,6 +635,8 @@ export async function POST(request: NextRequest) {
     let batch = db.batch();
     let writes = 0;
     const writtenOptionIds = new Set<string>();
+    const writtenAnnualIds = new Set<string>();
+    const writtenMonthlyIds = new Set<string>();
 
     const commitIfNeeded = async (force = false) => {
       if (writes > 0 && (force || writes >= 240)) {
@@ -624,6 +674,7 @@ export async function POST(request: NextRequest) {
       const docId = sanitizeId(idBase);
       const docRef = db.collection(collectionName).doc(docId);
       const monthlyRef = db.collection('monthly_schedules').doc(`import_${docId}`);
+      writtenAnnualIds.add(docRef.id);
 
       const commonData = {
         type,
@@ -655,6 +706,7 @@ export async function POST(request: NextRequest) {
       batch.set(docRef, { ...commonData, created_at: now }, { merge: true });
       writes += 1;
       if (type === 'lesson_schedule') {
+        writtenMonthlyIds.add(monthlyRef.id);
         batch.set(monthlyRef, {
           ...Object.fromEntries(Object.entries(commonData).filter(([key]) => key !== 'raw')),
           description: notes || [subject, grade, unit].filter(Boolean).join(' / '),
@@ -695,6 +747,10 @@ export async function POST(request: NextRequest) {
     }
 
     await commitIfNeeded(true);
+
+    const deletedAnnual = await deleteDocumentTargets(existingAnnual.filter(doc => !writtenAnnualIds.has(doc.id)));
+    const expectedRelatedIds = type === 'lesson_schedule' ? writtenMonthlyIds : writtenOptionIds;
+    const deletedRelated = await deleteDocumentTargets(existingRelated.filter(doc => !expectedRelatedIds.has(doc.id)));
 
     const eventId = await writeLearningEvent({
       actor_id: user.uid,

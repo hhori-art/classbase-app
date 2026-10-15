@@ -4,7 +4,6 @@ import { useEffect, useState } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
 import { doc, updateDoc, serverTimestamp } from 'firebase/firestore';
-import { Loader2 } from 'lucide-react';
 // ★追加: BottomNavigation をインポート (パスはプロジェクトに合わせてください)
 import BottomNavigation from '@/app/components/BottomNav'; 
 import {
@@ -58,12 +57,7 @@ export default function StudentLayout({ children }: { children: React.ReactNode 
   }, [user?.uid, profile?.role]);
 
   if (loading || !user || !profile || profile.role !== 'student') {
-    return (
-      <div className="flex min-h-[100dvh] w-full flex-col items-center justify-center bg-slate-50 px-6 text-center">
-        <Loader2 className="animate-spin text-indigo-600" size={36} />
-        <p className="mt-4 text-sm font-black text-slate-500">ホーム画面を準備しています</p>
-      </div>
-    );
+    return <div className="min-h-[100dvh] w-full bg-slate-50" aria-busy="true" />;
   }
 
   return (

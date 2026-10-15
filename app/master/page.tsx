@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect } from 'react';
 import Link from 'next/link';
 import {
   ArrowRight,
@@ -9,15 +10,18 @@ import {
   LockKeyhole,
   PanelsTopLeft,
   ShieldCheck,
+  Sparkles,
 } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
 import {
   normalizeAdminAppPermissions,
+  isConfigurableAdminRole,
   type AdminAppId,
 } from '@/lib/admin-app-permissions';
 
 const APPS: Array<{
-  id: AdminAppId;
+  id: AdminAppId | 'online_school';
+  masterOnly?: boolean;
   title: string;
   description: string;
   href: string;
@@ -44,6 +48,16 @@ const APPS: Array<{
     iconStyle: 'bg-emerald-600',
   },
   {
+    id: 'online_school',
+    masterOnly: true,
+    title: 'オンライン校 管理',
+    description: '10分学習の実施状況、生徒の進捗、問題を管理します。',
+    href: '/master/online-school',
+    icon: Sparkles,
+    style: 'border-violet-200 bg-violet-50 text-violet-950',
+    iconStyle: 'bg-violet-600',
+  },
+  {
     id: 'attendance',
     title: '勤怠 管理',
     description: '勤務記録、打刻修正、交通費、勤怠出力を管理します。',
@@ -57,8 +71,13 @@ const APPS: Array<{
 export default function AdminAppHome() {
   const { profile } = useAuth();
   const permissions = normalizeAdminAppPermissions(profile?.role, profile || {});
-  const availableApps = APPS.filter(app => permissions[app.id]);
   const isMaster = profile?.role === 'master';
+  const isSchoolAdmin = isConfigurableAdminRole(profile?.role) && !isMaster;
+  useEffect(() => {
+    if (isSchoolAdmin) window.location.replace('/master/science-social');
+  }, [isSchoolAdmin]);
+  if (isSchoolAdmin) return <div className="min-h-[60vh]" aria-busy="true" />;
+  const availableApps = APPS.filter(app => app.masterOnly ? isMaster : permissions[app.id as AdminAppId]);
 
   return (
     <div className="mx-auto max-w-6xl py-4 sm:py-8">

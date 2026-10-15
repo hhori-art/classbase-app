@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
-import { collection, query, orderBy, getDocs, doc, getDoc } from 'firebase/firestore';
+import { doc, getDoc } from 'firebase/firestore';
 import { ArrowLeft, ShoppingBag, Coins, Lock, Loader2, AlertTriangle } from 'lucide-react';
 // import Image from 'next/image'; // ★削除
 import Link from 'next/link';
@@ -26,9 +26,13 @@ export default function StudentShopPage() {
         if (!enabled) return;
 
         // 1. 景品リスト取得
-        const q = query(collection(db, 'rewards'), orderBy('required_coins', 'asc'));
-        const rewardSnap = await getDocs(q);
-        setRewards(rewardSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+        const token = await user.getIdToken();
+        const rewardResponse = await fetch('/api/rewards', {
+          headers: { Authorization: `Bearer ${token}` }, cache: 'no-store',
+        });
+        const rewardData = await rewardResponse.json();
+        if (!rewardResponse.ok) throw new Error(rewardData.error || '景品を取得できませんでした');
+        setRewards(rewardData.rewards || []);
 
         // 2. ユーザーの現在のコイン数取得
         const userSnap = await getDoc(doc(db, 'users', user.uid));
@@ -58,7 +62,11 @@ export default function StudentShopPage() {
       const res = await fetch('/api/coin-transactions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ action: 'reward_exchange', reward_id: reward.id }),
+        body: JSON.stringify({
+          action: 'reward_exchange',
+          reward_id: reward.id,
+          exchange_id: crypto.randomUUID(),
+        }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.ok === false) {

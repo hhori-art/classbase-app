@@ -25,29 +25,49 @@ function verifyZoomWebhook(rawBody: string, request: Request) {
 
 export async function POST(request: Request) {
   try {
+    const contentLength = Number(request.headers.get('content-length') || 0);
+    if (Number.isFinite(contentLength) && contentLength > 1_000_000) {
+      return NextResponse.json({ error: 'payload-too-large' }, { status: 413 });
+    }
     const rawBody = await request.text();
-    const body = JSON.parse(rawBody || '{}');
-    
-    // --- 1. URL確認イベントへの応答 (Zoomの仕様) ---
-    if (body.event === 'endpoint.url_validation') {
-      const hashForValidate = crypto
-        .createHmac('sha256', process.env.ZOOM_WEBHOOK_SECRET || '')
-        .update(body.payload.plainToken)
-        .digest('hex');
-      return NextResponse.json({
-        plainToken: body.payload.plainToken,
-        encryptedToken: hashForValidate
-      });
+    if (Buffer.byteLength(rawBody, 'utf8') > 1_000_000) {
+      return NextResponse.json({ error: 'payload-too-large' }, { status: 413 });
     }
 
-    // --- 2. Zoomの認証 (Secret Tokenの検証) ---
+    // URL validationも含め、Zoom署名を確認する前に共有秘密で応答しない。
     if (!verifyZoomWebhook(rawBody, request)) {
       return NextResponse.json({ error: 'invalid-signature' }, { status: 401 });
     }
 
+    let body: any;
+    try {
+      body = JSON.parse(rawBody || '{}');
+    } catch {
+      return NextResponse.json({ error: 'invalid-json' }, { status: 400 });
+    }
+    
+    // --- 1. URL確認イベントへの応答 (Zoomの仕様) ---
+    if (body.event === 'endpoint.url_validation') {
+      const plainToken = String(body.payload?.plainToken || '');
+      if (!plainToken || plainToken.length > 500) {
+        return NextResponse.json({ error: 'invalid-validation-token' }, { status: 400 });
+      }
+      const hashForValidate = crypto
+        .createHmac('sha256', process.env.ZOOM_WEBHOOK_SECRET!)
+        .update(plainToken)
+        .digest('hex');
+      return NextResponse.json({
+        plainToken,
+        encryptedToken: hashForValidate
+      });
+    }
+
     // --- 3. 録画完了イベントの処理 ---
     if (body.event === 'recording.completed') {
-      const payload = body.payload.object;
+      const payload = body.payload?.object;
+      if (!payload || typeof payload !== 'object') {
+        return NextResponse.json({ error: 'invalid-recording-payload' }, { status: 400 });
+      }
       const result = await attachRecordingToBestShift(payload, 'zoom_webhook');
       console.info('[zoom-webhook] recording.completed', {
         meetingId: result.meetingId,
@@ -63,6 +83,6 @@ export async function POST(request: Request) {
 
   } catch (error: any) {
     console.error('Webhook Error:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: 'webhook-processing-failed' }, { status: 500 });
   }
 }

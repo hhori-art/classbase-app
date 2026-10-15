@@ -1,11 +1,12 @@
 'use client';
 
 import { useState } from 'react';
-import { User as FirebaseUser, signInWithEmailAndPassword } from 'firebase/auth';
-import { doc, getDoc } from 'firebase/firestore';
-import { auth, db } from '@/lib/firebase';
+import { User as FirebaseUser } from 'firebase/auth';
+import { auth } from '@/lib/firebase';
 import { Lock, Loader2, Wrench, ArrowLeft } from 'lucide-react';
 import Link from 'next/link';
+import { loadAuthenticatedProfile } from '@/lib/client-auth-profile';
+import { signInWithNetworkRetry } from '@/lib/client-auth-login';
 
 const normalizeLoginInput = (value: string) =>
   value.trim().normalize('NFKC').replace(/\s+/g, '').toLowerCase();
@@ -23,6 +24,7 @@ const ADMIN_ROLE_ALIASES = [
   'master_admin',
   'super_admin',
 ];
+const ATTENDANCE_ADMIN_ROLE_ALIASES = ['attendance_admin', 'attendance_only', 'attendance_manager'];
 
 const buildLoginCandidates = (value: string) => {
   const normalized = normalizeLoginInput(value);
@@ -66,32 +68,13 @@ const cacheProfileForAuthContext = (uid: string, profile: Record<string, any>) =
   } catch {}
 };
 
-const repairProfile = async () => {
-  const token = await auth.currentUser?.getIdToken();
-  if (!token) throw new Error('ログイン情報を確認できません。再ログインしてください。');
-  const res = await fetch('/api/auth/repair-profile', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || data.ok === false) throw new Error(data.error || 'profile repair failed');
-  return data;
-};
-
 const loadAdminProfile = async (firebaseUser: FirebaseUser) => {
-  let snap = await getDoc(doc(db, 'users', firebaseUser.uid));
-  if (!snap.exists()) {
-    await repairProfile();
-    snap = await getDoc(doc(db, 'users', firebaseUser.uid));
-  }
-  if (!snap.exists()) throw new Error('管理者プロフィールが見つかりません。');
-
-  const data = snap.data();
+  const data = await loadAuthenticatedProfile(firebaseUser);
   const role = String(data.role || '').toLowerCase();
-  if (role !== 'master' && !ADMIN_ROLE_ALIASES.includes(role)) {
+  if (role !== 'master' && !ADMIN_ROLE_ALIASES.includes(role) && !ATTENDANCE_ADMIN_ROLE_ALIASES.includes(role)) {
     throw new Error('このアカウントは管理者権限ではありません。');
   }
-  const normalizedRole = role === 'master' ? 'master' : 'admin';
+  const normalizedRole = role === 'master' ? 'master' : ATTENDANCE_ADMIN_ROLE_ALIASES.includes(role) ? 'attendance_admin' : 'admin';
   cacheProfileForAuthContext(firebaseUser.uid, { ...data, uid: firebaseUser.uid, role: normalizedRole });
   return normalizedRole;
 };
@@ -105,7 +88,7 @@ export default function AutoFixLoginPage() {
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
-    setStatus('🚀 1/3: 認証を開始します...');
+    setStatus('');
 
     try {
       // 1. Firebase Auth認証
@@ -115,7 +98,7 @@ export default function AutoFixLoginPage() {
 
       for (const candidate of loginCandidates) {
         try {
-          userCredential = await signInWithEmailAndPassword(auth, candidate, password);
+          userCredential = await signInWithNetworkRetry(auth, candidate, password);
           break;
         } catch (authError: any) {
           lastAuthError = authError;
@@ -126,14 +109,11 @@ export default function AutoFixLoginPage() {
       }
 
       if (!userCredential) {
-        setStatus('⚠️ Auth未登録またはメール形式違いの可能性があります。管理者データを確認中...');
         const restored = await adminFirstLogin(email, password);
-        userCredential = await signInWithEmailAndPassword(auth, restored.email, password);
+        userCredential = await signInWithNetworkRetry(auth, restored.email, password);
       }
-      setStatus('✅ 2/3: 認証成功。権限を確認中...');
-      const role = await loadAdminProfile(userCredential.user);
-      setStatus('✅ 3/3: 権限確認OK。画面を移動します...');
-      window.location.replace('/master');
+      const normalizedRole = await loadAdminProfile(userCredential.user);
+      window.location.replace(normalizedRole === 'attendance_admin' ? '/master/attendance' : '/master');
 
     } catch (error: any) {
       console.error('Login Error:', error);
@@ -143,7 +123,9 @@ export default function AutoFixLoginPage() {
       } else if (error.code === 'auth/user-disabled') {
         setStatus('❌ このアカウントは停止中です。管理者に確認してください');
       } else if (error.code === 'auth/network-request-failed') {
-        setStatus('❌ 通信に失敗しました。通信環境を確認して、もう一度お試しください。');
+        setStatus('❌ 認証サーバーへ接続できませんでした。通信環境を確認して、もう一度お試しください。改善しない場合は、校舎名・端末・発生時刻をお知らせください。');
+      } else if (error.message === 'profile-service-unavailable' || error.name === 'AbortError') {
+        setStatus('❌ 認証は完了しましたが、ユーザー情報の取得に失敗しました。少し待ってから、もう一度お試しください。');
       } else {
         setStatus(`❌ エラー: ${error.message || '不明なエラーが発生しました'}`);
       }
@@ -187,14 +169,11 @@ export default function AutoFixLoginPage() {
             />
           </div>
 
-          <div className={`p-3 rounded-lg text-sm font-bold text-center break-words ${
-            status.includes('❌') ? 'bg-red-100 text-red-700' :
-            status.includes('✨') || status.includes('3/3') ? 'bg-green-100 text-green-700' :
-            status.includes('🚀') || status.includes('⚠️') || status.includes('2/3') ? 'bg-yellow-50 text-yellow-700' :
-            'bg-gray-50 text-gray-500'
-          }`}>
-            {status || '管理者情報を入力してください'}
-          </div>
+          {status && (
+            <div className="whitespace-pre-line break-words rounded-lg bg-red-100 p-3 text-center text-sm font-bold text-red-700" role="alert">
+              {status}
+            </div>
+          )}
 
           <button 
             type="submit" 

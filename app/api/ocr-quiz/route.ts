@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import OpenAI from 'openai';
 import { getServerUser, jsonError, requireRole } from '@/lib/server-auth';
+import { consumeRateLimit } from '@/lib/server/password-recovery';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -8,10 +9,6 @@ export const dynamic = 'force-dynamic';
 const MAX_IMAGE_BASE64_CHARS = 10_500_000;
 const MAX_OCR_CHARS_FOR_GENERATION = 6000;
 const MAX_QUESTION_COUNT = 8;
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
 
 type GeneratedQuestion = {
   id: string;
@@ -21,9 +18,28 @@ type GeneratedQuestion = {
   explanation: string;
 };
 
-function isAllowedDataUrl(value: unknown) {
+function getOpenAIClient() {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error('OPENAI_API_KEYが設定されていません');
+  return new OpenAI({ apiKey });
+}
+
+function parseAllowedImage(value: unknown) {
   const text = String(value || '');
-  return /^data:image\/(png|jpe?g|webp);base64,[A-Za-z0-9+/=]+$/i.test(text);
+  const match = text.match(/^data:image\/(png|jpe?g|webp);base64,([A-Za-z0-9+/=]+)$/i);
+  if (!match) return null;
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(match[2], 'base64');
+  } catch {
+    return null;
+  }
+  if (bytes.length === 0 || bytes.length > 7 * 1024 * 1024) return null;
+  const mime = match[1].toLowerCase();
+  const isPng = mime === 'png' && bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  const isJpeg = (mime === 'jpg' || mime === 'jpeg') && bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  const isWebp = mime === 'webp' && bytes.length >= 12 && bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP';
+  return isPng || isJpeg || isWebp ? text : null;
 }
 
 function compactText(value: unknown) {
@@ -73,13 +89,21 @@ export async function POST(request: NextRequest) {
     const user = await getServerUser(request);
     requireRole(user, ['student']);
 
+    const [shortWindowAllowed, hourlyAllowed] = await Promise.all([
+      consumeRateLimit(`ocr_quiz_minute_${user.uid}`, 2, 60 * 1000),
+      consumeRateLimit(`ocr_quiz_hour_${user.uid}`, 6, 60 * 60 * 1000),
+    ]);
+    if (!shortWindowAllowed || !hourlyAllowed) {
+      return noStoreJson({ ok: false, error: 'rate-limit' }, { status: 429 });
+    }
+
     const body = await request.json();
     if (body?.legalConsent !== true || body?.privateUseOnly !== true) {
       return noStoreJson({ ok: false, error: 'legal-consent-required' }, { status: 400 });
     }
 
-    imageDataUrl = String(body?.imageDataUrl || '');
-    if (!isAllowedDataUrl(imageDataUrl)) {
+    imageDataUrl = parseAllowedImage(body?.imageDataUrl);
+    if (!imageDataUrl) {
       return noStoreJson({ ok: false, error: 'invalid-image-data' }, { status: 400 });
     }
     if (imageDataUrl.length > MAX_IMAGE_BASE64_CHARS) {
@@ -90,6 +114,23 @@ export async function POST(request: NextRequest) {
     const grade = String(body?.grade || user.profile?.grade || '').slice(0, 20);
     const subject = String(body?.subject || '').slice(0, 30);
 
+    if (process.env.SECURITY_DIAGNOSIS_MODE === 'true' && !process.env.OPENAI_API_KEY) {
+      const questions = Array.from({ length: questionCount }, (_, index) => ({
+        id: `diagnosis-ocr-${index + 1}`,
+        question: `【診断用OCR問題 ${index + 1}】アップロード処理と問題表示を確認する設問です。`,
+        correct_answer: '診断用の正解',
+        wrong_answers: ['診断用の誤答A', '診断用の誤答B', '診断用の誤答C'],
+        explanation: '診断環境では画像を保存せず、外部AIへも送らずに匿名の固定問題を返します。',
+      }));
+      return noStoreJson({
+        ok: true,
+        questions,
+        diagnosis_mock: true,
+        policy: { storage: 'not_persisted_server_side', sharing: 'disabled', sourceTextReturned: false },
+      });
+    }
+
+    const openai = getOpenAIClient();
     const ocrResult = await openai.chat.completions.create({
       model: process.env.OCR_QUIZ_VISION_MODEL || 'gpt-4o-mini',
       store: false,

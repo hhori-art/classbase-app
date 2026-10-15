@@ -31,65 +31,98 @@ const cleanObject = (value: unknown, depth = 0): Record<string, unknown> => {
   );
 };
 
+const MAX_EVENTS_PER_REQUEST = 25;
+
+const eventCountFields = (events: Array<{ type: string; feature: string }>) => {
+  const counts = new Map<string, number>();
+  const features = new Map<string, number>();
+  events.forEach(event => {
+    counts.set(event.type, (counts.get(event.type) || 0) + 1);
+    const feature = cleanField(event.feature);
+    features.set(feature, (features.get(feature) || 0) + 1);
+  });
+  return { counts, features };
+};
+
 export async function POST(request: NextRequest) {
   try {
     const user = await getServerUser(request);
-    const body = await request.json();
-    const type = EVENT_TYPES.has(String(body.type)) ? String(body.type) : 'click';
-    const path = clean(body.path, 300) || '/';
-    const sessionId = clean(body.session_id, 120);
-    const feature = clean(body.feature || body.target || path, 120);
+    const parsedBody: unknown = await request.json();
+    const body = parsedBody && typeof parsedBody === 'object' && !Array.isArray(parsedBody)
+      ? parsedBody as Record<string, unknown>
+      : {};
+    const rawEvents: unknown[] = (Array.isArray(body.events) ? body.events : [body]).slice(0, MAX_EVENTS_PER_REQUEST);
+    if (rawEvents.length === 0) return Response.json({ ok: true, count: 0 });
     const school = clean(user.school || user.school_ids[0] || body.school, 120);
     const now = new Date();
     const dateKey = now.toISOString().slice(0, 10);
-    const durationMs = Math.max(0, Math.min(1000 * 60 * 60 * 6, Number(body.duration_ms || 0)));
-    const metadata = cleanObject(body.metadata);
     const db = adminDb();
-
-    const eventRef = await db.collection('beta_test_events').add({
-      type,
-      actor_id: user.uid,
-      actor_role: user.role,
-      school,
-      path,
-      session_id: sessionId,
-      feature,
-      duration_ms: durationMs,
-      user_agent: request.headers.get('user-agent') || '',
-      metadata,
-      created_at: FieldValue.serverTimestamp(),
+    const events = rawEvents.map(rawEvent => {
+      const raw = rawEvent && typeof rawEvent === 'object' && !Array.isArray(rawEvent)
+        ? rawEvent as Record<string, unknown>
+        : {};
+      const type = EVENT_TYPES.has(String(raw.type)) ? String(raw.type) : 'click';
+      const path = clean(raw.path, 300) || '/';
+      return {
+        type,
+        path,
+        sessionId: clean(raw.session_id, 120),
+        feature: clean(raw.feature || raw.target || path, 120),
+        durationMs: Math.max(0, Math.min(1000 * 60 * 60 * 6, Number(raw.duration_ms || 0))),
+        metadata: cleanObject(raw.metadata),
+      };
+    });
+    const batch = db.batch();
+    const eventRefs = events.map(event => {
+      const eventRef = db.collection('beta_test_events').doc();
+      batch.set(eventRef, {
+        type: event.type,
+        actor_id: user.uid,
+        actor_role: user.role,
+        school,
+        path: event.path,
+        session_id: event.sessionId,
+        feature: event.feature,
+        duration_ms: event.durationMs,
+        user_agent: request.headers.get('user-agent') || '',
+        metadata: event.metadata,
+        created_at: FieldValue.serverTimestamp(),
+      });
+      return eventRef;
     });
 
+    const totalDurationMs = events.reduce((sum, event) => sum + event.durationMs, 0);
+    const { counts, features } = eventCountFields(events);
     const dailyRef = db.collection('beta_test_daily').doc(dateKey);
     const roleUidField = `${user.role}_uids`;
-    const eventField = `events_by_type.${type}`;
-    const featureField = `features.${cleanField(feature)}`;
-    await dailyRef.set({
+    const dailyUpdate: Record<string, unknown> = {
       date: dateKey,
-      total_events: FieldValue.increment(1),
-      total_duration_ms: FieldValue.increment(durationMs),
+      total_events: FieldValue.increment(events.length),
+      total_duration_ms: FieldValue.increment(totalDurationMs),
       active_uids: FieldValue.arrayUnion(user.uid),
       [roleUidField]: FieldValue.arrayUnion(user.uid),
-      [eventField]: FieldValue.increment(1),
-      [featureField]: FieldValue.increment(1),
       updated_at: FieldValue.serverTimestamp(),
-    }, { merge: true });
+    };
+    counts.forEach((count, type) => { dailyUpdate[`events_by_type.${type}`] = FieldValue.increment(count); });
+    features.forEach((count, feature) => { dailyUpdate[`features.${feature}`] = FieldValue.increment(count); });
+    batch.set(dailyRef, dailyUpdate, { merge: true });
 
-    await db.collection('beta_user_metrics').doc(user.uid).set({
+    batch.set(db.collection('beta_user_metrics').doc(user.uid), {
       uid: user.uid,
       role: user.role,
       school,
       name: user.profile.student_name || user.profile.name || '',
       grade: user.profile.grade || '',
       last_seen_at: FieldValue.serverTimestamp(),
-      last_path: path,
-      session_id: sessionId,
-      event_count: FieldValue.increment(1),
-      total_duration_ms: FieldValue.increment(durationMs),
+      last_path: events[events.length - 1].path,
+      session_id: events[events.length - 1].sessionId,
+      event_count: FieldValue.increment(events.length),
+      total_duration_ms: FieldValue.increment(totalDurationMs),
       first_seen_at: FieldValue.serverTimestamp(),
     }, { merge: true });
+    await batch.commit();
 
-    return Response.json({ ok: true, id: eventRef.id });
+    return Response.json({ ok: true, id: eventRefs[0].id, count: events.length });
   } catch (error) {
     return jsonError(error);
   }

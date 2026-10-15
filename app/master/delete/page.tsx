@@ -1,356 +1,102 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs, writeBatch, doc } from 'firebase/firestore';
-import { Trash2, Search, AlertTriangle, User, Users, CheckSquare, Square, Loader2, ArrowLeft, Filter } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
+import { AlertTriangle, Archive, ArrowLeft, CheckSquare, Filter, Loader2, Search, Square, User, Users } from 'lucide-react';
+import { auth } from '@/lib/firebase';
 
-export default function BulkDeletePage() {
+type ManagedUser = { id: string; role?: string; name?: string; student_name?: string; lifetime_id?: string; grade?: string; account_status?: string; status?: string };
+
+export default function AccountArchivePage() {
   const [role, setRole] = useState<'student' | 'teacher'>('student');
-  const [users, setUsers] = useState<any[]>([]);
+  const [users, setUsers] = useState<ManagedUser[]>([]);
   const [loading, setLoading] = useState(false);
-  
-  // フィルター用
+  const [loadError, setLoadError] = useState('');
   const [searchName, setSearchName] = useState('');
   const [filterGrade, setFilterGrade] = useState('');
-
-  // 処理状態
   const [isProcessing, setIsProcessing] = useState(false);
-  const [progress, setProgress] = useState({ current: 0, total: 0 });
-  const [statusMsg, setStatusMsg] = useState('');
-  
-  // 選択されたユーザーIDのセット
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
-  // ユーザー取得
-  useEffect(() => {
-    fetchUsers();
-    setSelectedIds(new Set());
-    setFilterGrade('');
-    setSearchName('');
-  }, [role]);
-
-  const fetchUsers = async () => {
+  const fetchUsers = useCallback(async () => {
     setLoading(true);
+    setLoadError('');
     try {
-      // 全件取得 (クライアント側でフィルタリング)
-      const q = query(collection(db, 'users'), where('role', '==', role));
-      const snap = await getDocs(q);
-      const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      setUsers(list);
-    } catch (e) {
-      console.error(e);
-      alert('データ取得中にエラーが発生しました');
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) throw new Error('ログイン情報を確認できません。再ログインしてください。');
+      const response = await fetch(`/api/admin/users?role=${role}&limit=500`, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.success) throw new Error(result.error || 'アカウントを取得できませんでした。');
+      setUsers((Array.isArray(result.users) ? result.users : []).filter((item: ManagedUser) => !['archived', 'withdrawn'].includes(String(item.account_status || item.status || '').toLowerCase())));
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : 'アカウントを取得できませんでした。');
+      setUsers([]);
     } finally {
       setLoading(false);
     }
-  };
+  }, [role]);
 
-  // フィルタリングロジック
-  const filteredUsers = users.filter(u => {
-    const matchName = 
-      (u.student_name || '').includes(searchName) || 
-      (u.name || '').includes(searchName) ||
-      (u.lifetime_id || '').includes(searchName);
-    
-    const matchGrade = filterGrade ? u.grade === filterGrade : true;
+  useEffect(() => {
+    setSelectedIds(new Set());
+    setFilterGrade('');
+    setSearchName('');
+    void fetchUsers();
+  }, [fetchUsers]);
 
-    return matchName && matchGrade;
+  const filteredUsers = useMemo(() => users.filter(user => {
+    const needle = searchName.trim().toLowerCase();
+    const searchable = [user.student_name, user.name, user.lifetime_id].map(value => String(value || '').toLowerCase());
+    return (!needle || searchable.some(value => value.includes(needle))) && (!filterGrade || user.grade === filterGrade);
+  }), [filterGrade, searchName, users]);
+
+  const toggleSelect = (id: string) => setSelectedIds(current => {
+    const next = new Set(current);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
   });
 
-  // チェックボックス操作
-  const toggleSelect = (id: string) => {
-    const newSet = new Set(selectedIds);
-    if (newSet.has(id)) newSet.delete(id);
-    else newSet.add(id);
-    setSelectedIds(newSet);
-  };
+  const toggleAll = () => setSelectedIds(current => {
+    const visibleIds = filteredUsers.map(user => user.id);
+    const allSelected = visibleIds.length > 0 && visibleIds.every(id => current.has(id));
+    const next = new Set(current);
+    visibleIds.forEach(id => allSelected ? next.delete(id) : next.add(id));
+    return next;
+  });
 
-  const toggleAll = () => {
-    if (selectedIds.size === filteredUsers.length) {
-      setSelectedIds(new Set());
-    } else {
-      const newSet = new Set(filteredUsers.map(u => u.id));
-      setSelectedIds(newSet);
-    }
-  };
-
-  // ★一括削除実行ロジック (大量データ対応版)
-  const handleBulkDelete = async () => {
-    const total = selectedIds.size;
-    if (total === 0) return;
-
-    if (!confirm(`選択した ${total} 名のアカウントを削除します。\n\n【警告】\n・PFデータ(成績/出席)も完全に削除されます\n・チャット履歴も削除されます\n・この操作は取り消せません\n\n本当によろしいですか？`)) return;
-    
-    // ダブルチェック
-    if (!confirm('本当に削除してよろしいですか？（最終確認）')) return;
-
+  const handleArchive = async () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0 || isProcessing) return;
+    if (ids.length > 100) return alert('一度にアーカイブできるのは100件までです。');
+    if (!confirm(`選択した ${ids.length} 名を利用停止し、アーカイブします。\n\nログインとデータアクセスは即時に拒否されます。データは削除されず、管理者が復旧できます。`)) return;
     setIsProcessing(true);
-    setProgress({ current: 0, total });
-    setStatusMsg('削除処理を開始します...');
-
     try {
-      // IDリストを配列化
-      const targets = Array.from(selectedIds);
-      
-      let batch = writeBatch(db);
-      let opCount = 0;
-      let processedCount = 0;
-
-      // 1人ずつ処理
-      for (const uid of targets) {
-        // --- 依存データの削除検索 ---
-        const deletions = [];
-
-        // 1. ユーザー本体
-        deletions.push(doc(db, 'users', uid));
-
-        if (role === 'student') {
-          // 2. PFレコード (pf_records) - クエリが必要
-          const pfQ = query(collection(db, 'pf_records'), where('student_id', '==', uid));
-          const pfSnap = await getDocs(pfQ);
-          pfSnap.forEach(d => deletions.push(d.ref));
-
-          // 3. サブコレクション (pf_yearly)
-          const subPfQ = collection(db, 'users', uid, 'pf_yearly');
-          const subPfSnap = await getDocs(subPfQ);
-          subPfSnap.forEach(d => deletions.push(d.ref));
-
-          // 4. チャット (chats)
-          const subChatQ = collection(db, 'users', uid, 'chats');
-          const subChatSnap = await getDocs(subChatQ);
-          subChatSnap.forEach(d => deletions.push(d.ref));
-        
-          // 5. テスト結果 (quiz_results)
-          const quizQ = collection(db, 'users', uid, 'quiz_results');
-          const quizSnap = await getDocs(quizQ);
-          quizSnap.forEach(d => deletions.push(d.ref));
-        }
-
-        if (role === 'teacher') {
-          // シフト・勤怠
-          const shiftQ = query(collection(db, 'shift_assignments'), where('user_id', '==', uid));
-          const shiftSnap = await getDocs(shiftQ);
-          shiftSnap.forEach(d => deletions.push(d.ref));
-          
-          const workQ = query(collection(db, 'work_records'), where('teacher_id', '==', uid));
-          const workSnap = await getDocs(workQ);
-          workSnap.forEach(d => deletions.push(d.ref));
-        }
-
-        // バッチに追加
-        for (const ref of deletions) {
-          batch.delete(ref);
-          opCount++;
-
-          // Firestore制限 (500件) に近づいたらコミット
-          if (opCount >= 400) {
-            await batch.commit();
-            batch = writeBatch(db);
-            opCount = 0;
-          }
-        }
-
-        processedCount++;
-        // 進捗更新 (Reactの再レンダリング頻度を抑えるため、10件ごとまたは最後のみ更新でも良いが、今回は毎回更新)
-        setProgress({ current: processedCount, total });
-        setStatusMsg(`${processedCount} / ${total} 人完了...`);
-      }
-
-      // 残りをコミット
-      if (opCount > 0) {
-        await batch.commit();
-      }
-
-      setStatusMsg('完了しました！');
-      alert(`${total}件の削除が完了しました`);
+      const token = await auth.currentUser?.getIdToken(true);
+      if (!token) throw new Error('ログイン情報を確認できません。');
+      const response = await fetch('/api/admin/accounts/status', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ user_ids: ids, status: 'archived' }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok) throw new Error(result.error || 'アーカイブできませんでした。');
+      setUsers(current => current.filter(user => !selectedIds.has(user.id)));
       setSelectedIds(new Set());
-      fetchUsers();
-
-    } catch (e) {
-      console.error(e);
-      alert('削除中にエラーが発生しました。一部のデータが残っている可能性があります。');
-    } finally {
-      setIsProcessing(false);
-      setProgress({ current: 0, total: 0 });
-      setStatusMsg('');
-    }
+      alert(`${result.count || ids.length}件をアーカイブしました。`);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'アーカイブできませんでした。');
+    } finally { setIsProcessing(false); }
   };
 
-  return (
-    <div className="min-h-screen bg-gray-50 p-8 font-sans text-gray-800">
-      <div className="max-w-6xl mx-auto">
-        
-        {/* ヘッダー */}
-        <div className="flex items-center gap-4 mb-8">
-          <Link href="/master" className="bg-white p-2 rounded-full shadow hover:bg-gray-100 text-gray-600"><ArrowLeft size={24} /></Link>
-          <div>
-            <h1 className="text-3xl font-bold text-gray-800 flex items-center gap-2">
-              <Trash2 className="text-red-600" /> アカウント一括削除
-            </h1>
-            <p className="text-gray-500 mt-1">退塾者や卒業生のデータを、関連データごと安全に削除します。</p>
-          </div>
-        </div>
+  const visibleAllSelected = filteredUsers.length > 0 && filteredUsers.every(user => selectedIds.has(user.id));
 
-        {/* メインカード */}
-        <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
-          
-          {/* 1. フィルター・操作エリア */}
-          <div className="p-4 border-b border-gray-100 bg-gray-50 space-y-4">
-            
-            <div className="flex flex-wrap gap-4 justify-between items-center">
-              {/* ロール切り替え */}
-              <div className="flex bg-white rounded-lg p-1 border shadow-sm">
-                <button onClick={() => setRole('student')} className={`px-4 py-2 rounded-md text-sm font-bold flex items-center gap-2 ${role === 'student' ? 'bg-green-100 text-green-700' : 'text-gray-500 hover:bg-gray-50'}`}>
-                  <User size={16}/> 生徒
-                </button>
-                <button onClick={() => setRole('teacher')} className={`px-4 py-2 rounded-md text-sm font-bold flex items-center gap-2 ${role === 'teacher' ? 'bg-purple-100 text-purple-700' : 'text-gray-500 hover:bg-gray-50'}`}>
-                  <Users size={16}/> 講師
-                </button>
-              </div>
-
-              {/* 検索・絞り込み */}
-              <div className="flex flex-wrap items-center gap-2">
-                {role === 'student' && (
-                  <div className="flex items-center gap-2 bg-white px-3 py-2 rounded-lg border">
-                    <Filter size={16} className="text-gray-400"/>
-                    <select 
-                      value={filterGrade}
-                      onChange={(e) => setFilterGrade(e.target.value)}
-                      className="bg-transparent text-sm outline-none font-bold text-gray-600"
-                    >
-                      <option value="">全学年</option>
-                      <option value="中1">中1</option>
-                      <option value="中2">中2</option>
-                      <option value="中3">中3</option>
-                      <option value="高1">高1</option>
-                      <option value="高2">高2</option>
-                      <option value="高3">高3</option>
-                      <option value="卒業">卒業</option>
-                    </select>
-                  </div>
-                )}
-                
-                <div className="flex items-center gap-2 bg-white px-3 py-2 rounded-lg border w-64">
-                  <Search size={16} className="text-gray-400"/>
-                  <input 
-                    type="text" 
-                    placeholder="名前・IDで検索..." 
-                    className="outline-none text-sm w-full"
-                    value={searchName}
-                    onChange={(e) => setSearchName(e.target.value)}
-                  />
-                </div>
-              </div>
-            </div>
-
-            {/* 選択アクションバー */}
-            <div className="flex justify-between items-center pt-2">
-              <div className="text-sm font-bold text-gray-500 flex items-center gap-2">
-                <button onClick={toggleAll} className="flex items-center gap-2 hover:text-gray-800 transition-colors">
-                   {selectedIds.size > 0 && selectedIds.size === filteredUsers.length ? <CheckSquare size={20} className="text-blue-600"/> : <Square size={20}/>}
-                   <span>表示中の {filteredUsers.length} 件をすべて選択</span>
-                </button>
-              </div>
-              
-              <button 
-                onClick={handleBulkDelete} 
-                disabled={isProcessing || selectedIds.size === 0}
-                className="bg-red-600 text-white px-6 py-2.5 rounded-lg text-sm font-bold hover:bg-red-700 shadow-sm flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-              >
-                {isProcessing ? <Loader2 className="animate-spin" size={18}/> : <Trash2 size={18}/>}
-                <span>{selectedIds.size} 件を完全削除</span>
-              </button>
-            </div>
-            
-            {/* 進捗バー (処理中のみ表示) */}
-            {isProcessing && (
-              <div className="w-full bg-gray-200 rounded-full h-2.5 mb-2 overflow-hidden relative">
-                <div 
-                  className="bg-blue-600 h-2.5 rounded-full transition-all duration-300 ease-out" 
-                  style={{ width: `${(progress.current / progress.total) * 100}%` }}
-                ></div>
-                <div className="absolute top-0 right-0 left-0 text-[10px] text-center text-gray-600 font-bold leading-none mt-[1px]">
-                   {statusMsg}
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* 2. ユーザーリスト (描画負荷対策: 最大100件のみ表示) */}
-          <div className="max-h-[600px] overflow-y-auto relative">
-            {loading ? (
-              <div className="p-20 text-center text-gray-400"><Loader2 className="animate-spin mx-auto mb-2"/>読み込み中...</div>
-            ) : filteredUsers.length === 0 ? (
-              <div className="p-20 text-center text-gray-400">条件に一致するユーザーがいません</div>
-            ) : (
-              <>
-                <table className="w-full text-left border-collapse">
-                  <thead className="bg-white sticky top-0 z-10 text-xs font-bold text-gray-500 border-b">
-                    <tr>
-                      <th className="p-4 w-16 text-center">選択</th>
-                      <th className="p-4">氏名 / 生涯ID</th>
-                      <th className="p-4">属性 (学年・クラス・曜日)</th>
-                      <th className="p-4 text-right">登録日</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-100 text-sm">
-                    {/* ★重要: 3000件描画すると重いので、最初の100件だけ表示する (選択は全件に効く) */}
-                    {filteredUsers.slice(0, 100).map(user => (
-                      <tr key={user.id} className={`hover:bg-gray-50 transition-colors ${selectedIds.has(user.id) ? 'bg-blue-50/40' : ''}`}>
-                        <td className="p-4 text-center">
-                          <button onClick={() => toggleSelect(user.id)} className="text-gray-400 hover:text-blue-600 block mx-auto">
-                            {selectedIds.has(user.id) ? <CheckSquare size={20} className="text-blue-600"/> : <Square size={20}/>}
-                          </button>
-                        </td>
-                        <td className="p-4">
-                          <div className="font-bold text-gray-800 text-base">{user.student_name || user.name}</div>
-                          <div className="text-xs text-gray-400 font-mono mt-0.5">{user.lifetime_id || user.id}</div>
-                        </td>
-                        <td className="p-4">
-                          {role === 'student' ? (
-                            <div className="flex gap-2 items-center flex-wrap">
-                              {user.grade && <span className="bg-gray-100 text-gray-600 px-2 py-1 rounded text-xs font-bold">{user.grade}</span>}
-                              {user.classroom && <span className="bg-gray-100 text-gray-600 px-2 py-1 rounded text-xs">{user.classroom}</span>}
-                              {user.day_of_week && <span className="bg-blue-50 text-blue-600 px-2 py-1 rounded text-xs">{user.day_of_week}</span>}
-                            </div>
-                          ) : (
-                            <span className="bg-purple-50 text-purple-600 px-2 py-0.5 rounded text-xs font-bold">講師アカウント</span>
-                          )}
-                        </td>
-                        <td className="p-4 text-right text-gray-400 text-xs font-mono">
-                          {user.created_at ? new Date(user.created_at).toLocaleDateString() : '-'}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                
-                {/* 100件以上ある場合のメッセージ */}
-                {filteredUsers.length > 100 && (
-                  <div className="p-4 text-center text-xs text-gray-400 bg-gray-50 border-t">
-                    他 {filteredUsers.length - 100} 件は省略されています（「すべて選択」でこれらも選択されます）
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        </div>
-
-        {/* 注意書きフッター */}
-        <div className="mt-6 flex items-start gap-3 text-sm text-gray-600 bg-orange-50 p-4 rounded-xl border border-orange-100">
-          <AlertTriangle size={20} className="text-orange-600 shrink-0 mt-0.5"/>
-          <div>
-            <p className="font-bold text-orange-800 mb-1">削除を実行する前の注意点</p>
-            <p>
-              この操作を実行すると、該当ユーザーの<strong>ログイン権限、PF(成績・出席)、チャット履歴、小テスト結果</strong>がすべてデータベースから完全に削除されます。<br/>
-              一度削除すると元に戻すことはできません。年度替わりの卒業生処理など、慎重に行ってください。
-            </p>
-          </div>
-        </div>
-
-      </div>
+  return <div className="min-h-screen bg-slate-50 p-4 text-slate-800 sm:p-8"><div className="mx-auto max-w-6xl">
+    <div className="mb-6 flex items-center gap-4"><Link href="/master/accounts" className="rounded-full bg-white p-2 shadow hover:bg-slate-100" aria-label="アカウント管理へ戻る"><ArrowLeft size={24} /></Link><div><h1 className="flex items-center gap-2 text-2xl font-black sm:text-3xl"><Archive className="text-amber-600" /> 利用停止・アーカイブ</h1><p className="mt-1 text-sm text-slate-500">退塾・退職者を利用停止します。誤操作時はアカウント管理から復旧できます。</p></div></div>
+    <div className="mb-4 flex gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm font-medium text-amber-950"><AlertTriangle className="mt-0.5 shrink-0" size={20} /><p>この画面ではデータを物理削除しません。法定保存期間後の完全削除は、対象データと承認記録を確認する別の運用手順で行ってください。</p></div>
+    <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm"><div className="space-y-4 border-b bg-slate-50 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3"><div className="flex rounded-lg border bg-white p-1"><button onClick={() => setRole('student')} className={`flex items-center gap-2 rounded-md px-4 py-2 text-sm font-bold ${role === 'student' ? 'bg-green-100 text-green-800' : 'text-slate-500'}`}><User size={16} />生徒</button><button onClick={() => setRole('teacher')} className={`flex items-center gap-2 rounded-md px-4 py-2 text-sm font-bold ${role === 'teacher' ? 'bg-violet-100 text-violet-800' : 'text-slate-500'}`}><Users size={16} />講師</button></div>
+        <div className="flex flex-wrap gap-2">{role === 'student' && <label className="flex items-center gap-2 rounded-lg border bg-white px-3"><Filter size={16} /><select value={filterGrade} onChange={event => setFilterGrade(event.target.value)} className="bg-transparent py-2 text-sm"><option value="">全学年</option>{['中1','中2','中3','高1','高2','高3','卒業'].map(value => <option key={value}>{value}</option>)}</select></label>}<label className="flex items-center gap-2 rounded-lg border bg-white px-3"><Search size={16} /><input value={searchName} onChange={event => setSearchName(event.target.value)} placeholder="名前・IDで検索" className="w-52 py-2 text-sm outline-none" /></label></div></div>
+      <div className="flex flex-wrap items-center justify-between gap-3"><button onClick={toggleAll} disabled={filteredUsers.length === 0} className="flex items-center gap-2 text-sm font-bold text-slate-600 disabled:opacity-50">{visibleAllSelected ? <CheckSquare className="text-blue-600" /> : <Square />} 表示中{filteredUsers.length}件を選択</button><button onClick={handleArchive} disabled={isProcessing || selectedIds.size === 0} className="flex items-center gap-2 rounded-lg bg-amber-600 px-5 py-2.5 text-sm font-bold text-white disabled:opacity-50">{isProcessing ? <Loader2 className="animate-spin" size={18} /> : <Archive size={18} />}{selectedIds.size}件をアーカイブ</button></div>
     </div>
-  );
+    {loadError && <div className="m-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm font-bold text-red-800"><p>{loadError}</p><button onClick={() => void fetchUsers()} className="mt-3 rounded bg-red-700 px-4 py-2 text-white">再読込</button></div>}
+    {loading ? <div className="flex justify-center p-12"><Loader2 className="animate-spin" /></div> : <div className="divide-y">{filteredUsers.map(user => <label key={user.id} className="flex cursor-pointer items-center gap-4 p-4 hover:bg-slate-50"><input type="checkbox" checked={selectedIds.has(user.id)} onChange={() => toggleSelect(user.id)} className="h-4 w-4" /><div className="min-w-0"><p className="font-bold">{user.student_name || user.name || '名前未登録'}</p><p className="text-xs text-slate-500">ID: {user.lifetime_id || user.id}{user.grade ? ` / ${user.grade}` : ''}</p></div></label>)}{!loadError && filteredUsers.length === 0 && <p className="p-12 text-center text-sm font-bold text-slate-400">対象アカウントはありません。</p>}</div>}
+    </div>
+  </div></div>;
 }

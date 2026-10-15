@@ -1,10 +1,8 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { db, storage } from '@/lib/firebase';
-import { collection, addDoc, getDocs, deleteDoc, doc, serverTimestamp, orderBy, query } from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { Loader2, Plus, Trash2, Image as ImageIcon, Coins, ArrowLeft, Package, Check } from 'lucide-react';
+import { auth } from '@/lib/firebase';
+import { Loader2, Plus, Archive, RotateCcw, Image as ImageIcon, Coins, ArrowLeft, Package, Check } from 'lucide-react';
 import Link from 'next/link';
 
 export default function RewardsManagementPage() {
@@ -22,9 +20,11 @@ export default function RewardsManagementPage() {
   // データ取得
   const fetchRewards = async () => {
     try {
-      const q = query(collection(db, 'rewards'), orderBy('required_coins', 'asc'));
-      const snapshot = await getDocs(q);
-      setRewards(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      const token = await auth.currentUser?.getIdToken();
+      const response = await fetch('/api/admin/rewards', { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '景品を取得できませんでした');
+      setRewards(data.rewards || []);
     } catch (error) {
       console.error(error);
     } finally {
@@ -52,18 +52,16 @@ export default function RewardsManagementPage() {
     
     setSubmitting(true);
     try {
-      // 1. 画像をStorageにアップロード
-      const storageRef = ref(storage, `rewards/${Date.now()}_${imageFile.name}`);
-      const uploadSnap = await uploadBytes(storageRef, imageFile);
-      const imageUrl = await getDownloadURL(uploadSnap.ref);
-
-      // 2. Firestoreに保存
-      await addDoc(collection(db, 'rewards'), {
-        name: name,
-        required_coins: Number(coins),
-        image_url: imageUrl,
-        created_at: serverTimestamp()
+      const token = await auth.currentUser?.getIdToken();
+      const form = new FormData();
+      form.set('name', name);
+      form.set('required_coins', coins);
+      form.set('image', imageFile);
+      const response = await fetch('/api/admin/rewards', {
+        method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form,
       });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '登録に失敗しました');
 
       alert('景品を追加しました！');
       
@@ -86,13 +84,23 @@ export default function RewardsManagementPage() {
   };
 
   // 削除処理
-  const handleDelete = async (id: string) => {
-    if (!confirm('本当にこの景品を削除しますか？')) return;
+  const handleToggleActive = async (item: any) => {
+    const nextActive = item.active === false || item.archived === true;
+    if (!confirm(nextActive ? 'この景品を再公開しますか？' : 'この景品を停止しますか？ 過去の交換申請は保持されます。')) return;
     try {
-      await deleteDoc(doc(db, 'rewards', id));
-      setRewards(prev => prev.filter(r => r.id !== id));
+      const token = await auth.currentUser?.getIdToken();
+      const response = await fetch('/api/admin/rewards', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ id: item.id, active: nextActive }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '更新に失敗しました');
+      setRewards(prev => prev.map(reward => reward.id === item.id
+        ? { ...reward, active: nextActive, archived: !nextActive }
+        : reward));
     } catch (error) {
-      alert('削除に失敗しました');
+      alert(error instanceof Error ? error.message : '更新に失敗しました');
     }
   };
 
@@ -216,7 +224,7 @@ export default function RewardsManagementPage() {
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-6">
                 {rewards.map((item) => (
-                  <div key={item.id} className="bg-white p-4 rounded-[28px] border border-slate-100 shadow-sm flex flex-col gap-4 group hover:border-yellow-200 hover:shadow-md transition-all relative overflow-hidden">
+                  <div key={item.id} className={`bg-white p-4 rounded-[28px] border shadow-sm flex flex-col gap-4 group transition-all relative overflow-hidden ${item.active === false || item.archived === true ? 'border-slate-200 opacity-60' : 'border-slate-100 hover:border-yellow-200 hover:shadow-md'}`}>
                     {/* 画像 */}
                     <div className="w-full aspect-[4/3] relative bg-slate-50 rounded-2xl overflow-hidden">
                       {item.image_url ? (
@@ -228,17 +236,18 @@ export default function RewardsManagementPage() {
                       
                       {/* 削除ボタン（ホバーで表示） */}
                       <button 
-                        onClick={() => handleDelete(item.id)}
-                        className="absolute top-2 right-2 bg-white/90 p-2 rounded-full text-slate-400 hover:text-red-500 hover:bg-white shadow-sm opacity-0 group-hover:opacity-100 transition-all transform scale-90 group-hover:scale-100"
-                        title="削除する"
+                        onClick={() => handleToggleActive(item)}
+                        className="absolute top-2 right-2 bg-white/90 p-2 rounded-full text-slate-500 hover:text-yellow-600 hover:bg-white shadow-sm transition-all"
+                        title={item.active === false || item.archived === true ? '再公開する' : '停止する'}
                       >
-                        <Trash2 size={18} />
+                        {item.active === false || item.archived === true ? <RotateCcw size={18} /> : <Archive size={18} />}
                       </button>
                     </div>
 
                     {/* 情報 */}
                     <div className="px-1 pb-1">
                       <h3 className="font-bold text-slate-800 text-lg leading-tight mb-2 line-clamp-2">{item.name}</h3>
+                      {(item.active === false || item.archived === true) && <div className="mb-2 text-xs font-black text-slate-500">停止中</div>}
                       <div className="flex items-center gap-1.5 bg-yellow-50 text-yellow-700 px-3 py-1.5 rounded-full w-fit">
                         <Coins size={16} className="text-yellow-500 fill-yellow-500" />
                         <span className="font-black text-sm">{item.required_coins.toLocaleString()}</span>

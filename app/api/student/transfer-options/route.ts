@@ -1,10 +1,13 @@
 import { NextRequest } from 'next/server';
 import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, jsonError, requireRole } from '@/lib/server-auth';
-import { enrichCourseOptionsWithShifts } from '@/lib/course-registration-match';
-import { canStudentRegisterCourseOption } from '@/lib/course-registration-rules';
+import { canonicalPeriodForGradeSubject, enrichCourseOptionsWithShifts, fixedPeriodForGradeCourse } from '@/lib/course-registration-match';
+import { courseOptionMatchesSelection } from '@/lib/course-registration-selection';
+import { canStudentUseTransferOption } from '@/lib/course-registration-rules';
 import { getCourseSubjectGroup, normalizeCourseText, toAsciiDigits } from '@/lib/course-text';
 import { looksLikeZoomUrl, normalizeZoomMeetingId } from '@/lib/zoom-url';
+import { loadStudentClassMasters } from '@/lib/server/student-class-masters';
+import { issueTransferOptionToken } from '@/lib/server/transfer-option-token';
 
 export const runtime = 'nodejs';
 
@@ -29,6 +32,19 @@ const normalizeGrade = (value: unknown) => {
 };
 
 const periodFromShift = (shift: any) => {
+  const fixed = fixedPeriodForGradeCourse(
+    shift.target_grade || shift.grade,
+    shift.target_detail_subject || shift.detail_subject,
+  );
+  if (fixed) return fixed;
+  if (String(shift.target_date || '') === '2026-09-11') {
+    const canonical = canonicalPeriodForGradeSubject(
+      shift.target_grade || shift.grade,
+      shift.target_subject || shift.subject,
+      shift.target_detail_subject || shift.detail_subject,
+    );
+    if (canonical) return canonical;
+  }
   if (shift.period !== undefined && shift.period !== null && shift.period !== '') return Number(shift.period);
   const raw = toAsciiDigits(`${shift.note || ''} ${shift.time_slot || ''} ${shift.slot || ''} ${shift.target_detail_subject || ''}`);
   if (raw.includes('1限') || raw.includes('1時間目') || raw.includes('①')) return 1;
@@ -162,11 +178,7 @@ const getSelectedCourseIds = (registration: any) => {
   return ids;
 };
 
-const selectedIdMatchesOption = (selectedIds: Set<string>, option: any) => (
-  selectedIds.has(String(option.id || '')) ||
-  selectedIds.has(String(option.parent_course_option_id || '')) ||
-  selectedIds.has(String(option.fallback_curriculum_option_id || ''))
-);
+const selectedIdMatchesOption = (selectedIds: Set<string>, option: any) => courseOptionMatchesSelection(option, selectedIds);
 
 const optionMatchesShift = (option: any, shift: any) => {
   const gradeOk = !option.grade || !shift.target_grade || normalizeGrade(option.grade) === normalizeGrade(shift.target_grade);
@@ -192,21 +204,34 @@ const optionMatchesShift = (option: any, shift: any) => {
 export async function GET(request: NextRequest) {
   try {
     const user = await getServerUser(request);
-    requireRole(user, ['student']);
+    requireRole(user, ['student', 'parent']);
 
     const db = adminDb();
     const params = request.nextUrl.searchParams;
+    const requestedStudentId = String(params.get('student_id') || '').trim();
+    const studentId = user.role === 'student' ? user.uid : requestedStudentId;
+    if (!studentId) return Response.json({ ok: false, error: 'student_id is required' }, { status: 400 });
+    const studentSnap = user.role === 'student'
+      ? null
+      : (await db.getAll(db.collection('users').doc(studentId)))[0];
+    if (user.role === 'parent' && !studentSnap?.exists) throw new Error('student-not-found');
+    const studentProfile = user.role === 'student' ? user.profile : studentSnap?.data() || {};
+    if (user.role === 'parent') {
+      const linkedIds = Array.isArray(user.profile.student_ids) ? user.profile.student_ids.map(String) : [];
+      if (!linkedIds.includes(studentId) && String(studentProfile.parent_uid || '') !== user.uid) throw new Error('forbidden');
+    }
     const absenceId = String(params.get('absence_id') || '').trim();
+    const requestedAbsenceDate = String(params.get('absence_date') || '').trim().slice(0, 10);
     const requiredOnly = params.get('required_only') === '1' || params.get('required_only') === 'true';
     const today = todayKeyInJapan();
 
-    const [absenceSnap, registrationSnap, optionSnap, curriculumSnap, shiftSnap] = await Promise.all([
-      db.collection('requests').where('student_id', '==', user.uid).where('type', '==', 'absence').limit(80).get(),
-      db.collection('course_registrations').where('student_id', '==', user.uid).limit(50).get(),
-      db.collection('course_registration_options').limit(1000).get(),
-      db.collection('annual_curriculum_schedules').limit(1500).get(),
-      db.collection('shift_assignments').where('target_date', '>=', today).limit(1000).get(),
-    ]);
+    const absenceSnap = user.role === 'parent'
+      ? { docs: [] as FirebaseFirestore.QueryDocumentSnapshot[] }
+      : await db.collection('requests')
+          .where('student_id', '==', studentId)
+          .where('type', '==', 'absence')
+          .limit(80)
+          .get();
 
     const absences = absenceSnap.docs
       .map(doc => ({ id: doc.id, ...doc.data() }))
@@ -216,8 +241,17 @@ export async function GET(request: NextRequest) {
       .filter((item: any) => !requiredOnly || item.transfer_selection_mode === 'student' || item.transfer_required_by_parent === true || item.transfer_status === 'waiting_student_selection')
       .sort((a: any, b: any) => String(b.target_date || '').localeCompare(String(a.target_date || '')));
 
-    const selectedAbsence = absences.find((item: any) => item.id === absenceId) || absences[0] || null;
+    const pendingParentAbsence = user.role === 'parent' && /^\d{4}-\d{2}-\d{2}$/.test(requestedAbsenceDate)
+      ? { id: `pending:${studentId}:${requestedAbsenceDate}`, student_id: studentId, type: 'absence', target_date: requestedAbsenceDate }
+      : null;
+    const selectedAbsence = pendingParentAbsence || absences.find((item: any) => item.id === absenceId) || absences[0] || null;
     if (!selectedAbsence) return Response.json({ ok: true, absences: [], absent_lessons: [], options: [] });
+
+    const [registrationSnap, shiftSnap, sharedMasters] = await Promise.all([
+      db.collection('course_registrations').where('student_id', '==', studentId).limit(50).get(),
+      db.collection('shift_assignments').where('target_date', '>=', today).limit(1000).get(),
+      loadStudentClassMasters(),
+    ]);
 
     const registrations = registrationSnap.docs
       .map(doc => ({ id: doc.id, ...doc.data() }))
@@ -231,17 +265,21 @@ export async function GET(request: NextRequest) {
     const futureShifts = preferSheetSyncedShiftsByDatePeriod(shiftSnap.docs
       .map(doc => ({ id: doc.id, ...doc.data() }))
       .filter(isStudentVisibleShift)
-      .filter((shift: any) => canStudentRegisterCourseOption(user.profile.grade, {
+      .filter((shift: any) => canStudentUseTransferOption(studentProfile.grade, {
         grade: shift.target_grade,
         subject: shift.target_subject,
         course_name: shift.target_detail_subject,
         unit: shift.unit,
       })));
-    const optionDocs = optionSnap.docs
-      .map(doc => ({ id: doc.id, ...doc.data() }))
+    const optionDocs = sharedMasters.optionDocs
+      .map(doc => ({ id: doc.id, ...doc.data }))
       .filter((option: any) => option.is_active !== false)
-      .filter((option: any) => canStudentRegisterCourseOption(user.profile.grade, option));
-    const enrichedOptions = enrichCourseOptionsWithShifts(optionDocs, curriculumSnap.docs.map(doc => ({ id: doc.id, ...doc.data() })), futureShifts);
+      .filter((option: any) => canStudentUseTransferOption(studentProfile.grade, option));
+    const enrichedOptions = enrichCourseOptionsWithShifts(
+      optionDocs,
+      sharedMasters.curriculumDocs.map(doc => ({ id: doc.id, ...doc.data })),
+      futureShifts,
+    );
     const registeredOptions = enrichedOptions.filter((option: any) => selectedIdMatchesOption(selectedIds, option));
 
     const absentShiftSnap = await db.collection('shift_assignments')
@@ -251,7 +289,7 @@ export async function GET(request: NextRequest) {
     const absentLessons = preferSheetSyncedShiftsByDatePeriod(absentShiftSnap.docs
       .map(doc => ({ id: doc.id, ...doc.data() }))
       .filter(isStudentVisibleShift)
-      .filter((shift: any) => canStudentRegisterCourseOption(user.profile.grade, {
+      .filter((shift: any) => canStudentUseTransferOption(studentProfile.grade, {
         grade: shift.target_grade,
         subject: shift.target_subject,
         course_name: shift.target_detail_subject,
@@ -282,7 +320,21 @@ export async function GET(request: NextRequest) {
         meeting_id: getShiftMeetingId(shift),
         title: `${shift.target_date || ''} ${periodFromShift(shift) ? `${periodFromShift(shift)}限 ` : ''}${shift.target_subject || ''} ${shift.target_detail_subject || ''}`.trim(),
       }))
-      .sort((a: any, b: any) => `${a.target_date}_${a.period}_${a.subject}`.localeCompare(`${b.target_date}_${b.period}_${b.subject}`, 'ja')));
+      .sort((a: any, b: any) => `${a.target_date}_${a.period}_${a.subject}`.localeCompare(`${b.target_date}_${b.period}_${b.subject}`, 'ja')))
+      .map((option: any) => ({
+        ...option,
+        transfer_token: issueTransferOptionToken({
+          actor_id: user.uid,
+          student_id: studentId,
+          absence_id: String((selectedAbsence as any).id),
+          shift_id: String(option.id),
+          target_date: String(option.target_date || ''),
+          unit: String(option.unit || ''),
+          subject: String(option.subject || ''),
+          course_name: String(option.course_name || ''),
+          period: Number(option.period) || 0,
+        }),
+      }));
 
     return Response.json({ ok: true, absences, selected_absence: selectedAbsence, absent_lessons: absentLessons, options });
   } catch (error) {

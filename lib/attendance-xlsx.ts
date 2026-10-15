@@ -61,13 +61,18 @@ function rowsFromSheetXml(xml: string, sharedStrings: string[]) {
   for (const rowMatch of xml.matchAll(/<row\b[^>]*>([\s\S]*?)<\/row>/g)) {
     if (rows.length >= MAX_XLSX_ROWS + 1) throw new Error(`Excelの行数は${MAX_XLSX_ROWS.toLocaleString()}行以下にしてください。`);
     const row: string[] = [];
-    for (const cellMatch of rowMatch[1].matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/g)) {
-      const reference = cellMatch[1].match(/\br="([A-Z]+\d+)"/i)?.[1] || '';
+    // Excel writers commonly serialize empty cells as `<c .../>`. A pattern that
+    // only looks for closing `</c>` tags can start at such an empty cell and end
+    // at a later populated cell, shifting the later value into the wrong column.
+    for (const cellMatch of rowMatch[1].matchAll(/<c\b([^>]*)\/>|<c\b([^>]*)>([\s\S]*?)<\/c>/g)) {
+      const attributes = cellMatch[1] || cellMatch[2] || '';
+      const content = cellMatch[3] || '';
+      const reference = attributes.match(/\br="([A-Z]+\d+)"/i)?.[1] || '';
       const index = columnIndex(reference);
       if (index < 0 || index > 500) continue;
-      const type = cellMatch[1].match(/\bt="([^"]+)"/)?.[1] || '';
-      const rawValue = cellMatch[2].match(/<v>([\s\S]*?)<\/v>/)?.[1] || '';
-      const inline = Array.from(cellMatch[2].matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g), text => text[1]).join('');
+      const type = attributes.match(/\bt="([^"]+)"/)?.[1] || '';
+      const rawValue = content.match(/<v>([\s\S]*?)<\/v>/)?.[1] || '';
+      const inline = Array.from(content.matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g), text => text[1]).join('');
       row[index] = type === 's'
         ? String(sharedStrings[Number(rawValue)] ?? '')
         : decodeXml(type === 'inlineStr' ? inline : rawValue);

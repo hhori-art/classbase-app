@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { adminAuth, adminDb } from '@/lib/firebase-admin';
+import { consumeRateLimit, getClientIp, requestFingerprint } from '@/lib/server/password-recovery';
 
 export const runtime = 'nodejs';
 
@@ -55,7 +56,7 @@ async function findSeedDocs(db: FirebaseFirestore.Firestore, lifetimeIdRaw: stri
   return Array.from(docs.values());
 }
 
-async function resolveAuthUser(auth: ReturnType<typeof adminAuth>, lifetimeId: string, password: string, seedEmail?: unknown) {
+async function resolveAuthUser(auth: ReturnType<typeof adminAuth>, lifetimeId: string, password: string, seedEmail?: unknown, seedId?: string) {
   const candidates = [
     String(seedEmail || '').trim().toLowerCase(),
     ...idVariants(lifetimeId).flatMap(candidateId => EMAIL_DOMAINS.map(domain => `${candidateId}@${domain}`)),
@@ -65,7 +66,10 @@ async function resolveAuthUser(auth: ReturnType<typeof adminAuth>, lifetimeId: s
   for (const email of uniqueCandidates) {
     try {
       const existing = await auth.getUserByEmail(email);
-      await auth.updateUser(existing.uid, { password, emailVerified: true, disabled: false });
+      const target = await adminDb().collection('users').doc(existing.uid).get();
+      if (target.exists && target.id !== seedId) throw new Error('account-identity-conflict');
+      await auth.updateUser(existing.uid, { password });
+      await auth.revokeRefreshTokens(existing.uid);
       return { uid: existing.uid, email };
     } catch (error: any) {
       const message = String(error?.message || '').toLowerCase();
@@ -75,7 +79,7 @@ async function resolveAuthUser(auth: ReturnType<typeof adminAuth>, lifetimeId: s
   }
 
   const email = uniqueCandidates[0] || `${lifetimeId}@classbase.local`;
-  const created = await auth.createUser({ email, password, emailVerified: true });
+  const created = await auth.createUser({ email, password, emailVerified: false });
   return { uid: created.uid, email };
 }
 
@@ -103,6 +107,14 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: 'id-invalid-format' }, { status: 400 });
     }
 
+    const [ipAllowed, accountAllowed] = await Promise.all([
+      consumeRateLimit(requestFingerprint(['first-login-ip', getClientIp(req)]), 12, 15 * 60 * 1000),
+      consumeRateLimit(requestFingerprint(['first-login-account', lifetimeId.toLowerCase()]), 6, 15 * 60 * 1000),
+    ]);
+    if (!ipAllowed || !accountAllowed) {
+      return NextResponse.json({ ok: false, error: 'too-many-attempts' }, { status: 429 });
+    }
+
     const db = adminDb();
     const auth = adminAuth();
 
@@ -113,6 +125,10 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: 'not-registered' }, { status: 404 });
     }
     const seed = seedDoc.data();
+    if (seed.isFirstLogin === false || ['suspended', 'withdrawn', 'archived'].some(status =>
+      seed.account_status === status || seed.status === status)) {
+      return NextResponse.json({ ok: false, error: 'initial-login-not-allowed' }, { status: 403 });
+    }
 
     // 2) 初回PW検証（登録経路差異に対応して initial_password / raw_password / password を見る）
     const initialPassword = savedInitialPassword(seed);
@@ -124,7 +140,7 @@ export async function POST(req: Request) {
     }
 
     // 3) Auth作成 or 既存取得（登録経路により classbase.local / sozogakuen.co.jp の両方があり得る）
-    const resolvedAuth = await resolveAuthUser(auth, lifetimeId, password, seed.email);
+    const resolvedAuth = await resolveAuthUser(auth, lifetimeId, password, seed.email, seedDoc.id);
     const uid = resolvedAuth.uid;
     const email = resolvedAuth.email;
 
@@ -142,9 +158,7 @@ export async function POST(req: Request) {
     );
 
     // 6) 旧doc削除（同一IDなら削除しない）
-    await Promise.all(seedDocs
-      .filter(doc => doc.ref.id !== uid)
-      .map(doc => doc.ref.delete().catch(() => {})));
+    if (seedDoc.id !== uid) await seedDoc.ref.delete();
 
     return NextResponse.json({ ok: true, uid, email }, { status: 200 });
   } catch (err: any) {

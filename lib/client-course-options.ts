@@ -8,12 +8,12 @@ type CourseOptionPayload = {
 type LoadCourseOptionsInput = {
   grade: string;
   year?: number;
-  getToken: () => Promise<string>;
+  getToken: (forceRefresh?: boolean) => Promise<string>;
   force?: boolean;
 };
 
-const CACHE_TTL_MS = 5 * 60 * 1000;
-const CACHE_VERSION = 'v3';
+const CACHE_TTL_MS = 10 * 60 * 1000;
+const CACHE_VERSION = 'v12-course-slot-identity';
 const memoryCache = new Map<string, { expiresAt: number; payload: CourseOptionPayload }>();
 const pendingRequests = new Map<string, Promise<CourseOptionPayload>>();
 
@@ -60,14 +60,25 @@ export async function loadCourseRegistrationOptions({ grade, year, getToken, for
   }
 
   const request = (async () => {
-    const token = await getToken();
     const params = new URLSearchParams();
     if (grade) params.set('grade', grade);
     if (year) params.set('year', String(year));
-    const response = await fetch(`/api/course-registration-options?${params.toString()}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    const payload = await response.json().catch(() => ({}));
+    const requestOptions = async (forceRefresh: boolean) => {
+      const token = await getToken(forceRefresh);
+      const response = await fetch(`/api/course-registration-options?${params.toString()}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        // The module-level/session cache above is the only cache for this payload.
+        // The response also contains the signed-in student's mutable registration
+        // summary, so the browser HTTP cache must never serve an older selection.
+        cache: 'no-store',
+      });
+      const payload = await response.json().catch(() => ({}));
+      return { response, payload };
+    };
+    let { response, payload } = await requestOptions(false);
+    if (response.status === 401 || payload?.code === 'reauth-required') {
+      ({ response, payload } = await requestOptions(true));
+    }
     if (!response.ok || payload.ok === false) {
       throw new Error(payload.error || 'course-options-fetch-failed');
     }

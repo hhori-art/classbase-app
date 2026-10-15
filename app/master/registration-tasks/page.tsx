@@ -1,11 +1,13 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { db } from '@/lib/firebase';
+import { auth, db } from '@/lib/firebase';
 import { collection, addDoc, query, orderBy, getDocs, updateDoc, doc, deleteDoc, serverTimestamp, limit, where } from 'firebase/firestore';
-import { Plus, CheckCircle, StopCircle, Loader2, FileText, X, Trash2, Calendar, BookOpen, Users, UserPlus, GraduationCap, Check } from 'lucide-react';
+import { Plus, CheckCircle, StopCircle, Loader2, FileText, X, Trash2, Calendar, BookOpen, Users, UserPlus, GraduationCap, Check, Pencil } from 'lucide-react';
 import CourseRegistrationCalendar from '@/app/components/CourseRegistrationCalendar';
 import { enrichCourseOptionsWithShifts } from '@/lib/course-registration-match';
+import { isThirdCourseTerm } from '@/lib/course-registration-rules';
+import { loadCourseRegistrationOptions } from '@/lib/client-course-options';
 
 // デフォルトの科目リスト
 const DEFAULT_SUBJECTS = ['英語', '数学', '国語', '理科', '社会'];
@@ -26,6 +28,17 @@ const courseYearDateRange = (year: number) => ({
 // 送信対象のタイプ
 type TargetAudience = 'all' | 'new_only' | 'grade';
 
+const normalizeScopeText = (value: any) => String(value || '').normalize('NFKC').replace(/[\s　]/g, '').toLowerCase();
+
+const optionMatchesSavedScope = (option: any, scope: any) => (
+  (!scope.year || Number(scope.year) === Number(option.year || 0)) &&
+  (!scope.term || String(scope.term) === String(option.term || '')) &&
+  (!scope.grade || normalizeScopeText(scope.grade) === normalizeScopeText(option.grade || option.target_grade)) &&
+  (!scope.subject || normalizeScopeText(scope.subject) === normalizeScopeText(option.subject || option.target_subject)) &&
+  (!scope.course_name || normalizeScopeText(scope.course_name) === normalizeScopeText(option.course_name || option.title)) &&
+  (!scope.month_label || !option.month_label || String(scope.month_label) === String(option.month_label))
+);
+
 export default function AdminRegistrationTasksPage() {
   const [requests, setRequests] = useState<any[]>([]);
   const [courseOptions, setCourseOptions] = useState<any[]>([]);
@@ -33,6 +46,7 @@ export default function AdminRegistrationTasksPage() {
   
   // 作成モーダル用ステート
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingRequestId, setEditingRequestId] = useState('');
   const [creating, setCreating] = useState(false);
   const [formData, setFormData] = useState({
     title: '',
@@ -73,6 +87,18 @@ export default function AdminRegistrationTasksPage() {
         curriculumSnap.docs.map((d: any) => ({ id: d.id, ...d.data() })),
         shiftSnap.docs.map((d: any) => ({ id: d.id, ...d.data() }))
       ));
+      // 公開側と同じ期間判定・学年ルールを使い、管理画面だけ候補がずれるのを防ぐ。
+      const currentUser = auth.currentUser;
+      if (currentUser) {
+        const gradePayloads = await Promise.all(GRADE_OPTIONS.map(grade => loadCourseRegistrationOptions({
+          grade,
+          year: currentCourseYear(),
+          getToken: forceRefresh => currentUser.getIdToken(forceRefresh),
+          force: true,
+        })));
+        const apiOptions = gradePayloads.flatMap(payload => Array.isArray(payload.options) ? payload.options : []);
+        setCourseOptions(Array.from(new Map(apiOptions.map((option: any) => [String(option.id), option])).values()));
+      }
     } catch (e) {
       console.error(e);
     } finally {
@@ -90,6 +116,7 @@ export default function AdminRegistrationTasksPage() {
     d.setDate(d.getDate() + 7); // デフォルト1週間後
     const defaultDeadline = d.toISOString().split('T')[0];
 
+    setEditingRequestId('');
     setFormData({
       title,
       type,
@@ -103,6 +130,35 @@ export default function AdminRegistrationTasksPage() {
       termFilter: 'all',
       monthFilter: 'all',
       courseOptionIds: []
+    });
+    setIsModalOpen(true);
+  };
+
+  const openEditCourseRegistrationModal = (request: any) => {
+    const storedIds = new Set(Array.isArray(request.course_option_ids) ? request.course_option_ids.map(String) : []);
+    const storedScopes = Array.isArray(request.course_option_scopes) ? request.course_option_scopes : [];
+    const resolvedIds = courseOptions
+      .filter((option: any) => (
+        storedIds.has(String(option.id || '')) ||
+        storedIds.has(String(option.parent_course_option_id || '')) ||
+        storedIds.has(String(option.fallback_curriculum_option_id || '')) ||
+        storedScopes.some((scope: any) => optionMatchesSavedScope(option, scope))
+      ))
+      .map((option: any) => String(option.id));
+    setEditingRequestId(String(request.id || ''));
+    setFormData({
+      title: String(request.title || '受講講座登録'),
+      type: 'course_registration',
+      deadline: String(request.deadline || request.period_end || ''),
+      subjects: [...DEFAULT_SUBJECTS],
+      newSubject: '',
+      targetAudience: 'grade',
+      targetGrades: Array.isArray(request.target_grades) ? request.target_grades.map(String) : [],
+      periodStart: String(request.period_start || ''),
+      periodEnd: String(request.period_end || request.deadline || ''),
+      termFilter: String(request.curriculum_term || 'all'),
+      monthFilter: String(request.curriculum_month || 'all'),
+      courseOptionIds: Array.from(new Set(resolvedIds)),
     });
     setIsModalOpen(true);
   };
@@ -181,6 +237,7 @@ export default function AdminRegistrationTasksPage() {
   };
 
   const openAutoCourseRegistrationModal = () => {
+    setEditingRequestId('');
     if (courseOptions.length === 0) {
       openCreateModal('次期 受講講座登録', 'course_registration');
       return;
@@ -189,6 +246,11 @@ export default function AdminRegistrationTasksPage() {
     const term = selectAutoCourseTerm();
     const items = term?.items || courseOptions;
     const grades = Array.from(new Set(items.map((option: any) => String(option.grade || '').trim()).filter(Boolean)));
+    const thirdTermForGrade3 = items.some((option: any) => isThirdCourseTerm(option) && String(option.grade || '').normalize('NFKC').includes('3'));
+    const defaultGrades = thirdTermForGrade3 ? ['中3'] : grades.length ? grades : [...GRADE_OPTIONS];
+    const defaultItems = thirdTermForGrade3
+      ? items.filter((option: any) => String(option.grade || '').normalize('NFKC').includes('3'))
+      : items;
     const termStartDate = items
       .map((option: any) => String(option.term_start_date || '').slice(0, 10))
       .filter(Boolean)
@@ -211,12 +273,12 @@ export default function AdminRegistrationTasksPage() {
       subjects: [...DEFAULT_SUBJECTS],
       newSubject: '',
       targetAudience: 'grade',
-      targetGrades: grades.length ? grades : [...GRADE_OPTIONS],
+      targetGrades: defaultGrades,
       periodStart: registrationStart,
       periodEnd: registrationEnd,
       termFilter: term?.key || 'all',
       monthFilter: 'all',
-      courseOptionIds: items.map((option: any) => option.id),
+      courseOptionIds: defaultItems.map((option: any) => option.id),
     });
     setIsModalOpen(true);
   };
@@ -265,27 +327,46 @@ export default function AdminRegistrationTasksPage() {
 
     setCreating(true);
     try {
-      await addDoc(collection(db, 'registration_requests'), {
+      const selectedCourseOptionScopes = formData.type === 'course_registration'
+        ? courseOptions
+          .filter((option: any) => formData.courseOptionIds.includes(option.id))
+          .map((option: any) => ({
+            year: Number(option.year || 0),
+            term: String(option.term || ''),
+            grade: String(option.grade || option.target_grade || ''),
+            subject: String(option.subject || ''),
+            course_name: String(option.course_name || option.title || ''),
+            month_label: String(option.month_label || ''),
+          }))
+        : [];
+      const requestPayload = {
         title: formData.title,
         type: formData.type,
         is_active: true,
-        created_at: serverTimestamp(),
+        updated_at: serverTimestamp(),
         deadline: formData.deadline,
         subjects: formData.type === 'course_registration' ? [] : formData.subjects,
         request_kind: formData.type === 'course_registration' ? 'course_registration' : 'subject_registration',
         period_start: formData.type === 'course_registration' ? formData.periodStart : null,
         period_end: formData.type === 'course_registration' ? formData.periodEnd : null,
         course_option_ids: formData.type === 'course_registration' ? formData.courseOptionIds : [],
+        course_option_scopes: selectedCourseOptionScopes,
         curriculum_term: formData.type === 'course_registration' ? formData.termFilter : null,
         curriculum_month: formData.type === 'course_registration' ? formData.monthFilter : null,
         
         // ★追加: 送信対象データ
         target_audience: formData.type === 'course_registration' ? 'grade' : formData.targetAudience, // 'all', 'new_only', 'grade'
         target_grades: formData.type === 'course_registration' || formData.targetAudience === 'grade' ? formData.targetGrades : null,
-      });
+      };
+      if (editingRequestId) {
+        await updateDoc(doc(db, 'registration_requests', editingRequestId), requestPayload);
+      } else {
+        await addDoc(collection(db, 'registration_requests'), { ...requestPayload, created_at: serverTimestamp() });
+      }
       await fetchRequests();
       setIsModalOpen(false);
-      alert('募集を開始しました');
+      setEditingRequestId('');
+      alert(editingRequestId ? '表示する講座を更新しました' : '募集を開始しました');
     } catch (e) {
       console.error(e);
       alert('作成に失敗しました');
@@ -407,6 +488,14 @@ export default function AdminRegistrationTasksPage() {
                 
                 {/* 操作ボタンエリア */}
                 <div className="flex items-center gap-3">
+                  {(req.request_kind === 'course_registration' || req.type === 'course_registration') && (
+                    <button
+                      onClick={() => openEditCourseRegistrationModal(req)}
+                      className="flex items-center gap-2 rounded-lg border border-blue-200 bg-white px-4 py-2 text-xs font-bold text-blue-600 transition-all hover:bg-blue-50"
+                    >
+                      <Pencil size={15}/>表示講座を編集
+                    </button>
+                  )}
                   <button 
                     onClick={() => toggleStatus(req.id, req.is_active)}
                     className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all border ${req.is_active ? 'bg-white border-red-200 text-red-500 hover:bg-red-50' : 'bg-white border-green-200 text-green-600 hover:bg-green-50'}`}
@@ -432,8 +521,8 @@ export default function AdminRegistrationTasksPage() {
         <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white w-full max-w-6xl rounded-2xl shadow-xl overflow-hidden animate-in zoom-in-95 flex flex-col max-h-[88vh]">
             <div className="bg-gray-50 px-6 py-4 border-b border-gray-100 flex justify-between items-center shrink-0">
-              <h2 className="font-bold text-gray-700">募集内容の設定</h2>
-              <button onClick={() => setIsModalOpen(false)}><X size={20} className="text-gray-400 hover:text-gray-600"/></button>
+              <h2 className="font-bold text-gray-700">{editingRequestId ? '表示する講座の編集' : '募集内容の設定'}</h2>
+              <button onClick={() => { setIsModalOpen(false); setEditingRequestId(''); }}><X size={20} className="text-gray-400 hover:text-gray-600"/></button>
             </div>
             
             <div className="p-6 space-y-6 overflow-y-auto">
@@ -686,9 +775,9 @@ export default function AdminRegistrationTasksPage() {
             </div>
 
             <div className="p-6 bg-gray-50 border-t border-gray-100 flex gap-3 shrink-0">
-              <button onClick={() => setIsModalOpen(false)} className="flex-1 py-3 text-gray-500 font-bold hover:bg-gray-100 rounded-xl transition-colors">キャンセル</button>
+              <button onClick={() => { setIsModalOpen(false); setEditingRequestId(''); }} className="flex-1 py-3 text-gray-500 font-bold hover:bg-gray-100 rounded-xl transition-colors">キャンセル</button>
               <button onClick={handleSave} disabled={creating} className="flex-1 bg-indigo-600 text-white font-bold py-3 rounded-xl hover:bg-indigo-700 disabled:opacity-50 transition-colors shadow-lg shadow-indigo-200">
-                {creating ? '作成中...' : '募集を開始する'}
+                {creating ? (editingRequestId ? '更新中...' : '作成中...') : (editingRequestId ? '表示講座を更新する' : '募集を開始する')}
               </button>
             </div>
           </div>

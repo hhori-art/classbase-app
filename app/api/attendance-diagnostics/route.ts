@@ -1,14 +1,16 @@
 import { NextRequest } from 'next/server';
 import { adminDb } from '@/lib/firebase-admin';
-import { canManageAttendance, jsonError, getServerUser, requireRole } from '@/lib/server-auth';
+import { canManageAttendanceSystem, jsonError, getServerUser, requireRole } from '@/lib/server-auth';
 import {
   buildAttendanceWarnings,
   normalizeAttendanceName,
   shiftMatchesTeacher,
 } from '@/lib/attendance-diagnostics';
-import { normalizePersonCode, overlapMinutes, type RegularAttendanceInterval } from '@/lib/attendance-payroll';
+import { normalizePersonCode, normalizeRegularAttendanceIntervalRecord, overlapMinutes, type RegularAttendanceInterval } from '@/lib/attendance-payroll';
+import { getAllQueryDocuments } from '@/lib/server/firestore-pagination';
 
 export const runtime = 'nodejs';
+export const maxDuration = 60;
 
 const todayJst = () => new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
@@ -56,19 +58,17 @@ function flattenRegularAttendance(docs: FirebaseFirestore.QueryDocumentSnapshot[
   return docs.flatMap(doc => {
     const data = doc.data();
     if (!data.compacted || !Array.isArray(data.intervals)) {
-      return [{ id: doc.id, ...data } as RegularAttendanceInterval & Record<string, unknown>];
+      return [normalizeRegularAttendanceIntervalRecord({ id: doc.id, ...data }) as RegularAttendanceInterval & Record<string, unknown>];
     }
     return data.intervals.map((interval: Record<string, unknown>, index: number) => ({
-      id: `${doc.id}_${index}`,
-      person_code: String(data.person_code || ''),
-      person_name: String(data.person_name || ''),
-      normalized_name: String(data.normalized_name || ''),
-      date: String(interval.date || ''),
-      start_time: String(interval.start_time || ''),
-      end_time: String(interval.end_time || ''),
-      work_type: String(interval.work_type || ''),
-      source_name: String(data.source_name || ''),
-      source_type: String(data.source_type || 'manual_import'),
+      ...normalizeRegularAttendanceIntervalRecord(interval, {
+        id: `${doc.id}_${index}`,
+        person_code: String(data.person_code || data.personCode || data.employeeId || ''),
+        person_name: String(data.person_name || data.personName || ''),
+        normalized_name: String(data.normalized_name || data.normalizedName || ''),
+        source_name: String(data.source_name || data.sourceName || data.source || ''),
+      }),
+      source_type: String(data.source_type || data.sourceType || 'manual_import'),
     }));
   });
 }
@@ -80,8 +80,9 @@ export async function GET(request: NextRequest) {
     const { month, start, end } = monthRange(String(request.nextUrl.searchParams.get('month') || ''));
     const db = adminDb();
 
-    const adminMode = mode === 'admin' && canManageAttendance(user);
+    const adminMode = mode === 'admin' && canManageAttendanceSystem(user);
     if (!adminMode) requireRole(user, ['teacher']);
+    const includeShiftDiagnostics = user.role === 'master';
 
     const teacherSnap = adminMode
       ? await db.collection('users').where('role', '==', 'teacher').get()
@@ -98,15 +99,27 @@ export async function GET(request: NextRequest) {
       .where('date', '<=', end);
     if (!adminMode) recordsQuery = recordsQuery.where('teacher_id', '==', user.uid);
 
-    const [recordSnap, shiftSnap, regularSnap] = await Promise.all([
-      recordsQuery.get(),
-      db.collection('shift_assignments').where('target_date', '>=', start).where('target_date', '<=', end).limit(2000).get(),
-      db.collection('attendance_regular_imports').where('date', '>=', start).where('date', '<=', end).limit(5000).get(),
+    const [recordDocs, shiftDocs, regularDocs] = await Promise.all([
+      getAllQueryDocuments(recordsQuery),
+      // 理社講座の講師配置との照合はマスターだけに提供する。
+      includeShiftDiagnostics
+        ? getAllQueryDocuments(db.collection('shift_assignments').where('target_date', '>=', start).where('target_date', '<=', end))
+        : Promise.resolve([]),
+      getAllQueryDocuments(db.collection('attendance_regular_imports').where('date', '>=', start).where('date', '<=', end)),
     ]);
 
-    const records = recordSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    const shifts = shiftSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    const regularAttendance = flattenRegularAttendance(regularSnap.docs);
+    const records = recordDocs.map(doc => ({ id: doc.id, ...doc.data() }));
+    const shifts = shiftDocs.map(doc => ({ id: doc.id, ...doc.data() }));
+    const regularAttendance = flattenRegularAttendance(regularDocs);
+    const regularByDatePerson = new Map<string, Array<RegularAttendanceInterval & Record<string, unknown>>>();
+    regularAttendance.forEach(external => {
+      const code = normalizePersonCode(external.person_code);
+      const name = normalizeAttendanceName(external.person_name || external.normalized_name);
+      const keys = new Set<string>();
+      if (code) keys.add(`${external.date}\u001fcode:${code}`);
+      if (name) keys.add(`${external.date}\u001fname:${name}`);
+      keys.forEach(key => regularByDatePerson.set(key, [...(regularByDatePerson.get(key) || []), external]));
+    });
     const recordKeySet = new Set(records.map((record: any) => `${record.teacher_id}_${record.date}`));
     const recordsByTeacherDate = new Map<string, any[]>();
     (records as any[]).forEach(record => {
@@ -184,8 +197,16 @@ export async function GET(request: NextRequest) {
 
       const teacherCode = personCodeFromProfile(teacher);
       const teacherName = normalizeAttendanceName(record.teacher_name || teacher.name);
-      const overlapping = regularAttendance.flatMap(external => {
-        if (external.date !== record.date) return [];
+      const regularCandidates = new Map<string, RegularAttendanceInterval & Record<string, unknown>>();
+      if (teacherCode) {
+        (regularByDatePerson.get(`${record.date}\u001fcode:${teacherCode}`) || [])
+          .forEach(external => regularCandidates.set(String(external.id), external));
+      }
+      if (teacherName) {
+        (regularByDatePerson.get(`${record.date}\u001fname:${teacherName}`) || [])
+          .forEach(external => regularCandidates.set(String(external.id), external));
+      }
+      const overlapping = Array.from(regularCandidates.values()).flatMap(external => {
         const externalCode = normalizePersonCode(external.person_code);
         const externalName = normalizeAttendanceName(external.person_name || external.normalized_name);
         const samePerson = teacherCode && externalCode ? teacherCode === externalCode : Boolean(teacherName && externalName && teacherName === externalName);
@@ -231,9 +252,9 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    const targetShifts = adminMode
+    const targetShifts = includeShiftDiagnostics && adminMode
       ? shifts
-      : shifts.filter((shift: any) => shiftMatchesTeacher(shift, { uid: user.uid, name: teacherNameFromProfile(user.profile) }));
+      : [];
 
     targetShifts.forEach((shift: any) => {
       const teacherByName = [...teacherMap.values()].find((teacher: any) =>

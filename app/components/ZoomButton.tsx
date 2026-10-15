@@ -1,8 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { db, auth } from '@/lib/firebase';
-import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { auth } from '@/lib/firebase';
 import { Loader2, Coins, Sparkles, ExternalLink } from 'lucide-react';
 import { normalizeZoomMeetingId } from '@/lib/zoom-url';
 
@@ -162,6 +161,9 @@ export default function ZoomButton(props: {
   endTime?: string,
   classDay?: string,
   classId?: string,
+  participationToken?: string,
+  subject?: string,
+  courseName?: string,
   userProfile?: any
 }) {
   const { 
@@ -173,6 +175,9 @@ export default function ZoomButton(props: {
     startTime,
     endTime,
     classId,
+    participationToken,
+    subject,
+    courseName,
     userProfile 
   } = props;
 
@@ -191,7 +196,9 @@ export default function ZoomButton(props: {
     if (!confirm(`${label}しますか？\n（参加ログとして記録されます）`)) return;
 
     setLoading(true);
-    const today = new Date().toISOString().split('T')[0];
+    const today = new Intl.DateTimeFormat('sv-SE', {
+      timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(new Date());
 
     try {
       const user = auth.currentUser;
@@ -216,25 +223,14 @@ export default function ZoomButton(props: {
 
       // --- 2. 出席・参加ログ（失敗してもZoom起動は止めない） ---
       try {
-        const attendanceId = `${user.uid}_${today}`;
-        const attendanceRef = doc(db, 'attendance', attendanceId);
-        await setDoc(attendanceRef, {
-          user_id: user.uid,
-          target_date: today,
-          type: 'present',
-          contacted_by: 'student',
-          reason: 'Zoom参加ボタンより自動登録',
-          created_at: serverTimestamp(),
-          updated_at: serverTimestamp()
-        }, { merge: true });
-
         const token = await user.getIdToken();
         await fetch('/api/class-participation', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
           body: JSON.stringify({
             target_date: today,
-            class_id: classId || `${user.uid}_${today}`,
+            participation_token: participationToken || '',
+            ...(classId ? { class_id: classId } : {}),
           }),
         });
       } catch (logError) {

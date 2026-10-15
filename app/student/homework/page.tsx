@@ -3,9 +3,10 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
-import { collection, query, orderBy, getDocs, where, doc, getDoc } from 'firebase/firestore';
+import { collection, query, getDocs, where } from 'firebase/firestore';
 import { ArrowLeft, BookOpen, Clock, CheckCircle, ChevronRight, AlertCircle, Loader2, Calendar, FileText, ExternalLink, Smartphone, Monitor } from 'lucide-react';
 import Link from 'next/link';
+import { loadStudentHomework } from '@/lib/client-student-homework';
 
 const MONOXER_WEB_URL = process.env.NEXT_PUBLIC_MONOXER_WEB_URL || 'https://app.monoxer.com/';
 const MONOXER_APP_URL = process.env.NEXT_PUBLIC_MONOXER_APP_URL || 'monoxer://';
@@ -41,7 +42,7 @@ const openAppThenFallback = (appUrls: string[], webUrl: string) => {
 };
 
 export default function StudentHomeworkListPage() {
-  const { user } = useAuth();
+  const { user, profile } = useAuth();
   const [assignments, setAssignments] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [studentInfo, setStudentInfo] = useState<{ grade: string, subjects: string[] } | null>(null);
@@ -62,44 +63,10 @@ export default function StudentHomeworkListPage() {
       if (!user) return;
 
       try {
-        // 1. 生徒のプロフィール（学年・受講科目）を取得
-        const userDoc = await getDoc(doc(db, 'users', user.uid));
-        if (!userDoc.exists()) throw new Error("User data not found");
-        
-        const userData = userDoc.data();
-        const userGrade = userData.grade; // 例: "中2"
-        // 受講科目が未設定の場合は空配列 (全科目表示を防ぐため、または初期設定として全科目を入れる運用も可)
-        const userSubjects = userData.subjects || ['英語', '数学', '国語', '理科', '社会']; 
-
+        const userGrade = String(profile?.grade || '');
+        const userSubjects = Array.isArray(profile?.subjects) ? profile.subjects : [];
         setStudentInfo({ grade: userGrade, subjects: userSubjects });
-
-        // 2. 学年に一致する課題を取得 (homework_assignmentsに変更)
-        // ※自動作成システムは、授業終了時にこのコレクションにデータを追加している前提
-        let qAssign;
-        if (userGrade) {
-          qAssign = query(
-            collection(db, 'homework_assignments'), 
-            where('target_grade', '==', userGrade), // 学年でまず絞る
-            orderBy('deadline', 'desc')
-          );
-        } else {
-          // 学年未設定の場合は全件取得（または表示なし）
-          qAssign = query(collection(db, 'homework_assignments'), orderBy('deadline', 'desc'));
-        }
-
-        const assignSnap = await getDocs(qAssign);
-        let assignList = assignSnap.docs.map(d => ({ id: d.id, ...d.data() } as any));
-
-        // 3. 受講科目でフィルタリング (クライアントサイド)
-        // 自動作成された宿題の科目が、生徒の受講科目リストに含まれているかチェック
-        if (userSubjects.length > 0) {
-          assignList = assignList.filter(assign => 
-            // 科目が設定されていない、または受講科目リストに含まれている場合
-            !assign.subject || userSubjects.includes(assign.subject)
-          );
-        }
-
-        setAssignments(assignList);
+        setAssignments(await loadStudentHomework({ limit: 300 }));
 
         // 4. 自分の提出状況を取得
         const qSub = query(collection(db, 'submissions'), where('student_id', '==', user.uid));
@@ -120,7 +87,7 @@ export default function StudentHomeworkListPage() {
     };
 
     fetchData();
-  }, [user]);
+  }, [profile, user]);
 
   if (loading) return <div className="min-h-screen flex items-center justify-center bg-indigo-50"><Loader2 className="animate-spin text-indigo-400" size={40}/></div>;
 

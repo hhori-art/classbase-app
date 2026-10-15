@@ -6,6 +6,7 @@ import {
   Phone, BarChart3, Briefcase, AlertTriangle, Lock, Megaphone, BookOpen, Smartphone
 } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
+import { isDedicatedAttendanceApproverProfile } from '@/lib/employment-category';
 
 type Props = {
   isInternalNetwork: boolean;
@@ -14,6 +15,7 @@ type Props = {
 export default function TeacherWorkMenu({ isInternalNetwork }: Props) {
   const { profile } = useAuth();
   const pendingCount = 0; 
+  const canApproveAttendance = Boolean(profile && isDedicatedAttendanceApproverProfile(profile));
 
   // メニュー項目の定義
   // restricted: true のものは社外からアクセス不可
@@ -26,6 +28,22 @@ export default function TeacherWorkMenu({ isInternalNetwork }: Props) {
       desc: '出退勤の記録',
       restricted: false // 許可
     },
+    ...(canApproveAttendance ? [{
+      title: '自校舎の勤怠承認',
+      href: '/teacher/attendance-approvals',
+      icon: <ClipboardList size={28}/>,
+      color: 'green',
+      desc: '打刻修正・詳細承認',
+      restricted: false,
+    }] : []),
+    ...(canApproveAttendance ? [{
+      title: '勤怠シフト管理',
+      href: '/teacher/shift-management',
+      icon: <CalendarPlus size={28}/>,
+      color: 'indigo',
+      desc: '自校舎の勤務予定を管理',
+      restricted: false,
+    }] : []),
     {
       title: '代行掲示板',
       href: '/teacher/substitutions',
@@ -41,6 +59,14 @@ export default function TeacherWorkMenu({ isInternalNetwork }: Props) {
       color: 'green',
       desc: '生徒画面を確認',
       restricted: false
+    },
+    {
+      title: 'オンライン校 管理',
+      href: '/teacher/online-school',
+      icon: <BookOpen size={28}/>,
+      color: 'purple',
+      desc: '10分学習の実施状況',
+      restricted: true
     },
     {
       title: '授業PPT',
@@ -84,11 +110,11 @@ export default function TeacherWorkMenu({ isInternalNetwork }: Props) {
       restricted: true // ★制限
     },
     {
-      title: 'PF管理',
+      title: '担当クラスPF',
       href: '/teacher/pf',
       icon: <BarChart3 size={28}/>,
       color: 'indigo',
-      desc: '成績・進捗データ',
+      desc: '出欠・宿題・小テスト',
       restricted: true // ★制限
     },
     {

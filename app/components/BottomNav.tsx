@@ -20,7 +20,7 @@ export default function BottomNav() {
       visible: true,
     },
     { 
-      label: '広場', // ★ここに追加
+      label: '掲示板',
       path: '/student/community', 
       icon: <Users size={24} />, 
       activeColor: 'text-pink-500', 

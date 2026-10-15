@@ -31,17 +31,19 @@ const ADMIN_ROLES = [
 async function findUser(loginId: string) {
   const db = adminDb();
   const candidates = Array.from(new Set([loginId, loginId.toLowerCase(), loginId.toUpperCase()]));
+  const matches = new Map<string, FirebaseFirestore.QueryDocumentSnapshot>();
   for (const value of candidates) {
-    for (const field of ['lifetime_id', 'initial_login_id'] as const) {
+    for (const field of ['lifetime_id', 'initial_login_id', 'login_id'] as const) {
       const snapshot = await db.collection('users').where(field, '==', value).limit(2).get();
-      if (!snapshot.empty) return snapshot.docs[0];
+      snapshot.docs.forEach(doc => matches.set(doc.id, doc));
     }
   }
   if (/^\d+$/.test(loginId)) {
     const snapshot = await db.collection('users').where('lifetime_id', '==', Number(loginId)).limit(2).get();
-    if (!snapshot.empty) return snapshot.docs[0];
+    snapshot.docs.forEach(doc => matches.set(doc.id, doc));
   }
-  return null;
+  // 重複IDで別人の復旧先を選ばない。対象が一意な場合だけ進める。
+  return matches.size === 1 ? Array.from(matches.values())[0] : null;
 }
 
 const profileDisplayName = (profile: FirebaseFirestore.DocumentData) =>
@@ -188,10 +190,11 @@ export async function POST(request: NextRequest) {
     if (userDoc && !adminRole && nameMatches && deliveryEmail) {
       const token = newSecretToken();
       const expiresAt = new Date(Date.now() + PASSWORD_RESET_TTL_MS);
-      await adminDb().collection('password_reset_tokens').add({
+      const tokenRef = await adminDb().collection('password_reset_tokens').add({
         user_id: userDoc.id,
         token_hash: hashSecret(token),
         purpose: 'self_service',
+        issued_role: role,
         requested_via: linkedParent ? 'linked_parent' : 'self',
         recovery_owner_user_id: linkedParent?.id || userDoc.id,
         expires_at: Timestamp.fromDate(expiresAt),
@@ -200,19 +203,26 @@ export async function POST(request: NextRequest) {
       });
 
       const actionUrl = `${getPublicBaseUrl(request)}/password-reset/confirm?token=${encodeURIComponent(token)}`;
-      await queueRecoveryEmail({
-        to: deliveryEmail,
-        subject: '【創造学園アプリ】パスワード再設定',
-        heading: 'パスワードを再設定します',
-        body: linkedParent
-          ? `${profileDisplayName(profile)}さんのパスワード再設定を受け付けました。下のボタンから新しいパスワードを設定してください。`
-          : 'パスワード再設定を受け付けました。下のボタンから新しいパスワードを設定してください。',
-        actionLabel: '新しいパスワードを設定する',
-        actionUrl,
-        expiresIn: '30分',
-        kind: 'password_reset',
-        userId: userDoc.id,
-      });
+      try {
+        await queueRecoveryEmail({
+          to: deliveryEmail,
+          subject: '【創造学園アプリ】パスワード再設定',
+          heading: 'パスワードを再設定します',
+          body: linkedParent
+            ? `${profileDisplayName(profile)}さんのパスワード再設定を受け付けました。下のボタンから新しいパスワードを設定してください。`
+            : 'パスワード再設定を受け付けました。下のボタンから新しいパスワードを設定してください。',
+          actionLabel: '新しいパスワードを設定する',
+          actionUrl,
+          expiresIn: '30分',
+          kind: 'password_reset',
+          userId: userDoc.id,
+        });
+      } catch (deliveryError) {
+        await tokenRef.delete().catch(cleanupError => {
+          console.error('Password reset token cleanup failed:', cleanupError);
+        });
+        throw deliveryError;
+      }
     }
 
     const remainingDelay = 700 - (Date.now() - startedAt);

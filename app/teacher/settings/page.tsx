@@ -1,8 +1,10 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import Link from 'next/link';
 import { useAuth } from '@/app/context/AuthContext';
-import { db } from '@/lib/firebase';
+import { auth, db } from '@/lib/firebase';
+import { signInWithEmailAndPassword } from 'firebase/auth';
 import { doc, updateDoc } from 'firebase/firestore';
 import { 
   User, Lock, LogOut, ChevronRight, 
@@ -52,6 +54,7 @@ export default function TeacherSettingsPage() {
     if (profile) {
       setName(profile.name || user?.displayName || '');
       if (profile.settings) setSettings(prev => ({ ...prev, ...profile.settings }));
+      if (profile.isFirstLogin === true) setIsPasswordExpanded(true);
     }
 
     // 3. PWAインストールの準備
@@ -131,7 +134,7 @@ export default function TeacherSettingsPage() {
 
   const handleChangePassword = async () => {
     if (!newPassword || newPassword !== confirmPassword) return showMessage('error', 'パスワード不一致');
-    if (newPassword.length < 10) return showMessage('error', 'パスワードは10文字以上で入力してください');
+    if (newPassword.length < 6) return showMessage('error', 'パスワードは6文字以上で入力してください');
     if (!user) return showMessage('error', 'ログイン情報を確認できません');
     setLoading(true);
     try {
@@ -143,7 +146,11 @@ export default function TeacherSettingsPage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || 'password-change-failed');
-      showMessage('success', 'パスワードを変更しました');
+      if (!user.email) throw new Error('missing-auth-email');
+      sessionStorage.removeItem(`classbase_profile_cache:${user.uid}`);
+      const refreshedCredential = await signInWithEmailAndPassword(auth, user.email, newPassword);
+      await refreshedCredential.user.getIdToken(true);
+      showMessage('success', 'パスワードを変更し、ログイン状態を更新しました');
       setNewPassword(''); setConfirmPassword(''); setIsPasswordExpanded(false);
     } catch(e) { showMessage('error', 'パスワード変更に失敗しました'); }
     finally { setLoading(false); }
@@ -165,9 +172,19 @@ export default function TeacherSettingsPage() {
           </h1>
         </div>
 
+        <Link href="/manual" className="flex min-h-12 items-center justify-between rounded-2xl border border-indigo-200 bg-indigo-50 px-5 py-3 text-sm font-black text-indigo-800">
+          講師・職員向け操作マニュアル <ChevronRight size={19} />
+        </Link>
+
         {message && (
           <div className={`p-4 rounded-2xl font-bold flex items-center gap-3 shadow-sm ${message.type === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
             <Shield size={20}/> {message.text}
+          </div>
+        )}
+
+        {profile?.isFirstLogin === true && (
+          <div className="rounded-2xl border-2 border-amber-300 bg-amber-50 p-4 text-sm font-black leading-relaxed text-amber-900">
+            初回ログインのため、新しいパスワードを設定してください。変更が完了すると通常画面を利用できます。
           </div>
         )}
 

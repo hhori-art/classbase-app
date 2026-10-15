@@ -3,10 +3,9 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { doc, getDoc } from 'firebase/firestore';
-import { ArrowLeft, CalendarCheck, CheckCircle, Clock, Loader2, MessageSquare, Repeat, Send } from 'lucide-react';
+import { AlertCircle, ArrowLeft, CalendarCheck, CheckCircle, Clock, Loader2, MessageSquare, Repeat, Send } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
-import { db } from '@/lib/firebase';
+import { jstDateKey } from '@/lib/date-key';
 
 type Student = { id: string; student_name?: string; grade?: string };
 
@@ -16,33 +15,39 @@ export default function ParentAbsencePage() {
   const [students, setStudents] = useState<Student[]>([]);
   const [studentId, setStudentId] = useState('');
   const [type, setType] = useState<'absent' | 'late'>('absent');
-  const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
+  const [date, setDate] = useState(jstDateKey());
   const [reason, setReason] = useState('');
   const [studentSelectsTransfer, setStudentSelectsTransfer] = useState(true);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const [reload, setReload] = useState(0);
 
   useEffect(() => {
     const loadStudents = async () => {
-      if (!profile) return;
+      if (!profile || !user) return;
       setLoading(true);
+      setLoadError('');
       try {
-        const linkedIds = Array.isArray(profile.student_ids) ? profile.student_ids.slice(0, 10) : [];
-        const list: Student[] = [];
-        for (const sid of linkedIds) {
-          const snap = await getDoc(doc(db, 'users', sid));
-          if (snap.exists()) list.push({ id: snap.id, ...snap.data() });
-        }
+        const response = await fetch('/api/parent/dashboard', { headers: { Authorization: `Bearer ${await user.getIdToken()}` }, cache: 'no-store' });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.ok) throw new Error(data.error || 'failed');
+        const list: Student[] = Array.isArray(data.students) ? data.students : [];
         setStudents(list);
         setStudentId(list[0]?.id || '');
+      } catch (error) {
+        console.error(error);
+        setStudents([]);
+        setStudentId('');
+        setLoadError('対象生徒を読み込めませんでした。通信状態を確認して、もう一度お試しください。');
       } finally {
         setLoading(false);
       }
     };
 
     loadStudents();
-  }, [profile]);
+  }, [profile, user, reload]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -90,6 +95,10 @@ export default function ParentAbsencePage() {
     );
   }
 
+  if (loadError) {
+    return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-8 text-center"><AlertCircle className="mx-auto mb-3 text-rose-500" /><p className="font-black text-rose-900">{loadError}</p><button type="button" onClick={() => setReload(value => value + 1)} className="mt-5 rounded-xl bg-rose-600 px-5 py-3 text-sm font-black text-white">再読み込み</button></div>;
+  }
+
   return (
     <div className="mx-auto max-w-3xl">
       <div className="mb-6 flex items-center gap-4">
@@ -130,7 +139,7 @@ export default function ParentAbsencePage() {
 
           <div>
             <label className="mb-2 flex items-center gap-2 text-xs font-black text-slate-500"><MessageSquare size={14} /> 理由</label>
-            <textarea value={reason} onChange={e => setReason(e.target.value)} required className="min-h-36 w-full resize-none rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100" placeholder="理由や連絡事項を入力してください" />
+            <textarea value={reason} onChange={e => setReason(e.target.value)} required maxLength={2000} className="min-h-36 w-full resize-none rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100" placeholder="理由や連絡事項を入力してください" />
           </div>
 
           {type === 'absent' && (

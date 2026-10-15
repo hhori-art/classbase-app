@@ -1,10 +1,9 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { db } from '@/lib/firebase';
-import { collection, query, orderBy, getDocs, limit } from 'firebase/firestore';
 import { Bell, ArrowLeft, ChevronRight, Loader2, Calendar } from 'lucide-react';
 import Link from 'next/link';
+import { loadAnnouncements } from '@/lib/client-announcements';
 
 // タグ定義 (管理者側と合わせる)
 const LABELS: {[key: string]: { label: string, color: string }} = {
@@ -22,9 +21,7 @@ export default function StudentNewsPage() {
     const fetchNews = async () => {
       try {
         // 全てのお知らせを取得 (日付順)
-        const q = query(collection(db, 'announcements'), orderBy('created_at', 'desc'), limit(50));
-        const snapshot = await getDocs(q);
-        const allData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        const allData = await loadAnnouncements(50);
 
         // ★フィルタリング: 「全員宛」または「生徒宛」のみ抽出
         const myNews = allData.filter((item: any) => 
@@ -86,7 +83,7 @@ export default function StudentNewsPage() {
                         {/* 日付 */}
                         <span className="text-xs text-gray-400 flex items-center gap-1">
                           <Calendar size={12}/>
-                          {item.created_at ? new Date(item.created_at).toLocaleDateString() : '-'}
+                          {item.publish_at || item.created_at ? new Date(item.publish_at || item.created_at).toLocaleDateString('ja-JP') : '-'}
                         </span>
                       </div>
                       <ChevronRight size={16} className="text-gray-300 group-hover:text-blue-500 transition-colors"/>

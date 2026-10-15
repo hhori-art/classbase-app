@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { revalidateTag } from 'next/cache';
 import crypto from 'crypto';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
-import { getServerUser, isAdminLike } from '@/lib/server-auth';
+import { canManageShifts, getServerUser } from '@/lib/server-auth';
+import { canonicalPeriodForGradeSubject, fixedPeriodForGradeCourse } from '@/lib/course-registration-match';
+import { isValidShiftDate, normalizeShiftCourseIdentity, normalizeShiftGrade, normalizeShiftIdentityText, normalizeShiftPeriod, normalizeShiftSubject, redirectedShiftDetailFromTeacher, shiftTeacherNameAfterChange, validateShiftSyncStructure } from '@/lib/shift-sync-normalization';
 
 export const runtime = 'nodejs';
 
@@ -45,13 +48,14 @@ function safeEqual(a: string, b: string) {
 
 async function assertAllowed(request: NextRequest) {
   const configured = syncSecret();
-  const requestSecret = request.headers.get('x-shift-sync-secret') || request.nextUrl.searchParams.get('secret') || '';
+  // URLのクエリはブラウザ履歴やアクセスログに残るため、同期用秘密値は専用ヘッダーだけで受け取る。
+  const requestSecret = request.headers.get('x-shift-sync-secret') || '';
   if (configured && safeEqual(requestSecret, configured)) return { uid: 'gas-sync', role: 'system' };
   if (requestSecret && !configured) throw new Error('shift-sync-secret-not-configured');
   if (configured && requestSecret) throw new Error('shift-sync-secret-mismatch');
 
   const user = await getServerUser(request);
-  if (!isAdminLike(user)) throw new Error('forbidden');
+  if (!canManageShifts(user)) throw new Error('forbidden');
   return { uid: user.uid, role: user.role };
 }
 
@@ -59,17 +63,36 @@ function clean(value: unknown) {
   return String(value ?? '').replace(/\r/g, '\n').trim();
 }
 
+function validDateRange(startDate: string, endDate: string) {
+  if (!isValidShiftDate(startDate) || !isValidShiftDate(endDate) || startDate > endDate) return false;
+  return new Date(`${endDate}T00:00:00Z`).getTime() - new Date(`${startDate}T00:00:00Z`).getTime() <= 370 * 24 * 60 * 60 * 1000;
+}
+
 function periodLabel(period: unknown) {
-  const raw = clean(period);
-  if (raw.includes('2') || raw.includes('２')) return 2;
-  return 1;
+  return normalizeShiftPeriod(period) || 1;
 }
 
 function periodFromShift(data: FirebaseFirestore.DocumentData) {
-  if (data.period) return periodLabel(data.period);
-  if (data.target_period) return periodLabel(data.target_period);
-  const note = String(data.note || '');
-  if (note.includes('2') || note.includes('２')) return 2;
+  const isLegacyCorrectionDate = clean(data.target_date) === '2026-09-11';
+  // Google配置表から保存した明示時限を最優先する。通常カリキュラムの
+  // 固定時限は、旧データなど時限情報がない場合だけ補完に使う。
+  const explicitPeriod = normalizeShiftPeriod(data.period)
+    || normalizeShiftPeriod(data.target_period)
+    || normalizeShiftPeriod(data.note);
+  if (explicitPeriod && !isLegacyCorrectionDate) return explicitPeriod;
+  const fixedCoursePeriod = fixedPeriodForGradeCourse(
+    data.target_grade || data.grade,
+    data.target_detail_subject || data.detail_subject,
+  );
+  if (fixedCoursePeriod) return fixedCoursePeriod;
+  const canonicalPeriod = canonicalPeriodForGradeSubject(
+    data.target_grade || data.grade,
+    data.target_subject || data.subject || data.target_detail_subject || data.detail_subject,
+    data.target_detail_subject || data.detail_subject,
+  );
+  // 配置表の結合セルや行ずれで時限だけが壊れても、既知の時間割を優先する。
+  if (canonicalPeriod) return canonicalPeriod;
+  if (explicitPeriod) return explicitPeriod;
   return 1;
 }
 
@@ -117,16 +140,85 @@ function periodFromValue(value: unknown) {
   return 1;
 }
 
+function sourceRow(shift: SyncShift) {
+  return Number(shift.source_row || 0) || 0;
+}
+
+function blockKey(shift: SyncShift, rowOffset = 0) {
+  const row = sourceRow(shift) + rowOffset;
+  if (!row) return '';
+  return `${clean(shift.target_date)}:${row}`;
+}
+
+function inferBlockPeriods(shifts: SyncShift[]) {
+  const candidates = new Map<string, Set<1 | 2>>();
+  shifts.forEach(shift => {
+    if ((shift.role_type || 'main') !== 'main') return;
+    const key = blockKey(shift);
+    const period = canonicalPeriodForGradeSubject(shift.grade, shift.subject || shift.detail_subject, shift.detail_subject);
+    if (!key || !period) return;
+    const values = candidates.get(key) || new Set<1 | 2>();
+    values.add(period);
+    candidates.set(key, values);
+  });
+
+  const periods = new Map<string, 1 | 2>();
+  candidates.forEach((values, key) => {
+    if (values.size === 1) periods.set(key, [...values][0]);
+  });
+  return periods;
+}
+
+function resolvedPeriodForShift(shift: SyncShift, blockPeriods: Map<string, 1 | 2>) {
+  const roleType = shift.role_type || 'main';
+  const key = blockKey(shift, roleType === 'sub' ? -1 : 0);
+  const explicitPeriod = normalizeShiftPeriod(shift.period);
+  const isLegacyCorrectionDate = clean(shift.target_date) === '2026-09-11';
+  if (explicitPeriod && !isLegacyCorrectionDate) return explicitPeriod;
+  const fixedCoursePeriod = fixedPeriodForGradeCourse(shift.grade, shift.detail_subject);
+  if (fixedCoursePeriod) return fixedCoursePeriod;
+  const canonicalPeriod = canonicalPeriodForGradeSubject(
+    shift.grade,
+    shift.subject || shift.detail_subject,
+    shift.detail_subject,
+  );
+  if (canonicalPeriod) return canonicalPeriod;
+  return explicitPeriod
+    || (key ? blockPeriods.get(key) : null)
+    || periodFromValue(shift.period);
+}
+
+function redirectedMainKey(shift: SyncShift, detail: unknown, period: 1 | 2) {
+  return [
+    clean(shift.target_date),
+    period,
+    normalizeShiftGrade(shift.grade),
+    normalizeShiftSubject(shift.subject),
+    normalizeShiftCourseIdentity(detail),
+  ].join(':');
+}
+
+function parentClassKey(shift: SyncShift, period: 1 | 2) {
+  return [
+    clean(shift.target_date),
+    period,
+    normalizeShiftGrade(shift.grade),
+    normalizeShiftSubject(shift.subject),
+    normalizeShiftCourseIdentity(shift.detail_subject),
+  ].join(':');
+}
+
 function duplicateKeyForData(data: FirebaseFirestore.DocumentData) {
   const roleType = clean(data.role_type) || 'main';
   const period = periodFromShift(data);
   if (roleType === 'main') {
+    const meetingId = clean(data.target_meeting_id || data.meeting_id).replace(/\D/g, '');
     return [
       clean(data.target_date),
       period,
-      clean(data.target_grade),
-      clean(data.target_subject),
-      clean(data.target_detail_subject),
+      normalizeShiftGrade(data.target_grade),
+      normalizeShiftSubject(data.target_subject),
+      meetingId ? `meeting:${meetingId}` : normalizeShiftCourseIdentity(data.target_detail_subject),
       'main',
     ].join('_');
   }
@@ -134,6 +226,9 @@ function duplicateKeyForData(data: FirebaseFirestore.DocumentData) {
     return [
       clean(data.target_date),
       period,
+      normalizeShiftGrade(data.target_grade),
+      normalizeShiftSubject(data.target_subject),
+      normalizeShiftCourseIdentity(data.target_detail_subject),
       clean(data.user_id || data.teacher_name),
       'sub',
     ].join('_');
@@ -149,16 +244,16 @@ function duplicateKeyForData(data: FirebaseFirestore.DocumentData) {
   return '';
 }
 
-function duplicateKeyForShift(shift: SyncShift, teacher?: { id: string; name: string }) {
+function duplicateKeyForShift(shift: SyncShift, teacher: { id: string; name: string } | undefined, period: 1 | 2) {
   const roleType = shift.role_type || 'main';
-  const period = periodFromValue(shift.period);
   if (roleType === 'main') {
+    const meetingId = clean(shift.meeting_id).replace(/\D/g, '');
     return [
       clean(shift.target_date),
       period,
-      clean(shift.grade),
-      clean(shift.subject),
-      clean(shift.detail_subject),
+      normalizeShiftGrade(shift.grade),
+      normalizeShiftSubject(shift.subject),
+      meetingId ? `meeting:${meetingId}` : normalizeShiftCourseIdentity(shift.detail_subject),
       'main',
     ].join('_');
   }
@@ -166,6 +261,9 @@ function duplicateKeyForShift(shift: SyncShift, teacher?: { id: string; name: st
     return [
       clean(shift.target_date),
       period,
+      normalizeShiftGrade(shift.grade),
+      normalizeShiftSubject(shift.subject),
+      normalizeShiftCourseIdentity(shift.detail_subject),
       clean(teacher?.id || shift.teacher_name),
       'sub',
     ].join('_');
@@ -184,6 +282,7 @@ function duplicateKeyForShift(shift: SyncShift, teacher?: { id: string; name: st
 async function teacherMap() {
   const snap = await adminDb().collection('users').where('role', '==', 'teacher').get();
   const map = new Map<string, { id: string; name: string }>();
+  const aliasCandidates = new Map<string, Map<string, { id: string; name: string }>>();
   snap.docs.forEach(doc => {
     const data = doc.data();
     const names = [
@@ -195,10 +294,21 @@ async function teacherMap() {
     ].map(clean).filter(Boolean);
     const displayName = names[0] || '';
     names.forEach(name => {
-      map.set(name, { id: doc.id, name: displayName || name });
-      map.set(name.replace(/\s+/g, ''), { id: doc.id, name: displayName || name });
-      map.set(normalizeName(name), { id: doc.id, name: displayName || name });
+      const teacher = { id: doc.id, name: displayName || name };
+      map.set(name, teacher);
+      map.set(name.replace(/\s+/g, ''), teacher);
+      map.set(normalizeName(name), teacher);
+      const surname = name.trim().split(/[\s　]+/)[0];
+      const alias = normalizeName(surname);
+      if (alias && alias !== normalizeName(name)) {
+        if (!aliasCandidates.has(alias)) aliasCandidates.set(alias, new Map());
+        aliasCandidates.get(alias)!.set(doc.id, teacher);
+      }
     });
+  });
+  // 姓だけの記載は、同姓の講師が1人に確定できる場合だけ安全に紐付ける。
+  aliasCandidates.forEach((candidates, alias) => {
+    if (candidates.size === 1 && !map.has(alias)) map.set(alias, [...candidates.values()][0]);
   });
   return map;
 }
@@ -211,25 +321,74 @@ export async function POST(request: NextRequest) {
     const sourceSpreadsheetId = clean(body.source_spreadsheet_id);
     const sourceSheetName = clean(body.source_sheet_name);
     const dryRun = body.dry_run === true;
+    const replace = body.replace === true;
+    const forceOverwrite = body.force_overwrite === true;
 
     if (!sourceSpreadsheetId || !sourceSheetName) {
       return NextResponse.json({ ok: false, error: 'source_spreadsheet_id and source_sheet_name are required' }, { status: 400 });
     }
+    if (!/^[A-Za-z0-9_-]{3,160}$/.test(sourceSpreadsheetId) || sourceSheetName.length > 120 || /[\u0000-\u001f]/.test(sourceSheetName)) {
+      return NextResponse.json({ ok: false, error: '同期元のスプレッドシートIDまたはシート名が不正です。' }, { status: 400 });
+    }
     if (!shifts.length) {
       return NextResponse.json({ ok: false, error: 'shifts is empty' }, { status: 400 });
     }
+    if (shifts.length > 5000) {
+      return NextResponse.json({ ok: false, error: '配置は1回5,000件以内で同期してください。' }, { status: 413 });
+    }
+    const structure = validateShiftSyncStructure(shifts);
+    if (!structure.valid) {
+      return NextResponse.json({ ok: false, error: '配置データの構造を確認してください。同期は実行されていません。', errors: structure.errors.slice(0, 50) }, { status: 400 });
+    }
 
-    const validShifts = shifts.filter(shift => clean(shift.target_date));
+    let validShifts = shifts
+      .filter(shift => clean(shift.target_date))
+      .map(shift => ({
+        ...shift,
+        grade: shift.role_type === 'general' ? null : normalizeShiftGrade(shift.grade),
+        subject: shift.role_type === 'general' ? null : normalizeShiftSubject(shift.subject),
+      }))
+      .filter(shift => shift.role_type === 'general' || (clean(shift.grade) && clean(shift.subject)));
     if (!validShifts.length) {
       return NextResponse.json({ ok: false, error: 'valid target_date is missing' }, { status: 400 });
     }
 
+    const db = adminDb();
+    const incomingDates = [...new Set(validShifts.map(shift => clean(shift.target_date)))];
+    const lockSnaps = await db.getAll(...incomingDates.map(date => db.collection('shift_sync_locks').doc(date)));
+    const lockedDates = new Set(lockSnaps
+      .filter(snapshot => snapshot.exists && snapshot.data()?.active === true)
+      .map(snapshot => snapshot.id));
+    validShifts = validShifts.filter(shift => !lockedDates.has(clean(shift.target_date)));
+    if (!validShifts.length) {
+      return NextResponse.json({ ok: true, incoming: 0, created: 0, updated: 0, deleted: 0, skipped: shifts.length, locked_dates: [...lockedDates] });
+    }
+
     const dates = validShifts.map(s => clean(s.target_date)).sort();
-    const startDate = clean(body.start_date) || dates[0];
-    const endDate = clean(body.end_date) || dates[dates.length - 1];
+    // 検索・置換範囲は受信した配置日から導出し、任意の広い期間を読ませない。
+    const startDate = dates[0];
+    const endDate = dates[dates.length - 1];
+    if (!validDateRange(startDate, endDate)) {
+      return NextResponse.json({ ok: false, error: '同期対象期間は実在する日付の370日以内にしてください。' }, { status: 400 });
+    }
+    const incomingDateSet = new Set(dates);
+    const datesWithMainClasses = new Set(validShifts
+      .filter(shift => (shift.role_type || 'main') === 'main')
+      .map(shift => clean(shift.target_date)));
+    if (datesWithMainClasses.size === 0) {
+      return NextResponse.json({ ok: false, error: 'main class shifts are missing; sync was not applied' }, { status: 422 });
+    }
 
     const teachers = await teacherMap();
-    const db = adminDb();
+    const blockPeriods = inferBlockPeriods(validShifts);
+    const mainTeacherByDateDetail = new Map<string, string>();
+    validShifts.forEach(shift => {
+      if ((shift.role_type || 'main') !== 'main') return;
+      const teacherName = clean(shift.teacher_name);
+      if (!teacherName || redirectedShiftDetailFromTeacher(teacherName, shift.detail_subject)) return;
+      const key = redirectedMainKey(shift, shift.detail_subject, resolvedPeriodForShift(shift, blockPeriods));
+      mainTeacherByDateDetail.set(key, teacherName);
+    });
     const existingSnap = await db.collection('shift_assignments')
       .where('source_spreadsheet_id', '==', sourceSpreadsheetId)
       .where('source_sheet_name', '==', sourceSheetName)
@@ -241,6 +400,7 @@ export async function POST(request: NextRequest) {
 
     const existingByKey = new Map<string, ExistingShiftDoc>();
     const existingByDuplicateKey = new Map<string, ExistingShiftDoc>();
+    const existingById = new Map<string, ExistingShiftDoc>();
     existingSnap.docs.forEach(doc => {
       const data = doc.data();
       const targetDate = clean(data.target_date);
@@ -252,6 +412,7 @@ export async function POST(request: NextRequest) {
     });
     rangeSnap.docs.forEach(doc => {
       const data = doc.data();
+      existingById.set(doc.id, { id: doc.id, ref: doc.ref, data });
       const duplicateKey = duplicateKeyForData(data);
       const current = duplicateKey ? existingByDuplicateKey.get(duplicateKey) : null;
       const currentIsGoogleSync = !!clean(current?.data.source_spreadsheet_id);
@@ -283,8 +444,12 @@ export async function POST(request: NextRequest) {
     let updated = 0;
     let skipped = 0;
     let missingTeacherCount = 0;
+    let correctedPeriodCount = 0;
+    let cleanedLegacyCount = 0;
     let batch = db.batch();
     let batchCount = 0;
+    const retainedRefPaths = new Set<string>();
+    const mainRefByClassKey = new Map<string, string>();
 
     const commit = async () => {
       if (!batchCount) return;
@@ -293,29 +458,68 @@ export async function POST(request: NextRequest) {
       batchCount = 0;
     };
 
-    for (const shift of validShifts) {
+    // 補助行が主担当行より先に送られても parent_id を確実に設定できるよう、
+    // 日付・時限ごとに主担当を先に処理する。
+    const orderedShifts = validShifts.slice().sort((a, b) => {
+      const dateDiff = clean(a.target_date).localeCompare(clean(b.target_date));
+      if (dateDiff) return dateDiff;
+      const periodDiff = resolvedPeriodForShift(a, blockPeriods) - resolvedPeriodForShift(b, blockPeriods);
+      if (periodDiff) return periodDiff;
+      const roleRank = (role: unknown) => role === 'main' || !role ? 0 : role === 'sub' ? 1 : 2;
+      return roleRank(a.role_type) - roleRank(b.role_type);
+    });
+
+    for (const shift of orderedShifts) {
       const roleType = shift.role_type || 'main';
-      const teacherNameRaw = clean(shift.teacher_name);
+      const rawTeacherCell = clean(shift.teacher_name);
+      const redirectedDetail = roleType === 'main' ? redirectedShiftDetailFromTeacher(rawTeacherCell, shift.detail_subject) : '';
+      const period = resolvedPeriodForShift(shift, blockPeriods);
+      const teacherNameRaw = redirectedDetail
+        ? mainTeacherByDateDetail.get(redirectedMainKey(shift, redirectedDetail, period)) || '未定'
+        : rawTeacherCell;
       if (!teacherNameRaw && roleType !== 'main') {
         skipped++;
         continue;
       }
 
-      const teacherNameForLookup = teacherNameRaw.includes('⇒') ? clean(teacherNameRaw.split('⇒').pop()) : teacherNameRaw;
+      const teacherNameForLookup = shiftTeacherNameAfterChange(teacherNameRaw);
       const normalizedTeacher = normalizeName(teacherNameForLookup);
       const teacher = teachers.get(normalizedTeacher);
       const unresolvedMain = !teacherNameForLookup ||
         ['未', '未定', '―', '-', 'ー', '⇒', 'nan', 'Nan'].includes(teacherNameForLookup) ||
         /^[\d\s]+$/.test(teacherNameForLookup);
+      // サポート欄は講師アカウントと一致した人だけを取り込む。
+      // 欄外の教室番号等が全体サポートとして保存されるのを防ぐ。
+      if (roleType !== 'main' && !teacher) {
+        skipped++;
+        continue;
+      }
       if (teacherNameRaw && !teacher && !unresolvedMain) missingTeacherCount++;
 
       const syncKey = buildSyncKey({ ...shift, source_spreadsheet_id: sourceSpreadsheetId, source_sheet_name: sourceSheetName });
-      const duplicateKey = duplicateKeyForShift(shift, teacher);
+      const explicitPeriod = normalizeShiftPeriod(shift.period);
+      if (explicitPeriod && explicitPeriod !== period) correctedPeriodCount++;
+      const duplicateKey = duplicateKeyForShift(shift, teacher, period);
       const existingBySyncKey = existingByKey.get(syncKey);
       const existingByCsvKey = existingByDuplicateKey.get(duplicateKey);
       const existing = existingByCsvKey || existingBySyncKey;
-      const ref = existing ? existing.ref : db.collection('shift_assignments').doc(docIdFromSyncKey(syncKey));
-      const period = periodLabel(shift.period);
+      const deterministicId = docIdFromSyncKey(syncKey);
+      const occupied = existingById.get(deterministicId);
+      // 過去の重複統合で、別sync_keyの文書が本来の決定的IDを占有している場合がある。
+      // 同じIDへ再作成して後続行に上書きされないよう、衝突時だけ退避IDを採番する。
+      const newId = occupied && clean(occupied.data.sync_key) !== syncKey
+        ? docIdFromSyncKey(`${syncKey}:recreated`)
+        : deterministicId;
+      const ref = existing ? existing.ref : db.collection('shift_assignments').doc(newId);
+      if (roleType === 'main') mainRefByClassKey.set(parentClassKey(shift, period), ref.id);
+      const parentId = roleType === 'sub'
+        ? mainRefByClassKey.get(parentClassKey(shift, period)) || null
+        : null;
+      retainedRefPaths.add(ref.path);
+      const incomingNote = clean(shift.note);
+      const normalizedNote = incomingNote
+        ? incomingNote.replace(/^【[１２12]限】/, `【${period}限】`)
+        : `【${period}限】${roleType === 'general' ? '全体サポート' : ''}`;
 
       batch.set(ref, {
         sync_key: syncKey,
@@ -329,6 +533,7 @@ export async function POST(request: NextRequest) {
         target_date: clean(shift.target_date),
         period,
         role_type: roleType,
+        parent_id: parentId,
         target_grade: roleType === 'general' ? null : clean(shift.grade),
         target_subject: roleType === 'general' ? null : clean(shift.subject),
         target_detail_subject: roleType === 'general' ? null : clean(shift.detail_subject),
@@ -336,12 +541,13 @@ export async function POST(request: NextRequest) {
         target_meeting_id: roleType === 'main' ? clean(shift.meeting_id) : null,
         target_signin_address: roleType === 'main' ? clean(shift.signin_address) : null,
         unit: roleType === 'main' ? clean(shift.unit) : null,
-        note: clean(shift.note) || `【${period}限】${roleType === 'general' ? '全体サポート' : ''}`,
+        note: normalizedNote,
         synced_by: actor.uid,
         synced_by_role: actor.role,
         synced_at: FieldValue.serverTimestamp(),
         updated_at: FieldValue.serverTimestamp(),
         created_at: existing ? existing.data.created_at || FieldValue.serverTimestamp() : FieldValue.serverTimestamp(),
+        sync_repair_preserve: FieldValue.delete(),
       }, { merge: true });
 
       if (existing) updated++;
@@ -359,7 +565,7 @@ export async function POST(request: NextRequest) {
           user_id: teacher?.id || '',
           teacher_name: teacher?.name || teacherNameForLookup || '',
           period,
-          note: clean(shift.note),
+          note: normalizedNote,
         },
       });
       if (duplicateKey) {
@@ -375,12 +581,54 @@ export async function POST(request: NextRequest) {
             user_id: teacher?.id || '',
             teacher_name: teacher?.name || teacherNameForLookup || '',
             period,
-            note: clean(shift.note),
+            note: normalizedNote,
           },
         });
       }
+      existingById.set(ref.id, { id: ref.id, ref, data: { sync_key: syncKey } });
       batchCount++;
       if (batchCount >= 400) await commit();
+    }
+
+    if (replace) {
+      for (const doc of existingSnap.docs) {
+        const data = doc.data();
+        const targetDate = clean(data.target_date);
+        // start/end の間にあるだけの未送信日を削除しない。GASが部分送信した場合も
+        // 当日配置を残し、参加ボタンが全消失する事故を防ぐ。
+        if (!incomingDateSet.has(targetDate) || !datesWithMainClasses.has(targetDate) || lockedDates.has(targetDate) || retainedRefPaths.has(doc.ref.path) || data.sync_repair_preserve === true) continue;
+        batch.delete(doc.ref);
+        deleted++;
+        batchCount++;
+        if (batchCount >= 400) await commit();
+      }
+    }
+
+    if (forceOverwrite) {
+      const archiveBatchId = `${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      for (const doc of rangeSnap.docs) {
+        const data = doc.data();
+        const targetDate = clean(data.target_date);
+        const roleType = clean(data.role_type) || 'main';
+        // GASを正として入れ直す場合、対象日に残る旧CSV・旧GASの授業／補助だけを整理する。
+        // 手動の全体サポートと、今回の同期でGoogle配置へ移行した文書は保持する。
+        if (!incomingDateSet.has(targetDate) || lockedDates.has(targetDate) || roleType === 'general') continue;
+        if (clean(data.source_spreadsheet_id) || retainedRefPaths.has(doc.ref.path)) continue;
+        const archiveRef = db.collection('shift_assignment_archives').doc(`${archiveBatchId}_${doc.id}`);
+        batch.set(archiveRef, {
+          ...data,
+          original_id: doc.id,
+          archived_reason: 'google_sheet_force_overwrite',
+          archived_batch_id: archiveBatchId,
+          archived_at: FieldValue.serverTimestamp(),
+          archived_by: actor.uid,
+        });
+        batch.delete(doc.ref);
+        deleted++;
+        cleanedLegacyCount++;
+        batchCount += 2;
+        if (batchCount >= 400) await commit();
+      }
     }
 
     await commit();
@@ -396,12 +644,33 @@ export async function POST(request: NextRequest) {
       deleted,
       skipped,
       missing_teacher_count: missingTeacherCount,
+      corrected_period_count: correctedPeriodCount,
+      cleaned_legacy_count: cleanedLegacyCount,
       actor_id: actor.uid,
       actor_role: actor.role,
       created_at: FieldValue.serverTimestamp(),
     });
 
-    return NextResponse.json({ ok: true, incoming: validShifts.length, created, updated, deleted, skipped, missing_teacher_count: missingTeacherCount });
+    await db.collection('system_status').doc('shift_sync').set({
+      ok: true,
+      source_spreadsheet_id: sourceSpreadsheetId,
+      source_sheet_name: sourceSheetName,
+      start_date: startDate,
+      end_date: endDate,
+      incoming_dates: Array.from(incomingDateSet),
+      incoming: validShifts.length,
+      created,
+      updated,
+      deleted,
+      skipped,
+      missing_teacher_count: missingTeacherCount,
+      corrected_period_count: correctedPeriodCount,
+      cleaned_legacy_count: cleanedLegacyCount,
+      last_success_at: FieldValue.serverTimestamp(),
+    }, { merge: true });
+    revalidateTag('course-registration-options');
+
+    return NextResponse.json({ ok: true, incoming: validShifts.length, created, updated, deleted, skipped, missing_teacher_count: missingTeacherCount, corrected_period_count: correctedPeriodCount, cleaned_legacy_count: cleanedLegacyCount, locked_dates: [...lockedDates] });
   } catch (error: any) {
     console.error('shift sync POST error:', error);
     return NextResponse.json({ ok: false, error: error.message || 'sync failed' }, { status: error.message === 'forbidden' ? 403 : 400 });
@@ -416,8 +685,11 @@ export async function GET(request: NextRequest) {
     const startDate = clean(request.nextUrl.searchParams.get('start_date'));
     const endDate = clean(request.nextUrl.searchParams.get('end_date'));
 
-    if (!startDate || !endDate) {
-      return NextResponse.json({ ok: false, error: 'start_date and end_date are required' }, { status: 400 });
+    if (!validDateRange(startDate, endDate)) {
+      return NextResponse.json({ ok: false, error: 'start_date and end_date must be valid and within 370 days' }, { status: 400 });
+    }
+    if ((sourceSpreadsheetId || sourceSheetName) && (!sourceSpreadsheetId || !sourceSheetName || !/^[A-Za-z0-9_-]{3,160}$/.test(sourceSpreadsheetId) || sourceSheetName.length > 120 || /[\u0000-\u001f]/.test(sourceSheetName))) {
+      return NextResponse.json({ ok: false, error: 'invalid source spreadsheet filters' }, { status: 400 });
     }
 
     let q: FirebaseFirestore.Query = adminDb().collection('shift_assignments');

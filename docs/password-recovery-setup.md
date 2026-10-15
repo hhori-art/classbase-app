@@ -13,23 +13,23 @@
 
 一致しない場合も画面には同じ受付完了メッセージを表示します。アカウントやメールアドレスの存在を第三者に推測されないための仕様です。
 
-## メール送信の初期設定
+## メール送信の初期設定（Resend）
 
-アプリは Firebase Trigger Email 拡張機能が監視する `mail` コレクションへ、サーバーから送信データを書き込みます。
+本番環境は Vercel Marketplace の Resend を使い、サーバーから直接送信します。配信APIがエラーを返した場合、画面に「送信しました」と表示しません。
 
-1. Firebase Console の Extensions から `Trigger Email` (`firestore-send-email`) をインストールします。
-2. 利用するメール配信サービスのSMTP情報を登録します。
-3. 監視対象コレクションを `mail` にします。
-4. 既定の送信元を、組織が管理するメールアドレスにします。
-5. Vercel本番環境へ次の環境変数を登録します。
+1. Vercel Marketplace から Resend を接続し、`sozogakuen.co.jp` のDNS確認を完了します。
+2. Vercel本番環境へ次の環境変数を登録します。
 
 ```text
 PASSWORD_RECOVERY_BASE_URL=https://classbase-app.vercel.app
-FIREBASE_MAIL_COLLECTION=mail
 PASSWORD_RECOVERY_RATE_LIMIT_SECRET=<十分に長いランダム文字列>
+RESEND_API_KEY=<Vercel Marketplaceが自動登録>
+RESEND_FROM_EMAIL=創造学園アプリ <noreply@sozogakuen.co.jp>
 ```
 
 `PASSWORD_RECOVERY_RATE_LIMIT_SECRET` は32バイト以上のランダム値を推奨します。設定後は本番を再デプロイします。
+
+Firebase Trigger Email を使う環境だけ、`FIREBASE_MAIL_COLLECTION` を明示的に設定します。拡張機能がない状態では送信成功を返しません。
 
 ## 導入時の運用
 
@@ -39,6 +39,6 @@ PASSWORD_RECOVERY_RATE_LIMIT_SECRET=<十分に長いランダム文字列>
 - 電話番号下4桁の一致は確認材料の一つです。氏名・受付番号だけでリンクを発行せず、登録済み電話への折り返しなど別経路で本人確認してください。
 - 発行した再設定リンクはパスワードそのものではありません。本人確認済みの利用者へ安全な連絡手段で伝え、第三者へ転送しないよう案内します。
 - 管理者アカウントはこのセルフサービスの対象外です。マスター管理者による復旧と、多要素認証を利用してください。
-- メール送信失敗は Firebase Extensions のログと `mail` コレクションの delivery 情報で確認します。
+- メール送信失敗は Resend のログとVercelの関数ログで確認します。
 - 氏名変更時はユーザーマスターも更新します。
 - 再設定メールを転送しないこと、共有端末では操作後にログアウトすることを案内します。

@@ -249,6 +249,7 @@ export function parseLegacyRateWorkbook(input: Buffer) {
     const breakthroughLessonRate = lessonRates.breakthrough;
     const officeRate = numeric(row[column('事務_TANKA')]);
     const interviewRate = numeric(row[column('サブスタッフ_TANKA')]) || officeRate;
+    const rateItem = (name: string, fallback = 0) => column(name) >= 0 ? numeric(row[column(name)]) : fallback;
     data.push({
       person_code: personCode,
       person_name: personName,
@@ -257,9 +258,51 @@ export function parseLegacyRateWorkbook(input: Buffer) {
       school_code: normalizePersonCode(row[column('所属教室番号')]),
       normal_lesson_rate: normalLessonRate,
       breakthrough_lesson_rate: breakthroughLessonRate,
-      hourly_rates: { lesson: breakthroughLessonRate, office: officeRate, interview: interviewRate, other: officeRate },
+      hourly_rates: { lesson: normalLessonRate, office: officeRate, interview: interviewRate, other: officeRate },
       allowances: { lesson: 0, office: 0, interview: 0, other: 0 },
+      rate_items: {
+        group_lesson: rateItem('EDIC授業_TANKA', normalLessonRate),
+        sogaku_lesson: rateItem('創学授業_TANKA'),
+        individual_1: rateItem('個別授業1_TANKA'), individual_2: rateItem('個別授業2_TANKA'), individual_3: rateItem('個別授業3_TANKA'),
+        individual_4: rateItem('個別授業4_TANKA'), individual_5: rateItem('個別授業5_TANKA'), individual_6: rateItem('個別授業6_TANKA'),
+        mentor: rateItem('メンター_TANKA'), sub_staff: rateItem('サブスタッフ_TANKA', interviewRate),
+        training_1: rateItem('研修1_TANKA'), training_2: rateItem('研修2_TANKA'), training_3: rateItem('研修3_TANKA'),
+        office: officeRate, office_premium_1: rateItem('深夜事務_TANKA'), office_premium_2: rateItem('深夜事務2_TANKA'),
+        private_tutor: rateItem('個別ﾁｭｰﾀｰ'), ac_study: rateItem('ＡＣ自習室'),
+      },
     });
   });
   return { data, errors, format: 'legacy_rate_sheet' as const };
+}
+
+export function parseLegacyAllowanceWorkbook(input: Buffer) {
+  const rows = sheetRows(workbookStream(input), 'Q042_M_TANKA_KOJIN選択ｸｴﾘｰExcel');
+  const [headers, ...dataRows] = rows;
+  if (!headers) return { data: [], errors: ['Q042のデータシートが空です。'] };
+  const headerMap = new Map(headers.map((header, index) => [String(header).normalize('NFKC').replace(/[\s　]/g, ''), index]));
+  const findColumn = (pattern: RegExp) => Array.from(headerMap.entries()).find(([header]) => pattern.test(header))?.[1] ?? -1;
+  const columns = {
+    month: findColumn(/^支給年月$/), school: findColumn(/^所属教室番号$/), code: findColumn(/^職員コード$/), name: findColumn(/^Expr1002$|^氏名$/),
+    group2: findColumn(/その他2.*PL学校前配布/), group3: findColumn(/その他3.*OL理社講座/), group4: findColumn(/その他4.*割増/), groupTransport: findColumn(/^移動費.*PL学校前\+理社/),
+    private2: findColumn(/^個別その他2/), private3: findColumn(/^個別その他3/), private4: findColumn(/^個別その他4/), privateTransport: findColumn(/^個別移動費/),
+  };
+  if ([columns.month, columns.code, columns.name].some(columnIndex => columnIndex < 0)) return { data: [], errors: ['Q042に支給年月・職員コード・氏名の列がありません。'] };
+  const data: Array<{ month: string; school_code: string; person_code: string; person_name: string; special_2: number; special_3: number; special_4: number; transportation: number }> = [];
+  const errors: string[] = [];
+  dataRows.forEach((row, index) => {
+    const code = normalizePersonCode(row[columns.code]);
+    const name = String(row[columns.name] || '').trim();
+    if (!code && !name) return;
+    const paymentMonth = String(Math.trunc(numeric(row[columns.month])));
+    const matched = paymentMonth.match(/^(\d{4})(\d{2})$/);
+    if (!matched) { errors.push(`${index + 2}行目: 支給年月が不正です。`); return; }
+    const amount = (columnIndex: number) => columnIndex >= 0 ? Number(row[columnIndex] || 0) || 0 : 0;
+    const item = {
+      month: `${matched[1]}-${matched[2]}`, school_code: columns.school >= 0 ? normalizePersonCode(row[columns.school]) : '', person_code: code, person_name: name,
+      special_2: amount(columns.group2) + amount(columns.private2), special_3: amount(columns.group3) + amount(columns.private3),
+      special_4: amount(columns.group4) + amount(columns.private4), transportation: amount(columns.groupTransport) + amount(columns.privateTransport),
+    };
+    if (item.special_2 || item.special_3 || item.special_4 || item.transportation) data.push(item);
+  });
+  return { data, errors };
 }

@@ -12,10 +12,10 @@ const requestSchema = z.object({
   understanding: z.enum(['good', 'uncertain', 'difficult']).optional(),
 });
 
-export async function POST(request: NextRequest, context: { params: { id: string } }) {
+export async function POST(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   try {
     const user = await getServerUser(request);
-    const taskId = String(context.params.id || '');
+    const taskId = String((await context.params).id || '');
     const taskSnap = await adminDb().collection('eiken_tasks').doc(taskId).get();
     if (!taskSnap.exists || taskSnap.data()?.status !== 'published') throw new Error('task-not-found');
     const task = taskSnap.data() || {};
@@ -53,6 +53,24 @@ export async function POST(request: NextRequest, context: { params: { id: string
             throw new Error('task-locked');
           }
         }
+        if (task.task_type === 'quiz') {
+          const quizId = String(task.details?.quiz_id || '');
+          if (!quizId) throw new Error('task-completion-evidence-required');
+          const resultSnap = await transaction.get(
+            adminDb().collection('eiken_quiz_results').where('student_id', '==', user.uid),
+          );
+          if (!resultSnap.docs.some(doc => doc.data().quiz_id === quizId)) {
+            throw new Error('task-completion-evidence-required');
+          }
+        }
+        if (task.task_type === 'ai_writing') {
+          const submissionSnap = await transaction.get(
+            adminDb().collection('eiken_writing_submissions').doc(`${user.uid}_${taskId}`),
+          );
+          if (!submissionSnap.exists || submissionSnap.data()?.evaluation_status !== 'completed') {
+            throw new Error('task-completion-evidence-required');
+          }
+        }
         update.status = 'completed';
         update.completed_at = FieldValue.serverTimestamp();
         if (!current.started_at) update.started_at = FieldValue.serverTimestamp();
@@ -71,4 +89,3 @@ export async function POST(request: NextRequest, context: { params: { id: string
     return jsonError(error);
   }
 }
-

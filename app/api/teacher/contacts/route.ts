@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, jsonError, requireRole } from '@/lib/server-auth';
+import { requireAccessibleStudent } from '@/lib/server/teacher-student-access';
 
 export const runtime = 'nodejs';
 
@@ -13,14 +14,18 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const action = String(body.action || '');
     const studentId = String(body.student_id || '');
-    const studentName = String(body.student_name || '');
-    const note = String(body.note || '').slice(0, 1000);
-    const week = String(body.week || '').replace(/[^0-9]/g, '') || '1';
+    const rawNote = String(body.note || '').trim();
+    if (rawNote.length > 1000) return Response.json({ ok: false, error: 'note-too-long' }, { status: 400 });
+    const note = rawNote;
+    const week = String(body.week || '').trim() || '1';
+    if (!/^\d{1,2}$/.test(week) || Number(week) < 1 || Number(week) > 53) return Response.json({ ok: false, error: 'invalid-week' }, { status: 400 });
     const teacherName = user.profile.name || user.profile.teacher_name || user.email || '講師';
 
     if (!studentId) {
       return Response.json({ ok: false, error: 'student_id is required' }, { status: 400 });
     }
+    const student = await requireAccessibleStudent(user, studentId);
+    const studentName = String(student.student_name || student.name || '生徒').slice(0, 120);
 
     const db = adminDb();
 

@@ -44,5 +44,20 @@ export function normalizeSchoolYear(targetDate?: string, value?: string | number
 }
 
 export function isZoomRecordingShareUrl(value?: string | null) {
-  return /^https?:\/\/(?:[^/]+\.)?zoom\.us\/rec\//i.test(String(value || '').trim());
+  try {
+    const url = new URL(String(value || '').trim());
+    const trustedHost = ['zoom.us', 'zoom.com'].some(domain => (
+      url.hostname === domain || url.hostname.endsWith(`.${domain}`)
+    ));
+    return url.protocol === 'https:' && trustedHost && url.pathname.startsWith('/rec/');
+  } catch {
+    return false;
+  }
+}
+
+export function appendZoomRecordingPasscode(value: string, passcode?: string | null) {
+  if (!isZoomRecordingShareUrl(value)) throw new Error('invalid-zoom-share-url');
+  const url = new URL(value);
+  if (passcode && !url.searchParams.has('pwd')) url.searchParams.set('pwd', passcode);
+  return url.toString();
 }

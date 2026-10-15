@@ -237,6 +237,7 @@ function shiftMeetingIdsFromShift(shift: FirebaseFirestore.DocumentData) {
 function recordingIdentity(recording: any) {
   const selectedFile = speakerViewFile(recording);
   return {
+    meeting_id: recordingMeetingId(recording),
     meeting_uuid: String(recording.uuid || ''),
     file_id: String(selectedFile?.id || ''),
     recording_start: String(selectedFile?.recording_start || recording.start_time || ''),

@@ -40,18 +40,14 @@ function handleClassbaseSheetEdit(e) {
   if (!e || !e.range) return;
 
   const lock = LockService.getScriptLock();
-  if (!lock.tryLock(1000)) return;
+  // 以前は1秒でロックを取得できない編集と、20秒以内の連続編集を破棄していた。
+  // 必ず順番に同期し、最後の編集内容までFirebaseへ反映する。
+  lock.waitLock(30000);
 
   try {
     const sheet = e.range.getSheet();
     if (!isClassbaseTargetSheet_(sheet)) return;
-
-    // 連続編集・貼り付けで短時間に何度も同期しないための簡易抑制。
-    const cache = CacheService.getScriptCache();
-    const key = `classbase_sync_${sheet.getSheetId()}`;
-    if (cache.get(key)) return;
-    cache.put(key, '1', 20);
-
+    SpreadsheetApp.flush();
     syncSheetToClassbase_(sheet, false);
   } catch (error) {
     console.error('Classbase auto sync failed:', error);
@@ -124,11 +120,29 @@ function classbaseDateKey_(displayValue, year) {
   return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
+function classbaseSheetYear_(sheetName, fallbackYear) {
+  const match = classbaseDisplay_(sheetName).match(/(20\d{2})年/);
+  return match ? Number(match[1]) : fallbackYear;
+}
+
 function classbasePeriod_(label) {
-  const text = classbaseDisplay_(label);
-  if (text.includes('２') || text.includes('2')) return 2;
-  if (text.includes('１') || text.includes('1')) return 1;
+  const text = classbaseDisplay_(label).normalize('NFKC');
+  if (/^(?:第\s*)?1\s*(?:時間目|時限|限|コマ)/.test(text)) return 1;
+  if (/^(?:第\s*)?2\s*(?:時間目|時限|限|コマ)/.test(text)) return 2;
   return 0;
+}
+
+function classbaseGrade_(subject) {
+  const text = classbaseDisplay_(subject).normalize('NFKC').replace(/[\s　]/g, '');
+  const match = text.match(/中(?:学)?([123])/);
+  return match ? `中${match[1]}` : text.replace(/理科|社会/g, '');
+}
+
+function classbaseSubject_(subject) {
+  const text = classbaseDisplay_(subject).normalize('NFKC');
+  if (text.includes('理科')) return '理科';
+  if (text.includes('社会')) return '社会';
+  return text.trim();
 }
 
 function classbaseSplitNames_(value) {
@@ -164,6 +178,7 @@ function parseClassbaseShiftSheet_(sheet) {
   const values = sheet.getDataRange().getDisplayValues();
   const spreadsheetId = ss.getId();
   const sheetName = sheet.getName();
+  const targetYear = classbaseSheetYear_(sheetName, cfg.year);
   const shifts = [];
   const classCounter = {};
 
@@ -172,7 +187,7 @@ function parseClassbaseShiftSheet_(sheet) {
 
   for (let r = 0; r < values.length; r += 1) {
     const row = values[r];
-    const possibleDate = classbaseDateKey_(row[0], cfg.year);
+    const possibleDate = classbaseDateKey_(row[0], targetYear);
     if (possibleDate && classbaseDisplay_(row[1]).includes('曜日')) {
       currentDate = possibleDate;
       currentWeek = classbaseDisplay_(row[2]);
@@ -180,7 +195,7 @@ function parseClassbaseShiftSheet_(sheet) {
     }
 
     const period = classbasePeriod_(row[0]);
-    if (!period || !currentDate) continue;
+    if (!period || !currentDate || classbaseDisplay_(row[1]) !== '教科') continue;
 
     const subjectRow = values[r] || [];
     const classRow = values[r + 1] || [];
@@ -204,7 +219,8 @@ function parseClassbaseShiftSheet_(sheet) {
 
       if (!subject && !detail && !teacher && !support) continue;
 
-      const grade = subject.replace(/理科|社会/g, '');
+      const grade = classbaseGrade_(subject);
+      const normalizedSubject = classbaseSubject_(subject);
       const counterKey = `${currentDate}_${period}_${grade}_${subject}_${detail}`;
       classCounter[counterKey] = (classCounter[counterKey] || 0) + 1;
       if (classCounter[counterKey] > 1) {
@@ -222,7 +238,7 @@ function parseClassbaseShiftSheet_(sheet) {
         role_type: 'main',
         teacher_name: teacher || '未定',
         grade,
-        subject,
+        subject: normalizedSubject,
         detail_subject: detail,
         unit,
         place,
@@ -243,7 +259,7 @@ function parseClassbaseShiftSheet_(sheet) {
           role_type: 'sub',
           teacher_name: name,
           grade,
-          subject,
+          subject: normalizedSubject,
           detail_subject: detail,
           unit,
           place,

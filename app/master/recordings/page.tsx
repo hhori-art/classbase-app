@@ -64,6 +64,7 @@ type PublishedData = {
   target_recording_file_id?: string;
   target_recording_type?: string;
   zoom_recording_files?: any[];
+  recording_meeting_id?: string;
   trim_start_seconds?: number;
   trim_end_seconds?: number | null;
 };
@@ -284,6 +285,7 @@ function normalizeRecording(raw: RecordingInput): Omit<PublishedData, 'id'> {
     target_recording_file_id: raw.target_recording_file_id || raw.zoom_recording_file_id || '',
     target_recording_type: raw.target_recording_type || '',
     zoom_recording_files: raw.zoom_recording_files || [],
+    recording_meeting_id: raw.recording_meeting_id || '',
     ...(raw.original_shift_id ? { original_shift_id: raw.original_shift_id } : {}),
   };
 }
@@ -389,10 +391,12 @@ export default function MasterApprovalPage() {
     ? previewTarget.item.target_recording_url || ''
     : previewTarget?.item.video_url || '';
 
+  const previewUsesZoomPlayer = isZoomRecordingShareUrl(previewExternalUrl);
+
   const previewSrc = previewTarget?.kind === 'shift'
-    ? ((previewTarget.item.target_recording_file_id || isZoomRecordingShareUrl(previewTarget.item.target_recording_url)) ? `/api/zoom/recordings/file?shift_id=${encodeURIComponent(previewTarget.item.id)}&token=${encodeURIComponent(previewToken)}` : previewTarget.item.target_recording_url || '')
+    ? (previewUsesZoomPlayer ? `/api/zoom/recordings/file?mode=share&shift_id=${encodeURIComponent(previewTarget.item.id)}&token=${encodeURIComponent(previewToken)}` : (previewTarget.item.target_recording_file_id ? `/api/zoom/recordings/file?shift_id=${encodeURIComponent(previewTarget.item.id)}&token=${encodeURIComponent(previewToken)}` : previewExternalUrl))
     : previewTarget?.kind === 'published'
-      ? ((previewTarget.item.zoom_recording_file_id || previewTarget.item.target_recording_file_id || previewTarget.item.original_shift_id || isZoomRecordingShareUrl(previewTarget.item.video_url)) ? `/api/zoom/recordings/file?recording_id=${encodeURIComponent(previewTarget.item.id)}&token=${encodeURIComponent(previewToken)}` : previewTarget.item.video_url || '')
+      ? (previewUsesZoomPlayer ? `/api/zoom/recordings/file?mode=share&recording_id=${encodeURIComponent(previewTarget.item.id)}&token=${encodeURIComponent(previewToken)}` : ((previewTarget.item.zoom_recording_file_id || previewTarget.item.target_recording_file_id || previewTarget.item.original_shift_id) ? `/api/zoom/recordings/file?recording_id=${encodeURIComponent(previewTarget.item.id)}&token=${encodeURIComponent(previewToken)}` : previewExternalUrl))
       : '';
 
   const openPreview = async (target: PreviewTarget) => {
@@ -552,6 +556,7 @@ export default function MasterApprovalPage() {
             target_recording_file_id: shift.target_recording_file_id || '',
             target_recording_type: shift.target_recording_type || '',
             zoom_recording_files: shift.zoom_recording_files || [],
+            recording_meeting_id: shift.target_meeting_id || '',
             source: 'zoom_approval',
           }),
           original_shift_id: shift.id,
@@ -725,6 +730,7 @@ export default function MasterApprovalPage() {
         target_recording_file_id: selectedReplacementSource.target_recording_file_id || selectedReplacementSource.zoom_recording_file_id || '',
         target_recording_type: selectedReplacementSource.target_recording_type || '',
         zoom_recording_files: selectedReplacementSource.zoom_recording_files || [],
+        recording_meeting_id: selectedReplacementSource.recording_meeting_id || '',
         is_replacement: true,
         replacement_source_recording_id: selectedReplacementSource.id,
         replacement_source_title: selectedReplacementSource.title,
@@ -762,6 +768,7 @@ export default function MasterApprovalPage() {
               target_recording_file_id: selectedReplacementSource.target_recording_file_id || selectedReplacementSource.zoom_recording_file_id || '',
               target_recording_type: selectedReplacementSource.target_recording_type || '',
               zoom_recording_files: selectedReplacementSource.zoom_recording_files || [],
+              recording_meeting_id: selectedReplacementSource.recording_meeting_id || '',
               source: 'recording_replacement',
             }),
             original_shift_id: shift.id,
@@ -802,6 +809,7 @@ export default function MasterApprovalPage() {
             target_recording_file_id: selectedReplacementSource.target_recording_file_id || selectedReplacementSource.zoom_recording_file_id || '',
             target_recording_type: selectedReplacementSource.target_recording_type || '',
             zoom_recording_files: selectedReplacementSource.zoom_recording_files || [],
+            recording_meeting_id: selectedReplacementSource.recording_meeting_id || '',
             source: 'recording_replacement',
           }),
           original_shift_id: shift.id,
@@ -1104,13 +1112,17 @@ export default function MasterApprovalPage() {
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   onClick={() => setTrimFromPreview('start')}
-                  className="flex items-center gap-1 rounded-xl bg-blue-50 px-3 py-2 text-xs font-black text-blue-700 hover:bg-blue-100"
+                  disabled={previewUsesZoomPlayer}
+                  title={previewUsesZoomPlayer ? 'Zoomプレイヤーでは下の秒数入力欄を使用してください' : undefined}
+                  className="flex items-center gap-1 rounded-xl bg-blue-50 px-3 py-2 text-xs font-black text-blue-700 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <Scissors size={14}/> 現在位置を開始秒
                 </button>
                 <button
                   onClick={() => setTrimFromPreview('end')}
-                  className="flex items-center gap-1 rounded-xl bg-amber-50 px-3 py-2 text-xs font-black text-amber-700 hover:bg-amber-100"
+                  disabled={previewUsesZoomPlayer}
+                  title={previewUsesZoomPlayer ? 'Zoomプレイヤーでは下の秒数入力欄を使用してください' : undefined}
+                  className="flex items-center gap-1 rounded-xl bg-amber-50 px-3 py-2 text-xs font-black text-amber-700 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <Scissors size={14}/> 現在位置を終了秒
                 </button>
@@ -1126,15 +1138,28 @@ export default function MasterApprovalPage() {
             </div>
             <div className="min-h-0 flex-1 bg-slate-950">
               {previewSrc ? (
-                <video
-                  key={previewSrc}
-                  ref={previewVideoRef}
-                  src={previewSrc}
-                  className="h-full w-full"
-                  controls
-                  playsInline
-                  preload="metadata"
-                />
+                previewUsesZoomPlayer ? (
+                  <div className="flex h-full items-center justify-center p-6 text-center text-white">
+                    <div>
+                      <PlayCircle className="mx-auto text-red-400" size={48} />
+                      <p className="mt-4 text-sm font-black">Zoom録画は公式プレイヤーで確認してください</p>
+                      <p className="mt-2 text-xs font-bold text-slate-400">Zoom側の制限により管理画面内へ埋め込めません。</p>
+                      <a href={previewSrc} target="_blank" rel="noopener noreferrer" className="mt-5 inline-flex rounded-xl bg-white px-5 py-3 text-xs font-black text-slate-900 hover:bg-slate-100">
+                        Zoomで録画を開く
+                      </a>
+                    </div>
+                  </div>
+                ) : (
+                  <video
+                    key={previewSrc}
+                    ref={previewVideoRef}
+                    src={previewSrc}
+                    className="h-full w-full"
+                    controls
+                    playsInline
+                    preload="metadata"
+                  />
+                )
               ) : (
                 <div className="flex h-full items-center justify-center p-6 text-center text-sm font-bold text-white">
                   この録画は画面内再生に必要なZoom録画ファイル情報がありません。

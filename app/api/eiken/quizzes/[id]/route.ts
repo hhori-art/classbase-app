@@ -6,10 +6,10 @@ import { getServerUser, jsonError } from '@/lib/server-auth';
 
 export const runtime = 'nodejs';
 
-export async function GET(request: NextRequest, context: { params: { id: string } }) {
+export async function GET(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   try {
     const user = await getServerUser(request);
-    const quizId = String(context.params.id || '');
+    const quizId = String((await context.params).id || '');
     const quizSnap = await adminDb().collection('eiken_quizzes').doc(quizId).get();
     if (!quizSnap.exists || quizSnap.data()?.status !== 'published') throw new Error('quiz-not-found');
     const quiz = { id: quizSnap.id, ...serializeFirestore(quizSnap.data()) };
@@ -38,4 +38,3 @@ export async function GET(request: NextRequest, context: { params: { id: string 
     return jsonError(error);
   }
 }
-

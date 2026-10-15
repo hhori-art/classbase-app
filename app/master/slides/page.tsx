@@ -4,15 +4,10 @@ import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { auth, db } from '@/lib/firebase';
 import {
-  addDoc,
   collection,
-  deleteDoc,
-  doc,
   getDocs,
   orderBy,
   query,
-  serverTimestamp,
-  writeBatch,
 } from 'firebase/firestore';
 import {
   ArrowLeft,
@@ -114,16 +109,6 @@ function formatBytes(value?: number) {
   if (!value) return '';
   if (value < 1024 * 1024) return `${Math.round(value / 1024)}KB`;
   return `${(value / 1024 / 1024).toFixed(1)}MB`;
-}
-
-function compactForAi(value: unknown, maxChars = 12000) {
-  const text = String(value || '').replace(/\n{3,}/g, '\n\n').trim();
-  if (text.length <= maxChars) return text;
-  const head = text.slice(0, Math.floor(maxChars * 0.45));
-  const middleStart = Math.max(0, Math.floor(text.length / 2 - maxChars * 0.15));
-  const middle = text.slice(middleStart, middleStart + Math.floor(maxChars * 0.25));
-  const tail = text.slice(-Math.floor(maxChars * 0.25));
-  return `${head}\n\n【中略】\n\n${middle}\n\n【後半抜粋】\n\n${tail}`.slice(0, maxChars);
 }
 
 async function readJsonResponse(res: Response) {
@@ -432,28 +417,32 @@ export default function SlideManagerPage() {
 
     setSubmitting(true);
     try {
-      await addDoc(collection(db, 'learning_units'), {
-        grade,
-        subject,
-        category: selectedCategory,
-        unit_name: unitName,
-        content,
-        term: term || null,
-        year,
-        month: month || null,
-        tags: tags.split(/[,\s、]+/).map(v => v.trim()).filter(Boolean),
-        source_type: 'manual',
-        created_at: serverTimestamp(),
-        updated_at: serverTimestamp(),
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) throw new Error('ログイン状態を確認できません');
+      const res = await fetch('/api/admin/slides/units', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          grade,
+          subject,
+          unit_name: unitName,
+          content,
+          term,
+          year,
+          month,
+          tags: tags.split(/[,\s、]+/).map(v => v.trim()).filter(Boolean),
+        }),
       });
+      const data = await readJsonResponse(res);
+      if (!res.ok || !data.ok) throw new Error(data.error || '登録に失敗しました');
 
       alert('単元を登録しました');
       setUnitName('');
       setContent('');
       await fetchData();
-    } catch (e) {
+    } catch (e: any) {
       console.error(e);
-      alert('登録失敗');
+      alert(`登録失敗: ${e.message || e}`);
     } finally {
       setSubmitting(false);
     }
@@ -549,41 +538,22 @@ export default function SlideManagerPage() {
 
     setGeneratingId(slide.id);
     try {
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) throw new Error('ログイン情報を確認できません');
       const res = await fetch('/api/homework/adaptive', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
-          grade: slide.grade,
-          subject: slide.subject,
-          unitName: slide.unit_name,
-          unitContent: compactForAi(slide.content),
+          sourceSlideId: slide.id,
+          persistForSlide: true,
           questionCount: 60,
         }),
       });
       const data = await readJsonResponse(res);
-      if (!res.ok || !Array.isArray(data.questions) || data.questions.length === 0) {
+      if (!res.ok || !data.ok || !Number(data.saved_count)) {
         throw new Error(data.error || '問題が生成されませんでした');
       }
-
-      const batch = writeBatch(db);
-      data.questions.slice(0, 60).forEach((q: any) => {
-        const ref = doc(collection(db, 'quizzes'));
-        batch.set(ref, {
-          question: q.question,
-          correct_answer: q.correct_answer,
-          wrong_answers: Array.isArray(q.wrong_answers) ? q.wrong_answers.slice(0, 3) : [],
-          explanation: q.explanation || '',
-          grade: slide.grade || '',
-          subject: slide.subject || '',
-          unit_name: slide.unit_name || '',
-          source_slide_id: slide.id,
-          source_type: 'pptx_ai',
-          question_order: 1000 + Math.floor(Math.random() * 100000),
-          created_at: serverTimestamp(),
-        });
-      });
-      await batch.commit();
-      alert(`${Math.min(data.questions.length, 60)}問をAIクエスト問題として追加保存しました`);
+      alert(`${data.saved_count}問をAIクエスト問題として追加保存しました`);
     } catch (e: any) {
       alert(`問題作成に失敗しました: ${e.message || e}`);
     } finally {
@@ -592,7 +562,7 @@ export default function SlideManagerPage() {
   };
 
   const handleDeleteSlide = async (slide: SlideItem) => {
-    if (!confirm(`「${slide.unit_name || slide.file_name || 'PPT'}」を削除しますか？\nPPTファイル・AIクエスト単元・このPPTから作成した問題も削除されます。`)) return;
+    if (!confirm(`「${slide.unit_name || slide.file_name || 'PPT'}」を削除しますか？\nPPTファイル・AIクエスト単元・このPPTから作成した問題と解答履歴も削除されます。元に戻せません。`)) return;
     const user = auth.currentUser;
     if (!user) return alert('ログイン状態を確認できません');
 
@@ -636,8 +606,20 @@ export default function SlideManagerPage() {
 
   const handleDeleteUnit = async (id: string) => {
     if (!confirm('この単元を削除しますか？')) return;
-    await deleteDoc(doc(db, 'learning_units', id));
-    setUnits(prev => prev.filter(u => u.id !== id));
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) throw new Error('ログイン状態を確認できません');
+      const res = await fetch('/api/admin/slides/units', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ id }),
+      });
+      const data = await readJsonResponse(res);
+      if (!res.ok || !data.ok) throw new Error(data.error || '削除に失敗しました');
+      setUnits(prev => prev.filter(u => u.id !== id));
+    } catch (e: any) {
+      alert(`削除に失敗しました: ${e.message || e}`);
+    }
   };
 
   return (

@@ -2,18 +2,22 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { BookOpen, BriefcaseBusiness, ChevronRight, GraduationCap, Languages, Loader2, LogOut } from 'lucide-react';
+import { BookOpen, BriefcaseBusiness, ChevronRight, GraduationCap, Languages, LogOut, Sparkles } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
+import { scienceSocialPathForProfile } from '@/lib/auth-navigation';
+import { loadAppAvailability } from '@/lib/client-app-availability';
 
 type AppAvailability = {
   science_social: boolean;
   eiken: boolean;
   attendance: boolean;
+  online_school: boolean;
 };
 
-const roleHome = (role: string, app: 'science_social' | 'eiken' | 'attendance') => {
+const roleHome = (role: string, app: 'science_social' | 'eiken' | 'attendance' | 'online_school', profile?: Record<string, unknown> | null) => {
+  if (app === 'online_school') return '/student/online-school';
   if (app === 'attendance') {
-    return role === 'admin' || role === 'master' ? '/master/attendance' : '/teacher/attendance';
+    return role === 'admin' || role === 'master' || role === 'attendance_admin' ? '/master/attendance' : '/teacher/attendance';
   }
   if (app === 'eiken') {
     if (role === 'student') return '/eiken/student';
@@ -21,10 +25,7 @@ const roleHome = (role: string, app: 'science_social' | 'eiken' | 'attendance') 
     if (role === 'teacher') return '/eiken/teacher';
     return '/master/eiken';
   }
-  if (role === 'student') return '/student';
-  if (role === 'parent' || role === 'guardian') return '/parent';
-  if (role === 'teacher') return '/teacher';
-  return '/master/science-social';
+  return scienceSocialPathForProfile({ ...(profile || {}), role });
 };
 
 export default function AppsHomePage() {
@@ -36,12 +37,9 @@ export default function AppsHomePage() {
   useEffect(() => {
     if (!user) return;
     let active = true;
-    user.getIdToken()
-      .then(token => fetch('/api/apps', { headers: { Authorization: `Bearer ${token}` } }))
-      .then(async response => {
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok || data.ok === false) throw new Error(data.error || '利用可能なアプリを確認できませんでした。');
-        if (active) setApps(data.apps);
+    loadAppAvailability(user.uid, () => user.getIdToken())
+      .then(data => {
+        if (active && data.apps) setApps(data.apps as AppAvailability);
       })
       .catch(fetchError => {
         if (active) setError(fetchError instanceof Error ? fetchError.message : 'アプリ情報の取得に失敗しました。');
@@ -64,6 +62,15 @@ export default function AppsHomePage() {
         iconColor: 'bg-indigo-600',
       },
       {
+        id: 'online_school' as const,
+        visible: apps.online_school,
+        name: 'オンライン校',
+        description: '算数・数学と国語の10分学習',
+        icon: Sparkles,
+        color: 'border-violet-200 bg-violet-50 text-violet-800',
+        iconColor: 'bg-violet-600',
+      },
+      {
         id: 'eiken' as const,
         visible: apps.eiken,
         name: '英検対策講座 Booster',
@@ -74,7 +81,10 @@ export default function AppsHomePage() {
       },
       {
         id: 'attendance' as const,
-        visible: apps.attendance,
+        // 理社講座を利用できる職員は、講師画面内の「勤怠」導線を使う。
+        // アプリ選択で同じ入口を重複表示せず、勤怠だけを利用する職員の
+        // 直接遷移に必要な場合だけこのカードを残す。
+        visible: apps.attendance && !apps.science_social,
         name: '創造学園勤怠アプリ',
         description: '出退勤、勤務詳細、交通費',
         icon: BriefcaseBusiness,
@@ -88,7 +98,7 @@ export default function AppsHomePage() {
     if (!apps || !profile || appCards.length !== 1 || redirecting) return;
     const onlyApp = appCards[0];
     setRedirecting(true);
-    window.location.replace(roleHome(String(profile.role || ''), onlyApp.id));
+    window.location.replace(roleHome(String(profile.role || ''), onlyApp.id, profile));
   }, [appCards, apps, profile, redirecting]);
 
   return (
@@ -125,10 +135,7 @@ export default function AppsHomePage() {
           </div>
 
           {(!apps || !profile || redirecting || (apps && appCards.length === 1)) && !error && (
-            <div className="flex min-h-48 items-center justify-center text-slate-500">
-              <Loader2 className="mr-2 animate-spin" size={20} />
-              {apps && appCards.length === 1 ? 'アプリを開いています' : '利用できるアプリを確認しています'}
-            </div>
+            <div className="min-h-48" aria-busy="true" />
           )}
 
           {error && (
@@ -150,7 +157,7 @@ export default function AppsHomePage() {
               return (
                 <Link
                   key={item.id}
-                  href={roleHome(String(profile?.role || ''), item.id)}
+                  href={roleHome(String(profile?.role || ''), item.id, profile)}
                   className={`group flex min-h-44 flex-col justify-between rounded-lg border p-5 transition hover:-translate-y-0.5 hover:shadow-md ${item.color}`}
                 >
                   <div className="flex items-start justify-between gap-4">

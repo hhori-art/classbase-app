@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
-import { getServerUser, isAdminLike, jsonError } from '@/lib/server-auth';
+import { canManageShifts, getServerUser, jsonError } from '@/lib/server-auth';
 import { fetchOfficialZoomJoinUrl, getZoomServerAccessToken } from '@/lib/zoom-meeting';
 
 export const runtime = 'nodejs';
@@ -17,12 +17,12 @@ const normalizePasscode = (value: unknown) => String(value || '')
 
 const isValidPasscode = (value: string) => /^[A-Za-z0-9@_-]{1,10}$/.test(value);
 
-export async function PATCH(request: NextRequest, context: { params: { shiftId: string } }) {
+export async function PATCH(request: NextRequest, context: { params: Promise<{ shiftId: string }> }) {
   try {
     const actor = await getServerUser(request);
-    if (!isAdminLike(actor)) throw new Error('forbidden');
+    if (!canManageShifts(actor)) throw new Error('forbidden');
 
-    const shiftId = String(context.params.shiftId || '').trim();
+    const shiftId = String((await context.params).shiftId || '').trim();
     const { passcode: rawPasscode } = await request.json();
     const passcode = normalizePasscode(rawPasscode);
     if (!shiftId) return NextResponse.json({ ok: false, error: '講師配置を特定できません。' }, { status: 400 });

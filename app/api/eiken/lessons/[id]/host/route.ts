@@ -7,11 +7,11 @@ import { normalizeZoomMeetingId } from '@/lib/zoom-url';
 
 export const runtime = 'nodejs';
 
-export async function POST(request: NextRequest, context: { params: { id: string } }) {
+export async function POST(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   try {
     const user = await getServerUser(request);
     if (!['teacher', 'admin', 'master'].includes(user.role)) throw new Error('forbidden');
-    const lessonSnap = await adminDb().collection('eiken_lessons').doc(String(context.params.id || '')).get();
+    const lessonSnap = await adminDb().collection('eiken_lessons').doc(String((await context.params).id || '')).get();
     if (!lessonSnap.exists) throw new Error('lesson-not-found');
     const lesson = lessonSnap.data() || {};
     if (!(await canManageEikenCourse(user, String(lesson.course_id || '')))) throw new Error('forbidden');
@@ -30,4 +30,3 @@ export async function POST(request: NextRequest, context: { params: { id: string
     return jsonError(error);
   }
 }
-

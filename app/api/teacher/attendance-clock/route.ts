@@ -3,6 +3,14 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, jsonError, requireRole } from '@/lib/server-auth';
 import { buildAttendanceWarnings } from '@/lib/attendance-diagnostics';
+import { canClockOutAttendanceRecord } from '@/lib/attendance-date';
+import {
+  SCIENCE_SOCIAL_WORKPLACE_ID,
+  SCIENCE_SOCIAL_WORKPLACE_LABEL,
+  attendanceSchoolName,
+  isAttendanceSchool,
+  resolveAttendanceSchoolCode,
+} from '@/lib/attendance-schools';
 
 export const runtime = 'nodejs';
 
@@ -32,6 +40,15 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const action = String(body.action || '');
     const { now, dateKey } = nowJstParts();
+    const requestedSchool = action === 'clock_in' ? body.school_id : '';
+    const isScienceSocialWorkplace = requestedSchool === SCIENCE_SOCIAL_WORKPLACE_ID;
+    if (action === 'clock_in' && !isScienceSocialWorkplace && !isAttendanceSchool(requestedSchool)) {
+      return Response.json({ ok: false, error: '勤務校舎を選択してください。' }, { status: 400 });
+    }
+    const schoolId = isScienceSocialWorkplace ? '' : resolveAttendanceSchoolCode(
+      requestedSchool || user.profile.school_id || user.profile.school_code || user.profile.school_name || user.profile.school || user.school
+    );
+    const schoolName = isScienceSocialWorkplace ? SCIENCE_SOCIAL_WORKPLACE_LABEL : attendanceSchoolName(schoolId);
 
     if (isClockBlocked()) {
       return Response.json({
@@ -63,11 +80,15 @@ export async function POST(request: NextRequest) {
         tx.create(ref, {
           teacher_id: user.uid,
           teacher_name: teacherName,
+          school_id: schoolId || null,
+          school_name: schoolName || null,
           date: dateKey,
           start_time: now.toISOString(),
           end_time: null,
           status: 'pending',
           attendance_kind: attendanceKind,
+          default_program: isScienceSocialWorkplace ? 'science_social' : attendanceKind === 'breakthrough' ? 'breakthrough' : 'normal',
+          workplace_type: isScienceSocialWorkplace ? 'science_social' : 'school',
           work_segments: [],
           transportation: [],
           created_by_api: true,
@@ -84,37 +105,41 @@ export async function POST(request: NextRequest) {
       if (!recordId) return Response.json({ ok: false, error: 'work_record_id is required' }, { status: 400 });
 
       const ref = db.collection('work_records').doc(recordId);
-      const snap = await ref.get();
-      if (!snap.exists) return Response.json({ ok: false, error: 'work record not found' }, { status: 404 });
-      const record = snap.data() || {};
-      if (record.teacher_id !== user.uid) throw new Error('forbidden');
-      if (record.status === 'approved') {
-        return Response.json({ ok: false, error: 'approved work records cannot be changed' }, { status: 400 });
-      }
-      if (record.end_time) {
-        return Response.json({ ok: false, error: 'work record already clocked out' }, { status: 400 });
-      }
+      let warnings: ReturnType<typeof buildAttendanceWarnings> = [];
+      await db.runTransaction(async transaction => {
+        const snap = await transaction.get(ref);
+        if (!snap.exists) throw new Error('work record not found');
+        const record = snap.data() || {};
+        if (record.teacher_id !== user.uid) throw new Error('forbidden');
+        if (record.status === 'approved') throw new Error('approved work records cannot be changed');
+        if (record.end_time) throw new Error('work record already clocked out');
+        if (!canClockOutAttendanceRecord(record.date, dateKey)) {
+          throw new Error('work record belongs to another date');
+        }
 
-      const currentSegments = Array.isArray(record.work_segments) ? record.work_segments : [];
-      const nextRecord = {
-        ...record,
-        end_time: now.toISOString(),
-        work_segments: currentSegments,
-      };
-      const warnings = buildAttendanceWarnings(nextRecord);
-
-      await ref.set({
-        end_time: now.toISOString(),
-        attendance_warnings: warnings,
-        updated_at: now.toISOString(),
-        updated_at_server: FieldValue.serverTimestamp(),
-      }, { merge: true });
+        const currentSegments = Array.isArray(record.work_segments) ? record.work_segments : [];
+        warnings = buildAttendanceWarnings({
+          ...record,
+          end_time: now.toISOString(),
+          work_segments: currentSegments,
+        });
+        transaction.set(ref, {
+          end_time: now.toISOString(),
+          attendance_warnings: warnings,
+          updated_at: now.toISOString(),
+          updated_at_server: FieldValue.serverTimestamp(),
+        }, { merge: true });
+      });
 
       return Response.json({ ok: true, warnings });
     }
 
     return Response.json({ ok: false, error: 'invalid action' }, { status: 400 });
   } catch (error) {
+    console.error('[attendance-clock] failed', {
+      message: error instanceof Error ? error.message : String(error),
+      code: error && typeof error === 'object' && 'code' in error ? String(error.code) : '',
+    });
     return jsonError(error);
   }
 }

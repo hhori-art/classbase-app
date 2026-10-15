@@ -4,9 +4,11 @@ import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, isAdminLike, requireRole } from '@/lib/server-auth';
 import OpenAI from 'openai';
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+function getOpenAIClient() {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error('OPENAI_API_KEYが設定されていません');
+  return new OpenAI({ apiKey });
+}
 
 // ★足切りの基準値 (これより低いと詳細AI診断を実行)
 const ATTENDANCE_BORDER = 90; // 出席率90%未満なら要診断
@@ -22,6 +24,7 @@ export async function POST(req: NextRequest) {
 
     const { batchSize = DEFAULT_BATCH_SIZE } = await req.json();
     const db = adminDb();
+    const openai = getOpenAIClient();
 
     // 1. 分析対象の生徒を取得 (分析日時が古い順に取得してローテーションさせる)
     const usersRef = db.collection('users');

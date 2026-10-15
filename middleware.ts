@@ -2,13 +2,16 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
 function getClientIp(request: NextRequest) {
-  // Vercel/Proxy: x-forwarded-for が基本
+  // Vercel が付与するヘッダーを優先し、一般的なProxyヘッダーへフォールバックする。
+  const xVercelForwardedFor = request.headers.get('x-vercel-forwarded-for');
   const xForwardedFor = request.headers.get('x-forwarded-for');
   const xRealIp = request.headers.get('x-real-ip');
 
   let ip = '';
 
-  if (xForwardedFor) {
+  if (xVercelForwardedFor) {
+    ip = xVercelForwardedFor.split(',')[0].trim();
+  } else if (xForwardedFor) {
     ip = xForwardedFor.split(',')[0].trim();
   } else if (xRealIp) {
     ip = xRealIp.trim();
@@ -43,6 +46,7 @@ export function middleware(request: NextRequest) {
 
   const isLocal = ip === '127.0.0.1' || ip === 'localhost';
   const isInternalNetwork = isLocal || allowedIps.includes(ip);
+  const isSecurityDiagnosis = process.env.SECURITY_DIAGNOSIS_MODE === 'true';
 
   // 判定結果ヘッダ
   const requestHeaders = new Headers(request.headers);
@@ -50,35 +54,15 @@ export function middleware(request: NextRequest) {
   requestHeaders.set('x-client-ip', ip);
 
   // --- アクセス制御 ---
-  // 管理者 (/master) は社外アクセス禁止
-  if (pathname.startsWith('/master')) {
-    if (!isInternalNetwork) {
-      console.log(`[Middleware] Blocked /master from IP: ${ip}`);
-      return NextResponse.redirect(new URL('/403', request.url));
-    }
+  // 外部診断環境では、診断会社の許可IPとローカル接続以外を全画面・APIで遮断する。
+  // 通常環境では無効なので、既存の公開画面には影響しない。
+  if (isSecurityDiagnosis && !isInternalNetwork) {
+    console.log(`[Middleware] Blocked security diagnosis access from IP: ${ip} -> ${pathname}`);
+    return NextResponse.redirect(new URL('/403', request.url));
   }
 
-  // 先生 (/teacher) は一部のみ社外アクセス許可
-  if (pathname.startsWith('/teacher')) {
-    if (!isInternalNetwork) {
-      const allowedTeacherPaths = [
-        '/teacher',
-        '/teacher/settings',
-        '/teacher/work',
-        '/teacher/student-preview',
-        '/teacher/attendance',
-        '/teacher/chat',
-        '/teacher/shifts',
-        '/teacher/substitutions',
-      ];
-
-      const isAllowedPath = allowedTeacherPaths.some(p => pathname === p || pathname.startsWith(`${p}/`));
-      if (!isAllowedPath) {
-        console.log(`[Middleware] Blocked restricted /teacher from IP: ${ip} -> ${pathname}`);
-        return NextResponse.redirect(new URL('/403', request.url));
-      }
-    }
-  }
+  // 通常本番はログイン後の役割・API権限で制御する。変動する携帯回線IPでは画面を遮断しない。
+  // 診断環境の許可IP制限は上の SECURITY_DIAGNOSIS_MODE 分岐で維持する。
 
   return NextResponse.next({
     request: { headers: requestHeaders },
@@ -86,5 +70,7 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/teacher/:path*', '/master/:path*'],
+  // 公開静的ファイルは Function を起動せず CDN から配信する。
+  // 画面と API は従来どおり対象にし、診断環境の全体 IP 制限も維持する。
+  matcher: ['/((?!_next/static|_next/image|favicon.ico|.*\\.[^/]+$).*)'],
 };

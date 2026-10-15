@@ -92,6 +92,7 @@
 |---|---|---|
 | ホーム | `/teacher` | 今日の予定、打刻導線、通知 |
 | 勤怠 | `/teacher/attendance` | 打刻、勤務実績、修正依頼 |
+| 勤怠シフト管理 | `/teacher/shift-management` | 専任の校舎承認者のみ。自校舎の専任・準専任の勤務予定を月・1週間・今日表示で登録・コピー・CSV入出力 |
 | 勤務希望 | `/teacher/shifts` | 勤務可能日の提出 |
 | 代行 | `/teacher/substitutions` | 代行依頼への回答 |
 | 生徒連絡 | `/teacher/contacts` | 電話のみ、欠席確定など |
@@ -149,7 +150,7 @@
 | カリキュラム | `/master/curriculum` | カリキュラム、ターム編集 |
 | 登録依頼 | `/master/registration-tasks` | 講座登録依頼の作成・管理 |
 | 録画 | `/master/recordings` | 録画承認 |
-| 勤怠 | `/master/attendance`, `/master/attendance-corrections` | 勤怠確認、修正依頼承認 |
+| 勤怠 | `/master/attendance`, `/master/attendance-approvals` | 勤怠確認、勤務校舎を確認して修正依頼を承認 |
 | 通知・LINE | `/master/notifications`, `/master/line`, `/master/announcements` | 通知作成、LINE送信、お知らせ配信 |
 | 問い合わせ | `/master/parent-inquiries` | 保護者問い合わせ対応 |
 | その他 | `/master/rewards`, `/master/stats`, `/master/settings` | 報酬・ポイント、統計、表示設定 |

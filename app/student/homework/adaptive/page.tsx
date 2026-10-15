@@ -15,7 +15,6 @@ import { useSound } from '@/lib/sound';
 // --- 設定値 ---
 const PASS_THRESHOLD = 0.8;
 const POINTS_PER_CLEAR = 10; // ★変更: 10コインに設定
-const MASTERED_STREAK_REQUIRED = 1;
 
 // --- ユーティリティ ---
 const shuffleArray = (array: any[]) => {
@@ -47,26 +46,17 @@ async function readJsonResponse(res: Response) {
   }
 }
 
+// 正解はサーバー（quest_sessions）にだけあり、回答ごとに /api/quest-sessions/answer で受け取る。
 interface Question {
   id: string;
   question: string;
-  correct_answer: string;
-  wrong_answers: string[];
-  explanation?: string;
+  options: string[];
   source_slide_id?: string;
   difficulty?: number;
   skill?: string;
 }
 
-type QuestionMastery = {
-  total: number;
-  wrong: number;
-  correct: number;
-  streak: number;
-  mastered: boolean;
-  masteryScore: number;
-  lastIsCorrect?: boolean;
-};
+type RevealedAnswer = { correct_answer: string; explanation: string };
 
 type UnitMastery = {
   unit_name?: string;
@@ -79,16 +69,6 @@ type UnitMastery = {
   stage?: string;
   stage_label?: string;
   completed?: boolean;
-};
-
-type AnswerRecord = {
-  question_id: string;
-  selected_answer: string;
-  correct_answer: string;
-  is_correct: boolean;
-  source_slide_id?: string;
-  difficulty?: number;
-  skill?: string;
 };
 
 const SUBJECTS = {
@@ -118,7 +98,9 @@ export default function AdaptiveLearningPage() {
   const [currentQuestion, setCurrentQuestion] = useState<Question | null>(null);
   const [shuffledOptions, setShuffledOptions] = useState<string[]>([]);
   const [sessionResults, setSessionResults] = useState<boolean[]>([]);
-  const [answerRecords, setAnswerRecords] = useState<AnswerRecord[]>([]);
+  const [revealed, setRevealed] = useState<RevealedAnswer | null>(null);
+  const [answering, setAnswering] = useState(false);
+  const [questSessionId, setQuestSessionId] = useState('');
   const [result, setResult] = useState<'correct' | 'incorrect' | null>(null);
   const [selectedAnswer, setSelectedAnswer] = useState<string | null>(null);
 
@@ -138,15 +120,6 @@ export default function AdaptiveLearningPage() {
     String(mastery.learning_unit_id || ''),
     String(mastery.unit_name || ''),
   ].filter(Boolean);
-
-  const stableGeneratedQuestionId = (unit: any, question: any, index: number) => {
-    const seed = `${unit?.source_slide_id || unit?.id || unit?.unit_name || 'unit'}:${question?.question || ''}:${question?.correct_answer || ''}:${index}`;
-    let hash = 0;
-    for (let i = 0; i < seed.length; i++) {
-      hash = ((hash << 5) - hash + seed.charCodeAt(i)) | 0;
-    }
-    return `generated-${Math.abs(hash)}`;
-  };
 
   const stageStyle = (stage?: string) => {
     if (stage === 'completed') return 'bg-emerald-50 text-emerald-700 border-emerald-100';
@@ -219,97 +192,27 @@ export default function AdaptiveLearningPage() {
     setUnitMasteryMap(next);
   };
 
-  const fetchPrebuiltQuestions = async (unit: any) => {
-    const snapshots = [];
-    if (unit.source_slide_id) {
-      snapshots.push(await getDocs(query(
-        collection(db, 'quizzes'),
-        where('source_slide_id', '==', unit.source_slide_id),
-        limit(80)
-      )));
-    }
-    if (snapshots.length === 0 || snapshots.every(snap => snap.empty)) {
-      snapshots.push(await getDocs(query(
-        collection(db, 'quizzes'),
-        where('unit_name', '==', unit.unit_name || ''),
-        limit(80)
-      )));
-    }
-
-    const map = new Map<string, Question>();
-    snapshots.forEach(snap => {
-      snap.docs.forEach(doc => {
-        const data = doc.data();
-        if (!data.question || !data.correct_answer || !Array.isArray(data.wrong_answers)) return;
-        map.set(doc.id, {
-          id: doc.id,
-          question: String(data.question),
-          correct_answer: String(data.correct_answer),
-          wrong_answers: data.wrong_answers.map(String).slice(0, 3),
-          explanation: String(data.explanation || ''),
-          source_slide_id: String(data.source_slide_id || unit.source_slide_id || ''),
-          difficulty: Number(data.difficulty || 3),
-          skill: String(data.skill || ''),
-        });
-      });
+  const postJson = async (url: string, payload: Record<string, unknown>) => {
+    const token = await auth.currentUser?.getIdToken();
+    if (!token) throw new Error('ログイン情報を確認できません');
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(payload),
     });
-    return Array.from(map.values());
+    const data = await readJsonResponse(res);
+    if (!res.ok || data.ok === false) throw new Error(data.error || 'API Error');
+    return data;
   };
 
-  const fetchQuestionMastery = async (unit: any, questionIds: string[]) => {
-    if (!user || questionIds.length === 0) return new Map<string, QuestionMastery>();
-    const snap = await getDocs(query(
-      collection(db, 'quest_question_mastery'),
-      where('student_id', '==', user.uid),
-      limit(500)
-    )).catch(() => ({ docs: [] as any[] }));
-
-    const target = new Set(questionIds);
-    const unitSlideId = String(unit?.source_slide_id || '');
-    const unitId = String(unit?.id || '');
-    const stats = new Map<string, QuestionMastery>();
-    snap.docs.forEach((doc: any) => {
-      const data = doc.data();
-      const qid = String(data.question_id || '');
-      if (!target.has(qid)) return;
-      const belongsToUnit =
-        (unitSlideId && String(data.source_slide_id || '') === unitSlideId) ||
-        (unitId && String(data.learning_unit_id || '') === unitId) ||
-        String(data.unit_name || '') === String(unit?.unit_name || '');
-      if (!belongsToUnit) return;
-      stats.set(qid, {
-        total: Number(data.total_attempts || 0),
-        wrong: Number(data.wrong_count || 0),
-        correct: Number(data.correct_count || 0),
-        streak: Number(data.current_correct_streak || 0),
-        mastered: Boolean(data.mastered),
-        masteryScore: Number(data.mastery_score || 0),
-        lastIsCorrect: typeof data.last_is_correct === 'boolean' ? data.last_is_correct : undefined,
-      });
-    });
-    return stats;
-  };
-
-  const selectQuestionsForMemory = async (unit: any, questions: Question[]) => {
-    const stats = await fetchQuestionMastery(unit, questions.map(q => q.id));
-    const scored = questions.map(question => {
-      const stat = stats.get(question.id);
-      const total = stat?.total || 0;
-      const wrong = stat?.wrong || 0;
-      const correct = stat?.correct || 0;
-      const mastery = total > 0 ? correct / total : 0;
-      const masteredPenalty = stat?.mastered ? -60 : 0;
-      const streakBonus = stat && stat.streak < MASTERED_STREAK_REQUIRED ? 20 : 0;
-      const priority = total === 0
-        ? 95 + Math.random() * 10
-        : wrong * 28 + (1 - mastery) * 38 + streakBonus + masteredPenalty + Math.random() * 8;
-      return { question, priority };
-    });
-    return scored
-      .sort((a, b) => b.priority - a.priority)
-      .slice(0, 10)
-      .map(item => item.question);
-  };
+  const toQuestions = (items: any[], unit: any): Question[] => (Array.isArray(items) ? items : []).map(item => ({
+    id: String(item.id || ''),
+    question: String(item.question || ''),
+    options: Array.isArray(item.options) ? item.options.map(String) : [],
+    source_slide_id: String(item.source_slide_id || unit.source_slide_id || ''),
+    difficulty: Number(item.difficulty || 3),
+    skill: String(item.skill || ''),
+  })).filter(item => item.id && item.question && item.options.length > 0);
 
   // --- クエスト開始 ---
   const startQuest = async (unit: any) => {
@@ -317,37 +220,28 @@ export default function AdaptiveLearningPage() {
     setLoading(true);
 
     try {
-      let questions = await fetchPrebuiltQuestions(unit);
-
-      if (questions.length === 0) {
-        const res = await fetch('/api/homework/adaptive', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            grade: selectedGrade,
-            subject: selectedSubject,
-            unitName: unit.unit_name,
-            unitContent: compactForAi(unit.content)
-          }),
+      setQuestSessionId('');
+      // 作成済み問題があればサーバーが未定着の問題を優先して選ぶ。なければAIで生成する。
+      let data = await postJson('/api/quest-sessions', { learning_unit_id: unit.id || '' });
+      if (!data.session_id) {
+        data = await postJson('/api/homework/adaptive', {
+          grade: selectedGrade,
+          subject: selectedSubject,
+          unitName: unit.unit_name,
+          unitContent: compactForAi(unit.content),
+          learningUnitId: unit.id || '',
+          sourceSlideId: unit.source_slide_id || '',
         });
-
-        if (!res.ok) throw new Error('API Error');
-        const data = await readJsonResponse(res);
-        questions = (data.questions || []).map((q: any, i: number) => ({
-          ...q,
-          id: q.id || stableGeneratedQuestionId(unit, q, i),
-          source_slide_id: unit.source_slide_id || '',
-        }));
       }
+      const questions = toQuestions(data.questions, unit);
+      if (!data.session_id || questions.length === 0) throw new Error('問題が生成されませんでした');
+      setQuestSessionId(String(data.session_id));
 
-      if (questions.length === 0) throw new Error('問題が生成されませんでした');
-
-      const selectedQuestions = await selectQuestionsForMemory(unit, questions);
-      const queue = shuffleArray(selectedQuestions);
+      const queue = shuffleArray(questions);
       setSessionQueue(queue);
       setCurrentIndex(0);
       setSessionResults([]);
-      setAnswerRecords([]);
+      setRevealed(null);
       setSelectedAnswer(null);
       setResult(null);
       setLatestUnitMastery(null);
@@ -367,32 +261,38 @@ export default function AdaptiveLearningPage() {
   const setNextQuestion = (question: Question) => {
     if (!question) return;
     setCurrentQuestion(question);
-    const opts = [question.correct_answer, ...question.wrong_answers];
-    setShuffledOptions(shuffleArray(opts));
+    setShuffledOptions(question.options);
   };
 
-  const handleAnswer = (ans: string) => {
-    if (!currentQuestion) return;
-    const isCorrect = ans === currentQuestion.correct_answer;
-    play(isCorrect ? 'answer_correct' : 'answer_incorrect');
+  const handleAnswer = async (ans: string) => {
+    if (!currentQuestion || answering) return;
+    setAnswering(true);
     setSelectedAnswer(ans);
-    setResult(isCorrect ? 'correct' : 'incorrect');
-    setSessionResults([...sessionResults, isCorrect]);
-    setAnswerRecords(prev => [...prev, {
-      question_id: currentQuestion.id,
-      selected_answer: ans,
-      correct_answer: currentQuestion.correct_answer,
-      is_correct: isCorrect,
-      source_slide_id: currentQuestion.source_slide_id,
-      difficulty: currentQuestion.difficulty,
-      skill: currentQuestion.skill,
-    }]);
+    try {
+      const data = await postJson('/api/quest-sessions/answer', {
+        session_id: questSessionId,
+        question_id: currentQuestion.id,
+        selected_answer: ans,
+      });
+      const isCorrect = data.is_correct === true;
+      play(isCorrect ? 'answer_correct' : 'answer_incorrect');
+      setRevealed({ correct_answer: String(data.correct_answer || ''), explanation: String(data.explanation || '') });
+      setResult(isCorrect ? 'correct' : 'incorrect');
+      setSessionResults(prev => [...prev, isCorrect]);
+    } catch (e) {
+      console.error(e);
+      setSelectedAnswer(null);
+      alert('回答を送信できませんでした。通信環境を確認して、もう一度選んでください。');
+    } finally {
+      setAnswering(false);
+    }
   };
 
   const handleNext = () => {
     const nextIdx = currentIndex + 1;
     if (nextIdx < sessionQueue.length) {
       setResult(null);
+      setRevealed(null);
       setSelectedAnswer(null);
       setCurrentIndex(nextIdx);
       setNextQuestion(sessionQueue[nextIdx]);
@@ -402,13 +302,7 @@ export default function AdaptiveLearningPage() {
   };
 
   const finishSession = async () => {
-    const correctCount = sessionResults.filter(Boolean).length;
-    const scoreRate = sessionQueue.length > 0 ? correctCount / sessionQueue.length : 0;
-    const passed = scoreRate >= PASS_THRESHOLD;
-
-    setIsPassed(passed);
     setMode('RESULT');
-    if (passed) play('quest_cleared');
 
     if (user) {
       try {
@@ -416,21 +310,15 @@ export default function AdaptiveLearningPage() {
         const res = await fetch('/api/quest-results', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({
-            grade: selectedGrade,
-            subject: selectedSubject,
-            unit_name: selectedUnit?.unit_name || '不明な単元',
-            learning_unit_id: selectedUnit?.id || '',
-            source_slide_id: selectedUnit?.source_slide_id || '',
-            score: Math.round(scoreRate * 100),
-            is_passed: passed,
-            total_question_count: selectedUnit?.prebuilt_question_count || sessionQueue.length,
-            question_results: answerRecords,
-          }),
+          // 採点はサーバーが記録済みの回答から行う。
+          body: JSON.stringify({ session_id: questSessionId }),
         });
         const saved = await res.json();
-        if (passed) {
-          setEarnedPoints(saved.earned_points || POINTS_PER_CLEAR);
+        if (!res.ok) throw new Error(saved.error || '結果を保存できませんでした');
+        setIsPassed(Boolean(saved.is_passed));
+        if (saved.is_passed) {
+          play('quest_cleared');
+          setEarnedPoints(Number(saved.earned_points || 0));
           if (saved.earned_points > 0) play('coin_acquired');
         }
         if (saved.unit_mastery) {
@@ -708,13 +596,13 @@ export default function AdaptiveLearningPage() {
             {shuffledOptions.map((opt, i) => {
               let btnStyle = "w-full p-5 rounded-2xl text-center border-b-4 font-bold transition-all duration-200 text-lg ";
               if (result) {
-                if (opt === currentQuestion?.correct_answer) btnStyle += "bg-green-500 border-green-700 text-white shadow-md transform scale-105";
+                if (opt === revealed?.correct_answer) btnStyle += "bg-green-500 border-green-700 text-white shadow-md transform scale-105";
                 else if (opt === selectedAnswer) btnStyle += "bg-red-100 border-red-300 text-red-500";
                 else btnStyle += "bg-gray-50 border-gray-200 text-gray-300 opacity-50";
               } else {
                 btnStyle += "bg-white border-indigo-100 text-indigo-600 hover:bg-indigo-50 hover:border-indigo-300 active:scale-[0.98] shadow-sm";
               }
-              return <button key={i} onClick={() => !result && handleAnswer(opt)} disabled={!!result} className={btnStyle}>{opt}</button>;
+              return <button key={i} onClick={() => !result && handleAnswer(opt)} disabled={!!result || answering} className={btnStyle}>{opt}</button>;
             })}
           </div>
         </div>
@@ -725,7 +613,7 @@ export default function AdaptiveLearningPage() {
               <div className="bg-white/20 p-2 rounded-full shrink-0">{result === 'correct' ? <CheckCircle size={32} strokeWidth={3}/> : <XCircle size={32} strokeWidth={3}/>}</div>
               <div>
                 <span className="font-black text-2xl block mb-1">{result === 'correct' ? '正解！' : '残念...'}</span>
-                <p className="text-sm font-bold opacity-90 leading-relaxed">{result === 'correct' ? '素晴らしい！この調子で進もう。' : `正解は「${currentQuestion?.correct_answer}」だよ。`}<br/>{currentQuestion?.explanation}</p>
+                <p className="text-sm font-bold opacity-90 leading-relaxed">{result === 'correct' ? '素晴らしい！この調子で進もう。' : `正解は「${revealed?.correct_answer}」だよ。`}<br/>{revealed?.explanation}</p>
               </div>
             </div>
             <button onClick={handleNext} className="group w-full bg-gray-900 text-white py-5 rounded-[24px] font-black text-xl hover:bg-black shadow-xl flex items-center justify-center gap-3 transition-all active:scale-95 active:shadow-sm">

@@ -58,7 +58,7 @@ export default function ImportCenterPage() {
             <div className="p-6">
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
                 <div className="text-sm text-gray-600 space-y-1 flex-1">
-                  <p><strong>必須項目:</strong> 氏名, ID(生涯番号)</p>
+                  <p><strong>必須項目:</strong> 氏名, ID(生涯番号), 校舎番号</p>
                   <p><strong>初期パスワード:</strong> CSVで空欄の場合はランダムに発行されます。</p>
                   <p><strong>自動登録:</strong> 学年, 教室, 曜日も同時に設定されます。</p>
                   <p className="text-xs text-gray-400 mt-1">※ IDが一致する生徒は情報が上書きされます。</p>

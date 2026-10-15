@@ -14,12 +14,17 @@ export function normalizeEmploymentCategory(value: unknown, role?: unknown): Emp
   const normalized = String(value || '').normalize('NFKC').trim().toLowerCase();
   if (['dedicated', 'employee', 'full_time', 'regular_employee', '専任', '社員', '正社員'].includes(normalized)) return 'dedicated';
   if (['semi_dedicated', 'part_time', 'part-time', '準専任', 'アルバイト', '非常勤'].includes(normalized)) return 'semi_dedicated';
-  // 既存の講師・勤怠利用者はすべて準専任として運用されていたため、未設定時も準専任扱いにする。
+  // 既存の講師・職員アカウントは未設定時も準専任として扱い、従来データとの互換性を保つ。
   return isAttendanceUserRole(role) ? 'semi_dedicated' : null;
 }
 
 export const isDedicatedProfile = (profile: Record<string, unknown>) =>
   normalizeEmploymentCategory(profile.employment_category || profile.employment_type || profile.worker_type, profile.role) === 'dedicated';
+
+export const isDedicatedAttendanceApproverProfile = (profile: Record<string, unknown>) =>
+  String(profile.role || '').toLowerCase() === 'teacher' &&
+  isDedicatedProfile(profile) &&
+  profile.attendance_school_manager === true;
 
 export const isSemiDedicatedProfile = (profile: Record<string, unknown>) =>
   normalizeEmploymentCategory(profile.employment_category || profile.employment_type || profile.worker_type, profile.role) === 'semi_dedicated';

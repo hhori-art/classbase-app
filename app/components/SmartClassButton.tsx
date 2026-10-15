@@ -21,21 +21,25 @@ type ClassButtonData = {
   meeting_id?: string;
   grade?: string;
   subject: string;
+  course_name?: string;
   unit?: string;
   source?: string;
   match_reason?: string;
+  participation_token?: string;
 };
 
 export default function SmartClassButton({ profile, period, startTime, endTime, previewMode = false, allowBetaTransfer = false }: Props) {
   const [classDataList, setClassDataList] = useState<ClassButtonData[]>([]);
-  const [betaTransferList, setBetaTransferList] = useState<ClassButtonData[]>([]);
-  const [showBetaTransfer, setShowBetaTransfer] = useState(false);
   const [showPreviewButtons, setShowPreviewButtons] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [scheduleMissing, setScheduleMissing] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     const fetchClassUrls = async () => {
       setLoading(true);
+      setLoadError(false);
 
       if (!profile) {
         setLoading(false);
@@ -46,43 +50,34 @@ export default function SmartClassButton({ profile, period, startTime, endTime, 
         const currentUser = auth.currentUser;
         if (!currentUser) {
           setClassDataList([]);
+          setLoadError(true);
           return;
         }
         const token = await currentUser.getIdToken();
         const previewParam = previewMode ? '&preview=teacher' : '';
         const res = await fetch(`/api/student/today-classes?period=${period}${previewParam}`, {
           headers: { Authorization: `Bearer ${token}` },
+          cache: 'no-store',
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || data.ok === false) throw new Error(data.error || 'class fetch failed');
         const normalClasses = Array.isArray(data.classes) ? data.classes : [];
         setClassDataList(normalClasses);
-        setShowBetaTransfer(false);
+        setScheduleMissing(data.schedule_missing === true);
         setShowPreviewButtons(false);
-        setBetaTransferList([]);
-
-        if (!previewMode && normalClasses.length === 0) {
-          const transferRes = await fetch(`/api/student/today-classes?period=${period}&beta_transfer=1`, {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          const transferData = await transferRes.json().catch(() => ({}));
-          if (transferRes.ok && transferData.ok !== false) {
-            setBetaTransferList(Array.isArray(transferData.classes) ? transferData.classes : []);
-          }
-        }
 
       } catch (error: any) {
         console.error("SmartClassButton Error:", error);
         setClassDataList([]);
-        setBetaTransferList([]);
-        setShowBetaTransfer(false);
+        setLoadError(true);
+        setScheduleMissing(false);
       } finally {
         setLoading(false);
       }
     };
 
     fetchClassUrls();
-  }, [profile, period, previewMode, allowBetaTransfer]);
+  }, [profile, period, previewMode, allowBetaTransfer, reloadKey]);
 
   if (loading) {
     return (
@@ -93,66 +88,38 @@ export default function SmartClassButton({ profile, period, startTime, endTime, 
     );
   }
 
+  if (loadError) {
+    return (
+      <div className="flex min-h-24 flex-col items-center justify-center gap-3 rounded-3xl border border-red-100 bg-red-50 px-4 py-5 text-center">
+        <p className="text-sm font-black text-red-700">本日の授業情報を確認できません</p>
+        <p className="text-xs font-bold text-red-500">通信状況を確認し、再読み込みしてください。</p>
+        <button type="button" onClick={() => setReloadKey(value => value + 1)} className="rounded-xl bg-red-600 px-4 py-2 text-xs font-black text-white">
+          もう一度確認する
+        </button>
+      </div>
+    );
+  }
+
   // 表示するものがない場合
   if (classDataList.length === 0) {
-    const hasTransferOptions = betaTransferList.length > 0;
     return (
       <div className="w-full flex flex-col gap-2">
         <div className="bg-white/70 border-2 border-dashed border-indigo-100 rounded-3xl p-6 flex flex-col items-center justify-center text-slate-500 gap-2">
           <CalendarX size={32} className="text-indigo-300" />
-          <div className="text-sm font-black text-center">{period}限目の登録授業はありません</div>
+          <div className="text-sm font-black text-center">{scheduleMissing ? '本日の授業配置が未反映です' : `${period}限目の登録授業はありません`}</div>
           <p className="max-w-sm text-center text-xs font-bold leading-relaxed text-slate-400">
-            本日の受講登録と一致する授業がありません。
+            {scheduleMissing ? '過去の配置では参加できません。校舎へお問い合わせください。' : '本日の受講登録と一致する授業がありません。'}
           </p>
-          <div className="mt-1 rounded-2xl bg-indigo-50 px-4 py-3 text-center text-xs font-black leading-relaxed text-indigo-700">
-            振替で参加する場合は、同じ学年で現在実施中の授業から選択できます。
-          </div>
-          {hasTransferOptions && (
-            <button
-              type="button"
-              onClick={() => setShowBetaTransfer(prev => !prev)}
-              className="mt-2 inline-flex items-center gap-2 rounded-2xl bg-indigo-600 px-4 py-3 text-sm font-black text-white shadow-lg shadow-indigo-100"
-            >
-              <Repeat size={16} />
-              {showBetaTransfer ? '振替候補を閉じる' : '振替参加を選ぶ'}
-            </button>
-          )}
-          {!hasTransferOptions && (
-            <div className="mt-2 rounded-2xl bg-slate-50 px-4 py-3 text-center text-xs font-black text-slate-400">
-              現在選べる振替候補はありません
-            </div>
-          )}
-          {!hasTransferOptions && allowBetaTransfer && (
+          {allowBetaTransfer && (
             <Link
-              href="/student/absence"
+              href="/student/absence?mode=transfer"
               className="mt-1 inline-flex items-center gap-2 rounded-2xl border border-indigo-100 bg-white px-4 py-3 text-sm font-black text-indigo-600 no-underline"
             >
               <Repeat size={16} />
-              振替登録ページを開く
+              正式な振替候補を確認する
             </Link>
           )}
         </div>
-        {showBetaTransfer && hasTransferOptions && (
-          <div className="space-y-3 rounded-3xl border border-indigo-100 bg-indigo-50/70 p-3">
-            <p className="px-1 text-xs font-black text-indigo-700">
-              振替参加できる授業です。同じ学年で現在実施中の授業から選べます。
-            </p>
-            {betaTransferList.map((classData) => (
-              <ZoomButton
-                key={classData.id}
-                url={classData.url}
-                meetingId={classData.meeting_id}
-                label={`振替 ${period}限: ${classData.subject}`}
-                subLabel={`${classData.match_reason || '振替参加候補'}${classData.unit ? ` | ${classData.unit}` : ''}`}
-                color={period === 1 ? 'blue' : 'purple'}
-                startTime={startTime}
-                endTime={endTime}
-                classId={classData.id}
-                userProfile={profile}
-              />
-            ))}
-          </div>
-        )}
       </div>
     );
   }
@@ -201,12 +168,15 @@ export default function SmartClassButton({ profile, period, startTime, endTime, 
                       key={classData.id}
                       url={classData.url}
                       meetingId={classData.meeting_id}
-                      label={`${period}限: ${classData.subject}`}
+                      label={`${period}限: ${classData.grade ? `${classData.grade} ` : ''}${classData.subject}`}
                       subLabel={`${classData.match_reason || 'テスト表示'}${classData.unit ? ` | ${classData.unit}` : ''}`}
                       color={period === 1 ? 'blue' : 'purple'}
                       startTime={startTime}
                       endTime={endTime}
                       classId={classData.id}
+                      participationToken={classData.participation_token}
+                      subject={classData.subject}
+                      courseName={classData.course_name}
                       userProfile={profile}
                     />
                   ))}
@@ -226,7 +196,7 @@ export default function SmartClassButton({ profile, period, startTime, endTime, 
           key={classData.id}
           url={classData.url}
           meetingId={classData.meeting_id}
-          label={`${period}限: ${classData.subject}`}
+          label={`${period}限: ${classData.grade ? `${classData.grade} ` : ''}${classData.subject}`}
           subLabel={
             classData.source === 'teacher_preview'
               ? `講師テスト表示${classData.unit ? ` | ${classData.unit}` : ''}`
@@ -238,6 +208,9 @@ export default function SmartClassButton({ profile, period, startTime, endTime, 
           startTime={startTime}
           endTime={endTime}
           classId={classData.id}
+          participationToken={classData.participation_token}
+          subject={classData.subject}
+          courseName={classData.course_name}
           // ★重要: ここでプロフィールを渡すことで、ZoomButton側で名前を指定できます
           userProfile={profile}
         />

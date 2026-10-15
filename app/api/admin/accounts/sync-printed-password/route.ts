@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
-import { canManageSchool, getServerUser, jsonError, requireMaster } from '@/lib/server-auth';
+import { canManageSchool, getServerUser, jsonError, requireRole } from '@/lib/server-auth';
 import { writeLearningEvent } from '@/lib/events';
 import { generateInitialPassword } from '@/lib/password';
 import {
@@ -15,7 +15,8 @@ export const runtime = 'nodejs';
 export async function POST(request: NextRequest) {
   try {
     const actor = await getServerUser(request);
-    requireMaster(actor);
+    if (actor.role !== 'master') throw new Error('forbidden');
+    requireRole(actor, ['master', 'admin']);
 
     const body = await request.json().catch(() => ({}));
     const userIds: string[] = Array.isArray(body.user_ids)
@@ -41,7 +42,8 @@ export async function POST(request: NextRequest) {
         }
 
         const data = snap.data() || {};
-        if (!canManageSchool(actor, String(data.school_id || data.school || '').trim() || null)) {
+        const targetSchool = String(data.school_id || data.school || '').trim();
+        if (!canManageSchool(actor, targetSchool || null)) {
           errors.push({ user_id: userId, error: 'forbidden-school' });
           continue;
         }
@@ -57,12 +59,14 @@ export async function POST(request: NextRequest) {
           continue;
         }
         const authUser = await syncAuthAccountCredentials({
+          actor,
           loginId,
           email: data.email,
           password,
           displayName,
           disabled,
           preferredUid: snap.id,
+          forcePassword: true,
         });
 
         const profileData = {

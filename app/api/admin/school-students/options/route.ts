@@ -8,6 +8,7 @@ export const runtime = 'nodejs';
 export async function POST(request: NextRequest) {
   try {
     const actor = await getServerUser(request);
+    if (actor.role !== 'master') throw new Error('forbidden');
     if (!isAdminLike(actor)) throw new Error('forbidden');
 
     const body = await request.json();
@@ -35,6 +36,19 @@ export async function POST(request: NextRequest) {
     if ('course_start_month' in body) updates.course_start_month = String(body.course_start_month || '').trim();
     if ('sibling_ids' in body) updates.sibling_ids = Array.isArray(body.sibling_ids) ? body.sibling_ids.map(String).filter(Boolean) : [];
     if ('twin_sibling_ids' in body) updates.twin_sibling_ids = Array.isArray(body.twin_sibling_ids) ? body.twin_sibling_ids.map(String).filter(Boolean) : [];
+    if ('student_name' in body) {
+      const name = String(body.student_name || '').trim().slice(0, 120);
+      if (!name) return Response.json({ ok: false, error: '氏名は必須です' }, { status: 400 });
+      updates.student_name = name;
+    }
+    if ('student_name_kana' in body) updates.student_name_kana = String(body.student_name_kana || '').trim().slice(0, 120);
+    if ('grade' in body) updates.grade = String(body.grade || '').trim().slice(0, 20);
+    if ('classroom' in body) updates.classroom = String(body.classroom || '').trim().slice(0, 120);
+    if ('day_of_week' in body) updates.day_of_week = String(body.day_of_week || '').trim().slice(0, 20);
+    if ('phone_number' in body) updates.phone_number = String(body.phone_number || '').trim().slice(0, 40);
+    if ('member_type' in body) updates.member_type = body.member_type === 'general' ? 'general' : 'enrolled';
+    if ('summer_course_status' in body) updates.summer_course_status = body.summer_course_status === 'attending' ? 'attending' : 'none';
+    if ('summer_only' in body) updates.summer_only = Boolean(body.summer_only);
 
     await ref.set(updates, { merge: true });
     return Response.json({ ok: true, updates });

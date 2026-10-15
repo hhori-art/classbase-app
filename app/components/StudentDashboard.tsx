@@ -10,7 +10,7 @@ import {
   Video, BookOpen, AlertTriangle, 
   ChevronRight, Calendar, Trophy, Settings,
   Bot, Brain, Sparkles, Clock, Coffee, CalendarCheck, ClipboardList, Timer,
-  LogOut, Loader2, RefreshCw
+  LogOut, RefreshCw, Repeat
 } from 'lucide-react';
 
 import BottomNav from '@/app/components/BottomNav';
@@ -263,13 +263,7 @@ export default function StudentDashboard() {
   if (globalError) return <ErrorFallback message={globalError} onRetry={handleForceLogout} />;
 
   if (!mounted || authLoading || !userData) {
-    return (
-      <div className="min-h-[100dvh] bg-slate-50 flex flex-col items-center justify-center gap-4">
-        <Loader2 className="animate-spin text-indigo-500" size={40} />
-        <p className="text-xs font-bold text-slate-400 animate-pulse">{!mounted ? '起動中...' : authLoading ? '認証中...' : 'データ読み込み中...'}</p>
-        <button onClick={handleForceLogout} className="mt-8 text-[10px] text-gray-400 underline cursor-pointer">画面が動かない場合はこちら（リセット）</button>
-      </div>
-    );
+    return <div className="min-h-[100dvh] bg-slate-50" aria-busy="true" />;
   }
 
   const currentBadgeId = userData?.selected_badge === 'beginner' ? 'badge_1' : userData?.selected_badge;
@@ -345,10 +339,11 @@ export default function StudentDashboard() {
            {visibility.homework && <Link href="/student/homework" className="block group"><div className="bg-white p-5 rounded-3xl shadow-sm border border-gray-100 hover:border-orange-200 transition-all flex flex-col items-center text-center h-full"><div className="w-12 h-12 bg-orange-100 text-orange-500 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><BookOpen size={24}/></div><h2 className="font-bold text-gray-800">宿題提出</h2><p className="text-[10px] text-gray-400 mt-1">写真を送信</p></div></Link>}
            {visibility.recordings && <Link href="/student/recordings" className="block group"><div className="bg-white p-5 rounded-3xl shadow-sm border border-gray-100 hover:border-red-200 transition-all flex flex-col items-center text-center h-full"><div className="w-12 h-12 bg-red-100 text-red-500 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><Video size={24}/></div><h2 className="font-bold text-gray-800">授業録画</h2><p className="text-[10px] text-gray-400 mt-1">見逃し配信</p></div></Link>}
            {visibility.absence && <Link href="/student/absence" className="block group"><div className="bg-white p-5 rounded-3xl shadow-sm border border-gray-100 hover:border-green-200 transition-all flex flex-col items-center text-center h-full"><div className="w-12 h-12 bg-green-100 text-green-500 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><AlertTriangle size={24}/></div><h2 className="font-bold text-gray-800">欠席連絡</h2><p className="text-[10px] text-gray-400 mt-1">お休み申請</p></div></Link>}
+           {visibility.transfer && <Link href="/student/absence?mode=transfer" className="block group"><div className="bg-white p-5 rounded-3xl shadow-sm border border-indigo-100 hover:border-indigo-300 transition-all flex flex-col items-center text-center h-full"><div className="w-12 h-12 bg-indigo-100 text-indigo-600 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform"><Repeat size={24}/></div><h2 className="font-bold text-gray-800">振替登録</h2><p className="text-[10px] text-gray-400 mt-1">候補から直接選択</p></div></Link>}
         </div>
         {visibility.news && <NewsWidget role="student" />}
         {visibility.calendar && <div className="bg-white p-2 rounded-3xl shadow-sm border border-gray-100"><CalendarWidget classDay={userData?.day_of_week} grade={userData?.grade} /></div>}
-        {visibility.changeRequest && <Link href="/student/change-request" className="flex items-center justify-between bg-white p-4 rounded-2xl border border-gray-100 shadow-sm hover:bg-gray-50 transition-colors no-underline mb-8"><div className="flex items-center gap-3"><div className="bg-gray-100 p-2 rounded-lg text-gray-500"><Settings size={18}/></div><span className="text-sm font-bold text-gray-600">受講講座・曜日時間の変更</span></div><ChevronRight size={20} className="text-gray-400" /></Link>}
+        <div className="mb-8 grid gap-3 md:grid-cols-2"><Link href="/student/review-periods" className="flex items-center justify-between bg-gradient-to-r from-emerald-50 to-teal-50 p-4 rounded-2xl border border-emerald-200 shadow-sm hover:border-emerald-400 transition-colors no-underline"><div className="flex items-center gap-3"><div className="bg-emerald-600 p-2 rounded-lg text-white"><BookOpen size={18}/></div><div><span className="block text-sm font-black text-emerald-900">復習期間の受講設定</span><span className="text-[10px] font-bold text-emerald-600">曜日・科目・単元を選ぶ</span></div></div><ChevronRight size={20} className="text-emerald-500" /></Link><Link href="/student/change-request" className="flex items-center justify-between bg-white p-4 rounded-2xl border border-indigo-100 shadow-sm hover:bg-indigo-50 transition-colors no-underline"><div className="flex items-center gap-3"><div className="bg-indigo-100 p-2 rounded-lg text-indigo-600"><Settings size={18}/></div><span className="text-sm font-bold text-gray-700">受講講座を登録・変更</span></div><ChevronRight size={20} className="text-gray-400" /></Link></div>
       </div>
 
       <BottomNav />

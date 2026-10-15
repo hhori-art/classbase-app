@@ -10,6 +10,7 @@ const safeDocPart = (value: string) => value.replace(/[^\p{Letter}\p{Number}_-]+
 export async function POST(request: NextRequest) {
   try {
     const actor = await getServerUser(request);
+    if (actor.role !== 'master') throw new Error('forbidden');
     if (!isAdminLike(actor)) throw new Error('forbidden');
 
     const body = await request.json();
@@ -21,6 +22,9 @@ export async function POST(request: NextRequest) {
       : [];
     const selectedCourseLabels = Array.isArray(body.selected_course_labels)
       ? Array.from(new Set(body.selected_course_labels.map((label: unknown) => String(label).trim()).filter(Boolean)))
+      : [];
+    const selectedCourseKeys = Array.isArray(body.selected_course_keys)
+      ? Array.from(new Set(body.selected_course_keys.map((key: unknown) => String(key).trim()).filter(Boolean)))
       : [];
 
     if (!studentId || selectedCourseIds.length === 0) {
@@ -55,8 +59,10 @@ export async function POST(request: NextRequest) {
       school: targetSchool || null,
       year,
       term,
+      registration_type: 'regular',
       selected_course_ids: selectedCourseIds,
       selected_course_labels: selectedCourseLabels,
+      selected_course_keys: selectedCourseKeys,
       status: 'active',
       approval_status: 'not_required',
       is_current: true,
@@ -70,7 +76,7 @@ export async function POST(request: NextRequest) {
 
     const batch = db.batch();
     existingSnap.docs.forEach(docSnap => {
-      if (docSnap.id !== registrationRef.id) {
+      if (docSnap.id !== registrationRef.id && String(docSnap.data().registration_type || 'regular') === 'regular') {
         batch.set(docSnap.ref, {
           is_current: false,
           current: false,
@@ -83,6 +89,9 @@ export async function POST(request: NextRequest) {
       active_course_registration_id: registrationRef.id,
       selected_course_ids: selectedCourseIds,
       selected_course_labels: selectedCourseLabels,
+      selected_course_keys: selectedCourseKeys,
+      course_registration_year: year,
+      course_registration_term: term,
       course_registration_status: 'active',
       course_registration_updated_at: FieldValue.serverTimestamp(),
     }, { merge: true });

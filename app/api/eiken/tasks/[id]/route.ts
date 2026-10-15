@@ -6,10 +6,10 @@ import { getServerUser, jsonError } from '@/lib/server-auth';
 
 export const runtime = 'nodejs';
 
-export async function GET(request: NextRequest, context: { params: { id: string } }) {
+export async function GET(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   try {
     const user = await getServerUser(request);
-    const taskId = String(context.params.id || '');
+    const taskId = String((await context.params).id || '');
     const taskSnap = await adminDb().collection('eiken_tasks').doc(taskId).get();
     if (!taskSnap.exists || taskSnap.data()?.status !== 'published') throw new Error('task-not-found');
     const task = { id: taskSnap.id, ...serializeFirestore(taskSnap.data()) };

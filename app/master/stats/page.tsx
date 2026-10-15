@@ -1,494 +1,95 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
-import { db } from '@/lib/firebase';
-import { auth } from '@/lib/firebase';
-import { collection, query, orderBy, limit, getDocs, where } from 'firebase/firestore';
-import { 
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer,
-  PieChart, Pie, Cell
-} from 'recharts';
-import { 
-  Users, Activity, Clock, Calendar, ArrowLeft, TrendingUp, Search, Download, Filter, PieChart as PieIcon, Trophy 
-} from 'lucide-react';
 import Link from 'next/link';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Area, AreaChart, Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { Activity, AlertTriangle, ArrowLeft, BookCheck, CalendarDays, Download, Mail, PlayCircle, RefreshCw, UserMinus, Users } from 'lucide-react';
+import { useAuth } from '@/app/context/AuthContext';
+
+type Period = 'week' | 'month';
+const pct = (value: number | null | undefined) => value == null ? '—' : `${value}%`;
+const csvCell = (value: unknown) => {
+  const text = String(value ?? '');
+  const safe = /^[=+\-@]/.test(text) ? `'${text}` : text;
+  return `"${safe.replace(/"/g, '""')}"`;
+};
 
 export default function StatisticsPage() {
-  const [dailyStats, setDailyStats] = useState<any[]>([]);
-  const [allStudents, setAllStudents] = useState<any[]>([]);
-  const [betaAnalytics, setBetaAnalytics] = useState<any | null>(null);
+  const { user, profile, loading: authLoading } = useAuth();
+  const [period, setPeriod] = useState<Period>('month');
+  const [anchor, setAnchor] = useState(new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' }));
+  const [school, setSchool] = useState('');
+  const [grade, setGrade] = useState('');
+  const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
-  
-  // フィルタ・検索用
-  const [searchQuery, setSearchQuery] = useState('');
-  const [gradeFilter, setGradeFilter] = useState('all');
+  const [error, setError] = useState('');
+  const [email, setEmail] = useState('');
+  const [sending, setSending] = useState(false);
 
-  useEffect(() => {
-    const fetchData = async () => {
-      try {
-        // 1. 日別アクセス推移 (過去14日間)
-        const statsQuery = query(collection(db, 'system_stats'), orderBy('date', 'desc'), limit(14));
-        const statsSnap = await getDocs(statsQuery);
-        const statsData = statsSnap.docs.map(d => ({
-          date: d.data().date.slice(5), // MM-DD
-          users: d.data().active_uids?.length || 0,
-          access: d.data().total_access || 0
-        })).reverse();
-        setDailyStats(statsData);
+  const load = useCallback(async () => {
+    if (!user || profile?.role !== 'master') return;
+    setLoading(true); setError('');
+    try {
+      const token = await user.getIdToken();
+      const params = new URLSearchParams({ period, anchor });
+      if (school) params.set('school', school);
+      if (grade) params.set('grade', grade);
+      const response = await fetch(`/api/admin/course-analytics?${params}`, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || '分析データを取得できませんでした。');
+      setData(body);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : '分析データを取得できませんでした。'); }
+    finally { setLoading(false); }
+  }, [anchor, grade, period, profile?.role, school, user]);
 
-        // 2. 全生徒データの取得
-        const usersQuery = query(collection(db, 'users'), where('role', '==', 'student'));
-        const usersSnap = await getDocs(usersQuery);
-        
-        const studentsData = usersSnap.docs.map(d => {
-          const data = d.data();
-          const lastLoginDate = data.last_login_at?.toDate ? data.last_login_at.toDate() : null;
-          
-          const daysSinceLogin = lastLoginDate 
-            ? Math.floor((new Date().getTime() - lastLoginDate.getTime()) / (1000 * 3600 * 24)) 
-            : 999;
+  useEffect(() => { void load(); }, [load]);
 
-          return {
-            id: d.id,
-            name: data.student_name || '未設定',
-            grade: data.grade || 'その他',
-            login_count: data.login_count || 0,
-            last_login: lastLoginDate ? lastLoginDate.toLocaleDateString() : 'なし',
-            days_since: daysSinceLogin,
-            status: daysSinceLogin < 3 ? 'active' : daysSinceLogin < 14 ? 'warning' : 'inactive'
-          };
-        });
-
-        studentsData.sort((a, b) => b.login_count - a.login_count);
-        setAllStudents(studentsData);
-
-        const token = await auth.currentUser?.getIdToken();
-        if (token) {
-          const betaRes = await fetch('/api/admin/beta-analytics?days=30', {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          const betaData = await betaRes.json().catch(() => ({}));
-          if (betaRes.ok && betaData.ok !== false) setBetaAnalytics(betaData);
-        }
-
-      } catch (error) {
-        console.error(error);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchData();
-  }, []);
-
-  // フィルタリング処理
-  const filteredStudents = useMemo(() => {
-    return allStudents.filter(s => {
-      const matchesSearch = s.name.toLowerCase().includes(searchQuery.toLowerCase());
-      const matchesGrade = gradeFilter === 'all' || s.grade === gradeFilter;
-      return matchesSearch && matchesGrade;
-    });
-  }, [allStudents, searchQuery, gradeFilter]);
-
-  // ★修正: アクティブユーザーのみの学年分布データ作成
-  const activeGradeDistribution = useMemo(() => {
-    const counts: {[key: string]: number} = {};
-    // activeステータスの生徒のみを集計
-    allStudents.filter(s => s.status === 'active').forEach(s => {
-      const g = s.grade || '不明';
-      counts[g] = (counts[g] || 0) + 1;
-    });
-    
-    // データがない場合のフォールバック（表示崩れ防止）
-    if (Object.keys(counts).length === 0) return [{ name: 'なし', value: 1 }];
-
-    return Object.entries(counts).map(([name, value]) => ({ name, value }));
-  }, [allStudents]);
-
-  // 今日のアクセス数
-  const todayDAU = dailyStats.length > 0 ? dailyStats[dailyStats.length - 1].users : 0;
-  
-  // アクティブ率
-  const activeUserCount = allStudents.filter(s => s.status === 'active').length;
-  const activeRate = allStudents.length > 0 ? Math.round((activeUserCount / allStudents.length) * 100) : 0;
-
-  // ★追加: ランキングデータ (トップ3)
-  const topUsers = allStudents.slice(0, 3);
-
-  // CSVダウンロード
-  const handleDownloadCSV = () => {
-    const header = "名前,学年,ログイン回数,最終ログイン,ステータス\n";
-    const rows = filteredStudents.map(s => 
-      `${s.name},${s.grade},${s.login_count},${s.last_login},${s.status}`
-    ).join("\n");
-    
-    const blob = new Blob([header + rows], { type: "text/csv;charset=utf-8;" });
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.download = "student_activity_data.csv";
-    link.click();
+  const exportReport = () => {
+    if (!data) return;
+    const summary = [['期間', data.range.label], ['対象生徒数', data.summary.students], ['受講人数', data.summary.enrolled_students], ['出席率', pct(data.summary.attendance_rate)], ['宿題提出率', pct(data.summary.homework_rate)], ['開始率', pct(data.summary.start_rate)], ['解除率', pct(data.summary.withdrawal_rate)]];
+    const courseRows = data.courses.map((course: any) => ['講座', course.name, course.enrolled, course.attended_students, pct(course.start_rate), course.schools.join(' / '), course.grades.join(' / ')]);
+    const exceptionRows = data.exceptions.map((item: any) => ['要確認', item.name, item.school, item.grade, item.attended ? '出席あり' : '期間内出席なし', `${item.homework_submitted}/${item.homework_total}`, pct(item.homework_rate)]);
+    const rows = [['種別', '名称/期間', '値1', '値2', '率', '校舎', '学年'], ...summary.map(row => ['概要', ...row]), ...courseRows, ...exceptionRows];
+    const blob = new Blob(['\uFEFF' + rows.map((row: unknown[]) => row.map(csvCell).join(',')).join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `course_report_${data.range.start}_${data.range.end}.csv`; link.click(); URL.revokeObjectURL(link.href);
   };
 
-  const handleDownloadBetaCSV = () => {
-    if (!betaAnalytics) return;
-    const header = '日付,アクティブユーザー,生徒,講師,PV,クリック,エラー,平均滞在分,総イベント\n';
-    const rows = betaAnalytics.daily.map((row: any) => [
-      row.date,
-      row.active_users,
-      row.student_users,
-      row.teacher_users,
-      row.page_views,
-      row.clicks,
-      row.errors,
-      row.avg_minutes,
-      row.total_events,
-    ].join(',')).join('\n');
-    const blob = new Blob(['\uFEFF' + header + rows], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = 'beta_test_effectiveness.csv';
-    link.click();
-    URL.revokeObjectURL(link.href);
+  const sendReport = async () => {
+    if (!user || !email) return alert('送信先メールアドレスを入力してください。');
+    setSending(true);
+    try {
+      const token = await user.getIdToken();
+      const response = await fetch('/api/admin/course-analytics', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ email, period, anchor, school, grade }) });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || 'メールを送信できませんでした。');
+      alert('レポート作成完了メールを送信しました。');
+    } catch (cause) { alert(cause instanceof Error ? cause.message : 'メールを送信できませんでした。'); }
+    finally { setSending(false); }
   };
 
-  const COLORS = ['#6366F1', '#EC4899', '#10B981', '#F59E0B', '#8B5CF6'];
+  const kpis = useMemo(() => data ? [
+    { label: '受講人数', value: `${data.summary.enrolled_students}人`, note: `対象生徒 ${data.summary.students}人`, icon: <Users />, tone: 'bg-indigo-50 text-indigo-700' },
+    { label: '出席率', value: pct(data.summary.attendance_rate), note: `${data.summary.attendance_numerator}/${data.summary.attendance_denominator}人`, icon: <CalendarDays />, tone: 'bg-emerald-50 text-emerald-700' },
+    { label: '宿題提出率', value: pct(data.summary.homework_rate), note: `${data.summary.homework_numerator}/${data.summary.homework_denominator}件`, icon: <BookCheck />, tone: 'bg-sky-50 text-sky-700' },
+    { label: '講座開始率', value: pct(data.summary.start_rate), note: `${data.summary.started_students}人が受講開始`, icon: <PlayCircle />, tone: 'bg-violet-50 text-violet-700' },
+    { label: '解除率', value: pct(data.summary.withdrawal_rate), note: `${data.summary.withdrawals}/${data.summary.registration_records}件`, icon: <UserMinus />, tone: 'bg-rose-50 text-rose-700' },
+    { label: '要確認', value: `${data.exceptions.length}人`, note: '未出席・宿題未提出', icon: <AlertTriangle />, tone: 'bg-amber-50 text-amber-800' },
+  ] : [], [data]);
 
-  return (
-    <div className="min-h-screen bg-gray-50 p-6 font-sans text-slate-800">
-      <div className="max-w-[1600px] mx-auto">
-        
-        {/* ヘッダー */}
-        <div className="flex items-center justify-between mb-8">
-          <div className="flex items-center gap-4">
-            <Link href="/master" className="bg-white p-3 rounded-full shadow hover:bg-gray-100 text-gray-600 transition-colors">
-              <ArrowLeft size={24} />
-            </Link>
-            <div>
-              <h1 className="text-2xl font-black text-gray-800 flex items-center gap-2">
-                <Activity className="text-indigo-600" /> 統計・詳細分析
-              </h1>
-              <p className="text-xs text-gray-500 font-bold mt-1">全生徒のアクティビティ詳細データ</p>
-            </div>
-          </div>
-          <button onClick={handleDownloadCSV} className="bg-green-600 text-white px-5 py-2.5 rounded-full font-bold text-sm flex items-center gap-2 hover:bg-green-700 transition-colors shadow-lg shadow-green-100 active:scale-95">
-            <Download size={18}/> CSV出力
-          </button>
-        </div>
+  if (authLoading || !profile) return <main className="grid min-h-screen place-items-center"><RefreshCw className="animate-spin text-indigo-600" /></main>;
+  if (profile.role !== 'master') return <main className="grid min-h-screen place-items-center p-6 font-black">マスター管理者専用です。</main>;
 
-        {/* KPIカード */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-          <div className="bg-white p-6 rounded-[24px] shadow-sm border border-indigo-50 flex items-center gap-4 transition-transform hover:scale-[1.02]">
-            <div className="p-4 bg-indigo-50 text-indigo-600 rounded-2xl"><Users size={28} /></div>
-            <div>
-              <p className="text-[10px] font-black text-gray-400 uppercase tracking-wider">今日のDAU</p>
-              <p className="text-3xl font-black text-gray-800">{todayDAU} <span className="text-sm font-bold text-gray-400">人</span></p>
-            </div>
-          </div>
-          <div className="bg-white p-6 rounded-[24px] shadow-sm border border-green-50 flex items-center gap-4 transition-transform hover:scale-[1.02]">
-            <div className="p-4 bg-green-50 text-green-600 rounded-2xl"><TrendingUp size={28} /></div>
-            <div>
-              <p className="text-[10px] font-black text-gray-400 uppercase tracking-wider">アクティブ率</p>
-              <p className="text-3xl font-black text-gray-800">{activeRate}<span className="text-sm font-bold text-gray-400">%</span></p>
-            </div>
-          </div>
-          <div className="bg-white p-6 rounded-[24px] shadow-sm border border-orange-50 flex items-center gap-4 transition-transform hover:scale-[1.02]">
-            <div className="p-4 bg-orange-50 text-orange-600 rounded-2xl"><Clock size={28} /></div>
-            <div>
-              <p className="text-[10px] font-black text-gray-400 uppercase tracking-wider">平均ログイン間隔</p>
-              <p className="text-xl font-black text-gray-800">約 2.5 <span className="text-sm font-bold text-gray-400">日</span></p>
-            </div>
-          </div>
-          <div className="bg-white p-6 rounded-[24px] shadow-sm border border-pink-50 flex items-center gap-4 transition-transform hover:scale-[1.02]">
-            <div className="p-4 bg-pink-50 text-pink-600 rounded-2xl"><Users size={28} /></div>
-            <div>
-              <p className="text-[10px] font-black text-gray-400 uppercase tracking-wider">総生徒数</p>
-              <p className="text-3xl font-black text-gray-800">{allStudents.length} <span className="text-sm font-bold text-gray-400">人</span></p>
-            </div>
-          </div>
-        </div>
-
-        {/* βテスト効果検証 */}
-        {betaAnalytics && (
-          <div id="beta-analytics" className="mb-8 scroll-mt-6 rounded-[32px] border border-violet-100 bg-white p-6 shadow-sm">
-            <div className="mb-6 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-              <div>
-                <p className="text-xs font-black uppercase tracking-wider text-violet-500">Beta Test Effectiveness</p>
-                <h2 className="mt-1 text-xl font-black text-gray-800">テスト利用の効果検証</h2>
-                <p className="mt-2 text-sm font-bold text-gray-400">利用率、機能別利用、学習行動、録画視聴、アンケート、エラーを30日単位で集計します。</p>
-              </div>
-              <button onClick={handleDownloadBetaCSV} className="w-fit rounded-2xl bg-violet-600 px-4 py-3 text-xs font-black text-white shadow-sm transition-colors hover:bg-violet-700">
-                β集計CSV
-              </button>
-            </div>
-
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-              {[
-                { label: '有用性スコア', value: `${betaAnalytics.kpis.evidence_score}`, unit: '/100', color: 'text-violet-700 bg-violet-50' },
-                { label: '生徒アクティブ率', value: `${betaAnalytics.kpis.activation_rate}`, unit: '%', color: 'text-indigo-700 bg-indigo-50' },
-                { label: '平均滞在時間', value: `${betaAnalytics.kpis.avg_minutes}`, unit: '分', color: 'text-emerald-700 bg-emerald-50' },
-                { label: 'エラー件数', value: `${betaAnalytics.kpis.errors}`, unit: '件', color: 'text-rose-700 bg-rose-50' },
-                { label: '録画視聴', value: `${betaAnalytics.kpis.recording_views}`, unit: '回', color: 'text-red-700 bg-red-50' },
-                { label: 'クエスト実施', value: `${betaAnalytics.kpis.quest_count}`, unit: '回', color: 'text-blue-700 bg-blue-50' },
-                { label: 'クエスト合格率', value: `${betaAnalytics.kpis.quest_pass_rate}`, unit: '%', color: 'text-sky-700 bg-sky-50' },
-                { label: 'アンケート回答', value: `${betaAnalytics.kpis.survey_count}`, unit: '件', color: 'text-amber-700 bg-amber-50' },
-              ].map(item => (
-                <div key={item.label} className={`rounded-3xl p-5 ${item.color}`}>
-                  <p className="text-[10px] font-black uppercase tracking-wider opacity-70">{item.label}</p>
-                  <p className="mt-2 text-3xl font-black">{item.value}<span className="ml-1 text-sm font-bold opacity-60">{item.unit}</span></p>
-                </div>
-              ))}
-            </div>
-
-            <div className="mt-6 grid gap-6 xl:grid-cols-3">
-              <div className="rounded-3xl border border-gray-100 bg-gray-50/70 p-5 xl:col-span-2">
-                <h3 className="mb-4 text-sm font-black text-gray-700">日別のテスト利用推移</h3>
-                <div className="h-[260px]">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={betaAnalytics.daily}>
-                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E5E7EB" />
-                      <XAxis dataKey="date" tickFormatter={(value) => String(value).slice(5)} tick={{ fontSize: 11, fill: '#94A3B8', fontWeight: 'bold' }} axisLine={false} tickLine={false} />
-                      <YAxis tick={{ fontSize: 11, fill: '#94A3B8' }} axisLine={false} tickLine={false} />
-                      <RechartsTooltip contentStyle={{ borderRadius: 16, border: 'none', boxShadow: '0 10px 20px rgba(15,23,42,.12)' }} />
-                      <Bar name="生徒利用" dataKey="student_users" fill="#8B5CF6" radius={[6, 6, 0, 0]} />
-                      <Bar name="クリック" dataKey="clicks" fill="#A7F3D0" radius={[6, 6, 0, 0]} />
-                      <Bar name="エラー" dataKey="errors" fill="#FDA4AF" radius={[6, 6, 0, 0]} />
-                      <Legend />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-
-              <div className="rounded-3xl border border-gray-100 bg-gray-50/70 p-5">
-                <h3 className="mb-4 text-sm font-black text-gray-700">よく使われた機能</h3>
-                <div className="space-y-3">
-                  {betaAnalytics.top_features.length === 0 ? (
-                    <p className="rounded-2xl bg-white p-5 text-center text-xs font-bold text-gray-400">データなし</p>
-                  ) : betaAnalytics.top_features.slice(0, 8).map((item: any) => (
-                    <div key={item.name} className="rounded-2xl bg-white p-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <span className="truncate text-xs font-black text-gray-700">{item.name}</span>
-                        <span className="text-xs font-black text-violet-600">{item.count}</span>
-                      </div>
-                      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-gray-100">
-                        <div className="h-full rounded-full bg-violet-500" style={{ width: `${Math.min(100, item.count / Math.max(1, betaAnalytics.top_features[0]?.count || 1) * 100)}%` }} />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            <div className="mt-6 rounded-3xl border border-amber-100 bg-amber-50 p-5">
-              <h3 className="mb-3 text-sm font-black text-amber-800">フォローが必要な可能性がある生徒</h3>
-              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {betaAnalytics.follow_up.length === 0 ? (
-                  <p className="rounded-2xl bg-white p-5 text-center text-xs font-bold text-amber-500 md:col-span-2 xl:col-span-3">現在、優先フォロー候補はありません</p>
-                ) : betaAnalytics.follow_up.slice(0, 9).map((item: any) => (
-                  <div key={item.uid} className="rounded-2xl bg-white p-4 shadow-sm">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className="text-sm font-black text-gray-800">{item.name}</p>
-                        <p className="mt-1 text-[10px] font-bold text-gray-400">{item.grade || '学年未設定'} / 最終: {item.last_path || '-'}</p>
-                      </div>
-                      <span className="rounded-full bg-amber-100 px-2 py-1 text-[10px] font-black text-amber-700">{item.days_since}日前</span>
-                    </div>
-                    <p className="mt-2 text-[11px] font-bold text-gray-500">イベント数: {item.event_count}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* グラフエリア */}
-        <div className="grid lg:grid-cols-3 gap-8 mb-8">
-          
-          {/* 左: アクセス推移 */}
-          <div className="lg:col-span-2 bg-white p-8 rounded-[32px] shadow-sm border border-gray-100">
-            <h2 className="text-lg font-black text-gray-700 mb-6 flex items-center gap-2">
-              <Calendar size={20} className="text-indigo-500"/> 週間アクセス推移 (14日間)
-            </h2>
-            <div className="h-[320px] w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={dailyStats} margin={{ top: 20, right: 30, left: 0, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F3F4F6"/>
-                  <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{fill: '#9CA3AF', fontSize: 12, fontWeight: 'bold'}} dy={10}/>
-                  <YAxis axisLine={false} tickLine={false} tick={{fill: '#9CA3AF', fontSize: 12}} />
-                  <RechartsTooltip cursor={{fill: '#F9FAFB'}} contentStyle={{borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1)', padding: '12px'}} labelStyle={{fontWeight: 'bold', color: '#374151', marginBottom: '8px'}}/>
-                  <Bar name="利用人数" dataKey="users" fill="#6366F1" radius={[6, 6, 0, 0]} barSize={24}/>
-                  <Bar name="アクセス回数" dataKey="access" fill="#BFDBFE" radius={[6, 6, 0, 0]} barSize={24}/>
-                  <Legend iconType="circle" wrapperStyle={{paddingTop: '20px'}}/>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          {/* 右: 学年分布 & ランキング */}
-          <div className="space-y-6">
-            
-            {/* 学年分布 (円グラフ) */}
-            <div className="bg-white p-8 rounded-[32px] shadow-sm border border-gray-100">
-              <h2 className="text-lg font-black text-gray-700 mb-2 flex items-center gap-2">
-                <PieIcon size={20} className="text-pink-500"/> 利用者の学年分布
-              </h2>
-              <p className="text-xs text-gray-400 font-bold mb-6 ml-7">アクティブユーザーのみ集計</p>
-              
-              <div className="h-[200px] w-full relative">
-                {activeUserCount > 0 ? (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie
-                        data={activeGradeDistribution}
-                        cx="50%"
-                        cy="50%"
-                        innerRadius={60}
-                        outerRadius={80}
-                        paddingAngle={5}
-                        dataKey="value"
-                      >
-                        {activeGradeDistribution.map((entry, index) => (
-                          <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} strokeWidth={0} />
-                        ))}
-                      </Pie>
-                      <RechartsTooltip contentStyle={{borderRadius: '12px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'}}/>
-                      <Legend verticalAlign="middle" align="right" layout="vertical" iconType="circle"/>
-                    </PieChart>
-                  </ResponsiveContainer>
-                ) : (
-                  <div className="flex items-center justify-center h-full text-gray-300 font-bold text-xs">データなし</div>
-                )}
-                {/* 中心テキスト */}
-                <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none pr-20">
-                  <span className="text-3xl font-black text-gray-800">{activeUserCount}</span>
-                  <span className="text-[10px] font-bold text-gray-400">ACTIVE</span>
-                </div>
-              </div>
-            </div>
-
-            {/* ★追加: ログインランキング */}
-            <div className="bg-white p-6 rounded-[32px] shadow-sm border border-gray-100">
-              <h2 className="text-sm font-black text-gray-700 mb-4 flex items-center gap-2">
-                <Trophy size={16} className="text-yellow-500"/> ログイン回数 TOP3
-              </h2>
-              <div className="space-y-3">
-                {topUsers.map((user, i) => (
-                  <div key={user.id} className="flex items-center justify-between p-2 rounded-xl bg-gray-50/50">
-                    <div className="flex items-center gap-3">
-                      <span className={`w-6 h-6 flex items-center justify-center rounded-full text-xs font-black text-white ${i===0?'bg-yellow-400':i===1?'bg-gray-400':'bg-orange-400'}`}>{i+1}</span>
-                      <div>
-                        <p className="text-xs font-bold text-gray-700">{user.name}</p>
-                        <p className="text-[10px] text-gray-400">{user.grade}</p>
-                      </div>
-                    </div>
-                    <span className="text-sm font-black text-indigo-600">{user.login_count}回</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-          </div>
-        </div>
-
-        {/* 詳細データテーブル */}
-        <div className="bg-white p-8 rounded-[32px] shadow-sm border border-gray-100">
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
-            <h2 className="text-lg font-black text-gray-700 flex items-center gap-2">
-              <Activity size={20} className="text-orange-500"/> 全生徒の詳細データ
-            </h2>
-            
-            <div className="flex gap-2">
-              {/* 学年フィルタ */}
-              <div className="relative group">
-                <Filter size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 group-focus-within:text-indigo-500 transition-colors"/>
-                <select 
-                  className="pl-9 pr-8 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-bold text-gray-600 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-50 transition-all cursor-pointer appearance-none"
-                  value={gradeFilter}
-                  onChange={(e) => setGradeFilter(e.target.value)}
-                >
-                  <option value="all">全学年</option>
-                  <option value="中1">中1</option>
-                  <option value="中2">中2</option>
-                  <option value="中3">中3</option>
-                </select>
-              </div>
-
-              {/* 名前検索 */}
-              <div className="relative group">
-                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 group-focus-within:text-indigo-500 transition-colors"/>
-                <input 
-                  type="text" 
-                  placeholder="名前で検索..." 
-                  className="pl-9 pr-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-bold text-gray-600 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-50 transition-all w-48"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                />
-              </div>
-            </div>
-          </div>
-
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm text-left border-collapse">
-              <thead className="text-[10px] text-gray-400 uppercase bg-gray-50/80 tracking-wider">
-                <tr>
-                  <th className="px-6 py-3 rounded-l-xl font-black">名前</th>
-                  <th className="px-6 py-3 font-black">学年</th>
-                  <th className="px-6 py-3 font-black">累計ログイン回数</th>
-                  <th className="px-6 py-3 font-black">最終ログイン</th>
-                  <th className="px-6 py-3 rounded-r-xl font-black text-center">ステータス</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-50">
-                {filteredStudents.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="text-center py-12 text-gray-400 font-bold text-xs">該当する生徒はいません</td>
-                  </tr>
-                ) : (
-                  filteredStudents.map((student) => (
-                    <tr key={student.id} className="hover:bg-gray-50 transition-colors group">
-                      <td className="px-6 py-4 font-bold text-gray-700">{student.name}</td>
-                      <td className="px-6 py-4">
-                        <span className={`px-2.5 py-1 rounded-lg text-[10px] font-black ${
-                          student.grade === '中3' ? 'bg-purple-50 text-purple-600' :
-                          student.grade === '中2' ? 'bg-blue-50 text-blue-600' :
-                          'bg-green-50 text-green-600'
-                        }`}>
-                          {student.grade}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 font-mono text-indigo-600 font-black text-base">{student.login_count}<span className="text-[10px] ml-1 text-gray-400 font-bold">回</span></td>
-                      <td className="px-6 py-4 text-gray-500 text-xs font-bold">
-                        {student.last_login} 
-                        <span className="text-[10px] text-gray-300 ml-2 group-hover:text-gray-400 transition-colors">({student.days_since}日前)</span>
-                      </td>
-                      <td className="px-6 py-4 text-center">
-                        {student.status === 'active' && (
-                          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-green-100 text-green-600 text-[10px] font-black shadow-sm border border-green-200">
-                            <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span> Active
-                          </span>
-                        )}
-                        {student.status === 'warning' && (
-                          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-yellow-100 text-yellow-600 text-[10px] font-black border border-yellow-200">
-                            Warning
-                          </span>
-                        )}
-                        {student.status === 'inactive' && (
-                          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-gray-100 text-gray-400 text-[10px] font-black border border-gray-200">
-                            Inactive
-                          </span>
-                        )}
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-          <div className="mt-4 text-[10px] font-bold text-gray-400 text-right">
-            全 {filteredStudents.length} 名を表示中
-          </div>
-        </div>
-
-      </div>
-    </div>
-  );
+  return <main className="min-h-screen bg-slate-50 px-3 py-5 text-slate-900 sm:px-6"><div className="mx-auto max-w-[1500px] space-y-5">
+    <header className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm sm:p-7">
+      <div className="flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between"><div className="flex items-center gap-3"><Link href="/master" aria-label="戻る" className="grid h-11 w-11 place-items-center rounded-2xl bg-slate-100"><ArrowLeft size={19} /></Link><div><h1 className="flex items-center gap-2 text-2xl font-black"><Activity className="text-indigo-600" />講座運用分析</h1><p className="mt-1 text-xs font-bold text-slate-500">出席・宿題・受講開始・解除・受講人数を一つの母数で確認</p></div></div><div className="flex flex-wrap gap-2"><button onClick={exportReport} disabled={!data} className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-xs font-black text-white disabled:opacity-40"><Download size={16} />CSVレポート</button><button onClick={() => window.print()} disabled={!data} className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-slate-900 px-4 text-xs font-black text-white disabled:opacity-40"><Download size={16} />印刷・PDF</button></div></div>
+      <div className="mt-6 grid gap-3 md:grid-cols-2 xl:grid-cols-5"><label className="grid gap-1 text-xs font-black text-slate-600"><span>集計単位</span><select value={period} onChange={event => setPeriod(event.target.value as Period)} className="min-h-11 rounded-xl border border-slate-200 px-3"><option value="week">週次</option><option value="month">月次</option></select></label><label className="grid gap-1 text-xs font-black text-slate-600"><span>基準日</span><input type="date" value={anchor} onChange={event => setAnchor(event.target.value)} className="min-h-11 rounded-xl border border-slate-200 px-3" /></label><label className="grid gap-1 text-xs font-black text-slate-600"><span>校舎</span><select value={school} onChange={event => setSchool(event.target.value)} className="min-h-11 rounded-xl border border-slate-200 px-3"><option value="">全校舎</option>{(data?.options.schools || []).map((value: string) => <option key={value}>{value}</option>)}</select></label><label className="grid gap-1 text-xs font-black text-slate-600"><span>学年</span><select value={grade} onChange={event => setGrade(event.target.value)} className="min-h-11 rounded-xl border border-slate-200 px-3"><option value="">全学年</option>{(data?.options.grades || []).map((value: string) => <option key={value}>{value}</option>)}</select></label><button onClick={() => void load()} disabled={loading} className="mt-auto inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 text-xs font-black text-white disabled:opacity-50"><RefreshCw size={15} className={loading ? 'animate-spin' : ''} />再集計</button></div>
+    </header>
+    {error && <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm font-bold text-rose-800">{error}</div>}
+    {loading && !data ? <div className="grid min-h-80 place-items-center rounded-3xl bg-white"><RefreshCw className="animate-spin text-indigo-600" /></div> : data && <>
+      <section aria-label="主要指標" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">{kpis.map(item => <article key={item.label} className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm"><div className={`grid h-10 w-10 place-items-center rounded-xl ${item.tone}`}>{item.icon}</div><p className="mt-3 text-xs font-black text-slate-500">{item.label}</p><p className="mt-1 text-2xl font-black">{item.value}</p><p className="mt-1 text-[11px] font-bold text-slate-400">{item.note}</p></article>)}</section>
+      <section className="grid gap-5 xl:grid-cols-2"><article className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm"><h2 className="font-black">日別の受講状況</h2><p className="mt-1 text-xs font-bold text-slate-500">ユニーク出席者数と宿題提出件数</p><div className="mt-4 h-72"><ResponsiveContainer width="100%" height="100%"><AreaChart data={data.trend}><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="date" tickFormatter={value => String(value).slice(5)} fontSize={11} /><YAxis allowDecimals={false} fontSize={11} /><Tooltip /><Legend /><Area name="出席者" dataKey="attended_students" stroke="#059669" fill="#a7f3d0" /><Area name="宿題提出" dataKey="homework_submissions" stroke="#0284c7" fill="#bae6fd" /></AreaChart></ResponsiveContainer></div></article><article className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm"><h2 className="font-black">講座別の受講人数</h2><p className="mt-1 text-xs font-bold text-slate-500">現在の登録人数が多い講座順</p><div className="mt-4 h-72"><ResponsiveContainer width="100%" height="100%"><BarChart data={data.courses.slice(0, 10)} layout="vertical" margin={{ left: 20 }}><CartesianGrid strokeDasharray="3 3" horizontal={false} /><XAxis type="number" allowDecimals={false} /><YAxis type="category" dataKey="name" width={120} tick={{ fontSize: 10 }} /><Tooltip /><Bar name="受講人数" dataKey="enrolled" fill="#6366f1" radius={[0, 6, 6, 0]} /></BarChart></ResponsiveContainer></div></article></section>
+      <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex flex-wrap items-end justify-between gap-2"><div><h2 className="font-black">講座別の運用状況</h2><p className="mt-1 text-xs font-bold text-slate-500">人数・期間内の開始状況・対象校舎を比較</p></div><span className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-black text-indigo-700">{data.summary.course_count}講座</span></div><div className="mt-4 overflow-x-auto"><table className="w-full min-w-[760px] text-left text-sm"><thead><tr className="border-b text-xs text-slate-500"><th className="p-3">講座</th><th className="p-3">受講人数</th><th className="p-3">開始人数</th><th className="p-3">開始率</th><th className="p-3">校舎</th><th className="p-3">学年</th></tr></thead><tbody>{data.courses.map((course: any) => <tr key={course.name} className="border-b border-slate-100"><td className="p-3 font-black">{course.name}</td><td className="p-3 font-bold">{course.enrolled}人</td><td className="p-3 font-bold">{course.attended_students}人</td><td className="p-3 font-black text-indigo-700">{pct(course.start_rate)}</td><td className="p-3 text-xs font-bold text-slate-500">{course.schools.join(' / ') || '—'}</td><td className="p-3 text-xs font-bold text-slate-500">{course.grades.join(' / ') || '—'}</td></tr>)}</tbody></table>{data.courses.length === 0 && <p className="py-10 text-center text-sm font-bold text-slate-400">該当する受講登録はありません。</p>}</div></section>
+      <section className="grid gap-5 xl:grid-cols-[1.5fr_1fr]"><article className="rounded-3xl border border-amber-200 bg-white p-5 shadow-sm"><h2 className="flex items-center gap-2 font-black"><AlertTriangle className="text-amber-500" />運用上の要確認</h2><p className="mt-1 text-xs font-bold text-slate-500">受講登録済みで期間内出席がない生徒、または宿題未提出がある生徒</p><div className="mt-4 max-h-[430px] overflow-auto"><table className="w-full min-w-[620px] text-left text-sm"><thead className="sticky top-0 bg-white"><tr className="border-b text-xs text-slate-500"><th className="p-3">生徒</th><th className="p-3">校舎・学年</th><th className="p-3">出席</th><th className="p-3">宿題</th></tr></thead><tbody>{data.exceptions.map((item: any) => <tr key={item.id} className="border-b border-slate-100"><td className="p-3 font-black">{item.name}</td><td className="p-3 text-xs font-bold text-slate-500">{item.school}・{item.grade}</td><td className={`p-3 font-black ${item.attended ? 'text-emerald-700' : 'text-rose-700'}`}>{item.attended ? '出席あり' : '期間内なし'}</td><td className="p-3 font-bold">{item.homework_submitted}/{item.homework_total}（{pct(item.homework_rate)}）</td></tr>)}</tbody></table>{data.exceptions.length === 0 && <p className="py-10 text-center text-sm font-bold text-emerald-700">要確認の生徒はいません。</p>}</div></article><div className="space-y-5"><article className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm"><h2 className="flex items-center gap-2 font-black"><Mail className="text-indigo-600" />レポート完成通知</h2><p className="mt-2 text-xs font-bold leading-5 text-slate-500">現在の週次／月次レポート概要をメール送信します。</p><input type="email" value={email} onChange={event => setEmail(event.target.value)} placeholder="送信先メールアドレス" className="mt-4 min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm" /><button onClick={() => void sendReport()} disabled={sending || !email} className="mt-3 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 text-xs font-black text-white disabled:opacity-40"><Mail size={15} />{sending ? '送信中…' : 'レポートをメール送信'}</button></article><article className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm"><h2 className="font-black">指標の定義</h2><dl className="mt-3 space-y-3 text-xs"><div><dt className="font-black">出席率</dt><dd className="mt-1 font-bold text-slate-500">{data.definitions.attendance_rate}</dd></div><div><dt className="font-black">宿題提出率</dt><dd className="mt-1 font-bold text-slate-500">{data.definitions.homework_rate}</dd></div><div><dt className="font-black">開始率</dt><dd className="mt-1 font-bold text-slate-500">{data.definitions.start_rate}</dd></div><div><dt className="font-black">解除率</dt><dd className="mt-1 font-bold text-slate-500">{data.definitions.withdrawal_rate}</dd></div></dl></article></div></section>
+    </>}
+  </div></main>;
 }

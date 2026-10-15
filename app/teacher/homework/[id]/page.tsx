@@ -1,9 +1,8 @@
 'use client';
 
 import { useState, useEffect, use, useRef } from 'react';
-import { db, storage } from '@/lib/firebase';
+import { db } from '@/lib/firebase';
 import { doc, getDoc, collection, query, where, getDocs } from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { ArrowLeft, CheckCircle, User, MessageSquare, ExternalLink, RefreshCw, XCircle, Send, Stamp, Plus, ImageIcon } from 'lucide-react';
 import Link from 'next/link';
 import Image from 'next/image';
@@ -89,16 +88,21 @@ export default function TeacherHomeworkCheckPage({ params }: { params: Promise<{
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
       try {
-        // Storageにスタンプ用としてアップロード
-        const storageRef = ref(storage, `stamps/teacher_${Date.now()}_${file.name}`);
-        const snapshot = await uploadBytes(storageRef, file);
-        const url = await getDownloadURL(snapshot.ref);
+        const token = await user?.getIdToken();
+        const form = new FormData();
+        form.set('image', file);
+        const response = await fetch('/api/teacher/homework/stamp', {
+          method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form,
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.ok || !data.url) throw new Error(data.error || 'stamp-upload-failed');
+        const url = String(data.url);
         
         // リストに追加して選択状態にする
         setCustomStamps(prev => [...prev, { id: `custom_${Date.now()}`, url }]);
         setSelectedStamp(url);
-      } catch (err) {
-        alert('スタンプのアップロードに失敗しました');
+      } catch (err: any) {
+        alert(err?.message || 'スタンプのアップロードに失敗しました');
       }
     }
   };

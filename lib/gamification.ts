@@ -1,6 +1,3 @@
-import { db } from '@/lib/firebase';
-import { doc, updateDoc, increment, collection, addDoc, serverTimestamp } from 'firebase/firestore';
-
 // ランク定義
 // Dashboardで rank.color を使用するため、colorプロパティを追加しました
 export const RANKS = [
@@ -36,32 +33,3 @@ export const BADGES = [
   { id: 'badge_king', name: 'コインマスター', icon: '💰', description: '所持コインが1000枚を超えると獲得', secret: true },
   { id: 'badge_dragon', name: 'レジェンド', icon: '🐉', description: '特別な達成で獲得', secret: true },
 ];
-
-/**
- * ▼ ここを追加しました ▼
- * ユーザーにポイントを追加する関数
- */
-export const addPoints = async (userId: string, amount: number, reason: string = 'unknown') => {
-  if (!userId) return;
-
-  try {
-    const userRef = doc(db, 'users', userId);
-
-    // 1. ユーザーの合計ポイントを加算
-    await updateDoc(userRef, {
-      total_points: increment(amount),
-      // 必要であれば最終アクティブ日時なども更新
-      // last_active_at: serverTimestamp(),
-    });
-
-    // 2. ポイント獲得履歴をサブコレクションに記録
-    await addDoc(collection(db, 'users', userId, 'point_history'), {
-      amount: amount,
-      reason: reason,
-      created_at: serverTimestamp(),
-    });
-
-  } catch (error) {
-    console.error("Error adding points:", error);
-  }
-};

@@ -2,20 +2,20 @@
 
 import { useState, useEffect, use, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import { db, storage } from '@/lib/firebase';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { db } from '@/lib/firebase';
+import { doc, getDoc } from 'firebase/firestore';
 import { useAuth } from '@/app/context/AuthContext';
 import { ArrowLeft, Clock, Send, CheckCircle, AlertCircle, Loader2, Image as ImageIcon, X, Plus, ExternalLink, RefreshCw, Calendar, FileText, Stamp, MessageCircle } from 'lucide-react';
 import Link from 'next/link';
 import Image from 'next/image';
+import { loadStudentHomework } from '@/lib/client-student-homework';
 
 export default function HomeworkDetailPage({ params }: { params: Promise<{ id: string }> }) {
   // Next.js 13+ (App Router) の params アンラップ
   const { id } = use(params);
   const assignmentId = id;
 
-  const { user, profile, loading: authLoading } = useAuth();
+  const { user, loading: authLoading } = useAuth();
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -39,16 +39,13 @@ export default function HomeworkDetailPage({ params }: { params: Promise<{ id: s
 
   const fetchData = async () => {
     try {
-      // ★修正: コレクション名を 'assignments' から 'homework_assignments' に変更
-      const assignSnap = await getDoc(doc(db, 'homework_assignments', assignmentId));
-      
-      if (!assignSnap.exists()) {
-        // ID間違いなどで存在しない場合
+      const assignedHomework = await loadStudentHomework({ id: assignmentId });
+      if (!assignedHomework) {
         console.error('Homework not found:', assignmentId);
         setAssignment(null); 
         return;
       }
-      setAssignment({ id: assignSnap.id, ...assignSnap.data() });
+      setAssignment(assignedHomework);
 
       // 提出状況の取得
       const subId = `${assignmentId}_${user!.uid}`;
@@ -92,42 +89,20 @@ export default function HomeworkDetailPage({ params }: { params: Promise<{ id: s
     try {
       if (!user) throw new Error('ログインセッション切れ');
 
-      // 画像アップロード
-      const fileExtension = selectedFile.name.split('.').pop() || 'jpg';
-      const storagePath = `submissions/${assignmentId}/${user.uid}_${Date.now()}.${fileExtension}`;
-      const storageRef = ref(storage, storagePath);
-      const snapshot = await uploadBytes(storageRef, selectedFile);
-      const imageUrl = await getDownloadURL(snapshot.ref);
-
-      // Firestoreへ保存
-      const subId = `${assignmentId}_${user.uid}`;
-      const subRef = doc(db, 'submissions', subId);
-
-      const studentName = profile?.student_name || user.displayName || '生徒';
-
-      const submissionData = {
-        assignment_id: assignmentId,
-        student_id: user.uid,
-        student_name: studentName,
-        imageUrl: imageUrl,
-        comment: comment,
-        status: 'submitted', // 提出済み (先生確認待ち)
-        submitted_at: new Date().toISOString(),
-        feedback: null
-      };
-
-      await setDoc(subRef, submissionData, { merge: true });
-
       const token = await user.getIdToken();
-      const rewardRes = await fetch('/api/coin-transactions', {
+      const form = new FormData();
+      form.set('assignment_id', assignmentId);
+      form.set('comment', comment);
+      form.set('image', selectedFile);
+      const submitRes = await fetch('/api/student/homework/submission', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ action: 'homework_submission_reward', assignment_id: assignmentId }),
+        headers: { Authorization: `Bearer ${token}` },
+        body: form,
       });
-      const rewardData = await rewardRes.json().catch(() => ({}));
-      if (!rewardRes.ok || rewardData.ok === false) throw new Error(rewardData.error || 'reward failed');
+      const submitData = await submitRes.json().catch(() => ({}));
+      if (!submitRes.ok || submitData.ok === false) throw new Error(submitData.error || '提出に失敗しました');
 
-      alert(rewardData.applied ? '提出しました！ 50コイン獲得！' : '提出しました！この課題のコインは受取済みです。');
+      alert(submitData.reward_applied ? '提出しました！ 50コイン獲得！' : '提出しました！この課題のコインは受取済みです。');
       setSelectedFile(null);
       setPreviewUrl(null);
       await fetchData(); // 画面更新

@@ -383,6 +383,7 @@ export async function POST(request: NextRequest) {
           .get()
           .catch(() => null);
         existingSnap?.docs.forEach(docSnap => {
+          if (String(docSnap.data().registration_type || 'regular') !== 'regular') return;
           if (!item.clearOnly && docSnap.id === registrationRef.id) return;
           batch.set(docSnap.ref, {
             is_current: false,
@@ -399,6 +400,8 @@ export async function POST(request: NextRequest) {
             active_course_registration_id: FieldValue.delete(),
             selected_course_ids: [],
             selected_course_labels: [],
+            course_registration_year: year,
+            course_registration_term: term,
             course_registration_status: 'empty',
             course_registration_updated_at: FieldValue.serverTimestamp(),
           }, { merge: true });
@@ -417,6 +420,7 @@ export async function POST(request: NextRequest) {
           school,
           year,
           term,
+          registration_type: 'regular',
           selected_course_ids: item.selectedCourseIds,
           selected_course_labels: item.matchedLabels,
           status: 'active',
@@ -435,6 +439,8 @@ export async function POST(request: NextRequest) {
           active_course_registration_id: registrationRef.id,
           selected_course_ids: item.selectedCourseIds,
           selected_course_labels: item.matchedLabels,
+          course_registration_year: year,
+          course_registration_term: term,
           course_registration_status: 'active',
           course_registration_updated_at: FieldValue.serverTimestamp(),
         }, { merge: true });

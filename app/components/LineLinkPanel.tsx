@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { auth } from '@/lib/firebase';
-import { Check, Loader2, MessageCircle } from 'lucide-react';
+import { Check, HelpCircle, Loader2, MessageCircle } from 'lucide-react';
 
 type Props = {
   role: 'teacher' | 'student' | 'parent' | 'admin' | 'master';
@@ -29,7 +29,15 @@ export default function LineLinkPanel({ role, lineUserId, description, compact =
       setMessage('LINE連携が完了しました。');
       window.history.replaceState(null, '', window.location.pathname);
     } else if (error) {
-      setMessage('LINE連携に失敗しました。時間をおいて再度お試しください。解決しない場合はサポートセンターへご連絡ください。');
+      const errorMessages: Record<string, string> = {
+        line_auth_failed: 'LINE側で連携が完了しませんでした。キャンセルしていないか確認し、もう一度お試しください。',
+        line_env_missing: 'LINE連携の設定が不足しています。管理者へご連絡ください。',
+        token_failed: 'LINE認証の有効期限が切れたか、認証設定が一致していません。最初からやり直してください。',
+        profile_failed: 'LINEプロフィールを取得できませんでした。LINEへのログイン状態を確認してください。',
+        line_integration_unavailable: 'このアカウントでは現在LINE連携を利用できません。',
+        line_link_failed: '連携の有効期限が切れたか、別の連携操作が開始されました。設定画面からもう一度お試しください。',
+      };
+      setMessage(errorMessages[error] || 'LINE連携に失敗しました。時間をおいて再度お試しください。解決しない場合はサポートセンターへご連絡ください。');
       window.history.replaceState(null, '', window.location.pathname);
     }
   }, []);
@@ -47,8 +55,10 @@ export default function LineLinkPanel({ role, lineUserId, description, compact =
       const data = await res.json();
       if (!res.ok || !data.url) throw new Error(data.error || 'failed');
       window.location.href = data.url;
-    } catch {
-      setMessage('LINE連携画面への移動に失敗しました。');
+    } catch (error) {
+      setMessage(error instanceof Error && error.message === 'line-integration-unavailable'
+        ? 'この環境ではLINE外部連携を停止しています。LINE側の画面は今回の診断対象外です。'
+        : 'LINE連携画面への移動に失敗しました。');
       setLoading(false);
     }
   };
@@ -79,6 +89,15 @@ export default function LineLinkPanel({ role, lineUserId, description, compact =
         <MessageCircle size={18} className="text-[#06C755]" /> LINE連携
       </h2>
       <p className="text-xs text-gray-500 mb-4 font-medium leading-relaxed">{description}</p>
+      <details className="mb-4 rounded-2xl border border-green-100 bg-green-50/70 px-4 py-3">
+        <summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-black text-green-900"><HelpCircle size={15} />連携方法・よくある質問</summary>
+        <ol className="mt-2 list-decimal space-y-1 pl-5 text-xs font-bold leading-6 text-green-900">
+          <li>「LINEと連携する」を押し、通知を受け取るLINEアカウントでログインします。</li>
+          <li>認証画面で許可し、アプリに「連携済み」と表示されたことを確認します。</li>
+          <li>通知が届かない場合は、公式アカウントをブロックしていないか、通知設定がONか確認します。</li>
+        </ol>
+        <p className="mt-2 text-[11px] font-bold leading-5 text-green-800">Q. 別のLINEに変えたい：一度「連携を解除する」を押し、変更先のLINEで連携し直してください。</p>
+      </details>
       {message && <p className="mb-3 rounded-xl bg-slate-50 px-3 py-2 text-xs font-bold text-slate-600">{message}</p>}
 
       {linked ? (

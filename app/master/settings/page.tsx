@@ -4,8 +4,9 @@ import type React from 'react';
 import { useState, useEffect } from 'react';
 import { db, auth } from '@/lib/firebase';
 import { doc, setDoc, getDoc } from 'firebase/firestore';
-import { updatePassword } from 'firebase/auth';
+import { signInWithEmailAndPassword } from 'firebase/auth';
 import { useAuth } from '@/app/context/AuthContext';
+import { minPasswordLength } from '@/lib/password-policy';
 import { 
   ArrowLeft, Link as LinkIcon, Loader2, Save, 
   Settings, User, Lock, LogOut, Smartphone, 
@@ -18,6 +19,7 @@ import LineLinkPanel from '@/app/components/LineLinkPanel';
 import { RELEASE_PHASES, ReleasePhaseId } from '@/lib/release-phase-visibility';
 import SystemControl from '@/app/components/master/SystemControl';
 import {
+  CLASS_BUTTON_GRADES,
   DEFAULT_CLASS_BUTTON_SETTINGS,
   normalizeClassButtonSettings,
   type ClassButtonSettings,
@@ -86,7 +88,6 @@ const DEFAULT_VISIBILITY = {
     shifts: true,
     monthlySchedules: true,
     attendance: false,
-    attendanceCorrections: false,
     attendanceDiagnostics: false,
     substitutions: true,
     announcements: true,
@@ -231,7 +232,6 @@ const ADMIN_VISIBILITY_ITEMS = [
   { key: 'shifts', label: 'シフト管理' },
   { key: 'monthlySchedules', label: '月間予定' },
   { key: 'attendance', label: '勤怠管理' },
-  { key: 'attendanceCorrections', label: '打刻修正承認' },
   { key: 'attendanceDiagnostics', label: '勤怠ミス候補' },
   { key: 'substitutions', label: '代行依頼管理' },
   { key: 'announcements', label: 'お知らせ配信' },
@@ -277,6 +277,10 @@ export default function SettingsPage() {
   const [customMissions, setCustomMissions] = useState<CustomMission[]>([]);
   const [classButtonSettings, setClassButtonSettings] = useState<ClassButtonSettings>(DEFAULT_CLASS_BUTTON_SETTINGS);
   const [savingNotifications, setSavingNotifications] = useState(false);
+
+  useEffect(() => {
+    if (profile?.isFirstLogin === true) setActiveTab('account');
+  }, [profile?.isFirstLogin]);
 
   // --- PWA State ---
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
@@ -381,8 +385,20 @@ export default function SettingsPage() {
     }
   };
 
-  const handleClassButtonSettingChange = (key: keyof ClassButtonSettings, value: string | number) => {
+  const handleClassButtonSettingChange = (key: keyof ClassButtonSettings, value: string | number | boolean) => {
     setClassButtonSettings(prev => normalizeClassButtonSettings({ ...prev, [key]: value }));
+  };
+
+  const handleTestPrepGradeVisibilityChange = (studentGrade: typeof CLASS_BUTTON_GRADES[number], shiftGrade: typeof CLASS_BUTTON_GRADES[number], checked: boolean) => {
+    setClassButtonSettings(prev => normalizeClassButtonSettings({
+      ...prev,
+      test_prep_grade_visibility: {
+        ...prev.test_prep_grade_visibility,
+        [studentGrade]: checked
+          ? Array.from(new Set([...prev.test_prep_grade_visibility[studentGrade], shiftGrade]))
+          : prev.test_prep_grade_visibility[studentGrade].filter(grade => grade !== shiftGrade),
+      },
+    }));
   };
 
   const handleVisibilityChange = (group: 'student' | 'parent' | 'teacher' | 'admin', key: string, value: boolean) => {
@@ -492,10 +508,28 @@ export default function SettingsPage() {
       setPasswordMsg('パスワードが一致しません');
       return;
     }
+    const minLength = minPasswordLength(profile?.role);
+    if (newPassword.length < minLength) {
+      setPasswordMsg(`エラー: パスワードは${minLength}文字以上で入力してください`);
+      return;
+    }
     try {
-      if(user) await updatePassword(user, newPassword);
+      const currentUser = auth.currentUser;
+      if (!currentUser?.email) throw new Error('missing-auth-email');
+      const token = await currentUser.getIdToken();
+      const res = await fetch('/api/auth/change-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ password: newPassword }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || 'password-change-failed');
+      sessionStorage.removeItem(`classbase_profile_cache:${currentUser.uid}`);
+      const credential = await signInWithEmailAndPassword(auth, currentUser.email, newPassword);
+      await credential.user.getIdToken(true);
       setPasswordMsg('パスワードを変更しました');
       setNewPassword(''); setConfirmPassword('');
+      if (profile?.isFirstLogin === true) window.location.replace('/master');
     } catch(e) { setPasswordMsg('エラー: 再ログインが必要です'); }
   };
 
@@ -638,6 +672,27 @@ export default function SettingsPage() {
                   <ClassWindowPreview label="1限" start={classButtonSettings.period1_start} end={classButtonSettings.period1_end} settings={classButtonSettings} />
                   <ClassWindowPreview label="2限" start={classButtonSettings.period2_start} end={classButtonSettings.period2_end} settings={classButtonSettings} />
                 </div>
+              </div>
+
+              <div className="mt-5 rounded-3xl border border-amber-200 bg-amber-50/70 p-5">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div>
+                    <p className="text-xs font-black uppercase tracking-wider text-amber-600">Test Preparation</p>
+                    <h3 className="mt-1 text-base font-black text-slate-900">講師配置の「対策」を参加ボタンへ表示</h3>
+                    <p className="mt-2 text-xs font-bold leading-relaxed text-slate-600">講師配置の講座名・詳細科目などに「対策」を含む授業を、受講登録とは別に表示します。行が生徒の学年、列が表示対象の講師配置学年です。</p>
+                  </div>
+                  <label className="flex min-h-11 shrink-0 cursor-pointer items-center gap-3 rounded-2xl bg-white px-4 py-3 text-sm font-black text-slate-700 ring-1 ring-amber-200">
+                    <input type="checkbox" checked={classButtonSettings.test_prep_enabled} onChange={event => handleClassButtonSettingChange('test_prep_enabled', event.target.checked)} className="h-5 w-5 accent-amber-600" />
+                    対策表示を有効にする
+                  </label>
+                </div>
+                <div className={`mt-5 overflow-x-auto rounded-2xl bg-white ring-1 ring-amber-100 ${classButtonSettings.test_prep_enabled ? '' : 'opacity-50'}`}>
+                  <table className="w-full min-w-[520px] text-sm">
+                    <thead className="bg-amber-100/70 text-xs font-black text-amber-900"><tr><th className="px-4 py-3 text-left">生徒の学年</th>{CLASS_BUTTON_GRADES.map(grade => <th key={grade} className="px-4 py-3 text-center">{grade}の対策を表示</th>)}</tr></thead>
+                    <tbody className="divide-y divide-amber-100">{CLASS_BUTTON_GRADES.map(studentGrade => <tr key={studentGrade}><th className="px-4 py-4 text-left font-black text-slate-800">{studentGrade}</th>{CLASS_BUTTON_GRADES.map(shiftGrade => <td key={shiftGrade} className="px-4 py-4 text-center"><input type="checkbox" disabled={!classButtonSettings.test_prep_enabled} checked={classButtonSettings.test_prep_grade_visibility[studentGrade].includes(shiftGrade)} onChange={event => handleTestPrepGradeVisibilityChange(studentGrade, shiftGrade, event.target.checked)} aria-label={`${studentGrade}に${shiftGrade}の対策を表示`} className="h-5 w-5 accent-amber-600" /></td>)}</tr>)}</tbody>
+                  </table>
+                </div>
+                <p className="mt-3 text-xs font-black text-amber-800">現在の推奨設定: 中1・中2は相互表示、中3は中3のみ。</p>
               </div>
             </div>
             
@@ -882,7 +937,7 @@ export default function SettingsPage() {
                   icon={<Bell size={18} className="text-slate-500" />}
                   items={[
                     { key: 'line_enabled', label: 'LINE通知を使う', description: '全アカウントのLINE通知を有効にします。' },
-                    { key: 'email_enabled', label: 'メール通知を使う', description: 'メール送信ジョブの利用を有効にします。' },
+                    { key: 'email_enabled', label: 'メール通知を使う', description: '対象者へのメール送信を有効にします（1回100名まで）。' },
                     { key: 'in_app_enabled', label: 'アプリ内通知を使う', description: 'アプリ内のお知らせ・通知表示を有効にします。' },
                   ]}
                   values={notificationSettings}
@@ -931,6 +986,11 @@ export default function SettingsPage() {
            ======================= */}
         {activeTab === 'account' && (
           <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2">
+            {profile?.isFirstLogin === true && (
+              <div className="rounded-2xl border-2 border-amber-300 bg-amber-50 p-4 text-sm font-black leading-relaxed text-amber-900">
+                初回ログインのため、この画面で新しいパスワードを設定してください。
+              </div>
+            )}
             
             {/* PWAインストール */}
             {!isStandalone && (
