@@ -8,16 +8,17 @@ type CourseOptionPayload = {
 type LoadCourseOptionsInput = {
   grade: string;
   year?: number;
+  studentId?: string;
   getToken: (forceRefresh?: boolean) => Promise<string>;
   force?: boolean;
 };
 
 const CACHE_TTL_MS = 10 * 60 * 1000;
-const CACHE_VERSION = 'v12-course-slot-identity';
+const CACHE_VERSION = 'v13-course-registration-refresh';
 const memoryCache = new Map<string, { expiresAt: number; payload: CourseOptionPayload }>();
 const pendingRequests = new Map<string, Promise<CourseOptionPayload>>();
 
-const cacheKey = (grade: string, year?: number) => `${String(grade || 'all').trim()}__${year || 'current'}`;
+const cacheKey = (grade: string, year?: number, studentId?: string) => `${String(grade || 'all').trim()}__${year || 'current'}__${String(studentId || 'self').trim()}`;
 const storageKey = (key: string) => `classbase_course_options:${CACHE_VERSION}:${key}`;
 
 const readSessionCache = (key: string) => {
@@ -45,8 +46,8 @@ const writeSessionCache = (key: string, entry: { expiresAt: number; payload: Cou
   }
 };
 
-export async function loadCourseRegistrationOptions({ grade, year, getToken, force = false }: LoadCourseOptionsInput) {
-  const key = cacheKey(grade, year);
+export async function loadCourseRegistrationOptions({ grade, year, studentId, getToken, force = false }: LoadCourseOptionsInput) {
+  const key = cacheKey(grade, year, studentId);
   if (!force) {
     const memory = memoryCache.get(key);
     if (memory && memory.expiresAt > Date.now()) return memory.payload;
@@ -63,6 +64,7 @@ export async function loadCourseRegistrationOptions({ grade, year, getToken, for
     const params = new URLSearchParams();
     if (grade) params.set('grade', grade);
     if (year) params.set('year', String(year));
+    if (studentId) params.set('student_id', studentId);
     const requestOptions = async (forceRefresh: boolean) => {
       const token = await getToken(forceRefresh);
       const response = await fetch(`/api/course-registration-options?${params.toString()}`, {

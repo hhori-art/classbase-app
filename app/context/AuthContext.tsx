@@ -8,7 +8,7 @@ import {
   setPersistence,
   browserLocalPersistence,
 } from 'firebase/auth';
-import { doc, getDocFromCache, serverTimestamp, updateDoc } from 'firebase/firestore';
+import { doc, getDocFromCache, onSnapshot, serverTimestamp, updateDoc } from 'firebase/firestore';
 import { usePathname } from 'next/navigation';
 import { auth, db } from '@/lib/firebase';
 import { passwordChangePathForRole, shouldRedirectToPasswordChange } from '@/lib/first-login-guard';
@@ -91,6 +91,11 @@ const AUTH_INIT_TIMEOUT_MS = 12000;
 const PROFILE_FETCH_TIMEOUT_MS = 9000;
 const PROFILE_CACHE_TTL_MS = 60 * 1000;
 const LAST_LOGIN_TOUCH_INTERVAL_MS = 15 * 60 * 1000;
+const PRIVATE_PROFILE_FIELDS = new Set([
+  'initial_password', 'raw_password', 'parent_initial_password',
+  'password', 'password_hash', 'temporary_password',
+  'line_user_id', 'lineUserId', 'reset_token', 'verification_token',
+]);
 const profileCacheKey = (uid: string) => `classbase_profile_cache:${uid}`;
 const lastLoginTouchKey = (uid: string) => `classbase_last_login_touch:${uid}`;
 
@@ -129,6 +134,25 @@ const clearProfileCache = (uid?: string | null) => {
   } catch {}
 };
 
+const safeLiveProfile = (uid: string, data: Record<string, any>): UserProfile => Object.fromEntries(
+  Object.entries({ ...data, uid, role: normalizeRole(data.role) })
+    .filter(([key]) => !PRIVATE_PROFILE_FIELDS.has(key)),
+) as UserProfile;
+
+const courseRegistrationSignature = (profile: Record<string, any>) => JSON.stringify({
+  grade: profile.grade || '',
+  active: profile.active_course_registration_id || '',
+  ids: Array.isArray(profile.selected_course_ids) ? profile.selected_course_ids : [],
+  keys: Array.isArray(profile.selected_course_keys) ? profile.selected_course_keys : [],
+  year: profile.course_registration_year || '',
+  term: profile.course_registration_term || '',
+  updated: profile.course_registration_updated_at || '',
+  testPrepActive: profile.active_test_prep_course_registration_id || '',
+  testPrepIds: Array.isArray(profile.selected_test_prep_course_ids) ? profile.selected_test_prep_course_ids : [],
+  testPrepKeys: Array.isArray(profile.selected_test_prep_course_keys) ? profile.selected_test_prep_course_keys : [],
+  testPrepUpdated: profile.test_prep_course_registration_updated_at || '',
+});
+
 const touchLastLogin = async (uid: string) => {
   if (typeof window === 'undefined' || !uid) return;
   try {
@@ -162,6 +186,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const authSettledRef = useRef(false);
   const authTransitionRef = useRef(0);
   const lastAuthenticatedUidRef = useRef<string | null>(null);
+  const courseRegistrationSignatureRef = useRef('');
 
   const clearAuthUiState = (keepLoading = false) => {
     redirectingRef.current = false;
@@ -371,6 +396,63 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     }
     return true;
   };
+
+  // 管理者が別端末から生徒の講座登録を変更しても、再ログインを待たずに
+  // AuthContextと講座画面のキャッシュを更新する。生徒画面ごとの重複購読は行わない。
+  useEffect(() => {
+    if (!user?.uid || profile?.uid !== user.uid) return;
+    const uid = user.uid;
+    return onSnapshot(doc(db, 'users', uid), snapshot => {
+      if (!snapshot.exists()) return;
+      const data = snapshot.data();
+      const status = String(data.account_status || data.status || '').toLowerCase();
+      if (['suspended', 'withdrawn', 'archived'].includes(status)) {
+        clearProfileCache(uid);
+        clearCourseRegistrationOptionsCache();
+        void firebaseSignOut(auth).finally(() => window.location.replace('/?reason=account-inactive'));
+        return;
+      }
+      const nextProfile = safeLiveProfile(uid, data);
+      const nextCourseRegistrationSignature = courseRegistrationSignature(nextProfile);
+      if (courseRegistrationSignatureRef.current !== nextCourseRegistrationSignature) {
+        courseRegistrationSignatureRef.current = nextCourseRegistrationSignature;
+        clearCourseRegistrationOptionsCache();
+      }
+      writeCachedProfile(nextProfile);
+      setProfile(current => current?.uid === uid ? nextProfile : current);
+    }, error => console.warn('Authenticated profile live update failed:', error));
+  }, [profile?.uid, user?.uid]);
+
+  // モバイルOSがバックグラウンド中にFirestore購読を停止した場合の保険。
+  // アプリに戻った時だけサーバーの最新登録と照合し、定期ポーリングは行わない。
+  useEffect(() => {
+    if (!user?.uid || profile?.uid !== user.uid) return;
+    let disposed = false;
+    let lastRefreshAt = 0;
+    const refreshCourseRegistration = async () => {
+      if (disposed || document.visibilityState !== 'visible' || Date.now() - lastRefreshAt < 15_000) return;
+      lastRefreshAt = Date.now();
+      try {
+        const remote = safeLiveProfile(user.uid, await loadAuthenticatedProfile(user, PROFILE_FETCH_TIMEOUT_MS));
+        const nextSignature = courseRegistrationSignature(remote);
+        if (nextSignature === courseRegistrationSignatureRef.current || disposed) return;
+        courseRegistrationSignatureRef.current = nextSignature;
+        clearCourseRegistrationOptionsCache();
+        writeCachedProfile(remote);
+        setProfile(current => current?.uid === user.uid ? remote : current);
+      } catch (error) {
+        console.warn('Course registration focus refresh failed:', error);
+      }
+    };
+    const handleVisibility = () => { if (document.visibilityState === 'visible') void refreshCourseRegistration(); };
+    window.addEventListener('focus', refreshCourseRegistration);
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      disposed = true;
+      window.removeEventListener('focus', refreshCourseRegistration);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [profile?.uid, user]);
 
   useEffect(() => {
     setPersistence(auth, browserLocalPersistence).catch(console.error);

@@ -3,7 +3,7 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, jsonError, requireRole } from '@/lib/server-auth';
 import { canonicalPeriodForGradeSubject, enrichCourseOptionsWithShifts, fixedPeriodForGradeCourse } from '@/lib/course-registration-match';
-import { courseOptionMatchesSelection, currentCourseTermIds, resolveSelectedCourseOptionIds, selectCurrentCourseRegistration } from '@/lib/course-registration-selection';
+import { courseOptionMatchesSelection, currentCourseTermIds, resolveSelectedCourseOptionIds, selectEffectiveCourseRegistration } from '@/lib/course-registration-selection';
 import { canStudentRegisterCourseOption } from '@/lib/course-registration-rules';
 import { getCourseSubjectGroup, normalizeCourseText, toAsciiDigits } from '@/lib/course-text';
 import { buildZoomJoinUrl, hasZoomPasswordToken, looksLikeZoomUrl, normalizeZoomMeetingId } from '@/lib/zoom-url';
@@ -426,13 +426,11 @@ export async function GET(request: NextRequest) {
       .sort((a: any, b: any) => timestampValue(b.updated_at || b.created_at) - timestampValue(a.updated_at || a.created_at));
 
     const selectedIds = new Set<string>();
-    const activeRegistrationId = String(user.profile.active_course_registration_id || '');
     const courseYear = Number(targetDate.slice(5, 7)) >= 4 ? Number(targetDate.slice(0, 4)) : Number(targetDate.slice(0, 4)) - 1;
     const currentTerms = currentCourseTermIds(sharedMasters.optionDocs.map(doc => doc.data), courseYear, targetDate);
     const regularRegistrations = registrations.filter((registration: any) => String(registration.registration_type || 'regular') === 'regular');
     const testPrepRegistrations = registrations.filter((registration: any) => registration.registration_type === 'test_prep');
-    const currentRegistration = selectCurrentCourseRegistration(regularRegistrations, courseYear, currentTerms, activeRegistrationId)
-      || regularRegistrations.find((registration: any) => activeRegistrationId && registration.id === activeRegistrationId)
+    const currentRegistration = selectEffectiveCourseRegistration(regularRegistrations, courseYear, currentTerms, user.profile)
       || regularRegistrations.find((registration: any) => registration.is_current === true || registration.current === true)
       || regularRegistrations.find((registration: any) => String(registration.status || '').toLowerCase() === 'active')
       || regularRegistrations[0];

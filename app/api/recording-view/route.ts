@@ -88,6 +88,7 @@ export async function POST(request: NextRequest) {
           coins: FieldValue.increment(COMPLETION_REWARD),
           total_coins: FieldValue.increment(COMPLETION_REWARD),
           last_recording_view_date: new Date().toISOString().split('T')[0],
+          recording_complete_count: FieldValue.increment(1),
           earned_badges: FieldValue.arrayUnion('badge_book'),
           updated_at: FieldValue.serverTimestamp(),
         }, { merge: true });

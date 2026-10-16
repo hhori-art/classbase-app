@@ -1065,6 +1065,26 @@ test('course registration accepts signed visible options and derives profile set
   assert.equal(h.data.get('users/actor').subject_science, '物理');
 });
 
+test('student can clear the current course registration without a course token', async () => {
+  const h = harness({
+    profiles: { actor: { ...student, grade: '中3', active_course_registration_id: 'current', selected_course_ids: ['physics-monday'] } },
+    documents: {
+      'course_registrations/current': { student_id: 'actor', registration_type: 'regular', is_current: true, current: true, selected_course_ids: ['physics-monday'] },
+    },
+  });
+  const response = await h.load('app/api/parent/course-registrations/route.ts').POST(request('/api/parent/course-registrations', {
+    student_id: 'actor', year: 2026, term: 'term03', registration_type: 'regular',
+    selected_course_ids: [], registration_tokens: [],
+  }));
+  assert.equal(response.status, 200);
+  assert.equal(h.data.get('users/actor').selected_course_ids.length, 0);
+  assert.equal(h.data.get('course_registrations/current').is_current, false);
+  const currentPath = h.writes.find(path => path.startsWith('course_registrations/registration_'));
+  assert.ok(currentPath);
+  assert.equal(h.data.get(currentPath).selected_course_ids.length, 0);
+  assert.equal(h.data.get(currentPath).is_current, true);
+});
+
 test('course registration keeps schedule-specific siblings separate and honors explicit second period', () => {
   const h = harness();
   const selection = h.load('lib/course-registration-selection.ts');
@@ -1104,6 +1124,13 @@ test('course registration rejects unsigned, foreign-grade, expired, mixed-term, 
       return { ids: ['one', 'two'], tokens: [
         issue({ actor_id: 'actor', grade: '中3', option_id: 'one', stable_key: 'physics', year: 2026, term: 'term03', registration_type: 'regular', request_id: '', day: '月', slot: '1時間目', course_text: '物理' }),
         issue({ actor_id: 'actor', grade: '中3', option_id: 'two', stable_key: 'chemistry', year: 2026, term: 'term03', registration_type: 'regular', request_id: '', day: '月', slot: '1時間目', course_text: '化学' }),
+      ] };
+    },
+    h => {
+      const issue = h.load('lib/server/course-registration-token.ts').issueCourseRegistrationToken;
+      return { ids: ['physics-mon', 'physics-thu'], tokens: [
+        issue({ actor_id: 'actor', grade: '中3', option_id: 'physics-mon', stable_key: 'course_中3_理科_物理_月_1限', course_key: '中3__理科__物理', year: 2026, term: 'term03', registration_type: 'regular', request_id: '', day: '月', slot: '1限', course_text: '理科 物理' }),
+        issue({ actor_id: 'actor', grade: '中3', option_id: 'physics-thu', stable_key: 'course_中3_理科_物理_木_2限', course_key: '中3__理科__物理', year: 2026, term: 'term03', registration_type: 'regular', request_id: '', day: '木', slot: '2限', course_text: '理科 物理' }),
       ] };
     },
   ];
@@ -1176,22 +1203,59 @@ test('school administrators cannot create test-prep events', async () => {
   }
 });
 
-test('school administrators cannot update regular-course registrations', async () => {
+test('school administrators update regular-course registrations only for their own school', async () => {
   const manager = { ...admin, admin_permissions: { science_social: true }, school_ids: ['112'] };
-  const h = harness({
-    profiles: { actor: manager, target: { ...student, role: 'student', school_id: '112', parent_uid: 'parent' } },
-    documents: {
-      'course_registrations/regular-old': { student_id: 'target', registration_type: 'regular', is_current: true, current: true },
-      'course_registrations/prep-current': { student_id: 'target', registration_type: 'test_prep', is_current: true, current: true },
-    },
-  });
-  const response = await h.load('app/api/admin/course-registrations/route.ts').POST(request('/api/admin/course-registrations', {
-    student_id: 'target', year: 2026, term: 'term03', selected_course_ids: ['regular-new'], selected_course_labels: ['物理'],
+  for (const [schoolId, expectedStatus] of [['112', 200], ['999', 403]]) {
+    const h = harness({
+      profiles: { actor: manager, target: { ...student, role: 'student', school_id: schoolId, parent_uid: 'parent', grade: '中3' } },
+      documents: {
+        'course_registrations/regular-old': { student_id: 'target', registration_type: 'regular', is_current: true, current: true },
+        'course_registrations/prep-current': { student_id: 'target', registration_type: 'test_prep', is_current: true, current: true },
+      },
+      env: { COURSE_REGISTRATION_TOKEN_SECRET: 'fixture-secret' },
+    });
+    const issue = h.load('lib/server/course-registration-token.ts').issueCourseRegistrationToken;
+    const registrationToken = issue({
+      actor_id: 'actor', grade: '中3', option_id: 'regular-new', stable_key: 'course_中3_理科_物理_月_1限', course_key: '中3__理科__物理',
+      year: 2026, term: 'term03', registration_type: 'regular', request_id: '', day: '月', slot: '1限', course_text: '理科 物理',
+    });
+    const response = await h.load('app/api/admin/course-registrations/route.ts').POST(request('/api/admin/course-registrations', {
+      student_id: 'target', year: 2026, term: 'term03', selected_course_ids: ['regular-new'], selected_course_labels: ['物理'], registration_tokens: [registrationToken],
+    }));
+    assert.equal(response.status, expectedStatus);
+    if (expectedStatus === 200) {
+      assert.equal(h.data.get('course_registrations/regular-old').is_current, false);
+      assert.equal(h.data.get('course_registrations/prep-current').is_current, true);
+      assert.equal(h.data.get('course_registrations/admin_target_2026_term03').selected_course_ids.join(','), 'regular-new');
+    } else {
+      assert.equal(h.writes.length, 0);
+    }
+  }
+});
+
+test('master course registration rejects duplicate courses and can clear an existing registration', async () => {
+  const documents = {
+    'course_registrations/regular-old': { student_id: 'target', registration_type: 'regular', is_current: true, current: true },
+  };
+  const rejected = harness({ profiles: { actor: master, target: { ...student, school_id: '112', grade: '中3' } }, documents, env: { COURSE_REGISTRATION_TOKEN_SECRET: 'fixture-secret' } });
+  const issue = rejected.load('lib/server/course-registration-token.ts').issueCourseRegistrationToken;
+  const duplicateTokens = [
+    issue({ actor_id: 'actor', grade: '中3', option_id: 'physics-mon', stable_key: 'course_中3_理科_物理_月_1限', course_key: '中3__理科__物理', year: 2026, term: 'term03', registration_type: 'regular', request_id: '', day: '月', slot: '1限', course_text: '理科 物理' }),
+    issue({ actor_id: 'actor', grade: '中3', option_id: 'physics-thu', stable_key: 'course_中3_理科_物理_木_2限', course_key: '中3__理科__物理', year: 2026, term: 'term03', registration_type: 'regular', request_id: '', day: '木', slot: '2限', course_text: '理科 物理' }),
+  ];
+  const rejectedResponse = await rejected.load('app/api/admin/course-registrations/route.ts').POST(request('/api/admin/course-registrations', {
+    student_id: 'target', year: 2026, term: 'term03', selected_course_ids: ['physics-mon', 'physics-thu'], registration_tokens: duplicateTokens,
   }));
-  assert.equal(response.status, 403);
-  assert.equal(h.data.get('course_registrations/regular-old').is_current, true);
-  assert.equal(h.data.get('course_registrations/prep-current').is_current, true);
-  assert.equal(h.data.has('course_registrations/admin_target_2026_term03'), false);
+  assert.equal(rejectedResponse.status, 400);
+  assert.equal(rejected.data.has('course_registrations/admin_target_2026_term03'), false);
+
+  const cleared = harness({ profiles: { actor: master, target: { ...student, school_id: '112', grade: '中3', selected_course_ids: ['physics-mon'] } }, documents, env: { COURSE_REGISTRATION_TOKEN_SECRET: 'fixture-secret' } });
+  const clearedResponse = await cleared.load('app/api/admin/course-registrations/route.ts').POST(request('/api/admin/course-registrations', {
+    student_id: 'target', year: 2026, term: 'term03', selected_course_ids: [], selected_course_labels: [],
+  }));
+  assert.equal(clearedResponse.status, 200);
+  assert.equal(cleared.data.get('users/target').selected_course_ids.length, 0);
+  assert.equal(cleared.data.get('course_registrations/admin_target_2026_term03').selected_course_ids.length, 0);
 });
 
 test('student transfer accepts only a signed eligible option and atomically closes the absence', async () => {
@@ -1286,6 +1350,29 @@ test('parent transfer creates linked absence and transfer records from signed se
   assert.equal([...h.data.keys()].filter(path => path.startsWith('requests/parent_transfer_')).length, 2);
 });
 
+test('student can confirm a signed transfer without a prior absence record', async () => {
+  const h = harness({
+    profiles: { actor: { ...student, role: 'student', grade: '中3', student_name: 'Student One' } },
+    documents: {
+      'shift_assignments/shift': { target_date: '2026-10-12', unit: '電流', target_subject: '理科', target_detail_subject: '物理', target_meeting_id: '12345' },
+    },
+    env: { TRANSFER_OPTION_TOKEN_SECRET: 'fixture-secret' },
+  });
+  const token = h.load('lib/server/transfer-option-token.ts').issueTransferOptionToken({
+    actor_id: 'actor', student_id: 'actor', absence_id: 'pending:actor:2026-10-05', shift_id: 'shift',
+    target_date: '2026-10-12', unit: '電流', subject: '理科', course_name: '物理', period: 1,
+  });
+  const response = await h.load('app/api/parent/absence-requests/route.ts').POST(request('/api/parent/absence-requests', {
+    student_id: 'actor', type: 'transfer', target_date: '2026-10-05', transfer_shift_id: 'shift', transfer_token: token,
+  }));
+  assert.equal(response.status, 200);
+  const transferPath = h.writes.find(path => path.startsWith('requests/parent_transfer_') && !path.endsWith('_absence'));
+  assert.ok(transferPath);
+  const transferId = transferPath.split('/').at(-1);
+  assert.equal(h.data.get(`${transferPath}`).target_date, '2026-10-12');
+  assert.equal(h.data.get(`requests/${transferId}_absence`).target_date, '2026-10-05');
+});
+
 test('parent absence is idempotent and rejects invalid dates, types, and oversized reasons', async () => {
   const makeHarness = () => harness({
     profiles: {
@@ -1339,6 +1426,27 @@ test('parent transfer options use the selected absence day and return only signe
     actor_id: 'actor', student_id: 'child', absence_id: 'pending:child:2099-10-05', shift_id: 'match',
   });
   assert.equal(grant.unit, '電流');
+});
+
+test('student transfer options allow selecting an original lesson day without a prior absence record', async () => {
+  const h = harness({
+    profiles: { actor: { ...student, role: 'student', grade: '中3' } },
+    documents: {
+      'shift_assignments/absent': { target_date: '2099-10-05', target_grade: '中3', target_subject: '理科', target_detail_subject: '物理', unit: '電流', role_type: 'main', target_meeting_id: '11111111111' },
+      'shift_assignments/match': { target_date: '2099-10-12', target_grade: '中3', target_subject: '理科', target_detail_subject: '物理', unit: '電流', role_type: 'main', target_meeting_id: '22222222222' },
+    },
+    env: { TRANSFER_OPTION_TOKEN_SECRET: 'fixture-secret' },
+    overrides: { 'next/cache': { unstable_cache: fn => fn } },
+  });
+  const response = await h.load('app/api/student/transfer-options/route.ts').GET(
+    request('/api/student/transfer-options?absence_date=2099-10-05', null, 'valid', 'GET'),
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.absences.length, 0);
+  assert.equal(body.selected_absence.id, 'pending:actor:2099-10-05');
+  assert.equal(body.options.length, 1);
+  assert.equal(body.options[0].id, 'match');
 });
 
 test('parent transfer rejects an arbitrary option before creating either record', async () => {
@@ -1966,14 +2074,34 @@ test('school claim listings exclude other school records', async () => {
   assert.equal(response.status, 200); assert.deepEqual((await response.json()).transport.map(item => item.id), ['a']);
 });
 
-test('school administrators cannot write attendance follow-up records', async () => {
-  for (const school_id of ['112', '999']) {
+test('school administrators write attendance follow-up records only for their own school', async () => {
+  for (const [school_id, expectedStatus] of [['112', 200], ['999', 403]]) {
     const h = harness({ profiles: { actor: admin, target: { ...student, school_id } } });
     const response = await h.load('app/api/admin/school-students/attendance-follow-ups/route.ts').POST(request('/api/admin/school-students/attendance-follow-ups', {
       student_id: 'target', status: 'contacted', note: '保護者へ電話連絡', week_start: '2026-08-31', week_end: '2026-09-06', consecutive_missed_weeks: 2,
     }));
-    assert.equal(response.status, 403);
-    assert.equal(h.writes.length, 0);
+    assert.equal(response.status, expectedStatus);
+    if (expectedStatus === 403) assert.equal(h.writes.length, 0);
+  }
+});
+
+test('school administrators edit student settings and monthly schedules only for their own school', async () => {
+  for (const [schoolId, expectedStatus] of [['112', 200], ['999', 403]]) {
+    const studentHarness = harness({ profiles: { actor: admin, target: { ...student, school_id: schoolId } } });
+    const studentResponse = await studentHarness.load('app/api/admin/school-students/options/route.ts').POST(request('/api/admin/school-students/options', {
+      user_id: 'target', middle_school: '創造中', camera_off_requested: true,
+    }));
+    assert.equal(studentResponse.status, expectedStatus);
+    if (expectedStatus === 200) assert.equal(studentHarness.data.get('users/target').middle_school, '創造中');
+    else assert.equal(studentHarness.writes.length, 0);
+
+    const scheduleHarness = harness({ profiles: { actor: admin } });
+    const scheduleResponse = await scheduleHarness.load('app/api/monthly-schedules/route.ts').POST(request('/api/monthly-schedules', {
+      title: '授業日', start_date: '2026-10-20', end_date: '2026-10-20', school_id: schoolId,
+    }));
+    assert.equal(scheduleResponse.status, expectedStatus);
+    if (expectedStatus === 200) assert.equal(scheduleHarness.data.get('monthly_schedules/generated').school_id, '112');
+    else assert.equal(scheduleHarness.writes.length, 0);
   }
 });
 
@@ -2657,6 +2785,50 @@ test('student today classes returns only the registered second-period course', a
   assert.equal(body.classes[0].course_name, '化学');
   assert.equal(body.classes[0].period, 2);
 });
+test('student today classes immediately prefers the latest administrator registration over old active history', async () => {
+  const targetDate = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Tokyo' }).format(new Date());
+  const day = new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', weekday: 'short' }).format(new Date()).replace('曜', '');
+  const h = harness({
+    profiles: { actor: {
+      ...student,
+      grade: '中3',
+      active_course_registration_id: 'latest-admin',
+      course_registration_year: 2026,
+      course_registration_term: 'admin-selected-term',
+    } },
+    env: { CLASS_PARTICIPATION_TOKEN_SECRET: 'fixture-secret' },
+    documents: {
+      'course_registrations/old-active': {
+        student_id: 'actor', registration_type: 'regular', year: 2026, term: 'current-term', status: 'active',
+        is_current: true, current: true, selected_course_keys: [`course_中3_社会_公民3_${day}_2限`],
+      },
+      'course_registrations/latest-admin': {
+        student_id: 'actor', registration_type: 'regular', year: 2026, term: 'admin-selected-term', status: 'active',
+        is_current: true, current: true, selected_course_keys: [`course_中3_理科_化学_${day}_2限`],
+      },
+      'shift_assignments/civics': {
+        target_date: targetDate, target_grade: '中3', target_subject: '社会', target_detail_subject: '公民3',
+        period: 2, role_type: 'main', target_meeting_id: '111111111', target_join_url: 'https://us02web.zoom.us/j/111111111?pwd=civics',
+      },
+      'shift_assignments/chemistry': {
+        target_date: targetDate, target_grade: '中3', target_subject: '理科', target_detail_subject: '化学',
+        period: 2, role_type: 'main', target_meeting_id: '222222222', target_join_url: 'https://us02web.zoom.us/j/222222222?pwd=chemistry',
+      },
+    },
+    overrides: {
+      '@/lib/server/student-class-masters': {
+        loadStudentClassMasters: async () => ({ optionDocs: [], curriculumDocs: [], testPrepOptionDocs: [], classButtonSettingsData: {} }),
+      },
+    },
+  });
+  const response = await h.load('app/api/student/today-classes/route.ts').GET(
+    request('/api/student/today-classes?period=2', null, 'valid', 'GET')
+  );
+  assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+  const body = await response.json();
+  assert.equal(body.classes.length, 1, JSON.stringify(body));
+  assert.equal(body.classes[0].course_name, '化学');
+});
 test('announcement API returns only the signed-in role, school, and grade audience', async () => {
   const h = harness({
     profiles: { actor: { ...student, grade: '中3' } },
@@ -3150,8 +3322,13 @@ test('school approval capability does not grant system payroll/settings permissi
 test('CSV account import cannot change a protected existing identity', async () => {
   const h = harness({ profiles: { actor: admin, target: { ...master, email: 'target@classbase.local', lifetime_id: 'target' } }, authUsers: { target: { email: 'target@classbase.local' } }, overrides: { '@/lib/events': { writeLearningEvent: async () => 'fixture-event' } } });
   const response = await h.load('app/api/admin/school-students/import/route.ts').POST(request('/api/admin/school-students/import', { school_id: '112', csv_text: 'ログインID,氏名\ntarget,Target', default_password: 'safe-password' }));
-  assert.equal(response.status, 403);
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.count, 0);
+  assert.equal(body.errors.length, 1);
+  assert.equal(body.errors[0].error, 'forbidden');
   assert.equal(h.authWrites.length, 0);
+  assert.equal(h.data.get('users/target').role, 'master');
 });
 
 test('recording proxy rejects a stored foreign download URL before forwarding the Zoom bearer', async () => {
@@ -3525,10 +3702,13 @@ test('reward exchange validates the reward and writes deduction plus request ato
   assert.equal(invalid.data.has('requests/exchange_actor_exchange_12345678'), false);
 });
 
-test('reward management is master-only and archives instead of deleting', async () => {
-  const denied = harness({ profiles: { actor: admin }, documents: { 'rewards/reward': { name: 'ノート', required_coins: 30 } } });
+test('reward management is limited to authorized science-social managers and archives instead of deleting', async () => {
+  const denied = harness({ profiles: { actor: { ...admin, admin_permissions: { science_social: false } } }, documents: { 'rewards/reward': { name: 'ノート', required_coins: 30 } } });
   assert.equal((await denied.load('app/api/admin/rewards/route.ts').GET(request('/api/admin/rewards', null, 'valid', 'GET'))).status, 403);
   assert.equal((await denied.load('app/api/admin/rewards/route.ts').PATCH(request('/api/admin/rewards', { id: 'reward', active: false }))).status, 403);
+
+  const scienceSocialManager = harness({ profiles: { actor: admin }, documents: { 'rewards/reward': { name: 'ノート', required_coins: 30, active: true } } });
+  assert.equal((await scienceSocialManager.load('app/api/admin/rewards/route.ts').GET(request('/api/admin/rewards', null, 'valid', 'GET'))).status, 200);
 
   const allowed = harness({ profiles: { actor: master }, documents: { 'rewards/reward': { name: 'ノート', required_coins: 30, active: true } } });
   const listed = await allowed.load('app/api/admin/rewards/route.ts').GET(request('/api/admin/rewards', null, 'valid', 'GET'));
@@ -3726,4 +3906,268 @@ test('講師は勤怠画面から自分の当日シフトだけ取得できる',
   const ownResponse = await managerView.load('app/api/attendance-shifts/route.ts').GET(request('/api/attendance-shifts?start=2026-10-09&end=2026-10-09&scope=mine', null, 'valid', 'GET'));
   assert.equal(ownResponse.status, 200);
   assert.deepEqual((await ownResponse.json()).shifts.map(item => item.id), ['own']);
+});
+
+const gachaDoc = (overrides = {}) => ({ name: '夏ガチャ', cost: 20, active: true, items: [{ reward_id: 'prize', weight: 10000 }], miss_weight: 0, miss_refund_coins: 0, ...overrides });
+
+test('gacha draw charges once, delivers a physical prize for shipping, and replays idempotently', async () => {
+  const h = harness({
+    profiles: { actor: { ...student, coins: 50 } },
+    documents: { 'gachas/g1': gachaDoc(), 'rewards/prize': { name: 'ノート', required_coins: 100, active: true, stock: 3 } },
+  });
+  const route = h.load('app/api/rewards/gacha/route.ts');
+  const response = await route.POST(request('/api/rewards/gacha', { gacha_id: 'g1', draw_id: 'draw_12345678' }));
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.result, 'win');
+  assert.equal(body.coins, 30);
+  assert.equal(h.data.get('coin_transactions/actor_gacha_draw_12345678').amount, -20);
+  assert.equal(h.data.get('requests/gacha_actor_draw_12345678').status, 'pending');
+  assert.equal(h.data.get('requests/gacha_actor_draw_12345678').cost, 0);
+  assert.deepEqual(h.data.get('rewards/prize').stock, { increment: -1 });
+
+  const replay = await route.POST(request('/api/rewards/gacha', { gacha_id: 'g1', draw_id: 'draw_12345678' }));
+  assert.equal((await replay.json()).applied, false);
+  assert.equal([...h.data.keys()].filter(key => key.startsWith('coin_transactions/actor_gacha_')).length, 1);
+});
+
+test('gacha treats an out-of-stock prize as a miss, refunds consolation coins, and rejects broken rates', async () => {
+  const h = harness({
+    profiles: { actor: { ...student, coins: 50 } },
+    documents: {
+      'gachas/g1': gachaDoc({ miss_refund_coins: 5 }),
+      'gachas/broken': gachaDoc({ miss_weight: 100 }),
+      'rewards/prize': { name: 'ノート', required_coins: 100, active: true, stock: 0 },
+    },
+  });
+  const route = h.load('app/api/rewards/gacha/route.ts');
+  const body = await (await route.POST(request('/api/rewards/gacha', { gacha_id: 'g1', draw_id: 'draw_miss_0001' }))).json();
+  assert.equal(body.result, 'miss');
+  assert.equal(body.refund, 5);
+  assert.equal(body.coins, 35);
+  assert.equal(h.data.has('requests/gacha_actor_draw_miss_0001'), false);
+  assert.equal((await route.POST(request('/api/rewards/gacha', { gacha_id: 'broken', draw_id: 'draw_broken_01' }))).status, 400);
+
+  const poor = harness({ profiles: { actor: { ...student, coins: 10 } }, documents: { 'gachas/g1': gachaDoc(), 'rewards/prize': { name: 'ノート', required_coins: 1, active: true } } });
+  assert.equal((await poor.load('app/api/rewards/gacha/route.ts').POST(request('/api/rewards/gacha', { gacha_id: 'g1', draw_id: 'draw_poor_0001' }))).status, 400);
+  assert.equal(poor.data.has('gacha_draws/actor_draw_poor_0001'), false);
+});
+
+test('digital rewards are granted on exchange and only the owner can get a download link', async () => {
+  const documents = { 'rewards/wallpaper': { name: '壁紙', required_coins: 30, active: true, kind: 'digital', digital_file_path: 'reward_files/wallpaper/a.png', digital_file_name: 'a.png' } };
+  const h = harness({ profiles: { actor: { ...student, coins: 100 } }, documents });
+  const exchange = await h.load('app/api/coin-transactions/route.ts').POST(request('/api/coin-transactions', {
+    action: 'reward_exchange', reward_id: 'wallpaper', exchange_id: 'exchange_digital_01',
+  }));
+  assert.equal(exchange.status, 200);
+  assert.equal((await exchange.json()).kind, 'digital');
+  assert.equal(h.data.get('reward_grants/shop_actor_exchange_digital_01').user_id, 'actor');
+  assert.equal(h.data.has('requests/exchange_actor_exchange_digital_01'), false);
+
+  const download = await h.load('app/api/rewards/download/route.ts').POST(request('/api/rewards/download', { grant_id: 'shop_actor_exchange_digital_01' }));
+  assert.equal(download.status, 200);
+  assert.ok(h.calls.includes('signed:reward_files/wallpaper/a.png'));
+
+  const other = harness({ profiles: { actor: student }, documents: { 'reward_grants/g': { user_id: 'someone-else', digital_file_path: 'reward_files/x/a.png' } } });
+  assert.equal((await other.load('app/api/rewards/download/route.ts').POST(request('/api/rewards/download', { grant_id: 'g' }))).status, 403);
+  assert.equal(other.calls.some(call => String(call).startsWith('signed:')), false);
+
+  const gachaOnly = harness({ profiles: { actor: { ...student, coins: 100 } }, documents: { 'rewards/r': { name: '限定', required_coins: 10, active: true, exchangeable: false } } });
+  assert.equal((await gachaOnly.load('app/api/coin-transactions/route.ts').POST(request('/api/coin-transactions', {
+    action: 'reward_exchange', reward_id: 'r', exchange_id: 'exchange_gacha_only',
+  }))).status, 400);
+});
+
+test('reward shipments are school-scoped and cancellation refunds coins and restores stock once', async () => {
+  const documents = {
+    'requests/exchange_student_x1': { type: 'exchange', status: 'pending', userId: 'student', rewardId: 'reward', rewardName: 'ノート', cost: 30 },
+    'rewards/reward': { name: 'ノート', required_coins: 30, active: true, stock: 2 },
+  };
+  const otherSchool = harness({ profiles: { actor: { ...admin, school: '200', school_id: '200', school_ids: ['200'] }, student: { ...student, coins: 0 } }, documents });
+  const otherRoute = otherSchool.load('app/api/admin/reward-shipments/route.ts');
+  assert.equal((await otherRoute.POST(request('/api/admin/reward-shipments', { request_id: 'exchange_student_x1', status: 'shipped' }))).status, 403);
+  assert.equal((await (await otherRoute.GET(request('/api/admin/reward-shipments', null, 'valid', 'GET'))).json()).shipments.length, 0);
+
+  const h = harness({ profiles: { actor: admin, student: { ...student, coins: 0 } }, documents });
+  const route = h.load('app/api/admin/reward-shipments/route.ts');
+  assert.equal((await route.POST(request('/api/admin/reward-shipments', { request_id: 'exchange_student_x1', status: 'preparing', student_note: '次の授業で渡します' }))).status, 200);
+  assert.equal(h.data.get('requests/exchange_student_x1').status, 'preparing');
+  const cancel = await route.POST(request('/api/admin/reward-shipments', { request_id: 'exchange_student_x1', status: 'rejected' }));
+  assert.equal(cancel.status, 200);
+  assert.equal(h.data.get('coin_transactions/reward_refund_exchange_student_x1').amount, 30);
+  assert.deepEqual(h.data.get('rewards/reward').stock, { increment: 1 });
+  assert.equal((await route.POST(request('/api/admin/reward-shipments', { request_id: 'exchange_student_x1', status: 'rejected' }))).status, 400);
+});
+
+test('point adjustments are school-scoped, audited, and cannot push a balance below zero', async () => {
+  const otherSchool = harness({ profiles: { actor: { ...admin, school: '200', school_id: '200', school_ids: ['200'] }, student: { ...student, coins: 10 } } });
+  assert.equal((await otherSchool.load('app/api/admin/points/route.ts').POST(request('/api/admin/points', {
+    action: 'adjust', user_id: 'student', amount: 5, reason: '発言', adjustment_id: 'adjust_0000001',
+  }))).status, 403);
+
+  const h = harness({ profiles: { actor: admin, student: { ...student, coins: 10, total_coins: 10 } } });
+  const route = h.load('app/api/admin/points/route.ts');
+  assert.equal((await route.POST(request('/api/admin/points', { action: 'adjust', user_id: 'student', amount: -11, reason: '修正', adjustment_id: 'adjust_0000002' }))).status, 400);
+  assert.equal((await route.POST(request('/api/admin/points', { action: 'adjust', user_id: 'student', amount: 5, reason: '', adjustment_id: 'adjust_0000003' }))).status, 400);
+  const added = await route.POST(request('/api/admin/points', { action: 'adjust', user_id: 'student', amount: 5, reason: '発言', adjustment_id: 'adjust_0000004' }));
+  assert.equal(added.status, 200);
+  assert.equal(h.data.get('coin_transactions/student_admin_adjustment_adjust_0000004').amount, 5);
+  assert.deepEqual(h.data.get('users/student').total_coins, { increment: 5 });
+
+  assert.equal((await route.POST(request('/api/admin/points', { action: 'grant_badge', user_id: 'student', badge_id: 'badge_king' }))).status, 400);
+  assert.equal((await route.POST(request('/api/admin/points', { action: 'grant_badge', user_id: 'student', badge_id: 'badge_special_mvp' }))).status, 200);
+});
+
+test('gacha configuration requires item rates plus the miss rate to total exactly 100 percent', async () => {
+  const h = harness({ profiles: { actor: admin }, documents: { 'rewards/prize': { name: 'ノート', required_coins: 10, active: true } } });
+  const route = h.load('app/api/admin/gachas/route.ts');
+  const form = (items, missWeight) => {
+    const body = new FormData();
+    body.set('name', 'テスト'); body.set('cost', '10');
+    body.set('items', JSON.stringify(items)); body.set('miss_weight', String(missWeight));
+    return new NextRequest('https://security.test/api/admin/gachas', { method: 'POST', headers: { authorization: 'Bearer valid' }, body });
+  };
+  assert.equal((await route.POST(form([{ reward_id: 'prize', weight: 3000 }], 6000))).status, 400);
+  assert.equal((await route.POST(form([{ reward_id: 'missing', weight: 3000 }], 7000))).status, 400);
+  assert.equal((await route.POST(form([{ reward_id: 'prize', weight: 3000 }], 7000))).status, 200);
+  assert.equal(h.data.get('gachas/generated').miss_weight, 7000);
+});
+
+test('reward shop stays closed when hidden globally except for students the master individually allowed', async () => {
+  const documents = {
+    'settings/portal_visibility': { student: { shop: false } },
+    'rewards/reward': { name: 'ノート', required_coins: 10, active: true },
+    'gachas/g1': gachaDoc({ items: [{ reward_id: 'reward', weight: 10000 }] }),
+  };
+  const closed = harness({ profiles: { actor: { ...student, coins: 100 } }, documents });
+  assert.equal((await closed.load('app/api/rewards/route.ts').GET(request('/api/rewards', null, 'valid', 'GET'))).status, 400);
+  assert.equal((await closed.load('app/api/coin-transactions/route.ts').POST(request('/api/coin-transactions', {
+    action: 'reward_exchange', reward_id: 'reward', exchange_id: 'exchange_closed_01',
+  }))).status, 400);
+  assert.equal((await closed.load('app/api/rewards/gacha/route.ts').POST(request('/api/rewards/gacha', { gacha_id: 'g1', draw_id: 'draw_closed_001' }))).status, 400);
+  assert.equal(closed.data.get('users/actor').coins, 100);
+
+  const tester = harness({ profiles: { actor: { ...student, coins: 100, feature_overrides: { shop: true } } }, documents });
+  assert.equal((await tester.load('app/api/rewards/route.ts').GET(request('/api/rewards', null, 'valid', 'GET'))).status, 200);
+  assert.equal((await tester.load('app/api/coin-transactions/route.ts').POST(request('/api/coin-transactions', {
+    action: 'reward_exchange', reward_id: 'reward', exchange_id: 'exchange_tester_01',
+  }))).status, 200);
+
+  const schoolAdmin = harness({ profiles: { actor: admin, student } });
+  assert.equal((await schoolAdmin.load('app/api/admin/points/route.ts').POST(request('/api/admin/points', { action: 'set_shop_override', user_id: 'student', enabled: true }))).status, 403);
+  const masterView = harness({ profiles: { actor: master, student } });
+  assert.equal((await masterView.load('app/api/admin/points/route.ts').POST(request('/api/admin/points', { action: 'set_shop_override', user_id: 'student', enabled: true }))).status, 200);
+  assert.equal(masterView.data.get('users/student').feature_overrides.shop, true);
+});
+
+test('cosmetic preset rewards are owned once, recorded server-side, and limited badges join earned badges', async () => {
+  const documents = {
+    'rewards/galaxy': { name: 'テーマ「ギャラクシー」', required_coins: 50, active: true, preset_id: 'theme_galaxy', kind: 'cosmetic' },
+    'rewards/unicorn': { name: '限定バッジ「ユニコーン」', required_coins: 50, active: true, preset_id: 'badge_shop_unicorn', kind: 'cosmetic' },
+  };
+  const h = harness({ profiles: { actor: { ...student, coins: 200 } }, documents });
+  const route = h.load('app/api/coin-transactions/route.ts');
+  const theme = await route.POST(request('/api/coin-transactions', { action: 'reward_exchange', reward_id: 'galaxy', exchange_id: 'exchange_theme_01' }));
+  assert.equal(theme.status, 200);
+  assert.equal((await theme.json()).kind, 'cosmetic');
+  assert.ok(h.data.get('users/actor').owned_cosmetics.includes('theme_galaxy'));
+  assert.equal(h.data.get('reward_grants/shop_actor_exchange_theme_01').preset_id, 'theme_galaxy');
+  assert.equal(h.data.has('requests/exchange_actor_exchange_theme_01'), false);
+
+  const badge = await route.POST(request('/api/coin-transactions', { action: 'reward_exchange', reward_id: 'unicorn', exchange_id: 'exchange_badge_01' }));
+  assert.equal(badge.status, 200);
+  assert.ok(h.data.get('users/actor').earned_badges.includes('badge_shop_unicorn'));
+
+  const owner = harness({ profiles: { actor: { ...student, coins: 200, owned_cosmetics: ['theme_galaxy'] } }, documents });
+  const duplicate = await owner.load('app/api/coin-transactions/route.ts').POST(request('/api/coin-transactions', { action: 'reward_exchange', reward_id: 'galaxy', exchange_id: 'exchange_theme_02' }));
+  assert.equal(duplicate.status, 400);
+  assert.equal((await duplicate.json()).error, 'reward-already-owned');
+  assert.equal(owner.data.get('users/actor').coins, 200);
+});
+
+test('gacha turns an already-owned cosmetic prize into a miss instead of a duplicate', async () => {
+  const h = harness({
+    profiles: { actor: { ...student, coins: 50, owned_cosmetics: ['vb_space'] } },
+    documents: {
+      'gachas/g1': gachaDoc({ items: [{ reward_id: 'space', weight: 10000 }], miss_refund_coins: 3 }),
+      'rewards/space': { name: 'バーチャル背景「宇宙」', required_coins: 100, active: true, preset_id: 'vb_space', kind: 'digital' },
+    },
+  });
+  const body = await (await h.load('app/api/rewards/gacha/route.ts').POST(request('/api/rewards/gacha', { gacha_id: 'g1', draw_id: 'draw_owned_001' }))).json();
+  assert.equal(body.result, 'miss');
+  assert.equal(body.refund, 3);
+  assert.equal(h.data.has('reward_grants/gacha_actor_draw_owned_001'), false);
+});
+
+test('administrators add preset rewards without uploading images and unknown presets are rejected', async () => {
+  const h = harness({ profiles: { actor: admin } });
+  const route = h.load('app/api/admin/rewards/route.ts');
+  const form = fields => {
+    const body = new FormData();
+    Object.entries(fields).forEach(([key, value]) => body.set(key, value));
+    return new NextRequest('https://security.test/api/admin/rewards', { method: 'POST', headers: { authorization: 'Bearer valid' }, body });
+  };
+  assert.equal((await route.POST(form({ preset_id: 'vb_aurora', required_coins: '150' }))).status, 200);
+  const created = h.data.get('rewards/generated');
+  assert.equal(created.preset_id, 'vb_aurora');
+  assert.equal(created.kind, 'digital');
+  assert.equal(created.name, 'バーチャル背景「オーロラ」');
+  assert.equal((await route.POST(form({ preset_id: 'not_a_preset', required_coins: '10' }))).status, 400);
+  assert.equal((await route.POST(form({ name: '画像なし', required_coins: '10' }))).status, 400);
+});
+
+test('premium appearance options only apply when the student owns them', async () => {
+  const { normalizeStudentAppearance } = harness().load('lib/student-customization.ts');
+  const saved = { theme: 'galaxy', backgroundPattern: 'stars', title: 'title_ace', frame: 'frame_gold' };
+  const locked = normalizeStudentAppearance(saved, []);
+  assert.equal(locked.theme, 'aurora');
+  assert.equal(locked.backgroundPattern, 'none');
+  assert.equal(locked.title, '');
+  assert.equal(locked.frame, '');
+  const unlocked = normalizeStudentAppearance(saved, ['theme_galaxy', 'pattern_stars', 'title_ace', 'frame_gold']);
+  assert.equal(unlocked.theme, 'galaxy');
+  assert.equal(unlocked.backgroundPattern, 'stars');
+  assert.equal(unlocked.title, 'title_ace');
+  assert.equal(unlocked.frame, 'frame_gold');
+});
+
+test('printed password sync skips already-activated accounts unless an administrator explicitly reissues', async () => {
+  const profiles = {
+    actor: master,
+    fresh: { ...student, lifetime_id: 'fresh01', email: 'fresh01@classbase.local', initial_password: 'Fresh12345', isFirstLogin: true },
+    active: { ...student, lifetime_id: 'active01', email: 'active01@classbase.local', isFirstLogin: false },
+  };
+  const authUsers = { fresh: { email: 'fresh01@classbase.local' }, active: { email: 'active01@classbase.local' } };
+  const h = harness({ profiles, authUsers });
+  const route = h.load('app/api/admin/accounts/sync-printed-password/route.ts');
+  const issued = await (await route.POST(request('/api/admin/accounts/sync-printed-password', { user_ids: ['fresh', 'active'] }))).json();
+  assert.equal(issued.synced_count, 1);
+  assert.equal(issued.skipped_count, 1);
+  assert.equal(issued.skipped[0].user_id, 'active');
+  assert.equal(issued.results[0].initial_password, 'Fresh12345');
+  assert.equal(h.authWrites.some(write => write.uid === 'active'), false);
+  assert.equal(h.data.get('users/active').isFirstLogin, false);
+
+  const reissued = await (await route.POST(request('/api/admin/accounts/sync-printed-password', { user_ids: ['active'], mode: 'reissue' }))).json();
+  assert.equal(reissued.synced_count, 1);
+  assert.equal(reissued.results[0].generated_password, true);
+  assert.ok(h.authWrites.some(write => write.uid === 'active' && write.password === reissued.results[0].initial_password));
+
+  const tooMany = await route.POST(request('/api/admin/accounts/sync-printed-password', { user_ids: Array.from({ length: 101 }, (_, i) => `u${i}`) }));
+  assert.equal(tooMany.status, 400);
+});
+
+test('ID guide pages alternate student and parent sheets and keep duplex pairs aligned', async () => {
+  const { buildGuidePages, toGuideAccount } = harness().load('app/components/account-guides/guide-model.ts');
+  const accounts = [
+    toGuideAccount({ id: 'a', role: 'student', student_name: 'A', lifetime_id: '1', initial_password: 'pw1', parent_login_id: '1P', parent_initial_password: 'pp1' }),
+    toGuideAccount({ id: 'b', role: 'student', student_name: 'B', lifetime_id: '2', initial_password: 'pw2', parent_status: 'activated' }),
+    toGuideAccount({ id: 'c', role: 'student', student_name: 'C', lifetime_id: '3', initial_password: 'pw3', parent_login_id: '3P', parent_initial_password: 'pp3' }),
+  ];
+  const types = options => Array.from(buildGuidePages(accounts, { order: 'alternate', duplex: false, checklist: false, ...options }), page => `${page.type}:${page.account?.key || page.page}`);
+  assert.deepEqual(types({}), ['student:a', 'parent:a', 'student:b', 'student:c', 'parent:c']);
+  assert.deepEqual(types({ duplex: true }), ['student:a', 'parent:a', 'student:b', 'parent-placeholder:b', 'student:c', 'parent:c']);
+  assert.deepEqual(types({ order: 'grouped' }), ['student:a', 'student:b', 'student:c', 'parent:a', 'parent:c']);
+  assert.deepEqual(types({ order: 'parent-only' }), ['parent:a', 'parent:c']);
+  assert.deepEqual(types({ checklist: true, duplex: true }).slice(0, 3), ['checklist:1', 'checklist:2', 'student:a']);
 });

@@ -7,6 +7,7 @@ export type CourseRegistrationGrant = {
   grade: string;
   option_id: string;
   stable_key: string;
+  course_key?: string;
   year: number;
   term: string;
   registration_type: 'regular' | 'test_prep';
@@ -44,6 +45,7 @@ export function issueCourseRegistrationToken(input: CourseRegistrationTokenInput
     grade: clean(input.grade, 20),
     option_id: clean(input.option_id, 500),
     stable_key: clean(input.stable_key, 500),
+    course_key: clean(input.course_key, 500),
     year: Number(input.year),
     term: clean(input.term, 120),
     registration_type: input.registration_type === 'test_prep' ? 'test_prep' : 'regular',

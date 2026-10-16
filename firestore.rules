@@ -85,7 +85,7 @@ service cloud.firestore {
           'initial_password', 'raw_password', 'password', 'parent_initial_password',
           'initial_password_policy', 'isFirstLogin',
           'account_status', 'status', 'suspended_at', 'withdrawn_at', 'archived_at',
-          'school_ids'
+          'school_ids', 'feature_overrides', 'owned_cosmetics'
         ]);
     }
 
@@ -156,6 +156,8 @@ service cloud.firestore {
         'earned_badges', 'attendance_count', 'quest_clear_count',
         // 報酬判定・配信対象の絞り込みにサーバーが使う属性は本人が変更できない。
         'grade', 'class', 'subjects', 'test_subjects', 'login_streak', 'last_login_bonus_date',
+        'feature_overrides', 'owned_cosmetics', 'best_login_streak', 'homework_count', 'recording_complete_count',
+        'community_activity_count', 'reward_exchange_count', 'gacha_draw_count', 'gacha_win_count',
         'initial_password', 'raw_password', 'password', 'parent_initial_password',
         'initial_password_policy', 'isFirstLogin',
         'enabled_programs', 'eiken_teacher', 'eiken_admin', 'admin_permissions',
@@ -164,6 +166,13 @@ service cloud.firestore {
         'recovery_email', 'recovery_email_verified_at', 'pending_recovery_email',
         'recovery_email_verification_sent_at'
       ]);
+    }
+
+    // 装備できるのは獲得済みのバッジだけ（獲得はサーバーが earned_badges に記録する）。
+    function selectedBadgeIsEarned() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['selected_badge']) ||
+        request.resource.data.selected_badge == 'badge_1' ||
+        request.resource.data.selected_badge in resource.data.get('earned_badges', []);
     }
 
     function studentOwnedCreate() {
@@ -225,7 +234,7 @@ service cloud.firestore {
       allow update: if signedIn() && (
         isMaster() ||
         adminSafeUserUpdate() ||
-        (request.auth.uid == userId && userSafeUpdate())
+        (request.auth.uid == userId && userSafeUpdate() && selectedBadgeIsEarned())
       );
       allow delete: if isMaster();
 
@@ -576,6 +585,19 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // ガチャ設定・抽選結果・デジタル景品の受け取り記録は専用API（Admin SDK）だけが扱う。
+    match /gachas/{gachaId} {
+      allow read, write: if false;
+    }
+
+    match /gacha_draws/{drawId} {
+      allow read, write: if false;
+    }
+
+    match /reward_grants/{grantId} {
+      allow read, write: if false;
+    }
+
     match /learning_units/{unitId} {
       allow read: if signedIn();
       allow write: if false;
@@ -788,6 +810,9 @@ service cloud.firestore {
     function hasExplicitCollectionRules(collection) {
       return collection in [
         'users',
+        'gachas',
+        'gacha_draws',
+        'reward_grants',
         'test_prep_course_options',
         'attendance_integration_alerts',
         'attendance_integration_batches',

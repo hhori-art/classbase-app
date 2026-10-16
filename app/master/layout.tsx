@@ -86,7 +86,7 @@ const MENU_ITEMS = [
       { key: 'parentInquiries', title: '保護者との個別連絡', icon: MessageCircle, href: '/master/parent-inquiries' },
       { key: 'requests', title: '生徒・保護者からの申請', icon: CheckSquare, href: '/master/requests' },
       { key: 'community', title: '交流掲示板管理', icon: MessageCircle, href: '/master/community' },
-      { key: 'rewards', title: '景品・コイン管理', icon: ShoppingBag, href: '/master/rewards' },
+      { key: 'rewards', title: 'ポイント・景品・ガチャ', icon: ShoppingBag, href: '/master/rewards' },
       { key: 'line', title: 'LINE・通知連携', icon: Bell, href: '/master/line' },
     ],
   },
@@ -145,7 +145,7 @@ export default function MasterLayout({ children }: { children: React.ReactNode }
   const visibleMenuItems = MENU_ITEMS.map(section => ({
     ...section,
     items: section.items.filter(item => {
-      if (isSchoolAdmin) return ['scienceSocialHome', 'schoolStudents', 'shifts', 'monthlySchedules', 'manual'].includes(item.key);
+      if (isSchoolAdmin) return ['scienceSocialHome', 'schoolStudents', 'shifts', 'monthlySchedules', 'rewards', 'manual'].includes(item.key);
       const app = itemApp(item.key);
       if (isMasterOnlyAdminPath(item.href) && !isMaster) return false;
       if (item.key === 'attendanceApprovalReturn') return isDedicatedAttendanceApprover;

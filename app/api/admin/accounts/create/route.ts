@@ -34,7 +34,7 @@ export async function POST(request: NextRequest) {
   let requestedRole = '';
   try {
     const actor = await getServerUser(request);
-    if (actor.role !== 'master') throw new Error('forbidden');
+    if (!['master', 'admin'].includes(actor.role)) throw new Error('forbidden');
     actorUid = actor.uid;
     actorRole = actor.role;
 

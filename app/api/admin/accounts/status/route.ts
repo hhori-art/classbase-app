@@ -1,14 +1,14 @@
 import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminAuth, adminDb } from '@/lib/firebase-admin';
-import { canManageSchool, getServerUser, jsonError, requireMaster } from '@/lib/server-auth';
+import { canManageSchool, getServerUser, jsonError, requireRole } from '@/lib/server-auth';
 
 const STATUSES = ['active', 'suspended', 'withdrawn', 'archived'];
 
 export async function POST(request: NextRequest) {
   try {
     const user = await getServerUser(request);
-    requireMaster(user);
+    requireRole(user, ['master', 'admin']);
 
     const body = await request.json();
     const requestedIds = Array.isArray(body.user_ids)
@@ -34,6 +34,7 @@ export async function POST(request: NextRequest) {
     for (const target of targets) {
       const targetSchool = target.data.school_id || target.data.school;
       if (!canManageSchool(user, targetSchool)) throw new Error('forbidden');
+      if (user.role === 'admin' && String(target.data.role || 'student') !== 'student') throw new Error('forbidden');
       if (target.data.role === 'master' && target.id !== user.uid) {
         return Response.json({ ok: false, error: 'マスター管理者の状態はこの画面から変更できません' }, { status: 400 });
       }

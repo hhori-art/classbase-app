@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
-import { getServerUser, jsonError, requireMaster } from '@/lib/server-auth';
+import { canManageSchool, getServerUser, isAdminLike, jsonError } from '@/lib/server-auth';
 import { writeLearningEvent } from '@/lib/events';
 
 export const runtime = 'nodejs';
@@ -9,7 +9,7 @@ export const runtime = 'nodejs';
 export async function POST(request: NextRequest) {
   try {
     const user = await getServerUser(request);
-    requireMaster(user);
+    if (!isAdminLike(user)) throw new Error('forbidden');
 
     const body = await request.json();
     const action = String(body.action || 'create');
@@ -23,7 +23,7 @@ export async function POST(request: NextRequest) {
       const schedule = scheduleSnap.data() || {};
       const scheduleSchool = schedule.school_id || schedule.school || null;
       if (user.role !== 'master') {
-        if (!scheduleSchool || !user.school_ids.includes(String(scheduleSchool))) throw new Error('forbidden');
+        if (!scheduleSchool || !canManageSchool(user, String(scheduleSchool))) throw new Error('forbidden');
       }
       await db.collection('monthly_schedules').doc(scheduleId).set({
         archived: true,
@@ -53,7 +53,7 @@ export async function POST(request: NextRequest) {
     if (user.role !== 'master') {
       const managedSchool = user.school_ids[0] || user.school || '';
       if (!managedSchool) throw new Error('forbidden');
-      if (schoolId && schoolId !== managedSchool) throw new Error('forbidden');
+      if (schoolId && !canManageSchool(user, schoolId)) throw new Error('forbidden');
       schoolId = managedSchool;
     }
     const grades = Array.isArray(body.grades)
@@ -68,7 +68,7 @@ export async function POST(request: NextRequest) {
       if (!scheduleSnap.exists) return Response.json({ ok: false, error: 'schedule not found' }, { status: 404 });
       const schedule = scheduleSnap.data() || {};
       const currentSchool = schedule.school_id || schedule.school || null;
-      if (user.role !== 'master' && (!currentSchool || !user.school_ids.includes(String(currentSchool)))) throw new Error('forbidden');
+      if (user.role !== 'master' && (!currentSchool || !canManageSchool(user, String(currentSchool)))) throw new Error('forbidden');
       await scheduleRef.set({
         title,
         target_date: startDate,

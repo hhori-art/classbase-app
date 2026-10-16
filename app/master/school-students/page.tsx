@@ -1,7 +1,6 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
 import { auth } from '@/lib/firebase';
 import {
   BookOpen,
@@ -32,10 +31,14 @@ import { useAuth } from '@/app/context/AuthContext';
 import CsvSampleDownload from '@/app/components/CsvSampleDownload';
 import CourseRegistrationCalendar, { getCourseDay, getCourseSlot, getCourseSubject } from '@/app/components/CourseRegistrationCalendar';
 import LastLoginCell from '@/app/components/LastLoginCell';
-import AccountGuideSheet, { ACCOUNT_GUIDE_PRINT_CSS } from '@/app/components/AccountGuideSheet';
+import AccountGuidePrintView from '@/app/components/account-guides/AccountGuidePrintView';
+import { toGuideAccount } from '@/app/components/account-guides/guide-model';
+import { attendanceSchoolName } from '@/lib/attendance-schools';
+import { describeSyncErrors, syncPrintedPasswords, type PrintedPasswordSkip } from '@/lib/client-printed-password-sync';
 import { loadCourseRegistrationOptions } from '@/lib/client-course-options';
-import { courseOptionMatchesSelection, getCourseOptionStableKey, resolveSelectedCourseOptionIds, summarizeSelectedCourseLabels } from '@/lib/course-registration-selection';
+import { courseOptionMatchesSelection, getCourseOptionCourseKey, getCourseOptionScheduleKey, getCourseOptionStableKey, hasCourseOptionSelection, removeCourseOptionSelections, resolveSelectedCourseOptionIds, summarizeSelectedCourseLabels } from '@/lib/course-registration-selection';
 import { buildSchoolCourseRegistrationCsv } from '@/lib/school-course-registration-export';
+import { hasAdminAppPermission, isConfigurableAdminRole } from '@/lib/admin-app-permissions';
 
 const STATUSES = [
   { id: 'active', label: '有効', icon: CheckCircle2, className: 'bg-emerald-50 text-emerald-700 border-emerald-100' },
@@ -149,10 +152,7 @@ const courseKey = (option: any) => [
     option.course_name || option.title || getCourseSubject(option) || '講座',
   ),
 ].join('__') || String(option.id || '講座');
-const timeKey = (option: any) => [
-  getCourseDay(option) || '曜日未設定',
-  getCourseSlot(option) || '時間未設定',
-].join('__');
+const timeKey = getCourseOptionScheduleKey;
 const courseDisplayName = (option: any) => compactCourseParts(
   getCourseSubject(option),
   option.course_name || option.title || getCourseSubject(option) || '講座',
@@ -213,7 +213,8 @@ export default function SchoolStudentsPage() {
   const [printingId, setPrintingId] = useState('');
   const [isMounted, setIsMounted] = useState(false);
   const [qrBaseUrl, setQrBaseUrl] = useState('');
-  const [showParentCredentials, setShowParentCredentials] = useState(true);
+  const [printRequest, setPrintRequest] = useState<{ targets: any[]; skipped: PrintedPasswordSkip[] } | null>(null);
+  const [printSyncProgress, setPrintSyncProgress] = useState<{ done: number; total: number } | null>(null);
   const [csvEncoding, setCsvEncoding] = useState('Shift_JIS');
   const [csvDefaultStartMonth, setCsvDefaultStartMonth] = useState(currentMonthValue());
   const [csvImporting, setCsvImporting] = useState(false);
@@ -221,8 +222,6 @@ export default function SchoolStudentsPage() {
   const [csvImportBatches, setCsvImportBatches] = useState<SchoolAccountImportBatch[]>([]);
   const [selectedCsvImportBatchId, setSelectedCsvImportBatchId] = useState('');
   const [csvHistoryLoading, setCsvHistoryLoading] = useState(false);
-  const [isPdfExporting, setIsPdfExporting] = useState(false);
-  const [pdfProgress, setPdfProgress] = useState({ current: 0, total: 0 });
   const [courseModalStudent, setCourseModalStudent] = useState<any | null>(null);
   const [courseOptions, setCourseOptions] = useState<any[]>([]);
   const [courseLoading, setCourseLoading] = useState(false);
@@ -262,7 +261,10 @@ export default function SchoolStudentsPage() {
 
   const middleSchools = useMemo(() => Array.from(new Set(students.map(student => String(student.middle_school || '').trim()).filter(Boolean))).sort(), [students]);
   const isMaster = profile?.role === 'master';
-  const canManageStudents = profile?.role === 'master';
+  const canManageStudents = Boolean(profile && (
+    profile.role === 'master' ||
+    (isConfigurableAdminRole(profile.role) && hasAdminAppPermission(profile.role, profile, 'science_social'))
+  ));
   const courseYearChoices = useMemo(() => {
     const values = Array.from(new Set(courseOptions.map(option => Number(option.year || courseYear)).filter(Boolean)));
     if (!values.includes(courseYear)) values.push(courseYear);
@@ -518,7 +520,8 @@ export default function SchoolStudentsPage() {
     setCourseSelectedKeys(prev => {
       const selected = prev.includes(key);
       if (selected) {
-        setCourseSelectedIds(current => current.filter(id => !targetIds.has(id)));
+        const targetOptions = visibleCourseOptions.filter((option: any) => targetIds.has(option.id));
+        setCourseSelectedIds(current => removeCourseOptionSelections(current, targetOptions));
         return prev.filter(item => item !== key);
       }
       return [...prev, key];
@@ -532,14 +535,15 @@ export default function SchoolStudentsPage() {
       const activeIds = new Set(visibleCourseOptions.map((option: any) => option.id));
       const outsideVisible = prev.filter(id => !activeIds.has(id));
       const current = new Set(prev.filter(id => activeIds.has(id)));
-      const allSelected = cleanIds.every(id => current.has(id));
-      if (allSelected) {
-        cleanIds.forEach(id => current.delete(id));
+      const targetOptions = visibleCourseOptions.filter((option: any) => cleanIds.includes(option.id));
+      const hasSelected = hasCourseOptionSelection(current, targetOptions);
+      if (hasSelected) {
+        return removeCourseOptionSelections(prev, targetOptions);
       } else {
-        const selectedOptions = visibleCourseOptions.filter((option: any) => cleanIds.includes(option.id));
-        const conflictKeys = new Set(selectedOptions.map(timeKey));
+        const conflictKeys = new Set(targetOptions.map(timeKey));
+        const duplicateCourseKeys = new Set(targetOptions.map(getCourseOptionCourseKey));
         visibleCourseOptions
-          .filter((option: any) => conflictKeys.has(timeKey(option)))
+          .filter((option: any) => conflictKeys.has(timeKey(option)) || duplicateCourseKeys.has(getCourseOptionCourseKey(option)))
           .forEach((option: any) => current.delete(option.id));
         cleanIds.forEach(id => current.add(id));
       }
@@ -549,7 +553,7 @@ export default function SchoolStudentsPage() {
 
   const saveCourseRegistration = async () => {
     if (!courseModalStudent) return;
-    if (visibleSelectedIds.length === 0) return alert('登録する講座を1つ以上選択してください');
+    if (visibleSelectedIds.length === 0 && !confirm('登録済みの講座をすべて解除します。よろしいですか？')) return;
     setCourseSaving(true);
     try {
       const selectedCourseLabels = selectedVisibleGroups.map(formatCourseGroupLabel);
@@ -558,6 +562,9 @@ export default function SchoolStudentsPage() {
         .filter((option: any) => visibleSelectedIds.includes(option.id))
         .map(getCourseOptionStableKey)
         .filter(Boolean);
+      const registrationTokens = visibleCourseOptions
+        .filter((option: any) => visibleSelectedIds.includes(option.id))
+        .map((option: any) => String(option.registration_token || ''));
       const token = await auth.currentUser?.getIdToken();
       const res = await fetch('/api/admin/course-registrations', {
         method: 'POST',
@@ -569,6 +576,7 @@ export default function SchoolStudentsPage() {
           selected_course_ids: visibleSelectedIds,
           selected_course_labels: selectedCourseLabels,
           selected_course_keys: selectedCourseKeys,
+          registration_tokens: registrationTokens,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -931,95 +939,67 @@ export default function SchoolStudentsPage() {
     }
   };
 
-  const printGuide = async (student: any) => {
-    setPrintingId(student.id);
+  /**
+   * 案内書面の印刷準備。生徒と保護者のパスワードを分割して同期し、ログイン済みの人は
+   * パスワードを変えずに除外する（mode=reissue のときだけ再発行する）。
+   */
+  const preparePrintStudents = async (targets: any[], busyKey: string, mode: 'issue' | 'reissue' = 'issue') => {
+    if (targets.length === 0) return alert('印刷する生徒がいません');
+    setPrintingId(busyKey);
     try {
-      const token = await auth.currentUser?.getIdToken();
-      if (!token) throw new Error('ログイン情報を確認できませんでした。再ログインしてください。');
-      const userIds = [student.id, student.parent_uid].filter(Boolean);
-      const res = await fetch('/api/admin/accounts/sync-printed-password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ user_ids: userIds }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.ok) throw new Error(data.error || 'パスワード同期に失敗しました');
-      if (data.error_count > 0) {
-        const details = (data.errors || []).map((item: any) => `${item.login_id || item.user_id}: ${item.error}`).join('\n');
-        throw new Error(`書面とログイン情報を同期できませんでした。\n${details}`);
+      const userIds = targets.flatMap(student => [student.id, student.parent_uid].filter(Boolean));
+      const summary = await syncPrintedPasswords(userIds, { mode, onProgress: (done, total) => setPrintSyncProgress({ done, total }) });
+      if (summary.errors.length > 0) {
+        throw new Error(`書面とログイン情報を同期できないアカウントがあります。\n${describeSyncErrors(summary.errors)}`);
       }
-
-      const resultByOldId = new Map((data.results || []).map((item: any) => [String(item.old_user_id || ''), item]));
-      const studentResult: any = resultByOldId.get(student.id);
-      const parentResult: any = student.parent_uid ? resultByOldId.get(student.parent_uid) : null;
-      const guideStudent = {
-        ...student,
-        id: studentResult?.user_id || student.id,
-        uid: studentResult?.user_id || student.uid,
-        email: studentResult?.email || student.email,
-        initial_password: studentResult?.initial_password || student.initial_password,
-        isFirstLogin: true,
-        parent_uid: parentResult?.user_id || student.parent_uid,
-        parent_login_id: student.parent_login_id || '',
-        parent_initial_password: parentResult?.initial_password || student.parent_initial_password || '',
-        parent_email: parentResult?.email || student.parent_email || '',
-      };
-      setStudents(current => current.map(item => item.id === student.id ? guideStudent : item));
-      setPrintStudent(guideStudent);
-      setPrintStudents([guideStudent]);
-      setIsPrintModalOpen(true);
-    } catch (error: any) {
-      alert(`案内書面を作成できませんでした。\n${error?.message || error}`);
-    } finally {
-      setPrintingId('');
-    }
-  };
-
-  const printSelectedCsvImportBatch = async () => {
-    if (!selectedCsvImportBatch) return alert('CSV取込履歴を選択してください');
-    const targets = filtered;
-    if (targets.length === 0) return alert('現在の絞り込みに該当する生徒がいません');
-    setPrintingId('csv-batch');
-    try {
-      const token = await auth.currentUser?.getIdToken();
-      if (!token) throw new Error('ログイン情報を確認できませんでした。再ログインしてください。');
-      const userIds = Array.from(new Set(targets.flatMap(student => [student.id, student.parent_uid].filter(Boolean))));
-      const response = await fetch('/api/admin/accounts/sync-printed-password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ user_ids: userIds }),
-      });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok || !result.ok) throw new Error(result.error || 'パスワード同期に失敗しました');
-      if (result.error_count > 0) {
-        const details = (result.errors || []).slice(0, 5).map((item: any) => `${item.login_id || item.user_id}: ${item.error}`).join('\n');
-        throw new Error(`書面とログイン情報を同期できないアカウントがあります。\n${details}`);
-      }
-
-      const byOldId = new Map((result.results || []).map((item: any) => [String(item.old_user_id || ''), item]));
+      const skippedIds = new Set(summary.skipped.map(item => item.user_id));
       const prepared = targets.map(student => {
-        const studentResult: any = byOldId.get(student.id);
-        const parentResult: any = student.parent_uid ? byOldId.get(student.parent_uid) : null;
+        const studentResult = summary.resultByUserId.get(student.id);
+        const parentResult = student.parent_uid ? summary.resultByUserId.get(student.parent_uid) : undefined;
         return {
           ...student,
           id: studentResult?.user_id || student.id,
           uid: studentResult?.user_id || student.uid,
           email: studentResult?.email || student.email,
           initial_password: studentResult?.initial_password || student.initial_password,
-          isFirstLogin: true,
+          isFirstLogin: studentResult ? true : student.isFirstLogin,
           parent_uid: parentResult?.user_id || student.parent_uid,
-          parent_initial_password: parentResult?.initial_password || student.parent_initial_password || '',
-          parent_email: parentResult?.email || student.parent_email || '',
+          parent_initial_password: parentResult?.initial_password || '',
+          parent_status: student.parent_uid && skippedIds.has(student.parent_uid) ? 'activated' : undefined,
+          print_skipped: skippedIds.has(student.id),
         };
       });
-      setPrintStudent(prepared[0] || null);
-      setPrintStudents(prepared);
+      // 一覧の行も同期後のID・パスワードに更新する（prepared[i] は targets[i] に対応）。
+      const changed = new Map(prepared.map((item, index) => [targets[index].id, item]));
+      setStudents(current => current.map(item => {
+        const next = changed.get(item.id);
+        return next ? { ...next, print_skipped: undefined, parent_status: undefined } : item;
+      }));
+      const printable = prepared.filter(item => !item.print_skipped);
+      setPrintRequest({ targets: prepared, skipped: summary.skipped });
+      if (printable.length === 0) {
+        if (confirm(`選んだ${targets.length}名は全員すでにログイン済みです。\n新しい初期パスワードを発行して書面を作成しますか？（本人が設定したパスワードは使えなくなります）`)) {
+          await preparePrintStudents(prepared, busyKey, 'reissue');
+        }
+        return;
+      }
+      setPrintStudent(printable[0]);
+      setPrintStudents(printable);
       setIsPrintModalOpen(true);
     } catch (error: any) {
       alert(`案内書面を作成できませんでした。\n${error?.message || error}`);
     } finally {
       setPrintingId('');
+      setPrintSyncProgress(null);
     }
+  };
+
+  const printGuide = (student: any) => preparePrintStudents([student], student.id);
+
+  const printSelectedCsvImportBatch = async () => {
+    if (!selectedCsvImportBatch) return alert('CSV取込履歴を選択してください');
+    if (filtered.length === 0) return alert('現在の絞り込みに該当する生徒がいません');
+    await preparePrintStudents(filtered, 'csv-batch');
   };
 
   const addCsvLog = (message: string) => {
@@ -1088,112 +1068,37 @@ export default function SchoolStudentsPage() {
     reader.readAsText(file, csvEncoding);
   };
 
-  const downloadIndividualPdfs = async () => {
-    if (isPdfExporting || printStudents.length === 0) return;
-    setIsPdfExporting(true);
-    setPdfProgress({ current: 0, total: printStudents.length });
-    try {
-      if (document.fonts?.ready) await document.fonts.ready;
-      const pages = Array.from(document.querySelectorAll<HTMLElement>('#school-student-print-root .account-guide-print-page'));
-      if (pages.length !== printStudents.length) throw new Error('書面の表示数とPDF対象数が一致しません');
-      const [{ default: html2canvas }, { jsPDF }, { default: JSZip }] = await Promise.all([
-        import('html2canvas'),
-        import('jspdf'),
-        import('jszip'),
-      ]);
-      const zip = new JSZip();
-      const usedNames = new Set<string>();
-      for (let index = 0; index < pages.length; index++) {
-        setPdfProgress({ current: index + 1, total: pages.length });
-        const student = printStudents[index];
-        const canvas = await html2canvas(pages[index], { scale: 2, useCORS: true, backgroundColor: '#ffffff', logging: false });
-        const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4', compress: true });
-        pdf.addImage(canvas.toDataURL('image/jpeg', 0.95), 'JPEG', 0, 0, 210, 297, undefined, 'FAST');
-        const rawName = String(student.student_name || student.name || student.lifetime_id || `user_${index + 1}`).trim();
-        const safeName = (rawName || `user_${index + 1}`).replace(/[\\/:*?"<>|\u0000-\u001F]/g, '_').slice(0, 80);
-        let fileName = `${safeName}_アカウント案内.pdf`;
-        if (usedNames.has(fileName)) fileName = `${safeName}_${index + 1}_アカウント案内.pdf`;
-        usedNames.add(fileName);
-        zip.file(fileName, pdf.output('arraybuffer'));
-      }
-      const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
-      const rawZipName = selectedCsvImportBatch?.file_name?.replace(/\.[^.]+$/, '') || `${school || mySchool || '校舎'}_アカウント案内`;
-      const safeZipName = rawZipName.replace(/[\\/:*?"<>|\u0000-\u001F]/g, '_').slice(0, 100);
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = `${safeZipName}_個別PDF.zip`;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch (error: any) {
-      alert(`PDFの作成に失敗しました。\n${error?.message || error}`);
-    } finally {
-      setIsPdfExporting(false);
-      setPdfProgress({ current: 0, total: 0 });
-    }
-  };
-
-  const PrintGuideModal = () => {
-    if (!isMounted || printStudents.length === 0 || typeof document === 'undefined') return null;
-
-    return createPortal(
-      <div id="school-student-print-root" className="fixed inset-0 z-[9999] overflow-y-auto bg-slate-200 print:static print:overflow-visible print:bg-white">
-        <style dangerouslySetInnerHTML={{ __html: `
-          @media print {
-            @page { size: A4 portrait; margin: 0; }
-            body > *:not(#school-student-print-root) { display: none !important; }
-          }
-          ${ACCOUNT_GUIDE_PRINT_CSS}
-        ` }} />
-        <div className="account-guide-print-hide sticky top-0 z-50 flex flex-col gap-3 border-b border-slate-200 bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex flex-wrap items-center gap-4">
-            <h2 className="flex items-center gap-2 text-lg font-black text-slate-800">
-              <Printer size={20} className="text-indigo-600" /> 案内書面プレビュー（{printStudents.length}名分）
-            </h2>
-            <label className="flex cursor-pointer items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-black text-amber-900">
-              <input
-                type="checkbox"
-                checked={showParentCredentials}
-                onChange={event => setShowParentCredentials(event.target.checked)}
-                className="h-4 w-4 accent-amber-600"
-              />
-              保護者ID・初期パスワードを掲載する
-            </label>
-          </div>
-          <div className="flex flex-wrap gap-3">
-            <button onClick={() => window.print()} className="flex items-center gap-2 rounded-xl bg-indigo-600 px-6 py-2 text-sm font-black text-white hover:bg-indigo-700">
-              <Printer size={18} /> 印刷する
-            </button>
-            <button onClick={downloadIndividualPdfs} disabled={isPdfExporting} className="flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-2 text-sm font-black text-white hover:bg-emerald-700 disabled:cursor-wait disabled:opacity-60">
-              {isPdfExporting ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
-              {isPdfExporting ? `PDF作成中 ${pdfProgress.current}/${pdfProgress.total}` : '個別PDFをまとめて保存'}
-            </button>
-            <button onClick={() => { setIsPrintModalOpen(false); setPrintStudents([]); }} className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-5 py-2 text-sm font-black text-slate-600 hover:bg-slate-50">
-              <X size={18} /> 閉じる
-            </button>
-          </div>
-        </div>
-        <div className="flex min-w-max flex-col items-center gap-8 py-8 print:block print:min-w-0 print:p-0">
-          {printStudents.map(student => (
-            <AccountGuideSheet
-              key={student.id || student.uid || student.lifetime_id}
-              account={student}
-              school={student.school_id || school || mySchool}
-              loginUrl={qrBaseUrl || 'https://classbase-app.vercel.app'}
-              showParentCredentials={showParentCredentials}
-            />
-          ))}
-        </div>
-      </div>,
-      document.body
-    );
-  };
+  const printSkipped = printRequest?.skipped || [];
+  const printNotice = printSkipped.length > 0 ? (
+    <div className="flex flex-col gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs font-bold text-amber-900 sm:flex-row sm:items-center sm:justify-between">
+      <p>
+        初回ログイン済みのため、パスワードを変えずに書面から外しました：生徒 {printSkipped.filter(item => item.role === 'student').length}名・保護者 {printSkipped.filter(item => item.role !== 'student').length}名
+        <span className="ml-1 text-amber-700">（{printSkipped.slice(0, 4).map(item => item.display_name).join('、')}{printSkipped.length > 4 ? ' ほか' : ''}）</span>
+      </p>
+      <button
+        onClick={() => {
+          if (!printRequest || !confirm('ログイン済みの人に新しい初期パスワードを発行して、書面に含めますか？\n本人が設定したパスワードは使えなくなります。')) return;
+          setIsPrintModalOpen(false);
+          void preparePrintStudents(printRequest.targets, 'reissue', 'reissue');
+        }}
+        className="shrink-0 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-black text-white hover:bg-amber-700"
+      >
+        パスワードを再発行して含める
+      </button>
+    </div>
+  ) : null;
 
   return (
     <>
-    {canManageStudents && isPrintModalOpen && <PrintGuideModal />}
+    {canManageStudents && isPrintModalOpen && isMounted && printStudents.length > 0 && (
+      <AccountGuidePrintView
+        accounts={printStudents.map(student => toGuideAccount(student, attendanceSchoolName(student.school_id || school || mySchool) || student.school_id || school || mySchool))}
+        loginUrl={qrBaseUrl || 'https://classbase-app.vercel.app'}
+        title={selectedCsvImportBatch?.file_name?.replace(/\.[^.]+$/, '') || `${attendanceSchoolName(school || mySchool) || school || mySchool || '校舎'} 案内書面`}
+        notice={printNotice}
+        onClose={() => { setIsPrintModalOpen(false); setPrintStudents([]); setPrintRequest(null); }}
+      />
+    )}
     <div className="space-y-6 print:hidden">
       <section className="rounded-[28px] bg-slate-950 p-6 text-white shadow-xl">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
@@ -1222,7 +1127,7 @@ export default function SchoolStudentsPage() {
         </div>
       </section>
 
-      {!canManageStudents ? <div className="rounded-2xl border border-sky-200 bg-sky-50 px-5 py-4 text-sm font-bold text-sky-900">この画面は閲覧専用です。登録内容の変更が必要な場合は、対象生徒と変更内容をマスター管理者へ連絡してください。</div> : null}
+      {!canManageStudents ? <div className="rounded-2xl border border-sky-200 bg-sky-50 px-5 py-4 text-sm font-bold text-sky-900">この画面は閲覧専用です。</div> : null}
 
       {canManageStudents && (
         <section className="grid gap-4 xl:grid-cols-[0.8fr_1.35fr_1fr]">
@@ -1332,7 +1237,7 @@ export default function SchoolStudentsPage() {
                   <div className="mt-2">
                     <p className="mb-2 text-[10px] font-bold text-slate-500">{filtered.length}名を表示中{selectedCsvImportBatch.error_count > 0 ? ` ／ ${selectedCsvImportBatch.error_count}件は取込失敗` : ''}</p>
                     <button type="button" onClick={() => void printSelectedCsvImportBatch()} disabled={printingId === 'csv-batch' || filtered.length === 0} className="flex min-h-[40px] w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-3 text-xs font-black text-white hover:bg-indigo-700 disabled:opacity-50">
-                      {printingId === 'csv-batch' ? <Loader2 size={15} className="animate-spin" /> : <Printer size={15} />} この履歴の{filtered.length}名を一括印刷
+                      {printingId === 'csv-batch' ? <Loader2 size={15} className="animate-spin" /> : <Printer size={15} />} {printingId === 'csv-batch' && printSyncProgress ? `パスワード確認中 ${printSyncProgress.done}/${printSyncProgress.total}` : `この履歴の${filtered.length}名を一括印刷`}
                     </button>
                   </div>
                 )}
@@ -1343,7 +1248,7 @@ export default function SchoolStudentsPage() {
         </section>
       )}
 
-      <section className="grid gap-4 lg:grid-cols-2">
+      {canManageStudents && <section className="grid gap-4 lg:grid-cols-2">
         <div className="rounded-[28px] bg-white p-5 shadow-sm">
           <h2 className="text-lg font-black text-slate-900">中学校絞り込み / 一括欠席</h2>
           <div className="mt-4 grid gap-3 md:grid-cols-[1fr_auto_auto]">
@@ -1359,7 +1264,7 @@ export default function SchoolStudentsPage() {
           <p className="mt-3 text-xs font-bold text-slate-400">現在の絞り込み対象: {middleSchoolFilter || '未選択'} / {filtered.length}名</p>
         </div>
 
-        <div className="rounded-[28px] bg-white p-5 shadow-sm">
+        {isMaster && <div className="rounded-[28px] bg-white p-5 shadow-sm">
           <h2 className="text-lg font-black text-slate-900">テスト対策登録＆連絡</h2>
           <div className="mt-4 grid gap-3 md:grid-cols-2">
             <input value={testPrepForm.title} onChange={e => setTestPrepForm(prev => ({ ...prev, title: e.target.value }))} placeholder="例: 期末テスト対策" className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none" />
@@ -1371,8 +1276,8 @@ export default function SchoolStudentsPage() {
             <button onClick={createTestPrepEvent} className="rounded-2xl bg-indigo-600 px-4 py-3 text-sm font-black text-white hover:bg-indigo-700">登録して通知</button>
           </div>
           <textarea value={testPrepForm.description} onChange={e => setTestPrepForm(prev => ({ ...prev, description: e.target.value }))} placeholder="補足内容" className="mt-3 min-h-[72px] w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none" />
-        </div>
-      </section>
+        </div>}
+      </section>}
 
       {canManageStudents && <section className="rounded-[28px] bg-white p-5 shadow-sm">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
@@ -1522,9 +1427,9 @@ export default function SchoolStudentsPage() {
                           継続通塾
                         </label>
                         <p>体験: {Array.isArray(student.trial_event_ids) && student.trial_event_ids.length > 0 ? student.trial_event_ids.join(' / ') : '-'}</p>
-                        <button onClick={() => editRelations(student)} className="w-fit rounded-xl border border-slate-200 px-3 py-2 text-[11px] font-black text-slate-600 hover:bg-slate-50">
+                        {isMaster && <button onClick={() => editRelations(student)} className="w-fit rounded-xl border border-slate-200 px-3 py-2 text-[11px] font-black text-slate-600 hover:bg-slate-50">
                           兄弟姉妹編集
-                        </button>
+                        </button>}
                       </div>
                     </td>}
                     <td className="px-4 py-4">
@@ -1544,9 +1449,9 @@ export default function SchoolStudentsPage() {
                         <button onClick={() => openCourseRegistrationModal(student)} className="shrink-0 rounded-xl border border-emerald-100 px-3 py-2 text-[11px] font-black text-emerald-600 hover:bg-emerald-50">
                           <BookOpen size={13} className="inline" /> 講座登録
                         </button>
-                        <button onClick={() => transferStudent(student)} className="shrink-0 rounded-xl border border-sky-100 px-3 py-2 text-[11px] font-black text-sky-600 hover:bg-sky-50">
+                        {isMaster && <button onClick={() => transferStudent(student)} className="shrink-0 rounded-xl border border-sky-100 px-3 py-2 text-[11px] font-black text-sky-600 hover:bg-sky-50">
                           移籍
-                        </button>
+                        </button>}
                         {student.account_status === 'withdrawn' ? (
                           <button onClick={() => restoreStudent(student)} className="shrink-0 rounded-xl border border-emerald-100 px-3 py-2 text-[11px] font-black text-emerald-600 hover:bg-emerald-50">受講中へ復帰</button>
                         ) : (
@@ -1738,7 +1643,7 @@ export default function SchoolStudentsPage() {
                           <p className="text-xs font-black text-slate-500">Step 2</p>
                           <h3 className="text-base font-black text-slate-900">開講曜日・時間を選択</h3>
                           <p className="mt-1 text-xs font-bold text-slate-400">
-                            別曜日は複数登録できます。同じ曜日・同じ時限は1つだけ登録されます。
+                            同じ曜日・時限は1講座のみ、同じ講座は曜日・時限を問わず1つだけ登録できます。
                           </p>
                         </div>
                         <span className="w-fit rounded-2xl bg-indigo-50 px-4 py-2 text-xs font-black text-indigo-700">
@@ -1811,6 +1716,9 @@ export default function SchoolStudentsPage() {
                 <button onClick={saveCourseRegistration} disabled={courseSaving || courseLoading || visibleSelectedIds.length === 0} className="flex items-center gap-2 rounded-2xl bg-emerald-600 px-5 py-3 text-sm font-black text-white hover:bg-emerald-700 disabled:bg-slate-300">
                   {courseSaving ? <Loader2 className="animate-spin" size={18} /> : <CheckCircle2 size={18} />}
                   登録する
+                </button>
+                <button onClick={saveCourseRegistration} disabled={courseSaving || courseLoading || visibleSelectedIds.length > 0} className="rounded-2xl border-2 border-rose-200 bg-white px-5 py-3 text-sm font-black text-rose-600 hover:bg-rose-50 disabled:opacity-30">
+                  すべて解除する
                 </button>
               </div>
             </div>

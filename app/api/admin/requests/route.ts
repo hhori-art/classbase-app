@@ -4,6 +4,7 @@ import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, jsonError, requireRole } from '@/lib/server-auth';
 import { requireAdminApp } from '@/lib/admin-app-access';
 import { resolveAttendanceSchoolCode } from '@/lib/attendance-schools';
+import { rejectRewardRequest } from '@/lib/server/reward-store';
 
 const ALLOWED_DAYS = new Set(['月', '火', '水', '木', '金', '土', '日']);
 
@@ -112,23 +113,8 @@ export async function POST(request: NextRequest) {
         tx.update(requestRef, { status: 'rejected', processed_at: FieldValue.serverTimestamp(), processed_by: actor.uid });
         return { status: 'rejected', refunded: 0 };
       }
-      const uid = String(data.userId || data.user_id || '');
-      const cost = Number(data.cost);
-      if (!uid || !Number.isInteger(cost) || cost <= 0 || cost > 1_000_000) throw new Error('invalid-refund-data');
-      const userRef = db.collection('users').doc(uid);
-      const userSnap = await tx.get(userRef);
-      if (!userSnap.exists || userSnap.data()?.role !== 'student') throw new Error('student-not-found');
-      const refundRef = db.collection('coin_transactions').doc(`reward_refund_${requestId}`);
-      const refundSnap = await tx.get(refundRef);
-      if (refundSnap.exists) throw new Error('refund-already-recorded');
-      tx.set(refundRef, {
-        user_id: uid, amount: cost, reason: `景品交換却下による返金: ${String(data.rewardName || '')}`,
-        actor_id: actor.uid, source: 'reward_exchange_refund', source_id: requestId,
-        metadata: { request_id: requestId, reward_id: data.rewardId || null }, created_at: FieldValue.serverTimestamp(),
-      });
-      tx.update(userRef, { coins: FieldValue.increment(cost), updated_at: FieldValue.serverTimestamp() });
-      tx.update(requestRef, { status: 'rejected', refunded_coins: cost, processed_at: FieldValue.serverTimestamp(), processed_by: actor.uid });
-      return { status: 'rejected', refunded: cost };
+      // 返金・在庫の戻しは発送管理と共通の処理で行う。
+      return rejectRewardRequest(tx, requestRef, data, actor.uid, '');
     });
     return Response.json({ ok: true, ...result });
   } catch (error) {

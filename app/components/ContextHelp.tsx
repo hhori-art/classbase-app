@@ -7,8 +7,8 @@ import { BookOpen, HelpCircle, X } from 'lucide-react';
 
 const HELP: Array<{ match: string; title: string; steps: string[] }> = [
   { match: '/master/science-social', title: '校舎ダッシュボード', steps: ['赤・黄の項目から確認します。', '要確認の生徒は校舎別生徒管理で詳細を確認します。'] },
-  { match: '/master/school-students', title: '校舎別生徒管理', steps: ['学年や氏名で絞り込みます。', '校舎管理者は閲覧のみです。変更はマスター管理者へ依頼してください。'] },
-  { match: '/master/monthly-schedules', title: '月間予定', steps: ['月を切り替えて予定を確認します。', '色と予定名を選ぶと対象期間を確認できます。'] },
+  { match: '/master/school-students', title: '校舎別生徒管理', steps: ['学年や氏名で絞り込みます。', '校舎管理者は自校舎の生徒情報を登録・変更できます。'] },
+  { match: '/master/monthly-schedules', title: '月間予定', steps: ['月を切り替えて予定を確認します。', '校舎管理者は自校舎の予定を登録・変更できます。'] },
   { match: '/master/shifts', title: 'シフト配置', steps: ['日付を選ぶと当日の配置を確認できます。', '校舎管理者は閲覧のみです。'] },
   { match: '/teacher/attendance', title: '勤怠・打刻', steps: ['勤務校舎と時刻を確認して打刻します。', '誤りは修正依頼から対象日を選んで送信します。'] },
   { match: '/student/change-request', title: '受講講座の登録', steps: ['期ごとに受講する講座を選びます。', '保存後、ホームの参加ボタンに反映されたことを確認します。'] },

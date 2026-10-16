@@ -29,6 +29,7 @@ export default function StudentAbsencePage() {
   const [reason, setReason] = useState('');
   const [absences, setAbsences] = useState<any[]>([]);
   const [selectedAbsenceId, setSelectedAbsenceId] = useState('');
+  const [manualTransferDate, setManualTransferDate] = useState('');
   const [transferOptions, setTransferOptions] = useState<TransferOption[]>([]);
   const [selectedTransferId, setSelectedTransferId] = useState('');
   const [loadingTransfers, setLoadingTransfers] = useState(false);
@@ -69,8 +70,14 @@ export default function StudentAbsencePage() {
       setSelectedTransferId('');
       try {
         const token = await user.getIdToken();
-        const params = selectedAbsenceId ? `?absence_id=${encodeURIComponent(selectedAbsenceId)}` : '';
-        const res = await fetch(`/api/student/transfer-options${params}`, {
+        const params = new URLSearchParams();
+        const pendingDate = selectedAbsenceId.startsWith('pending:')
+          ? selectedAbsenceId.split(':').at(-1) || manualTransferDate
+          : manualTransferDate;
+        if (pendingDate) params.set('absence_date', pendingDate);
+        else if (selectedAbsenceId) params.set('absence_id', selectedAbsenceId);
+        const query = params.toString();
+        const res = await fetch(`/api/student/transfer-options${query ? `?${query}` : ''}`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         const data = await res.json().catch(() => ({}));
@@ -86,13 +93,13 @@ export default function StudentAbsencePage() {
       }
     };
     loadTransferOptions();
-  }, [user, mode, selectedAbsenceId]);
+  }, [user, mode, selectedAbsenceId, manualTransferDate]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user) return;
     if (mode === 'transfer' && (!selectedAbsenceId || !selectedTransferId)) {
-      alert('欠席連絡と振替先を選択してください。');
+      alert('振替元の授業日と振替先を選択してください。');
       return;
     }
     
@@ -100,14 +107,23 @@ export default function StudentAbsencePage() {
 
     try {
       const token = await user.getIdToken();
+      const selectedTransfer = transferOptions.find(option => option.id === selectedTransferId);
+      const directTransferWithoutAbsence = mode === 'transfer' && selectedAbsenceId.startsWith('pending:');
       const res = mode === 'transfer'
-        ? await fetch('/api/student/transfers', {
+        ? await fetch(directTransferWithoutAbsence ? '/api/parent/absence-requests' : '/api/student/transfers', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({
+            body: JSON.stringify(directTransferWithoutAbsence ? {
+              student_id: user.uid,
+              type: 'transfer',
+              target_date: manualTransferDate || selectedAbsenceId.split(':').at(-1) || '',
+              transfer_shift_id: selectedTransferId,
+              transfer_token: selectedTransfer?.transfer_token || '',
+              reason,
+            } : {
               absence_id: selectedAbsenceId,
               transfer_shift_id: selectedTransferId,
-              transfer_token: transferOptions.find(option => option.id === selectedTransferId)?.transfer_token || '',
+              transfer_token: selectedTransfer?.transfer_token || '',
               note: reason,
             }),
           })
@@ -185,7 +201,7 @@ export default function StudentAbsencePage() {
             <h1 className="text-2xl font-black text-gray-800 flex items-center gap-2 tracking-tight">
               {directTransferEntry ? '振替先を選択' : '欠席・遅刻の連絡'}
             </h1>
-            <p className="text-xs font-bold text-gray-400">{directTransferEntry ? '登録済みの欠席連絡に合う候補を表示します' : '先生にメッセージを送ります'}</p>
+            <p className="text-xs font-bold text-gray-400">{directTransferEntry ? '欠席登録がなくても、元の授業日から候補を確認できます' : '先生にメッセージを送ります'}</p>
           </div>
         </div>
 
@@ -276,14 +292,29 @@ export default function StudentAbsencePage() {
             </div> : <div className="bg-white p-6 rounded-[32px] shadow-sm border border-gray-100">
               <label className="flex items-center gap-2 text-sm font-black text-gray-700 mb-4">
                 <span className="bg-indigo-100 text-indigo-600 p-1.5 rounded-lg"><CalendarDays size={18} strokeWidth={3}/></span>
-                振替する欠席連絡
+                振替元の授業
               </label>
               {loadingTransfers ? (
                 <div className="flex items-center gap-2 rounded-2xl bg-indigo-50 p-4 text-sm font-black text-indigo-600">
                   <Loader2 size={18} className="animate-spin" /> 候補を読み込み中
                 </div>
               ) : absences.length === 0 ? (
-                <div className="rounded-2xl bg-slate-50 p-4 text-sm font-bold text-slate-500">振替登録できる欠席連絡がありません。</div>
+                <div className="space-y-3">
+                  <p className="rounded-2xl bg-indigo-50 p-4 text-sm font-bold leading-relaxed text-indigo-700">
+                    欠席連絡を登録していなくても振替できます。振替元となる授業日を選んでください。
+                  </p>
+                  <input
+                    type="date"
+                    required
+                    value={manualTransferDate}
+                    onChange={e => {
+                      setManualTransferDate(e.target.value);
+                      setSelectedAbsenceId('');
+                      setSelectedTransferId('');
+                    }}
+                    className="w-full rounded-2xl border-2 border-indigo-100 bg-indigo-50 p-4 text-center text-base font-black text-slate-800 outline-none focus:border-indigo-400"
+                  />
+                </div>
               ) : (
                 <select value={selectedAbsenceId} onChange={e => setSelectedAbsenceId(e.target.value)} className="w-full rounded-2xl border-2 border-indigo-100 bg-indigo-50 p-4 text-sm font-black text-slate-800 outline-none focus:border-indigo-400">
                   {absences.map(absence => (
@@ -307,7 +338,9 @@ export default function StudentAbsencePage() {
               {mode === 'transfer' && (
                 <div className="mb-4 space-y-3">
                   {transferOptions.length === 0 ? (
-                    <div className="rounded-2xl bg-slate-50 p-4 text-sm font-bold text-slate-500">同じ単元の振替候補がありません。</div>
+                    <div className="rounded-2xl bg-slate-50 p-4 text-sm font-bold text-slate-500">
+                      {absences.length === 0 && !manualTransferDate ? '振替元の授業日を選ぶと候補が表示されます。' : '同じ単元の振替候補がありません。'}
+                    </div>
                   ) : transferOptions.map(option => (
                     <button
                       key={option.id}

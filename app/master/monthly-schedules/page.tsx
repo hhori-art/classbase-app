@@ -1,11 +1,12 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { collection, getDocs, orderBy, query, where } from 'firebase/firestore';
 import { ArrowLeft, CalendarPlus, Loader2, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-react';
 import { auth, db } from '@/lib/firebase';
 import { useAuth } from '@/app/context/AuthContext';
+import { hasAdminAppPermission, isConfigurableAdminRole } from '@/lib/admin-app-permissions';
 
 const CATEGORY_OPTIONS = [
   { id: 'general', label: '通常予定' },
@@ -59,7 +60,8 @@ export default function MasterMonthlySchedulesPage() {
   const [cloningGlobalTitle, setCloningGlobalTitle] = useState('');
 
   const isMaster = profile?.role === 'master';
-  const readOnly = !isMaster;
+  const canManageOwnSchool = Boolean(profile && isConfigurableAdminRole(profile.role) && hasAdminAppPermission(profile.role, profile, 'science_social'));
+  const readOnly = !isMaster && !canManageOwnSchool;
   const mySchool = useMemo(() => {
     const ids = Array.isArray(profile?.school_ids) ? profile.school_ids : [];
     return ids[0] || profile?.school_id || profile?.school || '';
@@ -77,7 +79,7 @@ export default function MasterMonthlySchedulesPage() {
       }));
   }, [month]);
 
-  const loadSchedules = async () => {
+  const loadSchedules = useCallback(async () => {
     setLoading(true);
     try {
       const [year, monthNum] = month.split('-').map(Number);
@@ -110,11 +112,11 @@ export default function MasterMonthlySchedulesPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [isMaster, month, mySchool]);
 
   useEffect(() => {
     loadSchedules();
-  }, [month, isMaster, mySchool]);
+  }, [loadSchedules]);
 
   useEffect(() => {
     if (!profile || isMaster || !mySchool) return;

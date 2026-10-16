@@ -9,7 +9,6 @@ export const runtime = 'nodejs';
 export async function POST(request: NextRequest) {
   try {
     const actor = await getServerUser(request);
-    if (actor.role !== 'master') throw new Error('forbidden');
     if (!isAdminLike(actor)) throw new Error('forbidden');
     const body = await request.json();
     const school = String(body.school_id || body.school || actor.school_ids[0] || actor.school || '').trim();

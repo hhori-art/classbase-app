@@ -1,14 +1,15 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { createPortal } from 'react-dom';
 import { auth, db } from '@/lib/firebase';
 import { collection, getDocs, query, orderBy } from 'firebase/firestore';
-import { Users, Search, Plus, Edit, ArrowLeft, GraduationCap, UserCheck, Save, X, Loader2, FileUp, Shield, Printer, Download, History } from 'lucide-react';
+import { Users, Search, Plus, Edit, ArrowLeft, GraduationCap, UserCheck, Save, X, Loader2, FileUp, Shield, Printer, History } from 'lucide-react';
 import Link from 'next/link';
 import CsvSampleDownload from '@/app/components/CsvSampleDownload';
 import LastLoginCell from '@/app/components/LastLoginCell';
-import AccountGuideSheet, { ACCOUNT_GUIDE_PRINT_CSS } from '@/app/components/AccountGuideSheet';
+import AccountGuidePrintView from '@/app/components/account-guides/AccountGuidePrintView';
+import { toGuideAccount } from '@/app/components/account-guides/guide-model';
+import { describeSyncErrors, syncPrintedPasswords, type PrintedPasswordSkip } from '@/lib/client-printed-password-sync';
 import { EMPLOYMENT_CATEGORY_LABELS, normalizeEmploymentCategory } from '@/lib/employment-category';
 import { ATTENDANCE_SCHOOL_OPTION_GROUPS, attendanceSchoolName, resolveAttendanceSchoolCode } from '@/lib/attendance-schools';
 
@@ -88,9 +89,9 @@ export default function UserManagementPage() {
   const [isPrintModalOpen, setIsPrintModalOpen] = useState(false);
   const [printAccounts, setPrintAccounts] = useState<UserData[]>([]);
   const [qrBaseUrl, setQrBaseUrl] = useState('');
-  const [showParentCredentials, setShowParentCredentials] = useState(true);
-  const [isPdfExporting, setIsPdfExporting] = useState(false);
-  const [pdfProgress, setPdfProgress] = useState({ current: 0, total: 0 });
+  const [printSkipped, setPrintSkipped] = useState<PrintedPasswordSkip[]>([]);
+  const [printRequestIds, setPrintRequestIds] = useState<string[]>([]);
+  const [syncProgress, setSyncProgress] = useState<{ done: number; total: number } | null>(null);
 
   const [formData, setFormData] = useState<Partial<UserData> & { displayName: string }>({
     role: 'student',
@@ -226,102 +227,80 @@ export default function UserManagementPage() {
     setSelectedIds(new Set());
   };
 
-  const syncPrintedPasswords = async (ids: string[]) => {
-    const uniqueIds = Array.from(new Set(ids.filter(Boolean)));
-    if (uniqueIds.length === 0) return { synced_count: 0, error_count: 0, errors: [] };
-    const token = await auth.currentUser?.getIdToken();
-    if (!token) throw new Error('ログイン情報を確認できませんでした。再ログインしてください。');
-
-    const res = await fetch('/api/admin/accounts/sync-printed-password', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ user_ids: uniqueIds }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.ok) {
-      throw new Error(data.error || 'パスワード同期に失敗しました');
-    }
-    return data;
-  };
-
-  const handleOpenPrintModal = async () => {
-    const requestedIds = Array.from(selectedIds);
+  /**
+   * ID書面の印刷準備。書面に載せるパスワードとログイン用パスワードを分割して同期する。
+   * mode=issue：初回ログイン済みの人はパスワードを変えずに除外する（大量発行時の誤リセット防止）。
+   * mode=reissue：ログイン済みの人にも新しい初期パスワードを発行する。
+   */
+  const handleOpenPrintModal = async (mode: 'issue' | 'reissue' = 'issue', overrideIds?: string[]) => {
+    const requestedIds = overrideIds || Array.from(selectedIds);
     if (requestedIds.length === 0) return alert('印刷するユーザーを選択してください。');
-    const selectedUsers = users.filter(user => selectedIds.has(user.id));
-    const linkedParentIds = selectedUsers
-      .filter(user => user.role === 'student')
-      .map(user => user.parent_uid || users.find(candidate => Array.isArray(candidate.student_ids) && candidate.student_ids.includes(user.id))?.id || '')
+    const requestedSet = new Set(requestedIds);
+    const parentOf = (user: UserData) => users.find(candidate => candidate.id === user.parent_uid)
+      || users.find(candidate => Array.isArray(candidate.student_ids) && candidate.student_ids.includes(user.id));
+    const linkedParentIds = users
+      .filter(user => requestedSet.has(user.id) && user.role === 'student')
+      .map(user => parentOf(user)?.id || user.parent_uid || '')
       .filter(Boolean);
     const syncIds = Array.from(new Set([...requestedIds, ...linkedParentIds]));
 
     setIsPasswordSyncing(true);
+    setSyncProgress({ done: 0, total: syncIds.length });
     try {
-      const result = await syncPrintedPasswords(syncIds);
-      if (result.error_count > 0) {
-        const details = (result.errors || [])
-          .slice(0, 5)
-          .map((item: any) => `${item.login_id || item.user_id}: ${item.error}`)
-          .join('\n');
-        throw new Error(`書面とログインのパスワードを同期できないアカウントがあります。\n${details}`);
+      const summary = await syncPrintedPasswords(syncIds, { mode, onProgress: (done, total) => setSyncProgress({ done, total }) });
+      if (summary.errors.length > 0) {
+        throw new Error(`書面とログインのパスワードを同期できないアカウントがあります。\n${describeSyncErrors(summary.errors)}`);
       }
-      const resultByOldId = new Map((result.results || []).map((item: any) => [String(item.old_user_id || ''), item]));
-      const resultByNewId = new Map((result.results || []).map((item: any) => [String(item.user_id || ''), item]));
-      const migratedId = new Map<string, string>((result.results || []).map((item: any) => [
-        String(item.old_user_id || ''),
-        String(item.user_id || ''),
-      ] as [string, string]));
+      const skippedIds = new Set(summary.skipped.map(item => item.user_id));
+      const migratedId = new Map<string, string>(summary.results.map(item => [String(item.old_user_id), String(item.user_id)] as [string, string]));
       const updatedUsers = users.map(user => {
-        const synced: any = resultByOldId.get(user.id) || resultByNewId.get(user.id);
-        const updated = synced ? {
-          ...user,
-          id: synced.user_id,
-          uid: synced.user_id,
-          email: synced.email,
-          initial_password: synced.initial_password,
-          isFirstLogin: true,
+        const synced = summary.resultByUserId.get(user.id);
+        const updated: UserData = synced ? {
+          ...user, id: synced.user_id, uid: synced.user_id, email: synced.email,
+          initial_password: synced.initial_password, isFirstLogin: true,
         } : { ...user };
-        if (updated.parent_uid && migratedId.has(updated.parent_uid)) {
-          updated.parent_uid = migratedId.get(updated.parent_uid) || updated.parent_uid;
-        }
-        if (Array.isArray(updated.student_ids)) {
-          updated.student_ids = updated.student_ids.map(id => migratedId.get(id) || id);
-        }
+        if (updated.parent_uid && migratedId.has(updated.parent_uid)) updated.parent_uid = migratedId.get(updated.parent_uid) || updated.parent_uid;
+        if (Array.isArray(updated.student_ids)) updated.student_ids = updated.student_ids.map(id => migratedId.get(id) || id);
         return updated;
       });
-      const syncedSelectedIds = requestedIds.map(id => {
-        const synced: any = resultByOldId.get(id) || resultByNewId.get(id);
-        return String(synced?.user_id || id);
-      });
-      const syncedSelectedSet = new Set(syncedSelectedIds);
+      const nextSelectedIds = requestedIds.map(id => migratedId.get(id) || id);
+      const printableIds = new Set(nextSelectedIds.filter(id => !skippedIds.has(id)));
       const preparedPrintAccounts = updatedUsers
-        .filter(user => syncedSelectedSet.has(user.id))
+        .filter(user => printableIds.has(user.id))
         .map(user => {
           const linkedParent = updatedUsers.find(candidate => (
             candidate.id === user.parent_uid ||
             (Array.isArray(candidate.student_ids) && candidate.student_ids.includes(user.id))
           ));
+          const children = String(user.role) === 'parent' && Array.isArray(user.student_ids)
+            ? updatedUsers.filter(candidate => user.student_ids!.includes(candidate.id))
+            : [];
           return {
             ...user,
-            parent_name: linkedParent?.name || linkedParent?.parent_name || user.parent_name || '',
+            child_name: children.map(child => child.student_name || child.name).filter(Boolean).join('・'),
             parent_login_id: linkedParent?.lifetime_id || linkedParent?.email || user.parent_login_id || '',
-            parent_initial_password: linkedParent?.initial_password || user.parent_initial_password || '',
-            parent_email: linkedParent?.email || user.parent_email || '',
+            parent_initial_password: linkedParent?.initial_password || '',
+            parent_status: linkedParent && skippedIds.has(linkedParent.id) ? 'activated' : undefined,
           };
         });
-      if (preparedPrintAccounts.length === 0) {
-        throw new Error('印刷対象のアカウント情報を作成できませんでした。');
-      }
       setUsers(updatedUsers);
-      setSelectedIds(new Set(syncedSelectedIds));
+      setSelectedIds(new Set(nextSelectedIds));
+      setPrintRequestIds(nextSelectedIds);
+      setPrintSkipped(summary.skipped);
+      if (preparedPrintAccounts.length === 0) {
+        alert(`選んだ${summary.skipped.length}名は全員すでにログイン済みのため、書面を作成していません。\nパスワードを再発行する場合は、もう一度「ID書面を印刷」を押してから「再発行して含める」を選んでください。`);
+        if (mode === 'issue' && confirm('ログイン済みの人のパスワードを再発行して書面を作成しますか？\n本人が設定したパスワードは使えなくなります。')) {
+          await handleOpenPrintModal('reissue', nextSelectedIds);
+        }
+        return;
+      }
       setPrintAccounts(preparedPrintAccounts);
       setIsPrintModalOpen(true);
     } catch (e: any) {
       alert(`印刷前のパスワード確認に失敗しました。\n${e.message || e}`);
     } finally {
       setIsPasswordSyncing(false);
+      setSyncProgress(null);
     }
   };
 
@@ -545,173 +524,39 @@ export default function UserManagementPage() {
   const handleSelectAll = (c: boolean) => setSelectedIds(c ? new Set(filteredUsers.map(u => u.id)) : new Set());
   const handleSelectOne = (id: string, c: boolean) => { const n = new Set(selectedIds); c ? n.add(id) : n.delete(id); setSelectedIds(n); };
   
-  const handleDownloadIndividualPdfs = async () => {
-    if (isPdfExporting || printAccounts.length === 0) return;
-    setIsPdfExporting(true);
-    setPdfProgress({ current: 0, total: printAccounts.length });
-
-    try {
-      if (document.fonts?.ready) await document.fonts.ready;
-      const pages = Array.from(document.querySelectorAll<HTMLElement>('#print-root .account-guide-print-page'));
-      if (pages.length !== printAccounts.length) throw new Error('書面の表示数とPDF対象数が一致しません');
-
-      const [{ default: html2canvas }, { jsPDF }, { default: JSZip }] = await Promise.all([
-        import('html2canvas'),
-        import('jspdf'),
-        import('jszip'),
-      ]);
-      const zip = new JSZip();
-      const usedNames = new Set<string>();
-
-      for (let index = 0; index < pages.length; index++) {
-        setPdfProgress({ current: index + 1, total: pages.length });
-        const account = printAccounts[index];
-        const canvas = await html2canvas(pages[index], {
-          scale: 2,
-          useCORS: true,
-          backgroundColor: '#ffffff',
-          logging: false,
-        });
-        const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4', compress: true });
-        pdf.addImage(canvas.toDataURL('image/jpeg', 0.95), 'JPEG', 0, 0, 210, 297, undefined, 'FAST');
-
-        const rawName = String(account.student_name || account.name || account.lifetime_id || `user_${index + 1}`).trim();
-        const safeName = (rawName || `user_${index + 1}`).replace(/[\\/:*?"<>|\u0000-\u001F]/g, '_').slice(0, 80);
-        let fileName = `${safeName}_アカウント案内.pdf`;
-        if (usedNames.has(fileName)) fileName = `${safeName}_${index + 1}_アカウント案内.pdf`;
-        usedNames.add(fileName);
-        zip.file(fileName, pdf.output('arraybuffer'));
-      }
-
-      const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
-      const batchBaseName = selectedImportBatch?.file_name
-        ? selectedImportBatch.file_name.replace(/\.[^.]+$/, '')
-        : `アカウント案内_${new Date().toISOString().slice(0, 10)}`;
-      const safeZipName = batchBaseName.replace(/[\\/:*?"<>|\u0000-\u001F]/g, '_').slice(0, 100);
-      const url = URL.createObjectURL(zipBlob);
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = `${safeZipName}_個別PDF.zip`;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch (error: any) {
-      alert(`PDFの作成に失敗しました。\n${error?.message || error}`);
-    } finally {
-      setIsPdfExporting(false);
-      setPdfProgress({ current: 0, total: 0 });
-    }
-  };
-
-  // =========================================================================
-  // ★ 印刷用のコンポーネント (React Portalでbody直下にレンダリングさせます)
-  // =========================================================================
-  const PrintModal = () => {
-    if (!isMounted || typeof document === 'undefined') return null;
-
-    return createPortal(
-      <div id="print-root" className="fixed inset-0 z-[9999] bg-gray-200 overflow-y-auto print:static print:bg-white print:overflow-visible">
-        
-        {/* === 印刷の時だけ適用される最強のCSS === */}
-        <style dangerouslySetInnerHTML={{__html: `
-          @media print {
-            @page { size: A4 portrait; margin: 0; }
-            body > *:not(#print-root) { display: none !important; }
-            #print-root {
-              position: static !important;
-              display: block !important;
-              width: 100% !important;
-              height: auto !important;
-              overflow: visible !important;
-              background-color: white !important;
-            }
-            .print-hide { display: none !important; }
-            .print-page {
-              display: block !important;
-              position: relative !important;
-              page-break-after: always !important;
-              break-after: page !important;
-              page-break-inside: avoid !important;
-              width: 210mm !important;
-              height: 297mm !important;
-              padding: 12mm 18mm !important; 
-              margin: 0 !important;
-              box-sizing: border-box !important;
-              box-shadow: none !important;
-              border: none !important;
-              background-color: white !important;
-            }
-            .print-page:last-child {
-              page-break-after: auto !important;
-              break-after: auto !important;
-            }
-            .print-footer {
-              position: absolute !important;
-              bottom: 12mm !important;
-              left: 18mm !important;
-              right: 18mm !important;
-            }
-            * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
-          }
-          ${ACCOUNT_GUIDE_PRINT_CSS}
-        `}} />
-
-        {/* コントロールバー (印刷時は非表示) */}
-        <div className="print-hide sticky top-0 z-50 flex flex-col gap-3 border-b border-gray-300 bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex flex-wrap items-center gap-4">
-            <h2 className="font-bold text-gray-800 text-lg flex items-center gap-2">
-              <Printer size={20} className="text-indigo-600"/> 印刷プレビュー ({printAccounts.length}名分)
-            </h2>
-            {printAccounts.some(account => account.role === 'student') && (
-              <label className="flex cursor-pointer items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-black text-amber-900">
-                <input
-                  type="checkbox"
-                  checked={showParentCredentials}
-                  onChange={event => setShowParentCredentials(event.target.checked)}
-                  className="h-4 w-4 accent-amber-600"
-                />
-                保護者ID・初期パスワードを掲載する
-              </label>
-            )}
-          </div>
-          <div className="flex flex-wrap gap-3">
-            <button onClick={() => window.print()} className="bg-indigo-600 text-white px-6 py-2 rounded-xl font-bold hover:bg-indigo-700 flex items-center gap-2 shadow-sm transition-transform active:scale-95">
-              <Printer size={18}/> 印刷する
-            </button>
-            <button onClick={handleDownloadIndividualPdfs} disabled={isPdfExporting} className="flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-2 font-bold text-white shadow-sm hover:bg-emerald-700 disabled:cursor-wait disabled:opacity-60">
-              {isPdfExporting ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
-              {isPdfExporting ? `PDF作成中 ${pdfProgress.current}/${pdfProgress.total}` : '個別PDFをまとめて保存'}
-            </button>
-            <button onClick={() => { setIsPrintModalOpen(false); setPrintAccounts([]); }} className="bg-white text-gray-600 border border-gray-300 px-5 py-2 rounded-xl font-bold hover:bg-gray-50 flex items-center gap-2 transition-colors">
-              <X size={18}/> 閉じる
-            </button>
-          </div>
-        </div>
-        
-        {/* 用紙のコンテナ */}
-        <div className="py-8 flex flex-col items-center gap-8 print:block print:p-0 print:gap-0 font-sans">
-          {printAccounts.map((user) => {
-            return (
-              <AccountGuideSheet
-                key={user.id}
-                account={user}
-                school={attendanceSchoolName(user.school_id || user.school || user.classroom)}
-                loginUrl={qrBaseUrl || 'https://classbase-app.vercel.app'}
-                showParentCredentials={showParentCredentials}
-              />
-            );
-          })}
-        </div>
-      </div>,
-      document.body // ★ Portalを使ってbodyの直下にレンダリング
-    );
-  };
+  const skippedStudents = printSkipped.filter(item => item.role === 'student');
+  const skippedOthers = printSkipped.filter(item => item.role !== 'student');
+  const printNotice = printSkipped.length > 0 ? (
+    <div className="flex flex-col gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs font-bold text-amber-900 sm:flex-row sm:items-center sm:justify-between">
+      <p>
+        初回ログイン済みのため、パスワードを変えずに書面から外しました：生徒 {skippedStudents.length}名・保護者など {skippedOthers.length}名
+        <span className="ml-1 text-amber-700">（{printSkipped.slice(0, 4).map(item => item.display_name).join('、')}{printSkipped.length > 4 ? ' ほか' : ''}）</span>
+      </p>
+      <button
+        onClick={() => {
+          if (!confirm('ログイン済みの人に新しい初期パスワードを発行して、書面に含めますか？\n本人が設定したパスワードは使えなくなります。')) return;
+          setIsPrintModalOpen(false);
+          void handleOpenPrintModal('reissue', printRequestIds);
+        }}
+        className="shrink-0 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-black text-white hover:bg-amber-700"
+      >
+        パスワードを再発行して含める
+      </button>
+    </div>
+  ) : null;
 
   return (
     <>
       {/* 印刷モーダル (Portal) の呼び出し */}
-      {isPrintModalOpen && <PrintModal />}
+      {isPrintModalOpen && isMounted && (
+        <AccountGuidePrintView
+          accounts={printAccounts.map(user => toGuideAccount(user, attendanceSchoolName(user.school_id || user.school || user.classroom)))}
+          loginUrl={qrBaseUrl || 'https://classbase-app.vercel.app'}
+          title={`ID書面 ${new Date().toLocaleDateString('ja-JP')}発行`}
+          notice={printNotice}
+          onClose={() => { setIsPrintModalOpen(false); setPrintAccounts([]); setPrintSkipped([]); }}
+        />
+      )}
 
       {/* --- メイン画面 (プレビュー時・印刷時は画面上から消す) --- */}
       <div className={`min-h-screen bg-gray-50 p-6 pb-20 ${isPrintModalOpen ? 'hidden' : 'block'}`}>
@@ -816,12 +661,12 @@ export default function UserManagementPage() {
             <div className="flex gap-2 flex-wrap justify-end">
               <span className="self-center text-xs font-bold text-slate-400">左端のチェックで印刷対象を選択</span>
               <button
-                onClick={handleOpenPrintModal}
+                onClick={() => void handleOpenPrintModal()}
                 disabled={isPasswordSyncing || selectedIds.size === 0}
                 className="flex items-center gap-2 rounded-full border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-bold text-indigo-600 transition-colors hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-45"
               >
                 {isPasswordSyncing ? <Loader2 size={16} className="animate-spin" /> : <Printer size={16}/>} {' '}
-                {isPasswordSyncing ? 'パスワード確認中' : `ID書面を印刷（${selectedIds.size}件）`}
+                {isPasswordSyncing ? `パスワード確認中${syncProgress ? ` ${syncProgress.done}/${syncProgress.total}` : ''}` : `ID書面を印刷（${selectedIds.size}件）`}
               </button>
             </div>
           </div>

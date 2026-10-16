@@ -9,7 +9,7 @@ import { canStudentRegisterCourseOption } from '@/lib/course-registration-rules'
 import { loadCourseRegistrationOptions } from '@/lib/client-course-options';
 import { loadAnnouncements } from '@/lib/client-announcements';
 import { loadStudentCalendar } from '@/lib/client-student-homework';
-import { getCourseOptionStableKey } from '@/lib/course-registration-selection';
+import { courseOptionMatchesSelection, getCourseOptionCourseKey, getCourseOptionScheduleKey, getCourseOptionStableKey, hasCourseOptionSelection, removeCourseOptionSelections } from '@/lib/course-registration-selection';
 import { calendarScheduleKind, calendarScheduleLabel } from '@/lib/calendar-schedule-display';
 import { usePortalVisibility } from '@/app/hooks/usePortalVisibility';
 import AppSwitcherLink from '@/app/components/AppSwitcherLink';
@@ -210,6 +210,7 @@ export default function ParentDashboardPage() {
         const [optionData, registrationSnap] = await Promise.all([
           loadCourseRegistrationOptions({
             grade: normalizeGrade(selectedStudent.grade),
+            studentId: selectedStudent.id,
             getToken: forceRefresh => user.getIdToken(forceRefresh),
           }),
           getDocs(query(collection(db, 'course_registrations'), where('parent_id', '==', user.uid), limit(50))).catch(() => ({ docs: [] as any[] })),
@@ -347,19 +348,35 @@ export default function ParentDashboardPage() {
     }
   };
 
-  const saveCourseRegistration = async (term: string, year: number, requestId = '') => {
-    if (!user || !selectedStudent || selectedCourseIds.length === 0) return alert('受講する講座を選択してください。');
+  const saveCourseRegistration = async (term: string, year: number, requestId = '', scopedSelectedIds?: string[]) => {
+    if (!user || !selectedStudent) return;
+    const intendedSelectedCourseIds = scopedSelectedIds ?? selectedCourseIds;
+    if (intendedSelectedCourseIds.length === 0 && !confirm('登録済みの講座をすべて解除します。よろしいですか？')) return;
     setSavingCourses(true);
     try {
-      const token = await user.getIdToken();
-      const selectedCourseKeys = courseOptions
-        .filter(option => selectedCourseIds.includes(String(option.id)))
-        .map(getCourseOptionStableKey)
-        .filter(Boolean);
-      const registrationTokens = courseOptions
-        .filter(option => selectedCourseIds.includes(String(option.id)))
-        .map(option => option.registration_token)
-        .filter(Boolean);
+      const selectedBeforeRefresh = courseOptions.filter(option => intendedSelectedCourseIds.includes(String(option.id)));
+      const identities = new Set([
+        ...intendedSelectedCourseIds,
+        ...selectedBeforeRefresh.map(getCourseOptionStableKey).filter(Boolean),
+      ]);
+      const refreshed = intendedSelectedCourseIds.length > 0 ? await loadCourseRegistrationOptions({
+        grade: normalizeGrade(selectedStudent.grade),
+        year,
+        studentId: selectedStudent.id,
+        getToken: forceRefresh => user.getIdToken(forceRefresh),
+        force: true,
+      }) : { options: [] };
+      const selected = (Array.isArray(refreshed.options) ? refreshed.options : [])
+        .filter((option: any) => Number(option.year || year) === year)
+        .filter((option: any) => String(option.term || option.term_label || '') === term)
+        .filter((option: any) => courseOptionMatchesSelection(option, identities));
+      if (intendedSelectedCourseIds.length > 0 && (selected.length === 0 || selected.some((option: any) => !option.registration_token))) {
+        throw new Error('講座候補が更新されました。画面を再読み込みして選択内容を確認してください。');
+      }
+      const freshSelectedCourseIds = selected.map((option: any) => String(option.id || '')).filter(Boolean);
+      const selectedCourseKeys = selected.map(getCourseOptionStableKey).filter(Boolean);
+      const registrationTokens = selected.map((option: any) => option.registration_token).filter(Boolean);
+      const token = await user.getIdToken(true);
       const res = await fetch('/api/parent/course-registrations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -368,14 +385,16 @@ export default function ParentDashboardPage() {
           request_id: requestId,
           term,
           year,
-          selected_course_ids: selectedCourseIds,
+          selected_course_ids: freshSelectedCourseIds,
           selected_course_keys: selectedCourseKeys,
           registration_tokens: registrationTokens,
+          registration_type: 'regular',
         }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.ok === false) throw new Error(data.error || 'failed');
-      alert('受講講座を登録しました。');
+      setSelectedCourseIds(freshSelectedCourseIds);
+      alert(freshSelectedCourseIds.length === 0 ? '受講講座の登録を解除しました。' : '受講講座を登録しました。');
       if (requestId) {
         setPendingCourseRequests(prev => prev.filter(req => req.id !== requestId));
         setActiveCourseRequest(null);
@@ -470,7 +489,7 @@ export default function ParentDashboardPage() {
         options={courseOptions}
         selectedCourseIds={selectedCourseIds}
         onChangeSelectedCourseIds={setSelectedCourseIds}
-        onSubmit={(term, year, requestId) => saveCourseRegistration(term, year, requestId)}
+        onSubmit={(term, year, requestId, scopedIds) => saveCourseRegistration(term, year, requestId, scopedIds)}
         onClose={() => setActiveCourseRequest(null)}
         saving={savingCourses}
       />
@@ -667,7 +686,7 @@ function ParentCourseRequestModal({
   options: any[];
   selectedCourseIds: string[];
   onChangeSelectedCourseIds: (updater: string[] | ((prev: string[]) => string[])) => void;
-  onSubmit: (term: string, year: number, requestId: string) => void;
+  onSubmit: (term: string, year: number, requestId: string, scopedSelectedIds: string[]) => void;
   onClose: () => void;
   saving: boolean;
 }) {
@@ -686,10 +705,7 @@ function ParentCourseRequestModal({
     getCourseSubject(option) || '',
     option.course_name || option.title || getCourseSubject(option) || '講座',
   ].join('__');
-  const timeKey = (option: any) => [
-    getCourseDay(option) || '曜日未設定',
-    getCourseSlot(option) || '時間未設定',
-  ].join('__');
+  const timeKey = getCourseOptionScheduleKey;
   const courseChoices = (Object.values(requestOptions.reduce((acc, option: any) => {
     const key = courseKey(option);
     if (!acc[key]) acc[key] = { key, option, count: 0, daySlots: new Set<string>(), units: new Set<string>() };
@@ -737,21 +753,21 @@ function ParentCourseRequestModal({
   const visibleSelectedIds = selectedCourseIds.filter(id => visibleOptionIds.has(id));
   const toggleCourseKey = (key: string) => {
     const targetOptions = requestOptions.filter(option => courseKey(option) === key);
-    const targetOptionIds = new Set(targetOptions.map(option => option.id));
     const selected = selectedCourseKeys.includes(key);
     setSelectedCourseKeys(prev => selected ? prev.filter(item => item !== key) : [...prev, key]);
     if (selected) {
-      onChangeSelectedCourseIds(current => current.filter(id => !targetOptionIds.has(id)));
+      onChangeSelectedCourseIds(current => removeCourseOptionSelections(current, targetOptions));
       return;
     }
     const scheduleKeys = new Set(targetOptions.map(timeKey));
+    const targetCourseKeys = new Set(targetOptions.map(getCourseOptionCourseKey));
     if (scheduleKeys.size === 1) {
       onChangeSelectedCourseIds(prev => {
         const visibleIds = new Set(requestOptions.map(option => option.id));
         const selectedInRequest = new Set(prev.filter(id => visibleIds.has(id)));
         const outsideRequest = prev.filter(id => !visibleIds.has(id));
         requestOptions
-          .filter(option => scheduleKeys.has(timeKey(option)))
+          .filter(option => scheduleKeys.has(timeKey(option)) || targetCourseKeys.has(getCourseOptionCourseKey(option)))
           .forEach(option => selectedInRequest.delete(option.id));
         targetOptions.forEach(option => selectedInRequest.add(option.id));
         return Array.from(new Set([...outsideRequest, ...Array.from(selectedInRequest)]));
@@ -765,16 +781,16 @@ function ParentCourseRequestModal({
       const visibleIds = new Set(requestOptions.map(option => option.id));
       const selectedInRequest = new Set(prev.filter(id => visibleIds.has(id)));
       const outsideRequest = prev.filter(id => !visibleIds.has(id));
-      const allSelected = cleanIds.every(id => selectedInRequest.has(id));
-      if (allSelected) {
-        cleanIds.forEach(id => selectedInRequest.delete(id));
-        return Array.from(new Set([...outsideRequest, ...Array.from(selectedInRequest)]));
+      const targetOptions = requestOptions.filter(option => cleanIds.includes(option.id));
+      const hasSelected = hasCourseOptionSelection(selectedInRequest, targetOptions);
+      if (hasSelected) {
+        return removeCourseOptionSelections(prev, targetOptions);
       }
 
-      const selectedOptions = requestOptions.filter(option => cleanIds.includes(option.id));
-      const conflictKeys = new Set(selectedOptions.map(timeKey));
+      const conflictKeys = new Set(targetOptions.map(timeKey));
+      const duplicateCourseKeys = new Set(targetOptions.map(getCourseOptionCourseKey));
       requestOptions
-        .filter(option => conflictKeys.has(timeKey(option)))
+        .filter(option => conflictKeys.has(timeKey(option)) || duplicateCourseKeys.has(getCourseOptionCourseKey(option)))
         .forEach(option => selectedInRequest.delete(option.id));
       cleanIds.forEach(id => selectedInRequest.add(id));
       return Array.from(new Set([...outsideRequest, ...Array.from(selectedInRequest)]));
@@ -862,7 +878,7 @@ function ParentCourseRequestModal({
                 <div>
                   <p className="text-xs font-black text-slate-500">2. 曜日・時間</p>
                   <h3 className="text-base font-black text-slate-900">通える曜日・時間を決める</h3>
-                  <p className="mt-1 text-xs font-bold text-slate-400">同じ曜日・同じ時限は1つだけ選べます。別の講座を選ぶと前の選択は自動で外れます。</p>
+                  <p className="mt-1 text-xs font-bold text-slate-400">同じ曜日・時限は1講座のみ、同じ講座は別の曜日・時限と重複して選べません。</p>
                 </div>
                 <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-black text-slate-600">{visibleSelectedIds.length}件</span>
               </div>
@@ -883,13 +899,20 @@ function ParentCourseRequestModal({
             </div>
           </div>
         </div>
-        <div className="shrink-0 border-t border-slate-100 bg-slate-50 p-5">
+        <div className="grid shrink-0 gap-3 border-t border-slate-100 bg-slate-50 p-5 sm:grid-cols-2">
           <button
-            onClick={() => onSubmit(first.term || request.term || 'term', Number(first.year || request.year || new Date().getFullYear()), request.id)}
+            onClick={() => onSubmit(first.term || request.term || 'term', Number(first.year || request.year || new Date().getFullYear()), request.id, visibleSelectedIds)}
             disabled={saving || requestOptions.length === 0 || visibleSelectedIds.length === 0}
-            className="w-full rounded-2xl bg-slate-900 py-4 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-50"
+            className="w-full rounded-2xl bg-slate-900 py-4 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-40"
           >
-            {saving ? '登録中...' : 'この内容で登録する'}
+            {saving ? '保存中...' : '登録する'}
+          </button>
+          <button
+            onClick={() => onSubmit(first.term || request.term || 'term', Number(first.year || request.year || new Date().getFullYear()), request.id, [])}
+            disabled={saving || requestOptions.length === 0 || visibleSelectedIds.length > 0}
+            className="w-full rounded-2xl border-2 border-rose-200 bg-white py-4 text-sm font-black text-rose-600 hover:bg-rose-50 disabled:opacity-30"
+          >
+            すべて解除する
           </button>
         </div>
       </div>

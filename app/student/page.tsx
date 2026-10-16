@@ -28,12 +28,15 @@ import {
 import {
   normalizeStudentAppearance,
   studentBackgroundPatternStyle,
+  studentBadgeFrameStyle,
   STUDENT_CARD_STYLES,
   STUDENT_DENSITIES,
   STUDENT_HEADER_STYLES,
   STUDENT_THEMES,
 } from '@/lib/student-customization';
 import { usePortalVisibility } from '@/app/hooks/usePortalVisibility';
+import { isStudentFeatureEnabled } from '@/lib/portal-feature-access';
+import { presetTitleText } from '@/lib/reward-presets';
 import { loadCourseRegistrationOptions } from '@/lib/client-course-options';
 import { getCourseDay } from '@/app/components/CourseRegistrationCalendar';
 import { formatClassDays, parseClassDays } from '@/lib/class-days';
@@ -327,7 +330,7 @@ export default function StudentDashboard() {
 
   const currentBadgeId = userData?.selected_badge === 'beginner' ? 'badge_1' : userData?.selected_badge;
   const currentBadge = BADGES.find(b => b.id === currentBadgeId);
-  const appearance = normalizeStudentAppearance(userData?.settings?.appearance);
+  const appearance = normalizeStudentAppearance(userData?.settings?.appearance, userData?.owned_cosmetics);
   const theme = STUDENT_THEMES[appearance.theme];
   const cardStyle = STUDENT_CARD_STYLES[appearance.cardStyle];
   const density = STUDENT_DENSITIES[appearance.density];
@@ -367,7 +370,7 @@ export default function StudentDashboard() {
         </div>
       )}
 
-      <TrophyModal isOpen={isTrophyOpen} onClose={() => setIsTrophyOpen(false)} userData={displayProfile} canUseShop={visibility.shop !== false} />
+      <TrophyModal isOpen={isTrophyOpen} onClose={() => setIsTrophyOpen(false)} userData={displayProfile} canUseShop={isStudentFeatureEnabled(visibility, displayProfile, 'shop')} />
 
       {requiredTransferError && !isTeacherPreview && (
         <div className="fixed inset-0 z-[270] flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
@@ -467,14 +470,21 @@ export default function StudentDashboard() {
       <div className={`${theme.heroBg} pt-10 ${density.heroBottom} px-6 ${headerStyle.heroShape} relative overflow-hidden`}>
         <div className={`absolute top-[-50px] right-[-50px] w-40 h-40 ${theme.heroAccent} rounded-full blur-2xl transition-transform ${headerStyle.decoration}`}></div>
         {appearance.showMascot && (
-          <div className="absolute bottom-5 right-6 rounded-full bg-white/15 px-4 py-2 text-3xl shadow-sm backdrop-blur-sm" aria-hidden="true">
-            {currentBadge ? currentBadge.icon : '🎓'}
+          <div className="absolute bottom-5 right-6 rounded-full" style={studentBadgeFrameStyle(appearance.frame)} aria-hidden="true">
+            <div className={`rounded-full px-4 py-2 text-3xl shadow-sm backdrop-blur-sm ${appearance.frame ? 'bg-white/90' : 'bg-white/15'}`}>
+              {currentBadge ? currentBadge.icon : '🎓'}
+            </div>
           </div>
         )}
         <div className="flex justify-between items-start text-white relative z-10">
           <div>
             <p className="text-sm font-bold opacity-90 mb-1 flex items-center gap-2"><Calendar size={14}/> {dateStr}</p>
-            <h1 className="text-2xl font-extrabold tracking-tight leading-tight">{greeting} <br/><span className={`${theme.nameColor} text-3xl`}>{displayProfile.student_name}</span> さん</h1>
+            <h1 className="text-2xl font-extrabold tracking-tight leading-tight">{greeting} <br/>
+              {appearance.title && (
+                <span className="mb-1 mt-1 inline-flex items-center gap-1 rounded-full bg-white/90 px-3 py-0.5 text-xs font-black text-indigo-700 shadow-sm">👑 {presetTitleText(appearance.title)}</span>
+              )}
+              {appearance.title && <br/>}
+              <span className={`${theme.nameColor} text-3xl`}>{displayProfile.student_name}</span> さん</h1>
             {displayProfile.error_mode ? (
               <div className="mt-3 inline-flex items-center gap-2 bg-red-500/80 backdrop-blur-sm px-3 py-1 rounded-full text-xs font-bold animate-pulse">
                 <AlertTriangle size={12}/> プロフィール読み込みエラー (管理者へご連絡ください)
@@ -498,7 +508,9 @@ export default function StudentDashboard() {
       <div className={`px-5 -mt-16 relative z-20 ${density.sectionGap}`}>
         <button onClick={() => setIsTrophyOpen(true)} className={`w-full ${cardStyle.panel} ${density.cardPadding} flex justify-between items-center transform hover:scale-[1.02] active:scale-95 transition-all text-left group`}>
           <div className="flex items-center gap-4">
-            <div className={`w-14 h-14 rounded-2xl ${theme.badgeBg} flex items-center justify-center text-4xl shadow-inner border ${theme.ring}`}>{currentBadge ? currentBadge.icon : '🎓'}</div>
+            <div className="rounded-2xl" style={studentBadgeFrameStyle(appearance.frame)}>
+              <div className={`w-14 h-14 rounded-2xl ${theme.badgeBg} flex items-center justify-center text-4xl shadow-inner border ${theme.ring}`}>{currentBadge ? currentBadge.icon : '🎓'}</div>
+            </div>
             <div>
               <p className={`text-[10px] text-gray-400 font-bold uppercase ${theme.primaryText} transition-colors`}>My Badge</p>
               <p className="text-lg font-extrabold text-gray-800 flex items-center gap-2">{currentBadge ? currentBadge.name : 'バッジ未設定'} {currentBadge && <span className="bg-yellow-400 text-yellow-900 text-[10px] px-2 py-0.5 rounded-full">Equipped</span>}</p>

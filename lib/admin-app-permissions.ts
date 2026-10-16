@@ -32,7 +32,6 @@ const MASTER_ONLY_ADMIN_PATHS = [
   '/master/community',
   '/master/parent-inquiries',
   '/master/requests',
-  '/master/rewards',
 ] as const;
 
 export const ADMIN_APP_LABELS: Record<AdminAppId, string> = {
@@ -66,6 +65,8 @@ const SCHOOL_ADMIN_ALLOWED_PATHS = [
   '/master/school-students',
   '/master/monthly-schedules',
   '/master/shifts',
+  // ポイント・景品管理。生徒への操作はAPI側で担当校の生徒に限定する。
+  '/master/rewards',
 ] as const;
 
 export function isSchoolAdminAllowedPath(pathname: string) {

@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
-import { BADGES } from '@/lib/gamification';
+import { BADGES, BADGE_CATEGORIES, BADGE_RARITY_LABELS, BADGE_RARITY_STYLES, badgeProgress, badgeStatsFromProfile, findBadge, type BadgeStats } from '@/lib/gamification';
 import { 
   X, Lock, Star, Coins, Trophy, UserCircle, CheckCircle2, ShoppingBag, 
   ArrowRight, Calendar, Loader2, Video, MessageCircle
@@ -118,6 +118,8 @@ export default function TrophyModal({ isOpen, onClose, userData, canUseShop = tr
     userData?.selected_badge && userData.selected_badge !== 'beginner' ? userData.selected_badge : 'badge_1'
   );
 
+  const [badgeStats, setBadgeStats] = useState<BadgeStats>(() => badgeStatsFromProfile(userData || {}));
+  const [newBadgeIds, setNewBadgeIds] = useState<string[]>([]);
   const earnedBadges = currentBadges;
   const selectedBadge = currentSelectedBadge;
 
@@ -191,6 +193,7 @@ export default function TrophyModal({ isOpen, onClose, userData, canUseShop = tr
               setCurrentLogins(data.login_count || data.attendance_count || 0);
               setCurrentStreak(data.login_streak || 0);
               setCurrentBadges(Array.isArray(data.earned_badges) ? data.earned_badges : []);
+              setBadgeStats(badgeStatsFromProfile(data));
               setCurrentSelectedBadge(data.selected_badge && data.selected_badge !== 'beginner' ? data.selected_badge : 'badge_1');
             }
           } catch (e) {
@@ -228,6 +231,26 @@ export default function TrophyModal({ isOpen, onClose, userData, canUseShop = tr
     };
     fetchData();
   }, [isOpen, activeTab, userData]);
+
+  // 開いた時に各機能の累計からバッジを確定し、新しく獲得したものを知らせる。
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const token = await auth.currentUser?.getIdToken();
+        if (!token) return;
+        const res = await fetch('/api/badges/sync', { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+        const data = await res.json().catch(() => ({}));
+        if (cancelled || !res.ok || data.ok === false) return;
+        if (Array.isArray(data.earned_badges)) setCurrentBadges(data.earned_badges);
+        if (Array.isArray(data.added) && data.added.length > 0) setNewBadgeIds(data.added);
+      } catch (error) {
+        console.warn('Badge sync failed:', error);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -620,22 +643,54 @@ export default function TrophyModal({ isOpen, onClose, userData, canUseShop = tr
 
           {/* 3. バッジ */}
           {activeTab === 'badge' && (
-            <div>
-              <p className="text-xs text-gray-500 text-center mb-4">獲得したバッジをアイコンに設定できるよ！</p>
-              <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
-                {BADGES.map((badge) => {
-                  const isUnlocked = earnedBadges.includes(badge.id);
-                  const isEquipped = selectedBadge === badge.id;
-                  const isSecretHidden = !isUnlocked && (badge as any).secret;
-                  return (
-                    <button key={badge.id} disabled={!isUnlocked || loading} onClick={() => handleEquipBadge(badge.id)} className={`relative aspect-square rounded-2xl flex flex-col items-center justify-center p-2 text-center border-2 transition-all ${isUnlocked ? (isEquipped ? 'bg-indigo-50 border-indigo-500 ring-2 ring-indigo-200' : 'bg-white border-gray-200 hover:border-indigo-300') : 'bg-gray-100 border-gray-200 opacity-60 cursor-not-allowed'}`}>
-                      <div className="text-2xl mb-1">{isUnlocked ? badge.icon : isSecretHidden ? <span className="text-gray-400 font-black">?</span> : <Lock size={20} className="text-gray-300"/>}</div>
-                      <div className="text-[9px] font-bold text-gray-600 w-full truncate">{isSecretHidden ? '???' : badge.name}</div>
-                      {isEquipped && <div className="absolute -top-1 -right-1 bg-indigo-600 text-white text-[8px] font-bold px-1.5 py-0.5 rounded-full shadow-sm">装備中</div>}
-                    </button>
-                  );
-                })}
+            <div className="space-y-5">
+              <div className="rounded-2xl bg-white p-3 text-center">
+                <p className="text-xs font-bold text-gray-500">獲得したバッジをタップするとアイコンに設定できるよ！</p>
+                <p className="mt-1 text-sm font-black text-indigo-700">{BADGES.filter(badge => earnedBadges.includes(badge.id)).length} / {BADGES.length} 個 獲得</p>
               </div>
+              {newBadgeIds.length > 0 && (
+                <div className="rounded-2xl border-2 border-amber-300 bg-amber-50 p-3 text-center">
+                  <p className="text-xs font-black text-amber-700">🎉 新しいバッジを獲得！</p>
+                  <p className="mt-1 text-sm font-black text-slate-800">{newBadgeIds.map(id => findBadge(id)).filter(Boolean).map(badge => `${badge!.icon} ${badge!.name}`).join('　')}</p>
+                </div>
+              )}
+              {BADGE_CATEGORIES.map(category => {
+                const badges = BADGES.filter(badge => badge.category === category.id);
+                if (badges.length === 0) return null;
+                return (
+                  <section key={category.id}>
+                    <h4 className="mb-2 text-xs font-black text-gray-500">{category.label}</h4>
+                    <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
+                      {badges.map((badge) => {
+                        const isUnlocked = earnedBadges.includes(badge.id);
+                        const isEquipped = selectedBadge === badge.id;
+                        const isSecretHidden = !isUnlocked && badge.secret;
+                        const progress = badgeProgress(badge, badgeStats);
+                        return (
+                          <button key={badge.id} disabled={!isUnlocked || loading} onClick={() => handleEquipBadge(badge.id)} title={isSecretHidden ? '???' : badge.description}
+                            className={`relative flex aspect-square flex-col items-center justify-center rounded-2xl border-2 p-2 text-center transition-all ${isUnlocked ? `${BADGE_RARITY_STYLES[badge.rarity]} ${isEquipped ? 'ring-2 ring-indigo-400' : 'hover:border-indigo-300'}` : 'cursor-not-allowed border-gray-200 bg-gray-100'}`}>
+                            <div className={`mb-1 text-2xl ${isUnlocked ? '' : 'opacity-40 grayscale'}`}>{isSecretHidden ? <span className="font-black text-gray-400">?</span> : isUnlocked ? badge.icon : <Lock size={20} className="text-gray-300"/>}</div>
+                            <div className="w-full truncate text-[9px] font-bold text-gray-600">{isSecretHidden ? '???' : badge.name}</div>
+                            {isUnlocked ? (
+                              <div className="text-[8px] font-black text-gray-400">{BADGE_RARITY_LABELS[badge.rarity]}</div>
+                            ) : progress && !isSecretHidden ? (
+                              <div className="mt-1 w-full">
+                                <div className="h-1 overflow-hidden rounded-full bg-gray-200"><div className="h-full bg-indigo-400" style={{ width: `${progress.rate * 100}%` }} /></div>
+                                <div className="mt-0.5 text-[8px] font-bold text-gray-400">{progress.current}/{progress.target}</div>
+                              </div>
+                            ) : badge.metric === 'manual' ? (
+                              <div className="text-[8px] font-bold text-gray-400">先生から授与</div>
+                            ) : badge.metric === 'shop' ? (
+                              <div className="text-[8px] font-bold text-gray-400">交換所で入手</div>
+                            ) : null}
+                            {isEquipped && <div className="absolute -top-1 -right-1 bg-indigo-600 text-white text-[8px] font-bold px-1.5 py-0.5 rounded-full shadow-sm">装備中</div>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </section>
+                );
+              })}
             </div>
           )}
 
@@ -649,7 +704,7 @@ export default function TrophyModal({ isOpen, onClose, userData, canUseShop = tr
                ) : ranking.map((player: any, index) => (
                  <div key={player.id || index} className={`flex items-center gap-3 p-3 rounded-xl border ${player.is_me || player.id === userData.uid ? 'bg-yellow-50 border-yellow-300' : 'bg-white border-gray-100'}`}>
                    <div className={`w-6 text-center font-black ${index < 3 ? 'text-orange-500' : 'text-gray-400'}`}>{player.rank || index + 1}</div>
-                   <div className="w-8 h-8 bg-white rounded-full flex items-center justify-center border text-lg">{BADGES.find(b => b.id === player.selected_badge)?.icon || '👤'}</div>
+                   <div className="w-8 h-8 bg-white rounded-full flex items-center justify-center border text-lg">{findBadge(player.selected_badge)?.icon || '👤'}</div>
                    <div className="flex-1">
                      <p className="text-xs font-bold text-gray-800">{player.student_name || '生徒'}</p>
                      <p className="text-[10px] text-gray-400">{Number(player.total_coins || 0).toLocaleString()} pt / {player.login_streak || 0}日連続</p>

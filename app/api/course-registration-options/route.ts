@@ -1,15 +1,15 @@
 import { NextRequest } from 'next/server';
 import { unstable_cache } from 'next/cache';
 import { adminDb } from '@/lib/firebase-admin';
-import { getServerUser, jsonError } from '@/lib/server-auth';
+import { getServerUser, isAdminLike, jsonError } from '@/lib/server-auth';
 import { enrichCourseOptionsWithShifts } from '@/lib/course-registration-match';
 import { canStudentRegisterCourseOption, normalizeCourseGrade } from '@/lib/course-registration-rules';
 import { getAllQueryDocuments } from '@/lib/server/firestore-pagination';
 import { isTestPrepShift } from '@/lib/class-button-settings';
 import { buildTestPrepRegistrationOptions, canStudentUseTestPrepDefinition, normalizeTestPrepDefinition, testPrepTermRanges } from '@/lib/test-prep-registration';
-import { getCourseOptionStableKey } from '@/lib/course-registration-selection';
+import { getCourseOptionCourseKey, getCourseOptionStableKey } from '@/lib/course-registration-selection';
 import { issueCourseRegistrationToken } from '@/lib/server/course-registration-token';
-import { canIssueCourseRegistrationGrant } from '@/lib/course-registration-window';
+import { canIssueCourseRegistrationGrantForContext } from '@/lib/course-registration-window';
 
 export const runtime = 'nodejs';
 
@@ -239,10 +239,20 @@ export async function GET(request: NextRequest) {
     const user = await getServerUser(request);
     const requestedGrade = normalizeCourseGrade(request.nextUrl.searchParams.get('grade') || user.profile.grade);
     const year = Number(request.nextUrl.searchParams.get('year') || currentCourseYear());
+    const requestedStudentId = String(request.nextUrl.searchParams.get('student_id') || '').trim();
+    let registrationStudentId = user.uid;
+    if (requestedStudentId) {
+      if (user.role === 'student' && requestedStudentId !== user.uid) throw new Error('forbidden');
+      if (user.role === 'parent') {
+        const linkedStudentIds = Array.isArray(user.profile.student_ids) ? user.profile.student_ids.map(String) : [];
+        if (!linkedStudentIds.includes(requestedStudentId)) throw new Error('forbidden');
+        registrationStudentId = requestedStudentId;
+      }
+    }
     const [payload, registrationRequestSnap, answeredRegistrationSnap] = await Promise.all([
       getCachedCourseOptions(requestedGrade, year),
       adminDb().collection('registration_requests').where('is_active', '==', true).limit(100).get(),
-      adminDb().collection('course_registrations').where('student_id', '==', user.uid).limit(50).get(),
+      adminDb().collection('course_registrations').where('student_id', '==', registrationStudentId).limit(50).get(),
     ]);
     const registrationRequests = registrationRequestSnap.docs
       .map(doc => ({ id: doc.id, ...doc.data() } as any))
@@ -327,7 +337,16 @@ export async function GET(request: NextRequest) {
       const isCurrent = Boolean(range?.start && range?.end && range.start <= today && today <= range.end);
       const isOpen = Boolean(opensAt && closesAt && opensAt <= today && today <= closesAt);
       const registrationType = option.registration_type === 'test_prep' ? 'test_prep' : 'regular';
-      if (!canIssueCourseRegistrationGrant(registrationType, isCurrent, isOpen)) return { ...option, registration_token: null };
+      const isExistingCurrentRegistration = registrationSummaries.some(registration => (
+        registration.is_current &&
+        registration.registration_type === registrationType &&
+        registration.year === Number(option.year || year) &&
+        registration.term === String(option.term || option.term_label || 'term')
+      ));
+      const administrator = isAdminLike(user);
+      if (!canIssueCourseRegistrationGrantForContext(registrationType, isCurrent, isOpen, isExistingCurrentRegistration, administrator)) {
+        return { ...option, registration_token: null };
+      }
       return {
         ...option,
         registration_token: issueCourseRegistrationToken({
@@ -335,6 +354,7 @@ export async function GET(request: NextRequest) {
           grade: requestedGrade,
           option_id: String(option.id || ''),
           stable_key: String(option.stable_course_key || getCourseOptionStableKey(option) || ''),
+          course_key: getCourseOptionCourseKey(option),
           year: Number(option.year || year),
           term: String(option.term || option.term_label || 'term'),
           registration_type: registrationType,
@@ -342,7 +362,7 @@ export async function GET(request: NextRequest) {
           day: String(option.resolved_day || option.day || option.day_of_week || ''),
           slot: String(option.resolved_slot || option.slot || option.time_slot || option.period || ''),
           course_text: [option.subject, option.course_name, option.title, option.resolved_unit].filter(Boolean).join(' '),
-          registration_closes_at: closesAt,
+          registration_closes_at: administrator || isExistingCurrentRegistration ? undefined : closesAt,
         }),
       };
     });

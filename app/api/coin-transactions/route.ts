@@ -4,6 +4,9 @@ import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, jsonError, requireRole } from '@/lib/server-auth';
 import { writeLearningEvent } from '@/lib/events';
 import { jstDateKey } from '@/lib/date-key';
+import { newlyEligibleBadges } from '@/lib/server/badges';
+import { isRewardDeliverable, ownsPreset, presetOf, presetOwnershipUpdates, requireStudentShopAccess, REWARD_CATALOG_TAG, studentSchoolOf, writeRewardDelivery } from '@/lib/server/reward-store';
+import { revalidateTag } from 'next/cache';
 
 const MISSION_CONFIG: Record<string, { amount: number; label: string }> = {
   last_mission_date: { amount: 10, label: 'ログインミッション' },
@@ -157,11 +160,12 @@ export async function POST(request: NextRequest) {
         const previousStreak = Number(profile.login_streak || 0);
         const nextStreak = profile.last_login_bonus_date === yesterday ? previousStreak + 1 : 1;
         const amount = LOGIN_BONUS_PATTERN[(nextCount - 1) % LOGIN_BONUS_PATTERN.length];
-        const earnedBadges: string[] = ['badge_1'];
-        if (nextStreak >= 3) earnedBadges.push('badge_fire_3');
-        if (nextStreak >= 7) earnedBadges.push('badge_rainbow');
-        if (nextCount >= 10) earnedBadges.push('badge_star_10');
-        if (Number(profile.coins || 0) + amount >= 1000) earnedBadges.push('badge_king');
+        const bestStreak = Math.max(Number(profile.best_login_streak || 0), nextStreak);
+        // 更新後の累計値でバッジ条件をまとめて判定する（lib/gamification.ts の定義を使用）。
+        const earnedBadges = ['badge_1', ...newlyEligibleBadges({
+          ...profile, login_count: nextCount, login_streak: nextStreak, best_login_streak: bestStreak,
+          total_coins: Number(profile.total_coins || 0) + amount,
+        })];
         const currentBadges = Array.isArray(profile.earned_badges) ? profile.earned_badges : [];
         const nextBadges = Array.from(new Set([...currentBadges, ...earnedBadges]));
         const currentSelectedBadge = String(profile.selected_badge || '');
@@ -185,6 +189,7 @@ export async function POST(request: NextRequest) {
           login_count: FieldValue.increment(1),
           attendance_count: FieldValue.increment(1),
           login_streak: nextStreak,
+          best_login_streak: bestStreak,
           last_login_bonus_date: today,
           last_active_date: today,
           last_login_at: FieldValue.serverTimestamp(),
@@ -409,6 +414,7 @@ export async function POST(request: NextRequest) {
 
     if (action === 'reward_exchange') {
       requireRole(user, ['student']);
+      await requireStudentShopAccess(user);
       const rewardId = String(body.reward_id || '').trim();
       const exchangeId = String(body.exchange_id || '').trim();
       if (!rewardId || !/^[a-zA-Z0-9_-]{8,80}$/.test(exchangeId)) {
@@ -417,23 +423,26 @@ export async function POST(request: NextRequest) {
       const db = adminDb();
       const rewardRef = db.collection('rewards').doc(rewardId);
       const userRef = db.collection('users').doc(user.uid);
-      const requestRef = db.collection('requests').doc(`exchange_${user.uid}_${exchangeId}`);
       const transactionRef = db.collection('coin_transactions').doc(`${user.uid}_reward_exchange_${exchangeId}`);
       const result = await db.runTransaction(async tx => {
-        const [rewardSnap, userSnap, existingRequest] = await Promise.all([
-          tx.get(rewardRef), tx.get(userRef), tx.get(requestRef),
+        const [rewardSnap, userSnap, existingTransaction] = await Promise.all([
+          tx.get(rewardRef), tx.get(userRef), tx.get(transactionRef),
         ]);
-        if (existingRequest.exists) {
-          return { applied: false, cost: Number(existingRequest.data()?.cost || 0), coins: Number(userSnap.data()?.coins || 0) };
+        const profile = userSnap.data() || {};
+        if (existingTransaction.exists) {
+          return { applied: false, cost: -Number(existingTransaction.data()?.amount || 0), coins: Number(profile.coins || 0), kind: null, new_badges: [] };
         }
         const reward = rewardSnap.data() || {};
         const cost = Number(reward.required_coins);
         const rewardName = String(reward.name || '').trim();
-        if (!rewardSnap.exists || reward.archived === true || reward.active === false || !rewardName || !Number.isInteger(cost) || cost <= 0 || cost > 1_000_000) {
+        if (!rewardSnap.exists || reward.exchangeable === false || !isRewardDeliverable(reward) || !Number.isInteger(cost) || cost <= 0 || cost > 1_000_000) {
           throw new Error('reward-not-available');
         }
-        const currentCoins = Number(userSnap.data()?.coins || 0);
+        const currentCoins = Number(profile.coins || 0);
+        if (ownsPreset(profile, reward)) throw new Error('reward-already-owned');
         if (!userSnap.exists || currentCoins < cost) throw new Error('insufficient-coins');
+        const newBadges = newlyEligibleBadges({ ...profile, reward_exchange_count: Number(profile.reward_exchange_count || 0) + 1 });
+        const ownership = presetOwnershipUpdates(reward);
         tx.set(transactionRef, {
           user_id: user.uid, amount: -cost, reason: `景品交換: ${rewardName}`,
           actor_id: user.uid, source: 'reward_exchange', source_id: exchangeId,
@@ -441,20 +450,22 @@ export async function POST(request: NextRequest) {
           created_at: FieldValue.serverTimestamp(),
         });
         tx.set(userRef, {
-          coins: FieldValue.increment(-cost), updated_at: FieldValue.serverTimestamp(),
+          coins: FieldValue.increment(-cost),
+          reward_exchange_count: FieldValue.increment(1),
+          ...ownership,
+          // 限定バッジと条件達成バッジを同時に得た場合も1回の arrayUnion にまとめる。
+          ...(newBadges.length || ownership.earned_badges ? { earned_badges: FieldValue.arrayUnion(...newBadges, ...(presetOf(reward)?.category === 'badge' ? [presetOf(reward)!.id] : [])) } : {}),
+          updated_at: FieldValue.serverTimestamp(),
         }, { merge: true });
-        tx.set(requestRef, {
-          type: 'exchange',
+        const delivery = writeRewardDelivery(tx, {
           userId: user.uid,
-          userName: user.profile.student_name || user.profile.name || user.email || '生徒',
-          rewardId,
-          rewardName,
-          cost,
-          status: 'pending',
-          created_at: FieldValue.serverTimestamp(),
+          userName: String(user.profile.student_name || user.profile.name || user.email || '生徒'),
+          userSchool: studentSchoolOf(user.profile),
+          rewardId, reward, origin: 'shop', originId: exchangeId, refundableCost: cost,
         });
-        return { applied: true, cost, coins: currentCoins - cost };
+        return { applied: true, cost, coins: currentCoins - cost, kind: delivery.kind, preset_id: presetOf(reward)?.id || null, new_badges: newBadges };
       });
+      if (result.applied) revalidateTag(REWARD_CATALOG_TAG);
       return Response.json({ ok: true, ...result });
     }
 

@@ -7,7 +7,12 @@ export type SoundEffectType =
   | 'login_bonus'
   | 'coin_acquired'
   | 'quest_cleared'
-  | 'notification';
+  | 'notification'
+  | 'gacha_spin'
+  | 'gacha_drop'
+  | 'gacha_open'
+  | 'gacha_rare'
+  | 'gacha_legendary';
 
 const SOUND_FILES: Partial<Record<SoundEffectType, string>> = {
   login_bonus: '/sounds/login-bonus.mp3',
@@ -24,6 +29,11 @@ const SOUND_VOLUMES: Record<SoundEffectType, number> = {
   coin_acquired: 0.5,
   quest_cleared: 0.7,
   notification: 0.5,
+  gacha_spin: 0.22,
+  gacha_drop: 0.35,
+  gacha_open: 0.4,
+  gacha_rare: 0.55,
+  gacha_legendary: 0.6,
 };
 
 type ToneStep = {
@@ -64,6 +74,36 @@ const TONE_PATTERNS: Record<SoundEffectType, ToneStep[]> = {
   notification: [
     { frequency: 880, duration: 0.08, type: 'sine' },
     { frequency: 1175, duration: 0.14, type: 'sine' },
+  ],
+  // ガチャ演出：ハンドルのカチカチ音、カプセル落下、開封、当たりのファンファーレ
+  gacha_spin: [
+    { frequency: 330, duration: 0.03, type: 'square', volume: 0.08 },
+    { frequency: 392, duration: 0.03, type: 'square', volume: 0.08 },
+    { frequency: 330, duration: 0.03, type: 'square', volume: 0.08 },
+  ],
+  gacha_drop: [
+    { frequency: 660, duration: 0.05, type: 'triangle' },
+    { frequency: 440, duration: 0.06, type: 'triangle' },
+    { frequency: 294, duration: 0.1, type: 'triangle' },
+  ],
+  gacha_open: [
+    { frequency: 784, duration: 0.05, type: 'sine' },
+    { frequency: 1175, duration: 0.05, type: 'sine' },
+    { frequency: 1568, duration: 0.12, type: 'sine' },
+  ],
+  gacha_rare: [
+    { frequency: 659, duration: 0.09, type: 'triangle' },
+    { frequency: 784, duration: 0.09, type: 'triangle' },
+    { frequency: 988, duration: 0.09, type: 'triangle' },
+    { frequency: 1319, duration: 0.26, type: 'triangle' },
+  ],
+  gacha_legendary: [
+    { frequency: 523, duration: 0.1, type: 'sawtooth', volume: 0.18 },
+    { frequency: 659, duration: 0.1, type: 'sawtooth', volume: 0.18 },
+    { frequency: 784, duration: 0.1, type: 'sawtooth', volume: 0.18 },
+    { frequency: 1047, duration: 0.14, type: 'sawtooth', volume: 0.2 },
+    { frequency: 1319, duration: 0.14, type: 'triangle' },
+    { frequency: 1568, duration: 0.4, type: 'triangle' },
   ],
 };
 

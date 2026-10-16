@@ -10,7 +10,6 @@ const VALID_STATUSES = new Set(['contacted', 'monitoring', 'resolved']);
 export async function POST(request: NextRequest) {
   try {
     const actor = await getServerUser(request);
-    if (actor.role === 'admin') throw new Error('forbidden');
     if (!canViewSchoolStudents(actor)) throw new Error('forbidden');
     const body = await request.json();
     const studentId = String(body.student_id || '').trim();

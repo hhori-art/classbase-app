@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
-import { canManageSchool, getServerUser, jsonError } from '@/lib/server-auth';
+import { canManageSchool, getServerUser, isAdminLike, jsonError } from '@/lib/server-auth';
 import { prepareAuthAccountCredentials } from '@/lib/server/account-credentials';
 import { writeLearningEvent } from '@/lib/events';
 import { generateInitialPassword } from '@/lib/password';
@@ -73,7 +73,7 @@ function indexOf(header: string[], patterns: string[]) {
 export async function POST(request: NextRequest) {
   try {
     const actor = await getServerUser(request);
-    if (actor.role !== 'master') throw new Error('forbidden');
+    if (!isAdminLike(actor)) throw new Error('forbidden');
 
     const body = await request.json();
     const csvText = String(body.csv_text || '');

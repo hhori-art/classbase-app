@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server';
 import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, jsonError, requireRole } from '@/lib/server-auth';
 import { canonicalPeriodForGradeSubject, enrichCourseOptionsWithShifts, fixedPeriodForGradeCourse } from '@/lib/course-registration-match';
-import { courseOptionMatchesSelection } from '@/lib/course-registration-selection';
+import { courseOptionMatchesSelection, currentCourseTermIds, selectEffectiveCourseRegistration } from '@/lib/course-registration-selection';
 import { canStudentUseTransferOption } from '@/lib/course-registration-rules';
 import { getCourseSubjectGroup, normalizeCourseText, toAsciiDigits } from '@/lib/course-text';
 import { looksLikeZoomUrl, normalizeZoomMeetingId } from '@/lib/zoom-url';
@@ -241,10 +241,12 @@ export async function GET(request: NextRequest) {
       .filter((item: any) => !requiredOnly || item.transfer_selection_mode === 'student' || item.transfer_required_by_parent === true || item.transfer_status === 'waiting_student_selection')
       .sort((a: any, b: any) => String(b.target_date || '').localeCompare(String(a.target_date || '')));
 
-    const pendingParentAbsence = user.role === 'parent' && /^\d{4}-\d{2}-\d{2}$/.test(requestedAbsenceDate)
+    // 欠席連絡を先に登録していない場合も、選択した元授業日を一時的な欠席として扱う。
+    // 確定時は署名済みトークンを検証したうえで、欠席と振替を同一トランザクションで作成する。
+    const pendingRequestedAbsence = /^\d{4}-\d{2}-\d{2}$/.test(requestedAbsenceDate)
       ? { id: `pending:${studentId}:${requestedAbsenceDate}`, student_id: studentId, type: 'absence', target_date: requestedAbsenceDate }
       : null;
-    const selectedAbsence = pendingParentAbsence || absences.find((item: any) => item.id === absenceId) || absences[0] || null;
+    const selectedAbsence = pendingRequestedAbsence || absences.find((item: any) => item.id === absenceId) || absences[0] || null;
     if (!selectedAbsence) return Response.json({ ok: true, absences: [], absent_lessons: [], options: [] });
 
     const [registrationSnap, shiftSnap, sharedMasters] = await Promise.all([
@@ -258,7 +260,16 @@ export async function GET(request: NextRequest) {
       .filter(isActiveRegistration)
       .sort((a: any, b: any) => timestampValue(b.updated_at || b.created_at) - timestampValue(a.updated_at || a.created_at));
     const selectedIds = new Set<string>();
-    registrations.forEach((registration: any) => {
+    const courseYear = Number(today.slice(5, 7)) >= 4 ? Number(today.slice(0, 4)) : Number(today.slice(0, 4)) - 1;
+    const currentTerms = currentCourseTermIds(sharedMasters.optionDocs.map(doc => doc.data), courseYear, today);
+    const regularRegistrations = registrations.filter((registration: any) => String(registration.registration_type || 'regular') === 'regular');
+    const currentRegularRegistration = selectEffectiveCourseRegistration(regularRegistrations, courseYear, currentTerms, studentProfile);
+    const testPrepRegistrations = registrations.filter((registration: any) => registration.registration_type === 'test_prep');
+    const activeTestPrepId = String(studentProfile.active_test_prep_course_registration_id || '');
+    const currentTestPrepRegistration = testPrepRegistrations.find((registration: any) => activeTestPrepId && registration.id === activeTestPrepId)
+      || testPrepRegistrations.find((registration: any) => registration.is_current === true || registration.current === true)
+      || testPrepRegistrations[0];
+    [currentRegularRegistration, currentTestPrepRegistration].filter(Boolean).forEach((registration: any) => {
       getSelectedCourseIds(registration).forEach(id => selectedIds.add(id));
     });
 

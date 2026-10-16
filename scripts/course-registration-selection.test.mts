@@ -7,11 +7,14 @@ import {
   currentCourseTermIds,
   filterCourseOptionsForRegistrationRequest,
   getCourseOptionStableKey,
+  hasCourseOptionSelection,
   legacyCourseSelectionLabel,
   parseLegacyCourseOptionId,
   resolveSelectedCourseOptionIds,
   resolveSelectedCourseOptionIdsAcrossTerms,
+  removeCourseOptionSelections,
   selectCurrentCourseRegistration,
+  selectEffectiveCourseRegistration,
   summarizeSelectedCourseLabels,
 } from '../lib/course-registration-selection.ts';
 
@@ -22,9 +25,31 @@ const option = {
 };
 
 test('再生成された講座候補を親IDとカリキュラムIDから現在登録へ復元する', () => {
-  assert.equal(courseOptionMatchesSelection(option, ['master-course-id']), true);
-  assert.equal(courseOptionMatchesSelection(option, ['curriculum-row-id']), true);
+  // 親IDの直接一致は複数曜日・時限を全選択するため使わず、
+  // 候補が1枠に特定できる場合だけ resolve で復元する。
+  assert.equal(courseOptionMatchesSelection(option, ['master-course-id']), false);
+  assert.equal(courseOptionMatchesSelection(option, ['curriculum-row-id']), false);
   assert.deepEqual(resolveSelectedCourseOptionIds([option], ['master-course-id']), ['generated-class-id']);
+  assert.deepEqual(resolveSelectedCourseOptionIds([option], ['curriculum-row-id']), ['generated-class-id']);
+});
+
+test('複数の単元IDで構成された講座枠も一度の操作で完全に解除する', () => {
+  const unitOptions = [
+    {
+      id: 'biology-cell', parent_course_option_id: 'biology-master',
+      grade: '中2', subject: '理科', course_name: '生物', resolved_day: '金', resolved_slot: '1時間目',
+    },
+    {
+      id: 'biology-digestion', parent_course_option_id: 'biology-master',
+      grade: '中2', subject: '理科', course_name: '生物', resolved_day: '金', resolved_slot: '1時間目',
+    },
+  ];
+  assert.equal(hasCourseOptionSelection(['biology-cell'], unitOptions), true);
+  assert.deepEqual(removeCourseOptionSelections(['biology-cell', 'unrelated-course'], unitOptions), ['unrelated-course']);
+  assert.deepEqual(removeCourseOptionSelections([
+    getCourseOptionStableKey(unitOptions[0]),
+    'unrelated-course',
+  ], unitOptions), ['unrelated-course']);
 });
 
 test('通常の変更画面では登録済みの期を受付中の別期より優先する', () => {
@@ -146,6 +171,26 @@ test('校舎別管理は今期の通常期と同日開始のカスタム期だ�
   ];
   assert.equal(selectCurrentCourseRegistration(history, 2026, terms, 'old')?.id, 'now');
   assert.equal(selectCurrentCourseRegistration(history.slice(0, 1), 2026, terms, 'old'), null);
+});
+
+test('管理者が最後に確定した登録は、期がずれていても生徒画面の正とする', () => {
+  const registrations = [
+    { id: 'old-current-term', year: 2026, term: 'term3', status: 'active', is_current: false, selected_course_ids: ['old'] },
+    { id: 'latest-admin-selection', year: 2026, term: 'term2', status: 'active', is_current: true, selected_course_ids: ['latest'] },
+  ];
+  const selected = selectEffectiveCourseRegistration(registrations, 2026, new Set(['term3']), {
+    active_course_registration_id: 'latest-admin-selection',
+    course_registration_year: 2026,
+    course_registration_term: 'term2',
+  });
+  assert.equal(selected?.id, 'latest-admin-selection');
+
+  const inconsistentPointer = selectEffectiveCourseRegistration(registrations, 2026, new Set(['term3']), {
+    active_course_registration_id: 'latest-admin-selection',
+    course_registration_year: 2026,
+    course_registration_term: 'term4',
+  });
+  assert.equal(inconsistentPointer?.id, 'old-current-term');
 });
 
 test('期開始日の旧フィールドも引き続き使用できる', () => {

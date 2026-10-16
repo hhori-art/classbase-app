@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server';
 import { adminDb } from '@/lib/firebase-admin';
 import { canViewSchoolStudents, getServerUser, jsonError } from '@/lib/server-auth';
 import { attendanceSchoolName, resolveAttendanceSchoolCode } from '@/lib/attendance-schools';
-import { courseOptionMatchesSelection, currentCourseTermIds, legacyCourseSelectionLabel, selectCurrentCourseRegistration, summarizeSelectedCourseLabels } from '@/lib/course-registration-selection';
+import { courseOptionMatchesSelection, currentCourseTermIds, legacyCourseSelectionLabel, selectEffectiveCourseRegistration, summarizeSelectedCourseLabels } from '@/lib/course-registration-selection';
 import { getAllQueryDocuments } from '@/lib/server/firestore-pagination';
 import { aggregateStudentParticipation, buildParticipationWeeksSince, buildRecentParticipationWeeks } from '@/lib/student-weekly-participation';
 
@@ -306,8 +306,7 @@ export async function GET(request: NextRequest) {
       const data = doc.data();
       const registrationHistory = registrationHistoryMap.get(doc.id) || [];
       const regularRegistrationHistory = registrationHistory.filter(registration => String(registration.registration_type || 'regular') !== 'test_prep');
-      const activeRegistrationId = String(data.active_course_registration_id || '').trim();
-      const currentRegistration: any = selectCurrentCourseRegistration(regularRegistrationHistory, courseYear, currentTerms, activeRegistrationId);
+      const currentRegistration: any = selectEffectiveCourseRegistration(regularRegistrationHistory, courseYear, currentTerms, data);
       const activeTestPrepRegistrationId = String(data.active_test_prep_course_registration_id || '').trim();
       const testPrepHistory = registrationHistory.filter(registration => String(registration.registration_type || 'regular') === 'test_prep');
       const currentTestPrepRegistration: any = testPrepHistory.find(registration => registration.id === activeTestPrepRegistrationId) ||

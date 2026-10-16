@@ -27,7 +27,7 @@ export async function POST(request: NextRequest) {
     const registrationTokens: string[] = Array.isArray(body.registration_tokens)
       ? body.registration_tokens.map((token: unknown) => String(token || '')).filter(Boolean)
       : [];
-    if (!studentId || selectedCourseIds.length === 0 || selectedCourseIds.length > 100 || registrationTokens.length !== selectedCourseIds.length) {
+    if (!studentId || selectedCourseIds.length > 100 || registrationTokens.length !== selectedCourseIds.length) {
       return Response.json({ ok: false, error: '受講講座の選択情報を再読み込みしてください。' }, { status: 400 });
     }
 
@@ -36,6 +36,76 @@ export async function POST(request: NextRequest) {
     if (!initialStudentSnap.exists) throw new Error('student-not-found');
     const initialStudent = initialStudentSnap.data() || {};
     const studentGrade = normalizeCourseGrade(initialStudent.grade);
+    const linkedIds = Array.isArray(user.profile.student_ids) ? user.profile.student_ids.map(String) : [];
+    const isOwnStudentRequest = user.role === 'student' && user.uid === studentId;
+    const isLinkedParentRequest = user.role === 'parent' && (linkedIds.includes(studentId) || clean(initialStudent.parent_uid, 128) === user.uid);
+    if (!isOwnStudentRequest && !isLinkedParentRequest) throw new Error('forbidden');
+
+    if (selectedCourseIds.length === 0) {
+      const year = Number(body.year);
+      const term = clean(body.term, 120);
+      const registrationType = body.registration_type === 'test_prep' ? 'test_prep' : 'regular';
+      if (!Number.isInteger(year) || year < 2020 || year > 2100 || !term) {
+        return Response.json({ ok: false, error: '解除する年度・期を確認してください。' }, { status: 400 });
+      }
+      const requestId = clean(body.request_id, 200);
+      const parentId = user.role === 'parent' ? user.uid : clean(initialStudent.parent_uid, 128);
+      const ref = db.collection('course_registrations').doc(registrationId([
+        user.uid, studentId, String(year), registrationType, term, requestId || 'direct',
+      ]));
+      const batch = db.batch();
+      const activeRegistrationId = clean(registrationType === 'test_prep'
+        ? initialStudent.active_test_prep_course_registration_id
+        : initialStudent.active_course_registration_id, 200);
+      if (activeRegistrationId && activeRegistrationId !== ref.id) {
+        batch.set(db.collection('course_registrations').doc(activeRegistrationId), {
+          is_current: false,
+          current: false,
+          updated_at: FieldValue.serverTimestamp(),
+        }, { merge: true });
+      }
+      batch.set(ref, {
+        request_id: requestId || null,
+        parent_id: parentId || null,
+        student_id: studentId,
+        student_name: initialStudent.student_name || initialStudent.name || '',
+        grade: initialStudent.grade || '',
+        year,
+        term,
+        registration_type: registrationType,
+        selected_course_ids: [],
+        selected_course_keys: [],
+        selected_course_labels: [],
+        status: 'active',
+        approval_status: 'not_required',
+        is_current: true,
+        current: true,
+        updated_by: user.uid,
+        updated_by_role: user.role,
+        updated_at: FieldValue.serverTimestamp(),
+        created_at: FieldValue.serverTimestamp(),
+      }, { merge: true });
+      batch.set(db.collection('users').doc(studentId), registrationType === 'test_prep' ? {
+        active_test_prep_course_registration_id: ref.id,
+        selected_test_prep_course_ids: [],
+        selected_test_prep_course_keys: [],
+        test_prep_course_registration_year: year,
+        test_prep_course_registration_term: term,
+        test_prep_course_registration_status: 'active',
+        test_prep_course_registration_updated_at: FieldValue.serverTimestamp(),
+      } : {
+        active_course_registration_id: ref.id,
+        selected_course_ids: [],
+        selected_course_keys: [],
+        selected_course_labels: [],
+        course_registration_year: year,
+        course_registration_term: term,
+        course_registration_status: 'active',
+        course_registration_updated_at: FieldValue.serverTimestamp(),
+      }, { merge: true });
+      await batch.commit();
+      return Response.json({ ok: true, registration_id: ref.id, selected_course_ids: [], cleared: true });
+    }
     let grants: CourseRegistrationGrant[];
     try {
       grants = registrationTokens.map(token => verifyCourseRegistrationToken(token, user.uid, studentGrade));
@@ -62,6 +132,7 @@ export async function POST(request: NextRequest) {
     }
 
     const slotSelections = new Map<string, string>();
+    const courseSelections = new Map<string, string>();
     for (const grant of grants) {
       const slotKey = `${grant.day}__${grant.slot}`;
       if (!grant.day || !grant.slot) continue;
@@ -70,6 +141,13 @@ export async function POST(request: NextRequest) {
         return Response.json({ ok: false, error: '同じ曜日・時限に複数の講座は登録できません。' }, { status: 400 });
       }
       slotSelections.set(slotKey, grant.stable_key);
+      const courseKey = String(grant.course_key || grant.stable_key)
+        .replace(new RegExp(`_${String(grant.day).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}_${String(grant.slot).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`), '');
+      const existingSchedule = courseSelections.get(courseKey);
+      if (courseKey && existingSchedule && existingSchedule !== slotKey) {
+        return Response.json({ ok: false, error: '同じ講座を別の曜日・時限で重複登録することはできません。' }, { status: 400 });
+      }
+      if (courseKey) courseSelections.set(courseKey, slotKey);
     }
 
     const selectedCourseKeys = Array.from(new Set(grants.map(grant => grant.stable_key).filter(Boolean)));
@@ -94,10 +172,10 @@ export async function POST(request: NextRequest) {
       if (!studentSnap.exists) throw new Error('student-not-found');
       const student = studentSnap.data() || {};
       if (String(student.role || '') !== 'student' || normalizeCourseGrade(student.grade) !== studentGrade) throw new Error('student-profile-changed');
-      const linkedIds = Array.isArray(user.profile.student_ids) ? user.profile.student_ids.map(String) : [];
-      const isOwnStudentRequest = user.role === 'student' && user.uid === studentId;
-      const isLinkedParentRequest = user.role === 'parent' && (linkedIds.includes(studentId) || clean(student.parent_uid, 128) === user.uid);
-      if (!isOwnStudentRequest && !isLinkedParentRequest) throw new Error('forbidden');
+      const transactionLinkedIds = Array.isArray(user.profile.student_ids) ? user.profile.student_ids.map(String) : [];
+      const transactionOwnRequest = user.role === 'student' && user.uid === studentId;
+      const transactionParentRequest = user.role === 'parent' && (transactionLinkedIds.includes(studentId) || clean(student.parent_uid, 128) === user.uid);
+      if (!transactionOwnRequest && !transactionParentRequest) throw new Error('forbidden');
 
       existingSnap.docs.forEach(docSnap => {
         const existingType = String(docSnap.data().registration_type || 'regular');

@@ -145,9 +145,58 @@ export const resolveSelectedCourseOptionIds = (options: any[], selectedIds: Iter
   return Array.from(resolved);
 };
 
+/**
+ * 保存形式が現在ID・安定キー・旧IDのどれでも、指定した講座候補に対応する選択を取り除く。
+ * 1つの曜日・時限が複数の単元IDで構成される場合も、最初の解除操作で確実に0件にできる。
+ */
+export const removeCourseOptionSelections = (
+  selectedIds: Iterable<string>,
+  targetOptions: any[],
+) => Array.from(selectedIds, String).filter(selection => !targetOptions.some(option => (
+  courseOptionMatchesSelection(option, [selection])
+)));
+
+export const hasCourseOptionSelection = (
+  selectedIds: Iterable<string>,
+  targetOptions: any[],
+) => {
+  const selected = selectedIds instanceof Set ? selectedIds : new Set(Array.from(selectedIds, String));
+  return targetOptions.some(option => courseOptionMatchesSelection(option, selected));
+};
+
 const normalizedCourseValue = (value: any) => normalizeCourseNameForStableKey(value)
   .replace(/[【】\[\]「」]/g, '')
   .replace(/[0-9①②③④⑤⑥⑦⑧⑨⑩]+$/g, '');
+
+/** 曜日・時限を除いた講座の同一性。別日程に同じ講座を二重登録しないために使う。 */
+export const getCourseOptionCourseKey = (option: any) => [
+  normalizeSelectionText(option?.grade || option?.target_grade),
+  normalizeSelectionText(option?.subject || option?.target_subject),
+  normalizedCourseValue(option?.course_name || option?.title || option?.detail_subject || option?.target_detail_subject || option?.subject),
+].join('__');
+
+/** 同じ曜日・時限に異なる講座を重ねないための共通キー。 */
+export const getCourseOptionScheduleKey = (option: any) => [
+  normalizeSelectionDay(option?.resolved_day || option?.day || option?.day_of_week),
+  normalizeSelectionSlot(option?.resolved_slot || option?.slot || option?.time_slot || option?.period),
+].join('__');
+
+export const findCourseSelectionConflict = (options: any[]) => {
+  const schedulesByCourse = new Map<string, Set<string>>();
+  const coursesBySchedule = new Map<string, Set<string>>();
+  for (const option of options) {
+    const courseKey = getCourseOptionCourseKey(option);
+    const scheduleKey = getCourseOptionScheduleKey(option);
+    if (!courseKey || !scheduleKey || scheduleKey === '__') continue;
+    if (!schedulesByCourse.has(courseKey)) schedulesByCourse.set(courseKey, new Set());
+    schedulesByCourse.get(courseKey)!.add(scheduleKey);
+    if (schedulesByCourse.get(courseKey)!.size > 1) return 'duplicate-course' as const;
+    if (!coursesBySchedule.has(scheduleKey)) coursesBySchedule.set(scheduleKey, new Set());
+    coursesBySchedule.get(scheduleKey)!.add(courseKey);
+    if (coursesBySchedule.get(scheduleKey)!.size > 1) return 'duplicate-schedule' as const;
+  }
+  return null;
+};
 
 /** 旧期の登録から講座名だけを引き継ぎ、現在期の曜日・時限を選び直せるようにする。 */
 export const courseOptionMatchesLegacyCourseSelection = (option: any, selectedIds: Iterable<string>) => {
@@ -273,6 +322,30 @@ export const selectCurrentCourseRegistration = (
   return candidates.find(item => item.id === preferredId) ||
     candidates.find(item => item.is_current || item.current) ||
     candidates[0] || null;
+};
+
+/**
+ * 管理者・生徒が最後に確定した登録を優先する。
+ * 旧データの残存 active/is_current は、明示的なポインタがない場合のみ今期判定に使う。
+ */
+export const selectEffectiveCourseRegistration = (
+  registrations: any[],
+  year: number,
+  termIds: Set<string>,
+  profile: any,
+) => {
+  const preferredId = String(profile?.active_course_registration_id || '').trim();
+  const preferred = registrations.find(registration => registration.id === preferredId);
+  if (preferred) {
+    const status = String(preferred.status || 'active').toLowerCase();
+    const inactive = ['cancelled', 'canceled', 'rejected', 'withdrawn', 'inactive', 'archived'].includes(status);
+    const declaredYear = Number(profile?.course_registration_year || 0);
+    const declaredTerm = String(profile?.course_registration_term || '').trim();
+    const pointerMatchesProfile = (!declaredYear || Number(preferred.year || 0) === declaredYear) &&
+      (!declaredTerm || String(preferred.term || '').trim() === declaredTerm);
+    if (!inactive && pointerMatchesProfile) return preferred;
+  }
+  return selectCurrentCourseRegistration(registrations, year, termIds, preferredId);
 };
 
 /** 単元名の羅列を除き、登録済みの講座と曜日・時限を一度ずつ表示する。 */

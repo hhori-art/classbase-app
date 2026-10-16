@@ -13,8 +13,12 @@ import {
   courseOptionMatchesLegacyCourseSelection,
   courseOptionMatchesSelection,
   filterCourseOptionsForRegistrationRequest,
+  getCourseOptionCourseKey,
+  getCourseOptionScheduleKey,
   getCourseOptionStableKey,
+  hasCourseOptionSelection,
   legacyCourseSelectionLabel,
+  removeCourseOptionSelections,
   resolveSelectedCourseOptionIds,
   resolveSelectedCourseOptionIdsAcrossTerms,
 } from '@/lib/course-registration-selection';
@@ -247,10 +251,7 @@ export default function StudentChangeRequestPage() {
     getCourseSubject(option) || '',
     option.course_name || option.title || getCourseSubject(option) || '講座',
   ].join('__');
-  const timeKey = (option: any) => [
-    getCourseDay(option) || '曜日未設定',
-    getCourseSlot(option) || '時間未設定',
-  ].join('__');
+  const timeKey = getCourseOptionScheduleKey;
   const courseChoices = useMemo(() => (Object.values(visibleCourseOptions.reduce((acc, option: any) => {
     const key = courseKey(option);
     if (!acc[key]) acc[key] = { key, option, count: 0, daySlots: new Set<string>(), units: new Set<string>() };
@@ -336,22 +337,22 @@ export default function StudentChangeRequestPage() {
 
   const toggleCourseKey = (key: string) => {
     const targetOptions = visibleCourseOptions.filter((option: any) => courseKey(option) === key);
-    const targetOptionIds = new Set(targetOptions.map((option: any) => option.id));
     const selected = selectedCourseKeys.includes(key);
     setSelectedCourseKeys(prev => selected ? prev.filter(item => item !== key) : [...prev, key]);
     if (selected) {
-      setSelectedCourseIds(current => current.filter(id => !targetOptionIds.has(id)));
+      setSelectedCourseIds(current => removeCourseOptionSelections(current, targetOptions));
       return;
     }
     // 日時候補が1つだけなら、科目選択だけで登録まで完了させる。
     const scheduleKeys = new Set(targetOptions.map(timeKey));
+    const targetCourseKeys = new Set(targetOptions.map(getCourseOptionCourseKey));
     if (scheduleKeys.size === 1) {
       setSelectedCourseIds(prev => {
         const currentTermIds = new Set(visibleCourseOptions.map((option: any) => option.id));
         const outsideActiveTerm = prev.filter(id => !currentTermIds.has(id));
         const activeTermSelected = new Set(prev.filter(id => currentTermIds.has(id)));
         visibleCourseOptions
-          .filter((option: any) => scheduleKeys.has(timeKey(option)))
+          .filter((option: any) => scheduleKeys.has(timeKey(option)) || targetCourseKeys.has(getCourseOptionCourseKey(option)))
           .forEach((option: any) => activeTermSelected.delete(option.id));
         targetOptions.forEach((option: any) => activeTermSelected.add(option.id));
         return Array.from(new Set([...outsideActiveTerm, ...Array.from(activeTermSelected)]));
@@ -370,14 +371,15 @@ export default function StudentChangeRequestPage() {
       const currentTermIds = new Set(visibleCourseOptions.map((option: any) => option.id));
       const outsideActiveTerm = prev.filter(id => !currentTermIds.has(id));
       const activeTermSelected = new Set(prev.filter(id => currentTermIds.has(id)));
-      const allSelected = cleanIds.every(id => activeTermSelected.has(id));
-      if (allSelected) {
-        cleanIds.forEach(id => activeTermSelected.delete(id));
+      const targetOptions = visibleCourseOptions.filter((option: any) => cleanIds.includes(option.id));
+      const hasSelected = hasCourseOptionSelection(activeTermSelected, targetOptions);
+      if (hasSelected) {
+        return removeCourseOptionSelections(prev, targetOptions);
       } else {
-        const selectedOptions = visibleCourseOptions.filter((option: any) => cleanIds.includes(option.id));
-        const conflictKeys = new Set(selectedOptions.map(timeKey));
+        const conflictKeys = new Set(targetOptions.map(timeKey));
+        const duplicateCourseKeys = new Set(targetOptions.map(getCourseOptionCourseKey));
         visibleCourseOptions
-          .filter((option: any) => conflictKeys.has(timeKey(option)))
+          .filter((option: any) => conflictKeys.has(timeKey(option)) || duplicateCourseKeys.has(getCourseOptionCourseKey(option)))
           .forEach((option: any) => activeTermSelected.delete(option.id));
         cleanIds.forEach(id => activeTermSelected.add(id));
       }
@@ -396,8 +398,32 @@ export default function StudentChangeRequestPage() {
         alert('受付中または現在実施中の期に、登録できる講座候補がありません');
         return;
       }
-      if (visibleCourseOptions.length > 0 && visibleSelectedCourseIds.length === 0) {
-        alert(`${termLabel(activeTerm, gradeCourseOptions)}に受講する曜日・時間の講座を1つ以上選択してください`);
+      if (visibleSelectedCourseIds.length === 0 && !confirm('登録済みの講座をすべて解除します。よろしいですか？')) return;
+
+      if (visibleSelectedCourseIds.length === 0) {
+        const [yearText, ...termParts] = activeTerm.split('__');
+        const token = await user.getIdToken(true);
+        const registrationRes = await fetch('/api/parent/course-registrations', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            student_id: user.uid,
+            year: Number(yearText),
+            term: termParts.join('__'),
+            selected_course_ids: [],
+            registration_tokens: [],
+            request_id: String(activeRegistrationRequestId || `student-direct-change-${activeTerm}`),
+            registration_type: activeRegistrationType,
+          }),
+        });
+        const registrationData = await registrationRes.json().catch(() => ({}));
+        if (!registrationRes.ok || registrationData.ok === false) throw new Error(registrationData.error || '講座登録の解除に失敗しました');
+        window.dispatchEvent(new CustomEvent('classbase:user-profile-updated', {
+          detail: activeRegistrationType === 'test_prep'
+            ? { selected_test_prep_course_ids: [], selected_test_prep_course_keys: [] }
+            : { selected_course_ids: [], selected_course_keys: [] },
+        }));
+        setCompleted(true);
         return;
       }
 
@@ -717,7 +743,7 @@ export default function StudentChangeRequestPage() {
                         <p className="text-xs font-black text-slate-500">2. 曜日・時間</p>
                         <h2 className="text-base font-black text-gray-900">通える曜日・時間を決める</h2>
                         <p className="mt-1 text-xs font-bold text-gray-400">
-                          同じ曜日・同じ時限は1つだけ選べます。別の講座を選ぶと前の選択は自動で外れます。
+                          同じ曜日・時限は1講座のみ、同じ講座は別の曜日・時限と重複して選べません。
                         </p>
                       </div>
                       <div className="inline-flex w-fit items-center gap-2 rounded-2xl bg-emerald-50 px-4 py-2 text-xs font-black text-emerald-700">
@@ -801,14 +827,23 @@ export default function StudentChangeRequestPage() {
               </div>
             )}
 
-            <button 
-              type="submit" 
-              disabled={submitting || visibleSelectedCourseIds.length === 0}
-              className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-black text-base hover:bg-indigo-700 shadow-xl shadow-indigo-200 transition-all flex items-center justify-center gap-3 disabled:opacity-50 active:scale-95"
-            >
-              {submitting ? <Loader2 className="animate-spin" size={24}/> : <Send size={24} strokeWidth={3}/>}
-              {activeRegistrationType === 'test_prep' ? '対策講座を登録する' : 'すぐに変更する'}
-            </button>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <button
+                type="submit"
+                disabled={submitting || visibleSelectedCourseIds.length === 0}
+                className="flex w-full items-center justify-center gap-3 rounded-2xl bg-indigo-600 py-4 text-base font-black text-white shadow-xl shadow-indigo-200 transition-all hover:bg-indigo-700 disabled:opacity-40 active:scale-95"
+              >
+                {submitting ? <Loader2 className="animate-spin" size={24}/> : <Send size={24} strokeWidth={3}/>} 
+                {activeRegistrationType === 'test_prep' ? '対策講座を登録する' : '登録する'}
+              </button>
+              <button
+                type="submit"
+                disabled={submitting || visibleSelectedCourseIds.length > 0}
+                className="w-full rounded-2xl border-2 border-rose-200 bg-white py-4 text-base font-black text-rose-600 transition hover:bg-rose-50 disabled:opacity-30"
+              >
+                すべて解除する
+              </button>
+            </div>
 
           </div>
 

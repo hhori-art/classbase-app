@@ -1,12 +1,13 @@
 'use client';
 
 import { useEffect, useState, useRef } from 'react';
-import { Loader2, FileUp, CheckCircle, AlertCircle, Download } from 'lucide-react';
+import { Loader2, FileUp, CheckCircle, AlertCircle, Printer } from 'lucide-react';
 import { auth } from '@/lib/firebase';
 import CsvSampleDownload from '@/app/components/CsvSampleDownload';
 import { generateInitialPassword } from '@/lib/password';
-import AccountGuideSheet from '@/app/components/AccountGuideSheet';
-import { parseAccountCsv, uniqueImportFileName } from '@/lib/account-import-csv';
+import AccountGuidePrintView from '@/app/components/account-guides/AccountGuidePrintView';
+import { toGuideAccount } from '@/app/components/account-guides/guide-model';
+import { parseAccountCsv } from '@/lib/account-import-csv';
 import { attendanceSchoolName, resolveAttendanceSchoolCode } from '@/lib/attendance-schools';
 
 interface Props {
@@ -19,12 +20,10 @@ export default function AccountImportButton({ role, onSuccess }: Props) {
   const [status, setStatus] = useState<'idle' | 'success' | 'error'>('idle');
   const [msg, setMsg] = useState('');
   const [importedAccounts, setImportedAccounts] = useState<any[]>([]);
-  const [isPdfExporting, setIsPdfExporting] = useState(false);
-  const [pdfProgress, setPdfProgress] = useState({ current: 0, total: 0 });
+  const [isGuideOpen, setIsGuideOpen] = useState(false);
   const [loginUrl, setLoginUrl] = useState('https://classbase-app.vercel.app');
   const [encoding, setEncoding] = useState<'utf-8' | 'shift_jis'>('utf-8');
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const pdfRootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setLoginUrl(window.location.origin);
@@ -181,57 +180,6 @@ export default function AccountImportButton({ role, onSuccess }: Props) {
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  const handleDownloadIndividualPdfs = async () => {
-    if (isPdfExporting || importedAccounts.length === 0 || !pdfRootRef.current) return;
-    setIsPdfExporting(true);
-    setPdfProgress({ current: 0, total: importedAccounts.length });
-    try {
-      if (document.fonts?.ready) await document.fonts.ready;
-      const pages = Array.from(pdfRootRef.current.querySelectorAll<HTMLElement>('.account-guide-print-page'));
-      if (pages.length !== importedAccounts.length) throw new Error('PDF対象の表示数が一致しません');
-      const [{ default: html2canvas }, { jsPDF }, { default: JSZip }] = await Promise.all([
-        import('html2canvas'),
-        import('jspdf'),
-        import('jszip'),
-      ]);
-      const zip = new JSZip();
-      const usedNames = new Set<string>();
-
-      for (let index = 0; index < pages.length; index++) {
-        setPdfProgress({ current: index + 1, total: pages.length });
-        const account = importedAccounts[index];
-        const canvas = await html2canvas(pages[index], {
-          scale: 2,
-          useCORS: true,
-          backgroundColor: '#ffffff',
-          logging: false,
-        });
-        const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4', compress: true });
-        pdf.addImage(canvas.toDataURL('image/jpeg', 0.95), 'JPEG', 0, 0, 210, 297, undefined, 'FAST');
-
-        const rawName = account.student_name || account.name || account.lifetime_id;
-        const fileName = uniqueImportFileName(rawName, index, usedNames);
-        zip.file(fileName, pdf.output('arraybuffer'));
-      }
-
-      const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
-      const url = URL.createObjectURL(zipBlob);
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = `${role === 'student' ? '生徒' : '講師'}アカウント_個別PDF.zip`;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch (error: any) {
-      setStatus('error');
-      setMsg(`PDF作成エラー: ${error?.message || error}`);
-    } finally {
-      setIsPdfExporting(false);
-      setPdfProgress({ current: 0, total: 0 });
-    }
-  };
-
   return (
     <div className="flex flex-col items-end gap-2">
       <input
@@ -296,14 +244,11 @@ export default function AccountImportButton({ role, onSuccess }: Props) {
       {importedAccounts.length > 0 && (
         <button
           type="button"
-          onClick={handleDownloadIndividualPdfs}
-          disabled={isPdfExporting}
-          className="flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 font-bold text-white shadow-md transition hover:bg-emerald-700 disabled:cursor-wait disabled:opacity-60"
+          onClick={() => setIsGuideOpen(true)}
+          className="flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 font-bold text-white shadow-md transition hover:bg-emerald-700"
         >
-          {isPdfExporting ? <Loader2 className="animate-spin" size={18} /> : <Download size={18} />}
-          {isPdfExporting
-            ? `個別PDF作成中 ${pdfProgress.current}/${pdfProgress.total}`
-            : `取込アカウントの個別PDFを保存（${importedAccounts.length}件）`}
+          <Printer size={18} />
+          取込アカウントのID書面を表示（{importedAccounts.length}件）
         </button>
       )}
 
@@ -321,17 +266,14 @@ export default function AccountImportButton({ role, onSuccess }: Props) {
       )}
 
 
-      <div ref={pdfRootRef} className="fixed left-[-10000px] top-0 w-[210mm] bg-white" aria-hidden="true">
-        {importedAccounts.map(account => (
-          <AccountGuideSheet
-            key={account.id}
-            account={account}
-            school={account.school_name || account.school_id || account.classroom || ''}
-            loginUrl={loginUrl}
-            showParentCredentials={false}
-          />
-        ))}
-      </div>
+      {isGuideOpen && (
+        <AccountGuidePrintView
+          accounts={importedAccounts.map(account => toGuideAccount(account, account.school_name || account.school_id || account.classroom || ''))}
+          loginUrl={loginUrl}
+          title={`${role === 'student' ? '生徒' : '講師'}アカウント CSV取込`}
+          onClose={() => setIsGuideOpen(false)}
+        />
+      )}
     </div>
   );
 }

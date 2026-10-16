@@ -479,8 +479,9 @@ export default function CourseRegistrationCalendar({
                         }, {});
                         return Object.entries(slotGroups).map(([slot, slotOptions]) => {
                           const ids = slotOptions.map((option: any) => option.id).filter(Boolean);
-                          const selected = ids.length > 0 && ids.every(id => selectedSet.has(id));
-                          const partiallySelected = !selected && ids.some(id => selectedSet.has(id));
+                          // 同じ講座枠が単元ごとの複数IDに展開されていても、1件あれば登録済みとして扱う。
+                          // これにより、登録済み枠を最初のクリックで解除できる。
+                          const selected = ids.some(id => selectedSet.has(id));
                           const disabled = ids.every(id => disabledSet.has(id));
                           const units = Array.from(new Set(slotOptions.flatMap((option: any) => [
                             option.resolved_unit,
@@ -501,9 +502,7 @@ export default function CourseRegistrationCalendar({
                               className={`rounded-xl border-2 px-3 py-2 text-left transition ${
                                 selected
                                   ? 'border-indigo-500 bg-white text-indigo-700 shadow-sm'
-                                  : partiallySelected
-                                    ? 'border-indigo-200 bg-indigo-50/70 text-indigo-700'
-                                    : 'border-white bg-white text-slate-700 hover:border-indigo-200'
+                                  : 'border-white bg-white text-slate-700 hover:border-indigo-200'
                               } ${disabled ? 'cursor-not-allowed opacity-50' : ''}`}
                             >
                               <span className="flex items-center justify-between gap-2 text-sm font-black">

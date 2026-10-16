@@ -17,14 +17,14 @@ import MaintenanceGuard from '@/app/components/common/MaintenanceGuard';
 export default function StudentLayout({ children }: { children: React.ReactNode }) {
   const { user, profile, loading } = useAuth();
   const [layoutAppearance, setLayoutAppearance] = useState<StudentAppearance>(() =>
-    normalizeStudentAppearance(profile?.settings?.appearance)
+    normalizeStudentAppearance(profile?.settings?.appearance, profile?.owned_cosmetics)
   );
   const appearance = layoutAppearance;
   const theme = STUDENT_THEMES[appearance.theme];
 
   useEffect(() => {
-    setLayoutAppearance(normalizeStudentAppearance(profile?.settings?.appearance));
-  }, [profile?.settings?.appearance]);
+    setLayoutAppearance(normalizeStudentAppearance(profile?.settings?.appearance, profile?.owned_cosmetics));
+  }, [profile?.settings?.appearance, profile?.owned_cosmetics]);
 
   useEffect(() => {
     if (!user || !profile || profile.role !== 'student') return;

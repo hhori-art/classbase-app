@@ -350,6 +350,41 @@ test('景品マスターと申請処理は管理画面から直接変更でき�
   await assertFails(updateDoc(doc(env.authenticatedContext('master-1').firestore(), 'requests/exchange'), { status: 'completed' }));
 });
 
+test('ガチャ設定・抽選結果・デジタル景品の受け取り記録はクライアントから読み書きできない', async () => {
+  await env.withSecurityRulesDisabled(async context => {
+    const db = context.firestore();
+    await setDoc(doc(db, 'gachas/g1'), { name: 'ガチャ', cost: 10, items: [] });
+    await setDoc(doc(db, 'gacha_draws/student-1_d1'), { user_id: 'student-1', result: 'win' });
+    await setDoc(doc(db, 'reward_grants/grant-1'), { user_id: 'student-1', digital_file_path: 'reward_files/a/b.pdf' });
+  });
+  for (const uid of ['student-1', 'admin-1', 'master-1']) {
+    const db = env.authenticatedContext(uid).firestore();
+    for (const path of ['gachas/g1', 'gacha_draws/student-1_d1', 'reward_grants/grant-1']) {
+      await assertFails(getDoc(doc(db, path)));
+      await assertFails(setDoc(doc(db, path), { forged: true }));
+    }
+  }
+});
+
+test('生徒は獲得済みのバッジだけを装備でき、獲得バッジ自体は書き換えられない', async () => {
+  await env.withSecurityRulesDisabled(async context => {
+    await updateDoc(doc(context.firestore(), 'users/student-1'), { earned_badges: ['badge_1', 'badge_pencil'] });
+  });
+  const db = env.authenticatedContext('student-1').firestore();
+  await assertSucceeds(updateDoc(doc(db, 'users/student-1'), { selected_badge: 'badge_pencil' }));
+  await assertSucceeds(updateDoc(doc(db, 'users/student-1'), { selected_badge: 'badge_1' }));
+  await assertFails(updateDoc(doc(db, 'users/student-1'), { selected_badge: 'badge_special_mvp' }));
+  await assertFails(updateDoc(doc(db, 'users/student-1'), { earned_badges: ['badge_special_mvp'] }));
+});
+
+test('景品表示の個別許可とバッジ用カウンターは生徒本人や校舎管理者が書き換えられない', async () => {
+  const studentDb = env.authenticatedContext('student-1').firestore();
+  await assertFails(updateDoc(doc(studentDb, 'users/student-1'), { feature_overrides: { shop: true } }));
+  await assertFails(updateDoc(doc(studentDb, 'users/student-1'), { gacha_draw_count: 100 }));
+  await assertFails(updateDoc(doc(studentDb, 'users/student-1'), { owned_cosmetics: ['theme_rainbow'] }));
+  await assertFails(updateDoc(doc(env.authenticatedContext('admin-1').firestore(), 'users/student-1'), { feature_overrides: { shop: true } }));
+});
+
 test('masterの通常の勤務記録作成と講師の拒否を維持する', async () => {
   const value = { teacher_id: 'teacher-1', date: '2026-09-01', status: 'pending', work_segments: [] };
   await assertSucceeds(setDoc(doc(env.authenticatedContext('master-1').firestore(), 'work_records/manual'), value));

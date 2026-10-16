@@ -11,7 +11,6 @@ const monthPattern = /^\d{4}-\d{2}$/;
 export async function POST(request: NextRequest) {
   try {
     const actor = await getServerUser(request);
-    if (actor.role !== 'master') throw new Error('forbidden');
     if (!isAdminLike(actor)) throw new Error('forbidden');
     const body = await request.json();
     const action = String(body.action || '').trim();
@@ -64,6 +63,7 @@ export async function POST(request: NextRequest) {
         restored_by: actor.uid,
       });
     } else if (action === 'relations') {
+      if (actor.role !== 'master') throw new Error('forbidden');
       const siblingIds: string[] = Array.isArray(body.sibling_ids) ? body.sibling_ids.map(String).filter(Boolean) : [];
       const twinSiblingIds: string[] = Array.isArray(body.twin_sibling_ids) ? body.twin_sibling_ids.map(String).filter(Boolean) : [];
       Object.assign(updates, { sibling_ids: siblingIds, twin_sibling_ids: twinSiblingIds });

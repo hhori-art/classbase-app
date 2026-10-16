@@ -25,6 +25,7 @@ export async function POST(request: NextRequest) {
       if (teacherAudience) return;
       await db.collection('users').doc(user.uid).set({
         last_community_activity_date: japanDateKey(),
+        community_activity_count: FieldValue.increment(1),
         earned_badges: FieldValue.arrayUnion('badge_social'),
         updated_at: FieldValue.serverTimestamp(),
       }, { merge: true });

@@ -16,13 +16,16 @@ import Link from 'next/link';
 import LineLinkPanel from '@/app/components/LineLinkPanel';
 import RecoveryEmailSettings from '@/app/components/RecoveryEmailSettings';
 import { usePortalVisibility } from '@/app/hooks/usePortalVisibility';
+import { isStudentFeatureEnabled } from '@/lib/portal-feature-access';
 import { playSoundEffect, useSound } from '@/lib/sound';
 import {
   DEFAULT_STUDENT_APPEARANCE,
   normalizeStudentAppearance,
   studentBackgroundPatternStyle,
   STUDENT_BACKGROUND_PATTERNS,
+  STUDENT_BADGE_FRAMES,
   STUDENT_CARD_STYLES,
+  studentBadgeFrameStyle,
   STUDENT_DENSITIES,
   STUDENT_HEADER_STYLES,
   STUDENT_THEMES,
@@ -33,6 +36,7 @@ import {
   StudentHeaderStyle,
   StudentThemeId,
 } from '@/lib/student-customization';
+import { presetTitleText } from '@/lib/reward-presets';
 
 type ManualItem = {
   title: string;
@@ -91,7 +95,7 @@ export default function StudentSettingsPage() {
         setSettings(prev => ({
           ...prev,
           ...profile.settings,
-          appearance: normalizeStudentAppearance(profile.settings.appearance),
+          appearance: normalizeStudentAppearance(profile.settings.appearance, profile.owned_cosmetics),
         }));
       }
     }
@@ -140,7 +144,7 @@ export default function StudentSettingsPage() {
     setSettings(prev => ({
       ...prev,
       appearance: {
-        ...normalizeStudentAppearance(prev.appearance),
+        ...normalizeStudentAppearance(prev.appearance, profile?.owned_cosmetics),
         [key]: value,
       },
     }));
@@ -199,7 +203,10 @@ export default function StudentSettingsPage() {
     setTimeout(() => setMessage(null), 5000);
   };
 
-  const appearance = normalizeStudentAppearance(settings.appearance);
+  const appearance = normalizeStudentAppearance(settings.appearance, profile?.owned_cosmetics);
+  const ownedCosmetics: string[] = Array.isArray(profile?.owned_cosmetics) ? profile.owned_cosmetics : [];
+  const ownedTitles = ownedCosmetics.filter(id => id.startsWith('title_') && presetTitleText(id));
+  const ownedFrames = ownedCosmetics.filter(id => STUDENT_BADGE_FRAMES[id]);
   const currentTheme = STUDENT_THEMES[appearance.theme];
   const currentHeader = STUDENT_HEADER_STYLES[appearance.headerStyle];
   const manualItems = [
@@ -319,7 +326,7 @@ export default function StudentSettingsPage() {
         '通知が来ない場合は、設定画面の通知設定とLINE連携を確認してください。',
       ],
     },
-    visibility.shop !== false && {
+    isStudentFeatureEnabled(visibility, profile, 'shop') && {
       title: 'ポイント・バッジを確認したいとき',
       summary: 'ログイン、録画視聴、ミッション達成などで獲得した内容を確認します。',
       steps: [
@@ -540,18 +547,21 @@ export default function StudentSettingsPage() {
                 {(Object.keys(STUDENT_THEMES) as StudentThemeId[]).map(themeId => {
                   const theme = STUDENT_THEMES[themeId];
                   const active = appearance.theme === themeId;
+                  const locked = Boolean(theme.premium && !ownedCosmetics.includes(theme.premium));
                   return (
                     <button
                       key={themeId}
                       type="button"
+                      disabled={locked}
                       onClick={() => handleAppearanceChange('theme', themeId)}
-                      className={`rounded-2xl border-2 p-3 text-left transition-all ${active ? 'border-gray-900 bg-gray-50' : 'border-gray-100 bg-white hover:bg-gray-50'}`}
+                      className={`rounded-2xl border-2 p-3 text-left transition-all ${active ? 'border-gray-900 bg-gray-50' : 'border-gray-100 bg-white hover:bg-gray-50'} ${locked ? 'cursor-not-allowed opacity-50' : ''}`}
                     >
                       <div className="flex items-center gap-2">
                         <span className={`h-5 w-5 rounded-full ${theme.previewDot}`}></span>
                         <span className="text-sm font-black text-gray-800">{theme.label}</span>
+                        {theme.premium && <span className="rounded-full bg-amber-100 px-1.5 text-[9px] font-black text-amber-700">{locked ? '🔒 限定' : '限定'}</span>}
                       </div>
-                      <p className="mt-1 text-[10px] font-bold text-gray-400">{theme.description}</p>
+                      <p className="mt-1 text-[10px] font-bold text-gray-400">{locked ? '交換所・ガチャで手に入るよ' : theme.description}</p>
                     </button>
                   );
                 })}
@@ -627,19 +637,56 @@ export default function StudentSettingsPage() {
                 {(Object.keys(STUDENT_BACKGROUND_PATTERNS) as StudentBackgroundPattern[]).map(patternId => {
                   const pattern = STUDENT_BACKGROUND_PATTERNS[patternId];
                   const active = appearance.backgroundPattern === patternId;
+                  const locked = Boolean(pattern.premium && !ownedCosmetics.includes(pattern.premium));
                   return (
                     <button
                       key={patternId}
                       type="button"
+                      disabled={locked}
                       onClick={() => handleAppearanceChange('backgroundPattern', patternId)}
-                      className={`rounded-2xl border-2 p-3 text-center transition-all ${active ? 'border-gray-900 bg-gray-50 text-gray-900' : 'border-gray-100 bg-white text-gray-400 hover:bg-gray-50'}`}
+                      className={`rounded-2xl border-2 p-3 text-center transition-all ${active ? 'border-gray-900 bg-gray-50 text-gray-900' : 'border-gray-100 bg-white text-gray-400 hover:bg-gray-50'} ${locked ? 'cursor-not-allowed opacity-50' : ''}`}
                     >
-                      <span className="block text-xs font-black">{pattern.label}</span>
-                      <span className="mt-1 block text-[9px] font-bold leading-relaxed">{pattern.description}</span>
+                      <span className="block text-xs font-black">{locked ? '🔒 ' : ''}{pattern.label}</span>
+                      <span className="mt-1 block text-[9px] font-bold leading-relaxed">{locked ? '交換所で手に入るよ' : pattern.description}</span>
                     </button>
                   );
                 })}
               </div>
+            </div>
+
+            <div>
+              <label className="mb-2 block text-xs font-black text-gray-400">名前の上の称号（交換所で手に入る）</label>
+              {ownedTitles.length === 0 ? (
+                <p className="rounded-2xl bg-gray-50 p-3 text-[11px] font-bold text-gray-400">まだ称号を持っていません。コイン交換所やガチャで手に入れよう！</p>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {['', ...ownedTitles].map(titleId => (
+                    <button key={titleId || 'none'} type="button" onClick={() => handleAppearanceChange('title', titleId)}
+                      className={`rounded-full border-2 px-3 py-1.5 text-xs font-black ${appearance.title === titleId ? 'border-gray-900 bg-gray-900 text-white' : 'border-gray-100 bg-white text-gray-500'}`}>
+                      {titleId ? presetTitleText(titleId) : '表示しない'}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div>
+              <label className="mb-2 block text-xs font-black text-gray-400">バッジのフレーム（交換所で手に入る）</label>
+              {ownedFrames.length === 0 ? (
+                <p className="rounded-2xl bg-gray-50 p-3 text-[11px] font-bold text-gray-400">まだフレームを持っていません。コイン交換所やガチャで手に入れよう！</p>
+              ) : (
+                <div className="flex flex-wrap gap-3">
+                  {['', ...ownedFrames].map(frameId => (
+                    <button key={frameId || 'none'} type="button" onClick={() => handleAppearanceChange('frame', frameId)}
+                      className={`flex flex-col items-center gap-1 rounded-2xl border-2 p-2 ${appearance.frame === frameId ? 'border-gray-900 bg-gray-50' : 'border-gray-100 bg-white'}`}>
+                      <span className="rounded-xl" style={studentBadgeFrameStyle(frameId) || { padding: 3 }}>
+                        <span className="flex h-9 w-9 items-center justify-center rounded-[9px] bg-white text-xl">🎓</span>
+                      </span>
+                      <span className="text-[10px] font-black text-gray-500">{frameId ? STUDENT_BADGE_FRAMES[frameId]?.label : 'なし'}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
 
             <label className="flex items-center justify-between rounded-2xl bg-gray-50 p-4">
