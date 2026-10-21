@@ -24,8 +24,8 @@ export function accountEmailCandidates(loginId: string, email?: unknown) {
   const normalizedLoginId = normalizeAccountLoginId(loginId);
   const requestedEmail = normalizeEmail(email);
   return Array.from(new Set([
-    requestedEmail.includes('@') ? requestedEmail : '',
     ...EMAIL_DOMAINS.map(domain => `${normalizedLoginId}@${domain}`.toLowerCase()),
+    requestedEmail.includes('@') ? requestedEmail : '',
   ].filter(Boolean)));
 }
 
