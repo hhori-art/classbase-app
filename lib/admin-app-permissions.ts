@@ -1,4 +1,5 @@
-export const ADMIN_APP_IDS = ['science_social', 'eiken', 'attendance'] as const;
+// 管理アプリごとの権限。理社講座・Booster・勤怠・オンライン校はそれぞれ独立して付け外しする（マスターは全て）。
+export const ADMIN_APP_IDS = ['science_social', 'eiken', 'attendance', 'online_school'] as const;
 
 export type AdminAppId = typeof ADMIN_APP_IDS[number];
 
@@ -27,23 +28,29 @@ const MASTER_ONLY_ADMIN_PATHS = [
   '/master/users',
   '/master/delete',
   '/master/settings',
+  '/master/ui-guide',
   '/master/stats',
   '/master/announcements',
   '/master/community',
   '/master/parent-inquiries',
+  '/master/safety-alerts',
   '/master/requests',
+  '/master/inbox',
+  '/master/audit-logs',
 ] as const;
 
 export const ADMIN_APP_LABELS: Record<AdminAppId, string> = {
   science_social: '理社講座 管理',
   eiken: 'Booster 管理',
   attendance: '勤怠 管理',
+  online_school: 'オンライン校 管理',
 };
 
 const EMPTY_PERMISSIONS: AdminAppPermissions = {
   science_social: false,
   eiken: false,
   attendance: false,
+  online_school: false,
 };
 
 const programList = (profile: Record<string, any>) =>
@@ -67,7 +74,16 @@ const SCHOOL_ADMIN_ALLOWED_PATHS = [
   '/master/shifts',
   // ポイント・景品管理。生徒への操作はAPI側で担当校の生徒に限定する。
   '/master/rewards',
+  // 自分宛ての通知（APIは本人の通知だけを返す）。
+  '/master/notifications',
 ] as const;
+
+// どの管理者でも開ける画面（自分のホーム・自分宛ての通知・自分のアカウント）。
+const GLOBAL_ADMIN_PATHS = ['/master', '/master/notifications', '/master/account'] as const;
+
+export function isGlobalAdminPath(pathname: string) {
+  return GLOBAL_ADMIN_PATHS.some(path => pathname === path || (path !== '/master' && pathname.startsWith(`${path}/`)));
+}
 
 export function isSchoolAdminAllowedPath(pathname: string) {
   return SCHOOL_ADMIN_ALLOWED_PATHS.some(path =>
@@ -82,7 +98,7 @@ export function normalizeAdminAppPermissions(
   const normalizedRole = String(role || '').toLowerCase();
 
   if (normalizedRole === 'master') {
-    return { science_social: true, eiken: true, attendance: true };
+    return { science_social: true, eiken: true, attendance: true, online_school: true };
   }
 
   if (isAttendanceAppAccountRole(normalizedRole)) {
@@ -97,15 +113,18 @@ export function normalizeAdminAppPermissions(
       science_social: stored.science_social === true,
       eiken: stored.eiken === true,
       attendance: stored.attendance === true,
+      online_school: stored.online_school === true,
     };
   }
 
   if (isConfigurableAdminRole(normalizedRole)) {
     const programs = programList(profile);
+    // 権限を一度も設定していない古い管理者アカウントは理社講座だけ（勤怠・オンライン校は明示的に付けたときだけ）。
     return {
       science_social: true,
       eiken: profile.eiken_admin === true || programs.includes('eiken'),
-      attendance: true,
+      attendance: false,
+      online_school: false,
     };
   }
 
@@ -137,14 +156,25 @@ export function adminAppForPath(pathname: string): AdminAppId | null {
   if (pathname === '/master/eiken' || pathname.startsWith('/master/eiken/')) {
     return 'eiken';
   }
+  if (pathname === '/master/online-school' || pathname.startsWith('/master/online-school/')) {
+    return 'online_school';
+  }
   // シフトは理社講座管理者と、専任の勤怠承認者が共用する。
   // 画面の基本所属は理社講座とし、layout側で専任承認者の例外入場を許可する。
   if (
-    pathname === '/master' ||
+    isGlobalAdminPath(pathname) ||
     isMasterOnlyAdminPath(pathname)
   ) {
     return null;
   }
   if (pathname.startsWith('/master/')) return 'science_social';
   return null;
+}
+
+/**
+ * 校舎管理者（マスター以外の管理者）が理社講座の画面で入れる範囲の制限。
+ * 制限は理社講座の画面だけにかける。勤怠・Booster・オンライン校は、権限を付けた画面をそのまま使える。
+ */
+export function isBlockedForSchoolAdmin(pathname: string) {
+  return adminAppForPath(pathname) === 'science_social' && !isSchoolAdminAllowedPath(pathname);
 }

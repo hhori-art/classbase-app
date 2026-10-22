@@ -77,7 +77,9 @@ export default function LoginPage() {
       if (data?.error === 'wrong-initial-password') throw new Error(LOGIN_CREDENTIAL_ERROR_MESSAGE);
       if (data?.error === 'missing-initial-password') throw new Error('初回パスワードが未設定です。管理者に連絡してください。');
       if (data?.error === 'initial-login-not-allowed') throw new Error(INITIAL_LOGIN_COMPLETED_MESSAGE);
-      throw new Error('初回登録処理に失敗しました。');
+      if (data?.error === 'wrong-password') throw new Error(LOGIN_CREDENTIAL_ERROR_MESSAGE);
+      if (data?.error === 'too-many-attempts') throw new Error('ログインの試行回数が多すぎます。15分ほど待ってから、もう一度ログインしてください。');
+      throw new Error('ログインの処理に失敗しました。少し待ってからもう一度お試しください。改善しない場合は、ログインIDと発生時刻を管理者へお知らせください。');
     }
 
     return data; // { ok:true, uid, email }
@@ -187,7 +189,7 @@ export default function LoginPage() {
           <div className="mx-auto mb-6 flex h-24 w-24 items-center justify-center rounded-2xl bg-indigo-600 text-white shadow-xl shadow-indigo-100">
             <GraduationCap size={50} strokeWidth={2.4} aria-hidden="true" />
           </div>
-          <p className="text-xs font-black tracking-[0.2em] text-indigo-600">SOZO GAKUEN</p>
+          <p className="text-xs font-bold tracking-[0.2em] text-indigo-600">SOZO GAKUEN</p>
           <h1 className="mt-2 text-2xl font-black tracking-tight text-slate-800">創造学園アプリ</h1>
         </div>
 
@@ -252,13 +254,13 @@ export default function LoginPage() {
               runLogin();
             }}
             disabled={loading}
-            className="flex w-full items-center justify-center gap-2 rounded-2xl bg-slate-900 py-4 font-bold text-white shadow-xl shadow-slate-200 transition-all hover:bg-slate-800 disabled:opacity-70"
+            className="flex min-h-12 w-full items-center justify-center gap-2 rounded-btn bg-accent py-3.5 font-bold text-accent-ink shadow-sm transition-colors hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 disabled:opacity-50"
           >
             {loading ? <Loader2 className="animate-spin" /> : (<><LogIn size={20} /> ログイン</>)}
           </button>
           <Link
             href="/password-reset"
-            className="flex items-center justify-center text-sm font-bold text-indigo-600 hover:text-indigo-800"
+            className="flex items-center justify-center text-sm font-bold text-accent hover:text-accent-hover"
           >
             パスワードを忘れた方
           </Link>

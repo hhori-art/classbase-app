@@ -1,9 +1,12 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import Link from 'next/link';
-import { AlertCircle, ArrowLeft, Bell, Calendar, CheckCircle, ClipboardList, Database, Download, Loader2, Plug, RefreshCw, Search } from 'lucide-react';
+import AdminPageHeader from '@/app/components/master/AdminPageHeader';
+import { AlertCircle, Bell, Calendar, CheckCircle, Database, Download, Plug, RefreshCw, Search } from 'lucide-react';
+import { Button, ButtonLink, EmptyState, ErrorState, ListSkeleton, useConfirm, useToast } from '@/app/components/ui';
+import { formatDateTime } from '@/lib/format';
 import { useAuth } from '@/app/context/AuthContext';
+import { jstDateKey } from '@/lib/date-key';
 
 type WarningItem = {
   code: string;
@@ -63,13 +66,11 @@ type IntegrationStatus = {
   selected_month_record_count: number;
 };
 
-const currentMonth = () => new Date().toISOString().slice(0, 7);
+const currentMonth = () => jstDateKey().slice(0, 7);
 
 const formatTime = (value?: string | null) => {
   if (!value) return '-';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '-';
-  return date.toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  return formatDateTime(value) || '-';
 };
 
 const typeLabel = (type: string) => {
@@ -98,10 +99,14 @@ export default function AttendanceDiagnosticsPage() {
   const [integration, setIntegration] = useState<IntegrationStatus | null>(null);
   const [integrationBusy, setIntegrationBusy] = useState<'test' | 'sync' | ''>('');
   const [integrationMessage, setIntegrationMessage] = useState('');
+  const [loadError, setLoadError] = useState(false);
+  const toast = useToast();
+  const confirm = useConfirm();
 
   const fetchDiagnostics = useCallback(async () => {
     if (!user) return;
     setLoading(true);
+    setLoadError(false);
     try {
       const token = await user.getIdToken();
       const headers = { Authorization: `Bearer ${token}` };
@@ -115,8 +120,9 @@ export default function AttendanceDiagnosticsPage() {
       const integrationData = await integrationRes.json().catch(() => ({}));
       setIntegration(integrationRes.ok && integrationData.ok !== false ? integrationData : null);
     } catch (e: any) {
-      alert(`勤怠ミス候補の取得に失敗しました: ${e.message || e}`);
+      console.error('Attendance diagnostics fetch error:', e);
       setDiagnostics([]);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -174,7 +180,7 @@ export default function AttendanceDiagnosticsPage() {
   const sendMissingInputNotification = async (items: DiagnosticItem[]) => {
     if (!user || items.length === 0) return;
     const targetIds = [...new Set(items.map(item => item.teacher_id).filter(Boolean))];
-    if (targetIds.length === 0) return alert('通知対象の講師が見つかりません。');
+    if (targetIds.length === 0) return toast.error('通知対象の講師が見つかりません。');
     const lines = items.slice(0, 8).map(item => {
       const labels = item.warnings
         .filter(w => w.code.startsWith('missing_') && w.code !== 'missing_transportation')
@@ -193,7 +199,11 @@ export default function AttendanceDiagnosticsPage() {
       '※交通費未入力のみの項目はこの通知対象から除外しています。',
     ].filter(Boolean).join('\n');
 
-    if (!confirm(`${targetIds.length}名の講師へ未入力通知を送信しますか？`)) return;
+    if (!(await confirm({
+      title: `${targetIds.length}名の講師へ未入力通知を送信しますか？`,
+      message: 'アプリ内とLINEで「勤怠入力の確認依頼」を送ります。',
+      confirmLabel: '送信する',
+    }))) return;
 
     setNotificationSending(true);
     try {
@@ -212,9 +222,10 @@ export default function AttendanceDiagnosticsPage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.ok === false) throw new Error(data.error || 'failed');
-      alert(`通知を送信しました。\nアプリ内: ${data.in_app_count || 0}件 / LINE: ${data.line_sent_count || 0}件`);
+      toast.success(`通知を送信しました（アプリ内: ${data.in_app_count || 0}件 / LINE: ${data.line_sent_count || 0}件）`);
     } catch (e: any) {
-      alert(`通知送信に失敗しました: ${e.message || e}`);
+      console.error(e);
+      toast.error(`通知を送信できませんでした。${e?.message || ''}`);
     } finally {
       setNotificationSending(false);
     }
@@ -249,67 +260,63 @@ export default function AttendanceDiagnosticsPage() {
   };
 
   const summaryCards: Array<{ key: FilterKind; label: string; count: number; color: string; border: string }> = [
-    { key: 'all', label: 'Total', count: summary.total, color: 'text-slate-900', border: 'border-slate-200' },
-    { key: 'danger', label: 'Danger', count: summary.danger, color: 'text-rose-600', border: 'border-rose-200' },
-    { key: 'missing', label: 'Missing', count: summary.missing, color: 'text-amber-600', border: 'border-amber-200' },
-    { key: 'duplicate', label: 'Duplicate', count: summary.duplicate, color: 'text-indigo-600', border: 'border-indigo-200' },
-    { key: 'overlap', label: 'Overlap', count: summary.overlap, color: 'text-rose-600', border: 'border-rose-200' },
+    { key: 'all', label: 'すべて', count: summary.total, color: 'text-slate-900', border: 'border-slate-200' },
+    { key: 'danger', label: '要対応', count: summary.danger, color: 'text-rose-600', border: 'border-rose-200' },
+    { key: 'missing', label: '勤務記録なし', count: summary.missing, color: 'text-amber-600', border: 'border-amber-200' },
+    { key: 'duplicate', label: '同日二重打刻', count: summary.duplicate, color: 'text-accent', border: 'border-accent/30' },
+    { key: 'overlap', label: '通常勤怠と重複', count: summary.overlap, color: 'text-rose-600', border: 'border-rose-200' },
   ];
 
   return (
-    <div className="min-h-screen bg-slate-50 px-4 py-6 font-sans md:p-8">
-      <div className="mx-auto max-w-6xl">
-        <div className="mb-6 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-          <div className="flex items-center gap-4">
-            <Link href="/master/attendance" className="grid h-11 w-11 place-items-center rounded-full border border-slate-200 bg-white text-slate-500 shadow-sm hover:bg-slate-100">
-              <ArrowLeft size={20} />
-            </Link>
-            <div>
-              <h1 className="flex items-center gap-2 text-2xl font-black text-slate-900">
-                <ClipboardList className="text-rose-600" /> 勤怠ミス候補確認
-              </h1>
-              <p className="mt-1 text-xs font-bold text-slate-500">講師配置・勤務記録・打刻状態を照らし合わせて確認します。</p>
-            </div>
-          </div>
-          <button onClick={fetchDiagnostics} disabled={loading} className="flex min-h-[44px] items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-60">
-            {loading ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />} 再読み込み
-          </button>
-        </div>
+    <div className="font-sans">
+      <div>
+        <AdminPageHeader
+          description="講師配置・勤務記録・打刻状態を照らし合わせて確認します。"
+          backHref="/master/attendance"
+          actions={
+            <Button variant="secondary" icon={<RefreshCw size={16} aria-hidden />} onClick={fetchDiagnostics} loading={loading}>
+              再読み込み
+            </Button>
+          }
+        />
 
-        <section className="mb-6 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+        <section className="mb-6 rounded-card border border-slate-200 bg-white p-5 shadow-sm">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <div>
-              <p className="flex items-center gap-2 text-sm font-black text-slate-900"><Database size={18} className="text-indigo-600" /> 外部勤怠データ連携</p>
+              <p className="flex items-center gap-2 text-sm font-bold text-slate-900"><Database size={18} className="text-accent" /> 外部勤怠データ連携</p>
               <div className="mt-2 flex flex-wrap gap-2 text-xs font-bold">
                 <span className={`rounded-full px-3 py-1 ${integration?.config.configured ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
                   {integration?.config.configured ? '接続情報設定済み' : '接続情報待ち'}
                 </span>
-                <span className={`rounded-full px-3 py-1 ${integration?.config.enabled ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-100 text-slate-500'}`}>
+                <span className={`rounded-full px-3 py-1 ${integration?.config.enabled ? 'bg-accent-soft text-accent' : 'bg-slate-100 text-slate-500'}`}>
                   自動同期 {integration?.config.enabled ? 'ON' : 'OFF'}
                 </span>
                 <span className="rounded-full bg-slate-100 px-3 py-1 text-slate-600">選択月 {integration?.selected_month_record_count || 0}件</span>
               </div>
               <p className="mt-2 text-xs font-bold text-slate-500">
-                接続先: {integration?.config.endpoint_host || '未設定'} / 最終成功: {integration?.state?.last_successful_at ? new Date(integration.state.last_successful_at).toLocaleString('ja-JP') : '未実行'}
+                接続先: {integration?.config.endpoint_host || '未設定'} / 最終成功: {integration?.state?.last_successful_at ? formatDateTime(integration.state.last_successful_at, { withYear: true }) : '未実行'}
               </p>
               {integration?.config.missing?.length ? <p className="mt-1 break-words text-xs font-bold text-amber-700">未設定: {integration.config.missing.join('、')}</p> : null}
-              {integrationMessage ? <p className="mt-2 rounded-xl bg-slate-100 px-3 py-2 text-xs font-bold text-slate-700">{integrationMessage}</p> : null}
+              {integrationMessage ? <p className="mt-2 rounded-btn bg-slate-100 px-3 py-2 text-xs font-bold text-slate-700">{integrationMessage}</p> : null}
             </div>
             <div className="flex flex-col gap-2 sm:flex-row">
-              <button
+              <Button
+                variant="secondary"
                 onClick={() => runIntegrationAction('test_connection')}
                 disabled={Boolean(integrationBusy) || !integration?.config.configured}
-                className="flex min-h-[44px] items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 text-xs font-black text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                loading={integrationBusy === 'test'}
+                icon={<Plug size={16} aria-hidden />}
               >
-                {integrationBusy === 'test' ? <Loader2 size={16} className="animate-spin" /> : <Plug size={16} />} 接続テスト
-              </button>
-              <button
+                接続テスト
+              </Button>
+              <Button
                 onClick={() => runIntegrationAction('sync')}
                 disabled={Boolean(integrationBusy) || !integration?.config.configured}
-                className="flex min-h-[44px] items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 text-xs font-black text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+                loading={integrationBusy === 'sync'}
+                icon={<Download size={16} aria-hidden />}
               >
-                {integrationBusy === 'sync' ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />} 選択月を同期
-              </button>
+                選択月を同期
+              </Button>
             </div>
           </div>
         </section>
@@ -319,103 +326,103 @@ export default function AttendanceDiagnosticsPage() {
             <button
               key={card.key}
               onClick={() => setFilterKind(card.key)}
-              className={`rounded-2xl border bg-white p-4 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md ${card.border} ${filterKind === card.key ? 'ring-2 ring-slate-900' : ''}`}
+              className={`rounded-card border bg-white p-4 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md ${card.border} ${filterKind === card.key ? 'ring-2 ring-accent' : ''}`}
             >
-              <p className="text-[10px] font-black uppercase text-slate-400">{card.label}</p>
+              <p className="text-xs font-bold text-slate-400">{card.label}</p>
               <p className={`mt-1 text-2xl font-black ${card.color}`}>{card.count}</p>
             </button>
           ))}
         </section>
 
-        <div className="sticky top-4 z-10 mb-6 flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-sm backdrop-blur md:flex-row md:items-center">
-          <label className="flex min-h-[44px] items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3">
+        <div className="sticky top-4 z-10 mb-6 flex flex-col gap-3 rounded-card border border-slate-200 bg-white/95 p-4 shadow-sm backdrop-blur md:flex-row md:items-center">
+          <label className="flex min-h-[44px] items-center gap-2 rounded-btn border border-slate-200 bg-slate-50 px-3">
             <Calendar size={16} className="text-slate-400" />
-            <input type="month" value={month} onChange={e => setMonth(e.target.value)} className="bg-transparent text-sm font-black text-slate-700 outline-none" />
+            <input type="month" value={month} onChange={e => setMonth(e.target.value)} className="bg-transparent text-sm font-bold text-slate-700 outline-none" />
           </label>
-          <label className="flex min-h-[44px] flex-1 items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3">
+          <label className="flex min-h-[44px] flex-1 items-center gap-2 rounded-btn border border-slate-200 bg-slate-50 px-3">
             <Search size={16} className="text-slate-400" />
             <input value={keyword} onChange={e => setKeyword(e.target.value)} placeholder="講師名・日付・警告内容で検索" className="w-full bg-transparent text-sm font-bold outline-none" />
           </label>
-          <button
+          <Button
             onClick={() => sendMissingInputNotification(filteredDiagnostics.filter(hasNonTransportationMissing))}
-            disabled={notificationSending || notificationTargets.length === 0}
-            className="flex min-h-[44px] items-center justify-center gap-2 rounded-xl bg-amber-500 px-4 text-sm font-black text-white hover:bg-amber-600 disabled:cursor-not-allowed disabled:bg-slate-300"
+            disabled={notificationTargets.length === 0}
+            loading={notificationSending}
+            icon={<Bell size={16} aria-hidden />}
             title="交通費未入力のみの項目は除外して通知します"
           >
-            {notificationSending ? <Loader2 className="animate-spin" size={16} /> : <Bell size={16} />}
             未入力通知 {notificationTargets.length > 0 ? `${notificationTargets.length}名` : ''}
-          </button>
+          </Button>
         </div>
         {filterKind !== 'all' && (
-          <div className="mb-4 flex items-center justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold text-slate-600">
+          <div className="mb-4 flex items-center justify-between rounded-card border border-slate-200 bg-white px-4 py-3 text-sm font-bold text-slate-600">
             <span>{summaryCards.find(card => card.key === filterKind)?.label} で絞り込み中</span>
-            <button onClick={() => setFilterKind('all')} className="rounded-xl bg-slate-100 px-3 py-2 text-xs font-black text-slate-600 hover:bg-slate-200">解除</button>
+            <Button variant="secondary" size="sm" onClick={() => setFilterKind('all')}>解除</Button>
           </div>
         )}
 
         {loading ? (
-          <div className="flex h-48 items-center justify-center text-slate-400"><Loader2 className="animate-spin" /></div>
+          <ListSkeleton rows={3} />
+        ) : loadError ? (
+          <ErrorState title="勤怠ミス候補を読み込めませんでした" onRetry={fetchDiagnostics} />
         ) : filteredDiagnostics.length === 0 ? (
-          <div className="rounded-3xl border border-emerald-100 bg-white p-10 text-center shadow-sm">
-            <CheckCircle className="mx-auto text-emerald-500" size={36} />
-            <p className="mt-3 text-lg font-black text-slate-800">勤怠ミス候補はありません</p>
-            <p className="mt-1 text-sm font-bold text-slate-400">選択中の月では確認対象が見つかりませんでした。</p>
-          </div>
+          <EmptyState icon={CheckCircle} title="勤怠ミス候補はありません" description="選択中の月では確認対象が見つかりませんでした。" />
         ) : (
           <div className="space-y-4">
             {filteredDiagnostics.map((item, index) => (
-              <article key={`${item.type}_${item.date}_${item.work_record_id || item.shift_assignment_id || index}`} className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+              <article key={`${item.type}_${item.date}_${item.work_record_id || item.shift_assignment_id || index}`} className="rounded-card border border-slate-200 bg-white p-5 shadow-sm">
                 <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                   <div>
                     <div className="flex flex-wrap items-center gap-2">
-                      <h2 className="text-lg font-black text-slate-900">{item.teacher_name || '講師未設定'}</h2>
-                      <span className={`rounded-full px-3 py-1 text-[10px] font-black ${item.warnings?.some(w => w.severity === 'danger') ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-700'}`}>
+                      <h2 className="text-lg font-bold text-slate-900">{item.teacher_name || '講師未設定'}</h2>
+                      <span className={`rounded-full px-3 py-1 text-xs font-bold ${item.warnings?.some(w => w.severity === 'danger') ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-700'}`}>
                         {typeLabel(item.type)}
                       </span>
                     </div>
                     <p className="mt-1 text-xs font-bold text-slate-400">{item.date} / 講師ID: {item.teacher_id || '-'}</p>
                   </div>
                   {item.work_record_id && (
-                    <Link href={`/master/attendance?date=${item.date}`} className="rounded-xl bg-slate-900 px-4 py-2 text-xs font-black text-white hover:bg-slate-800">
-                      勤怠管理へ戻る
-                    </Link>
+                    <ButtonLink href={`/master/attendance?date=${item.date}`} variant="secondary" size="sm">
+                      勤怠一覧で確認
+                    </ButtonLink>
                   )}
                   {hasNonTransportationMissing(item) && (
-                    <button
+                    <Button
+                      size="sm"
+                      variant="secondary"
                       onClick={() => sendMissingInputNotification([item])}
                       disabled={notificationSending}
-                      className="rounded-xl bg-amber-500 px-4 py-2 text-xs font-black text-white hover:bg-amber-600 disabled:opacity-60"
+                      icon={<Bell size={14} aria-hidden />}
                     >
                       通知
-                    </button>
+                    </Button>
                   )}
                 </div>
 
                 <div className="mb-4 grid gap-3 lg:grid-cols-2">
-                  <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
-                    <p className="mb-3 text-xs font-black text-slate-500">勤務記録</p>
+                  <div className="rounded-card border border-slate-100 bg-slate-50 p-4">
+                    <p className="mb-3 text-xs font-bold text-slate-500">勤務記録</p>
                     {item.record_summary && item.record_summary.length > 0 ? (
                       <div className="space-y-2">
                         {item.record_summary.map(record => (
-                          <div key={record.id} className="rounded-xl bg-white p-3 text-xs font-bold text-slate-600">
-                            <p className="font-black text-slate-800">ID: {record.id?.slice(0, 10)}</p>
+                          <div key={record.id} className="rounded-btn bg-white p-3 text-xs font-bold text-slate-600">
+                            <p className="font-bold text-slate-800">ID: {record.id?.slice(0, 10)}</p>
                             <p className="mt-1">出勤: {formatTime(record.start_time)} / 退勤: {formatTime(record.end_time)}</p>
                             <p className="mt-1">状態: {record.status || '-'} / 詳細: {record.work_segments_count ?? '-'} / 交通費: {record.transportation_count ?? '-'}</p>
                           </div>
                         ))}
                       </div>
                     ) : (
-                      <p className="rounded-xl bg-white p-3 text-xs font-bold text-rose-600">該当日の勤務記録がありません。</p>
+                      <p className="rounded-btn bg-white p-3 text-xs font-bold text-rose-600">該当日の勤務記録がありません。</p>
                     )}
                   </div>
 
-                  <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
-                    <p className="mb-3 text-xs font-black text-slate-500">{item.type === 'external_attendance_overlap' ? '照合先の通常勤怠' : '講師配置'}</p>
+                  <div className="rounded-card border border-slate-100 bg-slate-50 p-4">
+                    <p className="mb-3 text-xs font-bold text-slate-500">{item.type === 'external_attendance_overlap' ? '照合先の通常勤怠' : '講師配置'}</p>
                     {item.type === 'external_attendance_overlap' && item.external_record_summary?.length ? (
                       <div className="space-y-2">
                         {item.external_record_summary.map(record => (
-                          <div key={record.id} className="rounded-xl bg-white p-3 text-xs font-bold text-slate-600">
-                            <p className="font-black text-slate-800">{record.source_name || '通常勤怠'} / {record.work_type || '勤務'}</p>
+                          <div key={record.id} className="rounded-btn bg-white p-3 text-xs font-bold text-slate-600">
+                            <p className="font-bold text-slate-800">{record.source_name || '通常勤怠'} / {record.work_type || '勤務'}</p>
                             <p className="mt-1">時間: {record.start_time}〜{record.end_time}</p>
                             <p className="mt-1 text-slate-400">職員コード: {record.person_code || '-'} / {record.person_name || '-'}</p>
                           </div>
@@ -424,8 +431,8 @@ export default function AttendanceDiagnosticsPage() {
                     ) : item.shift_summary && item.shift_summary.length > 0 ? (
                       <div className="space-y-2">
                         {item.shift_summary.map(shift => (
-                          <div key={shift.id} className="rounded-xl bg-white p-3 text-xs font-bold text-slate-600">
-                            <p className="font-black text-slate-800">{shift.teacher_name || '講師名未設定'}</p>
+                          <div key={shift.id} className="rounded-btn bg-white p-3 text-xs font-bold text-slate-600">
+                            <p className="font-bold text-slate-800">{shift.teacher_name || '講師名未設定'}</p>
                             <p className="mt-1">日付: {shift.target_date || '-'} / 役割: {shift.role_type || '-'}</p>
                             <p className="mt-1">勤務地: {shift.school || '-'} / メモ: {shift.note || '-'}</p>
                             <p className="mt-1 text-slate-400">配置ID: {shift.id?.slice(0, 10)} / UID: {shift.user_id || '-'}</p>
@@ -433,15 +440,15 @@ export default function AttendanceDiagnosticsPage() {
                         ))}
                       </div>
                     ) : (
-                      <p className="rounded-xl bg-white p-3 text-xs font-bold text-amber-700">{item.type === 'external_attendance_overlap' ? '照合先データを表示できません。' : '一致する講師配置が見つかりません。'}</p>
+                      <p className="rounded-btn bg-white p-3 text-xs font-bold text-amber-700">{item.type === 'external_attendance_overlap' ? '照合先データを表示できません。' : '一致する講師配置が見つかりません。'}</p>
                     )}
                   </div>
                 </div>
 
                 <div className="space-y-2">
                   {(item.warnings || []).map(warning => (
-                    <div key={`${warning.code}_${warning.label}`} className={`rounded-2xl p-4 text-sm font-bold leading-relaxed ${warning.severity === 'danger' ? 'bg-rose-50 text-rose-700' : 'bg-amber-50 text-amber-700'}`}>
-                      <div className="flex items-center gap-2 font-black">
+                    <div key={`${warning.code}_${warning.label}`} className={`rounded-card p-4 text-sm font-bold leading-relaxed ${warning.severity === 'danger' ? 'bg-rose-50 text-rose-700' : 'bg-amber-50 text-amber-700'}`}>
+                      <div className="flex items-center gap-2 font-bold">
                         <AlertCircle size={16} /> {warning.label}
                       </div>
                       <p className="mt-1">{warning.detail}</p>

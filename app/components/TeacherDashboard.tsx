@@ -4,9 +4,9 @@ import { useEffect, useState } from 'react';
 import { 
   Calendar as CalendarIcon, MonitorPlay, MapPin, User, Star,
   ChevronLeft, ChevronRight, LayoutList, Layout, Maximize2, Minimize2,
-  Briefcase, Clock, KeyRound, ExternalLink, Smartphone,
+  Briefcase, Clock, KeyRound, Smartphone,
   Video, Loader2, Zap,
-  LogOut, Sparkles, Megaphone
+  LogOut, Megaphone
 } from 'lucide-react';
 import Link from 'next/link';
 import { useAuth } from '@/app/context/AuthContext';
@@ -17,6 +17,12 @@ import FutureClassesModal from '@/app/components/FutureClassesModal'; // ★カ�
 import CalendarWidget from '@/app/components/CalendarWidget';
 import { usePortalVisibility } from '@/app/hooks/usePortalVisibility';
 import AppSwitcherLink from '@/app/components/AppSwitcherLink';
+import { jstDateKey, weekdayFromDateKey } from '@/lib/date-key';
+import { formatDate } from '@/lib/format';
+import { Button, Card, IconButton, useConfirm, useToast } from '@/app/components/ui';
+import { prepareZoomWindow, requestZoomHostStart } from '@/lib/zoom-host-start';
+import { isDedicatedProfile } from '@/lib/employment-category';
+import { WorkDetailReminderCard, useWorkDetailReminders } from '@/app/teacher/attendance/work-detail-reminder';
 
 // --- 型定義 ---
 type ShiftAssignment = {
@@ -78,18 +84,28 @@ const buildMeetingJoinUrl = (meetingId?: string | null, passcode?: string | null
   return url.toString();
 };
 
-const EmptyState = ({ text }: { text: string }) => (
-  <div className="h-full min-h-[60px] border border-dashed border-slate-200 rounded-xl flex items-center justify-center bg-slate-50/50">
-    <span className="text-[10px] font-bold text-slate-400 flex items-center gap-1">
+// YYYY-MM-DD の日付キーに日数を加算する（端末のタイムゾーンに依存しない）
+const addDaysToDateKey = (dateKey: string, days: number) => {
+  const date = new Date(`${dateKey}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) return jstDateKey();
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+};
+
+const EmptySlot = ({ text }: { text: string }) => (
+  <div className="flex h-full min-h-[60px] items-center justify-center rounded-card border border-dashed border-line bg-surface/50">
+    <span className="flex items-center gap-1 text-xs font-bold text-fg-muted">
       {text}
     </span>
   </div>
 );
 
 // --- クラスカード ---
-const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { info: ClassGroup, color: 'emerald' | 'orange', currentUserProfile: any, isExpanded: boolean }) => {
+const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { info: ClassGroup, color: 'emerald' | 'amber', currentUserProfile: any, isExpanded: boolean }) => {
   const [loading, setLoading] = useState(false);
   const { user } = useAuth();
+  const toast = useToast();
+  const confirm = useConfirm();
   
   const currentUserId = currentUserProfile?.id || currentUserProfile?.uid || '';
   const isMyClass = (info.main?.user_id === currentUserId) || info.subs.some(s => s.user_id === currentUserId);
@@ -104,16 +120,16 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
     border: isMyClass ? 'border-emerald-500 ring-2 ring-emerald-100' : 'border-emerald-100',
     headerBg: isMyClass ? 'bg-emerald-600' : 'bg-emerald-50',
     headerText: isMyClass ? 'text-white' : 'text-emerald-800',
-    badge: isMyClass ? 'bg-white/20 text-white' : 'bg-emerald-100 text-emerald-700',
+    badge: isMyClass ? 'bg-white/20 text-white' : 'bg-emerald-100 text-emerald-800',
     iconBg: 'bg-emerald-500',
-    btn: hasHostPermission ? 'bg-rose-600 hover:bg-rose-700 text-white shadow-rose-200' : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-200',
+    btn: hasHostPermission ? 'bg-rose-600 hover:bg-rose-700 text-white' : 'bg-emerald-600 hover:bg-emerald-700 text-white',
   } : {
-    border: isMyClass ? 'border-orange-500 ring-2 ring-orange-100' : 'border-orange-100',
-    headerBg: isMyClass ? 'bg-orange-500' : 'bg-orange-50',
-    headerText: isMyClass ? 'text-white' : 'text-orange-800',
-    badge: isMyClass ? 'bg-white/20 text-white' : 'bg-orange-100 text-orange-700',
-    iconBg: 'bg-orange-500',
-    btn: hasHostPermission ? 'bg-rose-600 hover:bg-rose-700 text-white shadow-rose-200' : 'bg-orange-500 hover:bg-orange-600 text-white shadow-orange-200',
+    border: isMyClass ? 'border-amber-500 ring-2 ring-amber-100' : 'border-amber-100',
+    headerBg: isMyClass ? 'bg-amber-500' : 'bg-amber-50',
+    headerText: isMyClass ? 'text-white' : 'text-amber-900',
+    badge: isMyClass ? 'bg-white/20 text-white' : 'bg-amber-100 text-amber-800',
+    iconBg: 'bg-amber-500',
+    btn: hasHostPermission ? 'bg-rose-600 hover:bg-rose-700 text-white' : 'bg-amber-600 hover:bg-amber-700 text-white',
   };
 
   const myName = currentUserProfile?.student_name || currentUserProfile?.name || '講師';
@@ -136,43 +152,47 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
     e.stopPropagation();
 
     if (!confno) {
-      alert("ミーティングIDが設定されていません。");
+      toast.error("ミーティングIDが設定されていません。");
       return;
     }
 
     if (hasHostPermission) {
-      const popup = window.open('', '_blank');
-      if (popup) {
-        popup.document.write('<p style="font-family: sans-serif; padding: 24px;">Zoomホスト開始を準備しています...</p>');
-        popup.document.close();
+      // 担当外の授業（代行・引き継ぎ）は、誤操作防止のため確認してから開始する
+      if (!isMyClass) {
+        const ownerName = info.main?.teacher_name ? `${info.main.teacher_name}講師` : '他の講師';
+        const classLabel = [info.grade, info.place, info.unit].filter(Boolean).join(' / ');
+        const ok = await confirm({
+          title: '代行としてホスト開始しますか？',
+          message: `${ownerName}の授業${classLabel ? `（${classLabel}）` : ''}です。開始した講師と授業は記録されます。`,
+          confirmLabel: 'ホスト開始',
+        });
+        if (!ok) return;
       }
+      const popup = prepareZoomWindow();
       setLoading(true);
       try {
         if (!user) throw new Error('not-authenticated');
         const token = await user.getIdToken();
-        const res = await fetch('/api/get-zoom-zak', { 
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ email: loginEmail, meetingId: confno, shiftId: info.main?.id || info.id, name: myName })
-        });
-        const data = await res.json();
-        
-        if (data.success && (data.zak || data.start_url)) {
-          const webUrl = data.start_url || `https://zoom.us/s/${confno}?zak=${encodeURIComponent(data.zak)}&uname=${encodeURIComponent(myName)}`;
-          const appUrl = data.app_start_url || (data.zak ? `zoommtg://zoom.us/start?confno=${confno}&zak=${encodeURIComponent(data.zak)}` : '');
-          launchWebUrl(webUrl || appUrl, popup);
+        const result = await requestZoomHostStart({ token, email: loginEmail || '', meetingId: confno, shiftId: info.main?.id || info.id, name: myName });
+
+        if (result.ok) {
+          launchWebUrl(result.url, popup);
         } else {
           if (popup && !popup.closed) popup.close();
-          console.error("API Error:", data);
-          alert(`ホスト権限の取得に失敗しました。\n\n理由: ${data.error}${data.detail ? `\n詳細: ${data.detail}` : ''}`);
-          if(confirm("通常参加で開きますか？")) {
+          console.error("API Error:", result);
+          const joinNormally = await confirm({
+            title: 'ホスト権限の取得に失敗しました',
+            message: <span className="whitespace-pre-line">{`理由: ${result.error}${result.detail ? `\n詳細: ${result.detail}` : ''}\n通常参加で開きますか？`}</span>,
+            confirmLabel: '通常参加で開く',
+          });
+          if (joinNormally) {
              launchWebUrl(info.url || `https://zoom.us/j/${confno}`);
           }
         }
       } catch (err) {
         if (popup && !popup.closed) popup.close();
         console.error(err);
-        alert('通信エラーが発生しました。');
+        toast.error('通信エラーが発生しました。');
       } finally {
         setLoading(false);
       }
@@ -189,34 +209,34 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
     }
   };
 
-  const widthClass = isExpanded ? 'w-full' : 'w-[140px] shrink-0';
-  let buttonLabel = hasHostPermission ? 'ホスト開始' : '入室';
+  const widthClass = isExpanded ? 'w-full' : 'w-[168px] shrink-0';
+  let buttonLabel = hasHostPermission ? (isMyClass ? 'ホスト開始' : 'ホスト開始（代行）') : '入室';
   if (loading) buttonLabel = '準備中...';
 
   return (
-    <div className={`${widthClass} bg-white border ${theme.border} rounded-xl shadow-sm flex flex-col overflow-hidden transition-all duration-200 ${isMyClass ? 'shadow-md transform -translate-y-0.5 z-10' : 'hover:shadow-md'}`}>
-      <div className={`${theme.headerBg} px-2 py-1.5 transition-colors relative h-[38px]`}>
-        <div className="flex justify-between items-start mb-0.5">
-          <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-md ${theme.badge} whitespace-nowrap truncate max-w-[85%]`}>
+    <div className={`${widthClass} flex flex-col overflow-hidden rounded-card border bg-surface shadow-sm transition-shadow ${theme.border} ${isMyClass ? 'z-10 shadow-md' : 'hover:shadow-md'}`}>
+      <div className={`${theme.headerBg} relative px-2.5 py-2`}>
+        <div className="mb-1 flex items-start justify-between gap-1">
+          <span className={`max-w-[85%] truncate whitespace-nowrap rounded-input px-1.5 py-0.5 text-xs font-bold ${theme.badge}`}>
             {info.grade}/{info.place}
           </span>
           {info.studio && (
-            <div className="flex items-center gap-0.5 text-[8px] bg-black/20 px-1.5 py-0.5 rounded text-white/90 font-bold whitespace-nowrap ml-1 max-w-[60px] truncate" title={info.studio}>
-              <MapPin size={8}/> {info.studio}
+            <div className="flex max-w-[72px] items-center gap-0.5 truncate whitespace-nowrap rounded bg-black/20 px-1.5 py-0.5 text-xs font-bold text-white/90" title={info.studio}>
+              <MapPin size={12} className="shrink-0" aria-hidden /> {info.studio}
             </div>
           )}
         </div>
-        <div className={`text-[10px] font-bold ${theme.headerText} line-clamp-1 leading-tight`}>
-          {info.unit || <span className="opacity-60 font-normal">未設定</span>}
+        <div className={`line-clamp-1 text-xs font-bold leading-tight ${theme.headerText}`}>
+          {info.unit || <span className="font-normal opacity-60">未設定</span>}
         </div>
       </div>
-      <div className="p-1.5 flex-1 flex flex-col gap-1.5 bg-white">
-        <div className="flex flex-col gap-0.5">
+      <div className="flex flex-1 flex-col gap-2 bg-surface p-2">
+        <div className="flex flex-col gap-1">
            <div className="flex items-center gap-1.5">
-              <div className={`w-5 h-5 rounded-full flex items-center justify-center text-white text-[8px] font-bold shadow-sm shrink-0 ${theme.iconBg}`}>
-                <User size={10}/>
+              <div className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-white shadow-sm ${theme.iconBg}`}>
+                <User size={12} aria-hidden />
               </div>
-              <div className={`text-[10px] font-bold truncate ${isMyClass ? 'text-slate-900' : 'text-slate-600'}`}>
+              <div className={`truncate text-xs font-bold ${isMyClass ? 'text-fg' : 'text-fg-muted'}`}>
                 {info.main?.teacher_name || '未定'}
               </div>
            </div>
@@ -225,35 +245,35 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
                 type="button"
                 onClick={handleEnterZoom}
                 disabled={loading}
-                className={`flex items-center gap-1 text-[8px] font-mono mt-0.5 border rounded px-1 transition-all cursor-pointer group w-full justify-between h-[18px] ${
+                className={`group flex min-h-8 w-full cursor-pointer items-center justify-between gap-1 rounded-input border px-1.5 font-mono text-xs transition-colors ${
                   hasHostPermission 
-                    ? 'bg-rose-50 border-rose-200 text-rose-700 hover:bg-rose-100' 
-                    : 'bg-slate-50 border-slate-100 text-slate-500 hover:bg-slate-100'
+                    ? 'border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100' 
+                    : 'border-line bg-canvas text-fg-muted hover:bg-slate-100'
                 }`}
                 title={`ログインID: ${loginEmail}`}
               >
-                <div className="flex items-center gap-1 min-w-0">
-                  <KeyRound size={8} className="shrink-0 opacity-70"/>
+                <div className="flex min-w-0 items-center gap-1">
+                  <KeyRound size={12} className="shrink-0 opacity-70" aria-hidden />
                   <span className="truncate">{displayLoginId}</span>
                 </div>
-                {loading ? <Loader2 size={6} className="animate-spin"/> : <Zap size={6} className={hasHostPermission ? "text-rose-500" : "text-slate-400"}/>}
+                {loading ? <Loader2 size={12} className="shrink-0 motion-safe:animate-spin" aria-hidden /> : <Zap size={12} className={`shrink-0 ${hasHostPermission ? "text-rose-500" : "text-slate-400"}`} aria-hidden />}
               </button>
             ) : (
-              <div className="h-[18px] text-[8px] text-slate-300 flex items-center pl-1 border border-transparent">ID未登録</div> 
+              <div className="flex min-h-8 items-center border border-transparent pl-1 text-xs text-slate-400">ID未登録</div> 
             )}
         </div>
-        <div className="border-t border-slate-100 pt-1 mt-0.5">
+        <div className="border-t border-line pt-1.5">
           <div className="space-y-0.5">
             {info.subs.length > 0 ? info.subs.map((s) => {
               const isMe = s.user_id === currentUserId;
               return (
-                <div key={s.id} className={`text-[8px] flex items-center gap-1 p-0.5 rounded ${isMe ? 'font-bold text-indigo-700 bg-indigo-50 border border-indigo-100' : 'text-slate-400'}`}>
-                  <div className={`w-1 h-1 rounded-full ${isMe ? 'bg-indigo-500' : 'bg-slate-300'} shrink-0`}></div> 
+                <div key={s.id} className={`flex items-center gap-1 rounded p-0.5 text-xs ${isMe ? 'border border-accent/20 bg-accent-soft font-bold text-accent' : 'text-fg-muted'}`}>
+                  <div className={`h-1.5 w-1.5 shrink-0 rounded-full ${isMe ? 'bg-accent' : 'bg-slate-300'}`}></div> 
                   <span className="truncate">{s.teacher_name}</span>
                 </div>
               );
             }) : (
-              <div className="text-[8px] text-slate-300 pl-1">-</div>
+              <div className="pl-1 text-xs text-slate-400">-</div>
             )}
           </div>
         </div>
@@ -263,14 +283,14 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
               type="button" 
               onClick={handleEnterZoom}
               disabled={loading}
-              className={`w-full ${theme.btn} shadow-sm text-[9px] font-bold py-1.5 rounded-md flex items-center justify-center gap-1 transition-transform active:scale-95`}
+              className={`flex min-h-10 w-full items-center justify-center gap-1 rounded-btn px-2 text-xs font-bold shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-70 ${theme.btn}`}
             >
-              {loading ? <Loader2 size={10} className="animate-spin"/> : hasHostPermission ? <Zap size={10}/> : <Video size={10}/>}
+              {loading ? <Loader2 size={14} className="motion-safe:animate-spin" aria-hidden /> : hasHostPermission ? <Zap size={14} aria-hidden /> : <Video size={14} aria-hidden />}
               {buttonLabel}
             </button>
           ) : (
-            <div className="w-full bg-slate-100 text-slate-400 text-[9px] font-bold py-1.5 rounded-md flex items-center justify-center gap-1 cursor-not-allowed border border-slate-200">
-              <Video size={10}/> -
+            <div className="flex min-h-10 w-full cursor-not-allowed items-center justify-center gap-1 rounded-btn border border-line bg-slate-100 text-xs font-bold text-slate-400" aria-label="ミーティングID未設定">
+              <Video size={14} aria-hidden /> -
             </div>
           )}
         </div>
@@ -279,7 +299,7 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
   );
 };
 
-// --- シフト表示エリア (変更なし) ---
+// --- シフト表示エリア ---
 const DailyShiftViewer = ({ assignments, currentUserProfile, isExpanded, date }: { assignments: ShiftAssignment[], currentUserProfile: any, isExpanded: boolean, date: string }) => {
   const getAllClasses = (time: string, subject: string) => {
     const slotAssignments = assignments.filter(a => a.note?.includes(`【${time}】`) && a.target_subject === subject && a.target_date === date);
@@ -301,43 +321,43 @@ const DailyShiftViewer = ({ assignments, currentUserProfile, isExpanded, date }:
     return classes.sort((a, b) => (a.grade || '').localeCompare(b.grade || ''));
   };
   const getGeneralSupport = (time: string) => assignments.filter(a => a.role_type === 'general' && a.note?.includes(`【${time}】`) && a.target_date === date);
-  const containerClass = 'bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm flex flex-col';
+  const containerClass = 'cb-card flex flex-col overflow-hidden';
   const listLayoutClass = isExpanded ? 'grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3' : 'flex gap-3 min-w-max'; 
-  const scrollAreaClass = isExpanded ? 'p-4 bg-slate-50/50 flex-1 overflow-y-auto custom-scrollbar' : 'overflow-x-auto p-3 bg-slate-50/50 custom-scrollbar';
+  const scrollAreaClass = isExpanded ? 'p-4 bg-canvas/50 flex-1 overflow-y-auto custom-scrollbar' : 'overflow-x-auto p-3 bg-canvas/50 custom-scrollbar';
 
   return (
-    <div className="space-y-4 h-full">
+    <div className="h-full space-y-4">
       {['1限', '2限'].map(period => (
         <div key={period} className={containerClass}>
-          <div className={`px-3 py-2 flex items-center justify-between shrink-0 ${period === '1限' ? 'bg-slate-800 text-white' : 'bg-slate-700 text-slate-100'}`}>
-            <div className="flex items-center gap-2 font-bold text-xs"><Clock size={12} className={period === '1限' ? 'text-blue-400' : 'text-indigo-400'}/>{period}</div>
-            <div className="flex gap-2 text-[9px] font-bold"><span className="bg-emerald-500/20 px-1.5 py-0.5 rounded text-emerald-100">理 {getAllClasses(period, '理科').length}</span><span className="bg-orange-500/20 px-1.5 py-0.5 rounded text-orange-100">社 {getAllClasses(period, '社会').length}</span></div>
+          <div className={`flex shrink-0 items-center justify-between px-3 py-2 ${period === '1限' ? 'bg-slate-800 text-white' : 'bg-slate-700 text-slate-100'}`}>
+            <div className="flex items-center gap-2 text-sm font-bold"><Clock size={14} className={period === '1限' ? 'text-sky-400' : 'text-indigo-300'} aria-hidden />{period}</div>
+            <div className="flex gap-2 text-xs font-bold"><span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-emerald-100">理 {getAllClasses(period, '理科').length}</span><span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-amber-100">社 {getAllClasses(period, '社会').length}</span></div>
           </div>
           <div className={scrollAreaClass}>
-            <div className={`flex ${isExpanded ? 'flex-col gap-4' : 'flex-row gap-4 items-start'}`}>
-              <div className={`flex flex-col gap-2 ${isExpanded ? 'w-full' : 'min-w-[140px] shrink-0'}`}>
-                {isExpanded && <div className="flex items-center gap-1 text-[10px] font-bold text-emerald-700 border-b border-emerald-100 pb-1 mb-1"><MonitorPlay size={10}/> 理科グループ</div>}
+            <div className={`flex ${isExpanded ? 'flex-col gap-4' : 'flex-row items-start gap-4'}`}>
+              <div className={`flex flex-col gap-2 ${isExpanded ? 'w-full' : 'min-w-[168px] shrink-0'}`}>
+                {isExpanded && <div className="mb-1 flex items-center gap-1 border-b border-emerald-100 pb-1 text-xs font-bold text-emerald-700"><MonitorPlay size={12} aria-hidden /> 理科グループ</div>}
                 {getAllClasses(period, '理科').length > 0 ? (
                   <div className={listLayoutClass}>{getAllClasses(period, '理科').map(info => (<TeacherClassCard key={info.id} info={info} color="emerald" currentUserProfile={currentUserProfile} isExpanded={isExpanded} />))}</div>
-                ) : (<EmptyState text="理科なし" />)}
+                ) : (<EmptySlot text="理科なし" />)}
               </div>
-              {!isExpanded && <div className="w-px bg-slate-200 self-stretch my-1 shrink-0"></div>}
-              {isExpanded && <div className="h-px bg-slate-200 w-full my-1"></div>}
-              <div className={`flex flex-col gap-2 ${isExpanded ? 'w-full' : 'min-w-[140px] shrink-0'}`}>
-                {isExpanded && <div className="flex items-center gap-1 text-[10px] font-bold text-orange-700 border-b border-orange-100 pb-1 mb-1"><MapPin size={10}/> 社会グループ</div>}
+              {!isExpanded && <div className="my-1 w-px shrink-0 self-stretch bg-line"></div>}
+              {isExpanded && <div className="my-1 h-px w-full bg-line"></div>}
+              <div className={`flex flex-col gap-2 ${isExpanded ? 'w-full' : 'min-w-[168px] shrink-0'}`}>
+                {isExpanded && <div className="mb-1 flex items-center gap-1 border-b border-amber-100 pb-1 text-xs font-bold text-amber-700"><MapPin size={12} aria-hidden /> 社会グループ</div>}
                 {getAllClasses(period, '社会').length > 0 ? (
-                  <div className={listLayoutClass}>{getAllClasses(period, '社会').map(info => (<TeacherClassCard key={info.id} info={info} color="orange" currentUserProfile={currentUserProfile} isExpanded={isExpanded} />))}</div>
-                ) : (<EmptyState text="社会なし" />)}
+                  <div className={listLayoutClass}>{getAllClasses(period, '社会').map(info => (<TeacherClassCard key={info.id} info={info} color="amber" currentUserProfile={currentUserProfile} isExpanded={isExpanded} />))}</div>
+                ) : (<EmptySlot text="社会なし" />)}
               </div>
               {getGeneralSupport(period).length > 0 && (
                 <>
-                  {!isExpanded && <div className="w-px bg-slate-200 self-stretch my-1 shrink-0"></div>}
-                  {isExpanded && <div className="h-px bg-slate-200 w-full my-1"></div>}
+                  {!isExpanded && <div className="my-1 w-px shrink-0 self-stretch bg-line"></div>}
+                  {isExpanded && <div className="my-1 h-px w-full bg-line"></div>}
                   <div className={`flex flex-col gap-1 ${isExpanded ? 'w-full' : 'ml-1 shrink-0'}`}>
-                    <div className={`bg-slate-100 rounded-lg p-2 border border-slate-200 ${isExpanded ? 'w-full' : 'h-full w-[120px]'}`}>
-                      <div className="text-[9px] font-bold text-slate-400 mb-2 flex items-center gap-1 uppercase tracking-wider shrink-0"><User size={10}/> Support</div>
-                      <div className={`gap-2 ${isExpanded ? 'grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6' : 'flex flex-col overflow-y-auto custom-scrollbar max-h-[140px]'}`}>
-                        {getGeneralSupport(period).map(a => (<div key={a.id} className={`p-1.5 rounded-md border shadow-sm text-[10px] font-bold flex items-center gap-2 ${a.user_id===currentUserProfile?.id ? 'bg-slate-800 text-white' : 'bg-white text-slate-700'}`}><User size={9}/><span className="truncate">{a.teacher_name}</span></div>))}
+                    <div className={`rounded-card border border-line bg-slate-100 p-2 ${isExpanded ? 'w-full' : 'h-full w-[132px]'}`}>
+                      <div className="mb-2 flex shrink-0 items-center gap-1 text-xs font-bold text-fg-muted"><User size={12} aria-hidden /> サポート</div>
+                      <div className={`gap-2 ${isExpanded ? 'grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6' : 'custom-scrollbar flex max-h-[140px] flex-col overflow-y-auto'}`}>
+                        {getGeneralSupport(period).map(a => (<div key={a.id} className={`flex items-center gap-2 rounded-input border border-line p-1.5 text-xs font-bold shadow-sm ${a.user_id===currentUserProfile?.id ? 'bg-slate-800 text-white' : 'bg-surface text-fg'}`}><User size={12} className="shrink-0" aria-hidden /><span className="truncate">{a.teacher_name}</span></div>))}
                       </div>
                     </div>
                   </div>
@@ -351,45 +371,58 @@ const DailyShiftViewer = ({ assignments, currentUserProfile, isExpanded, date }:
   );
 };
 
+const segmentClass = (active: boolean, dark = false) =>
+  `flex min-h-9 items-center gap-1 rounded-btn px-3 text-xs font-bold transition-colors ${
+    dark
+      ? active ? 'bg-slate-200 text-slate-900 shadow-sm' : 'text-slate-300 hover:text-white'
+      : active ? 'bg-surface text-accent shadow-sm' : 'text-fg-muted hover:text-fg'
+  }`;
+
 // --- メインコンポーネント ---
 export default function TeacherDashboard({ profile, allAssignments, pendingCount, currentDate, onDateChange, viewMode, onViewModeChange, isExpanded, onExpandChange }: Props) {
-  const { logout } = useAuth();
+  const { logout, user: authUser } = useAuth();
+  const confirm = useConfirm();
   const { visibility } = usePortalVisibility('teacher');
-  const days = ['日', '月', '火', '水', '木', '金', '土'];
-  const dayOfWeek = days[new Date(currentDate).getDay()];
+  // 専任は勤務詳細の入力がない（時間外申請で管理）ため、準専任のときだけ未入力を知らせる。
+  const showDetailReminder = visibility.attendance !== false && Boolean(profile) && !isDedicatedProfile(profile);
+  const detailReminders = useWorkDetailReminders(authUser?.uid, showDetailReminder);
+  const dayOfWeek = weekdayFromDateKey(currentDate);
   const teacherName = profile?.student_name || profile?.name || '講師';
   
-  // ★追加: カレンダーモーダル用ステート
+  // カレンダーモーダル用ステート
   const [isCalendarModalOpen, setIsCalendarModalOpen] = useState(false);
 
-  const handleLogout = async () => { if (confirm('ログアウトしますか？')) await logout(); };
-  const handleDateChange = (direction: number) => { const d = new Date(currentDate); const increment = viewMode === 'week' ? 7 : 1; d.setDate(d.getDate() + (direction * increment)); onDateChange(d.toISOString().split('T')[0]); };
+  const handleLogout = async () => {
+    const ok = await confirm({ title: 'ログアウトしますか？', confirmLabel: 'ログアウト' });
+    if (ok) await logout();
+  };
+  const handleDateChange = (direction: number) => { const increment = viewMode === 'week' ? 7 : 1; onDateChange(addDaysToDateKey(currentDate, direction * increment)); };
   const targetDates = [currentDate];
-  if (viewMode === 'week') { for (let i = 1; i < 7; i++) { const d = new Date(currentDate); d.setDate(d.getDate() + i); targetDates.push(d.toISOString().split('T')[0]); } }
-  const containerClasses = isExpanded ? 'fixed inset-0 z-[200] bg-slate-100 flex flex-col h-screen overflow-hidden' : 'min-h-screen bg-slate-50 font-sans text-slate-800 pb-24';
-  const contentClasses = isExpanded ? 'flex-1 overflow-hidden p-2 lg:p-6' : 'max-w-7xl mx-auto p-4 md:p-6 space-y-6';
+  if (viewMode === 'week') { for (let i = 1; i < 7; i++) { targetDates.push(addDaysToDateKey(currentDate, i)); } }
+  const containerClasses = isExpanded ? 'fixed inset-0 z-overlay bg-slate-100 flex flex-col h-[100dvh] overflow-hidden' : 'text-fg pb-24';
+  const contentClasses = isExpanded ? 'flex-1 overflow-hidden p-2 lg:p-6' : 'max-w-7xl mx-auto px-4 py-5 sm:px-6 space-y-6';
 
   return (
     <div className={containerClasses}>
       {!isExpanded && (
-        <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm/50 backdrop-blur-md bg-white/90">
-          <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
-            <div className="flex items-center gap-2"><div className="bg-slate-900 p-2 rounded-xl text-white shadow-lg shadow-indigo-500/20"><Briefcase size={20} /></div><span className="font-black text-lg tracking-tight text-slate-800 hidden md:inline">講師ポータル</span></div>
-            <div className="flex items-center gap-4">
-              <Link href="/teacher/student-preview" className="hidden items-center gap-2 rounded-full bg-emerald-50 px-3 py-2 text-xs font-black text-emerald-700 shadow-sm transition-colors hover:bg-emerald-100 sm:flex" title="生徒画面プレビュー">
-                <Smartphone size={16} /> 生徒画面
+        <header className="sticky top-[env(safe-area-inset-top,0px)] z-30 border-b border-line bg-surface/90 backdrop-blur-md">
+          <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4">
+            <div className="flex items-center gap-2"><div className="rounded-btn bg-slate-900 p-2 text-white shadow-sm"><Briefcase size={20} aria-hidden /></div><span className="hidden text-lg font-bold tracking-tight text-fg md:inline">講師ポータル</span></div>
+            <div className="flex items-center gap-2 sm:gap-3">
+              <Link href="/teacher/student-preview" className="hidden min-h-10 items-center gap-2 rounded-full bg-emerald-50 px-3 text-xs font-bold text-emerald-700 shadow-sm transition-colors hover:bg-emerald-100 sm:flex" title="生徒画面プレビュー">
+                <Smartphone size={16} aria-hidden /> 生徒画面
               </Link>
               {visibility.attendance !== false && (
-                <Link href="/teacher/attendance" className="p-2 bg-indigo-50 hover:bg-indigo-100 rounded-full text-indigo-600 transition-colors shadow-sm" title="勤怠打刻">
-                  <Clock size={20} />
+                <Link href="/teacher/attendance" className="inline-flex h-11 w-11 items-center justify-center rounded-full bg-accent-soft text-accent transition-colors hover:bg-accent-soft/70" title="勤怠打刻" aria-label="勤怠打刻">
+                  <Clock size={20} aria-hidden />
                 </Link>
               )}
 
-              <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 bg-slate-50 rounded-full border border-slate-100">
-                <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></div>
-                <span className="text-xs font-bold text-slate-600">{teacherName}</span>
+              <div className="hidden items-center gap-2 rounded-full border border-line bg-canvas px-3 py-1.5 sm:flex">
+                <div className="h-2 w-2 rounded-full bg-emerald-400 motion-safe:animate-pulse"></div>
+                <span className="text-xs font-bold text-fg-muted">{teacherName}</span>
               </div>
-              <button onClick={handleLogout} className="p-2 hover:bg-red-50 rounded-full text-slate-400 hover:text-red-500 transition-colors"><LogOut size={20} /></button>
+              <IconButton label="ログアウト" onClick={handleLogout} className="rounded-full hover:!bg-rose-50 hover:!text-rose-600"><LogOut size={20} aria-hidden /></IconButton>
             </div>
           </div>
         </header>
@@ -397,26 +430,26 @@ export default function TeacherDashboard({ profile, allAssignments, pendingCount
       
       {/* 拡大モード用ヘッダー */}
       {isExpanded && (
-        <div className="bg-slate-900 text-white p-2 flex justify-between items-center shadow-md z-20 shrink-0">
+        <div className="z-20 flex shrink-0 items-center justify-between bg-slate-900 p-2 pt-[calc(0.5rem+env(safe-area-inset-top,0px))] text-white shadow-md">
           <div className="flex items-center gap-3">
-             <button onClick={() => onExpandChange(false)} className="p-2 bg-white/10 hover:bg-white/20 rounded-lg transition-colors text-white/80 flex items-center gap-2"><Minimize2 size={16}/> <span className="text-xs font-bold hidden sm:inline">戻る</span></button>
-             <div className="flex bg-slate-800 p-0.5 rounded-lg border border-slate-700">
-                 <button onClick={() => onViewModeChange('day')} className={`px-2 py-1 rounded-md text-[10px] font-bold transition-all flex items-center gap-1 ${viewMode === 'day' ? 'bg-slate-200 text-slate-900 shadow-sm' : 'text-slate-400 hover:text-white'}`}><Layout size={12}/> 1日</button>
-                 <button onClick={() => onViewModeChange('week')} className={`px-3 py-1 rounded-md text-[10px] font-bold transition-all flex items-center gap-1 ${viewMode === 'week' ? 'bg-slate-200 text-slate-900 shadow-sm' : 'text-slate-400 hover:text-white'}`}><LayoutList size={12}/> 週間</button>
+             <button type="button" onClick={() => onExpandChange(false)} className="flex min-h-10 items-center gap-2 rounded-btn bg-white/10 px-3 text-white/80 transition-colors hover:bg-white/20" aria-label="戻る"><Minimize2 size={16} aria-hidden /> <span className="hidden text-xs font-bold sm:inline">戻る</span></button>
+             <div className="flex rounded-btn border border-slate-700 bg-slate-800 p-0.5">
+                 <button type="button" onClick={() => onViewModeChange('day')} className={segmentClass(viewMode === 'day', true)} aria-pressed={viewMode === 'day'}><Layout size={12} aria-hidden /> 1日</button>
+                 <button type="button" onClick={() => onViewModeChange('week')} className={segmentClass(viewMode === 'week', true)} aria-pressed={viewMode === 'week'}><LayoutList size={12} aria-hidden /> 週間</button>
              </div>
           </div>
-          <div className="flex items-center gap-2 bg-white/10 p-1 rounded-lg border border-white/10">
-             <button onClick={() => handleDateChange(-1)} className="p-1 hover:bg-white/20 rounded-md transition text-white/70 hover:text-white"><ChevronLeft size={16}/></button>
+          <div className="flex items-center gap-1 rounded-btn border border-white/10 bg-white/10 p-1">
+             <button type="button" onClick={() => handleDateChange(-1)} aria-label="前へ" className="inline-flex h-9 w-9 items-center justify-center rounded-btn text-white/70 transition hover:bg-white/20 hover:text-white"><ChevronLeft size={16} aria-hidden /></button>
              
-             {/* ★修正: 拡大時の日付をクリック可能に */}
              <button 
+               type="button"
                onClick={() => setIsCalendarModalOpen(true)}
-               className="px-2 text-xs font-bold font-mono hover:text-indigo-300 transition-colors"
+               className="min-h-9 px-2 text-xs font-bold transition-colors hover:text-indigo-300"
              >
-               {currentDate.replace(/-/g, '/')} {viewMode === 'week' ? '～' : `(${days[new Date(currentDate).getDay()]})`}
+               {formatDate(currentDate, { withWeekday: viewMode !== 'week' })}{viewMode === 'week' ? ' ～' : ''}
              </button>
 
-             <button onClick={() => handleDateChange(1)} className="p-1 hover:bg-white/20 rounded-md transition text-white/70 hover:text-white"><ChevronRight size={16}/></button>
+             <button type="button" onClick={() => handleDateChange(1)} aria-label="次へ" className="inline-flex h-9 w-9 items-center justify-center rounded-btn text-white/70 transition hover:bg-white/20 hover:text-white"><ChevronRight size={16} aria-hidden /></button>
           </div>
         </div>
       )}
@@ -426,74 +459,74 @@ export default function TeacherDashboard({ profile, allAssignments, pendingCount
         {/* ホーム上部: 挨拶と日付操作 */}
         {!isExpanded && (
           <div className="flex justify-end">
-            <AppSwitcherLink className="w-full md:w-auto" />
+            <AppSwitcherLink />
           </div>
         )}
         {!isExpanded && (
-          <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 flex flex-col lg:flex-row items-center justify-between gap-4">
-            <div className="w-full md:w-auto text-center md:text-left">
-               <div className="flex items-center justify-center md:justify-start gap-2 text-indigo-600 mb-1">
-                 <Sparkles size={14} className="animate-pulse"/>
-                 <span className="text-xs font-bold uppercase tracking-wider opacity-80">Welcome Back</span>
-               </div>
-               <h2 className="text-xl font-black text-slate-700">
-                 こんにちは、<span className="text-indigo-600">{teacherName}</span>先生
+          <Card className="flex flex-col items-center justify-between gap-4 lg:flex-row">
+            <div className="w-full text-center md:w-auto md:text-left">
+               <p className="mb-1 text-xs font-bold text-accent">講師ポータル</p>
+               <h2 className="text-xl font-black text-fg">
+                 こんにちは、<span className="text-accent">{teacherName}</span>さん
                </h2>
             </div>
 
             <div className="grid w-full gap-2 md:w-auto md:grid-cols-2">
-              <Link href="/teacher/student-preview" className="flex items-center justify-center gap-2 rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm font-black text-emerald-700 hover:bg-emerald-100 md:col-span-2">
-                <Smartphone size={18} /> 生徒画面をテスト
+              <Link href="/teacher/student-preview" className="flex min-h-11 items-center justify-center gap-2 rounded-btn border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-700 hover:bg-emerald-100 md:col-span-2">
+                <Smartphone size={18} aria-hidden /> 生徒画面をテスト
               </Link>
-              {visibility.attendance !== false && <Link href="/teacher/attendance" className="flex items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-3 text-sm font-black text-white shadow-sm hover:bg-slate-800">
-                <Clock size={18} /> 打刻する
+              {visibility.attendance !== false && <Link href="/teacher/attendance" className="flex min-h-11 items-center justify-center gap-2 rounded-btn bg-slate-900 px-4 py-3 text-sm font-bold text-white shadow-sm hover:bg-slate-800">
+                <Clock size={18} aria-hidden /> 打刻する
               </Link>}
-              {visibility.substitutions !== false && <Link href="/teacher/substitutions" className="flex items-center justify-center gap-2 rounded-xl border border-rose-100 bg-rose-50 px-4 py-3 text-sm font-black text-rose-700 hover:bg-rose-100">
-                <Megaphone size={18} /> 代行掲示板
+              {visibility.substitutions !== false && <Link href="/teacher/substitutions" className="flex min-h-11 items-center justify-center gap-2 rounded-btn border border-rose-100 bg-rose-50 px-4 py-3 text-sm font-bold text-rose-700 hover:bg-rose-100">
+                <Megaphone size={18} aria-hidden /> 代行掲示板
               </Link>}
             </div>
 
-            <div className="flex items-center bg-slate-50 rounded-xl p-1.5 border border-slate-100 shadow-inner w-full md:w-auto justify-between md:justify-start">
-               <button onClick={() => handleDateChange(-1)} className="p-3 hover:bg-white rounded-lg transition text-slate-400 hover:text-indigo-600 shadow-sm active:scale-95"><ChevronLeft size={20}/></button>
+            <div className="flex w-full items-center justify-between rounded-card border border-line bg-canvas p-1.5 md:w-auto md:justify-start">
+               <IconButton label="前の日へ" onClick={() => handleDateChange(-1)} className="hover:!bg-surface"><ChevronLeft size={20} aria-hidden /></IconButton>
                
-               {/* ★修正: 日付エリアをクリック可能に */}
-               <div 
-                 className="px-6 text-center min-w-[140px] cursor-pointer hover:bg-slate-100/50 rounded-lg transition-colors py-1"
+               <button 
+                 type="button"
+                 className="min-w-[140px] rounded-btn px-6 py-1 text-center transition-colors hover:bg-surface"
                  onClick={() => setIsCalendarModalOpen(true)}
                >
-                 <span className="block text-[10px] font-bold text-slate-400 mb-0.5">TARGET DATE</span>
-                 <div className="text-lg font-black text-slate-700 flex items-center justify-center gap-1">
-                   {currentDate} <span className="text-sm font-normal text-slate-400">({dayOfWeek})</span>
-                 </div>
-               </div>
+                 <span className="mb-0.5 block text-xs font-bold text-fg-muted">表示日</span>
+                 <span className="flex items-center justify-center gap-1 text-lg font-bold text-fg">
+                   {currentDate} <span className="text-sm font-normal text-fg-muted">({dayOfWeek})</span>
+                 </span>
+               </button>
 
-               <button onClick={() => handleDateChange(1)} className="p-3 hover:bg-white rounded-lg transition text-slate-400 hover:text-indigo-600 shadow-sm active:scale-95"><ChevronRight size={20}/></button>
+               <IconButton label="次の日へ" onClick={() => handleDateChange(1)} className="hover:!bg-surface"><ChevronRight size={20} aria-hidden /></IconButton>
             </div>
-          </div>
+          </Card>
         )}
         
+        {!isExpanded && showDetailReminder && (
+          <WorkDetailReminderCard records={detailReminders.records} error={detailReminders.error} onRetry={detailReminders.reload} className="mb-6" />
+        )}
         {!isExpanded && visibility.shifts !== false && <NextClassWidget profile={profile} />}
         {!isExpanded && visibility.news !== false && <NewsWidget role="teacher" />}
         {!isExpanded && visibility.calendar !== false && (
-          <section className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
+          <Card>
             <div className="mb-3 flex items-center gap-2">
-              <CalendarIcon className="text-indigo-600" size={18} />
-              <h3 className="text-sm font-black text-slate-800">年間予定カレンダー</h3>
+              <CalendarIcon className="text-accent" size={18} aria-hidden />
+              <h3 className="text-sm font-bold text-fg">年間予定カレンダー</h3>
             </div>
             <CalendarWidget role="teacher" profile={profile} />
-          </section>
+          </Card>
         )}
 
-        {visibility.shifts !== false ? <div className={`space-y-4 ${isExpanded ? 'h-full flex flex-col' : ''}`}>
-          <div className="flex items-center justify-between px-1 shrink-0">
-            <div className="flex items-center gap-3">
-              {/* ★修正: カレンダーアイコンをクリック可能に */}
+        {visibility.shifts !== false ? <div className={`space-y-4 ${isExpanded ? 'flex h-full flex-col' : ''}`}>
+          <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-1">
+            <div className="flex flex-wrap items-center gap-3">
               <button 
+                type="button"
                 onClick={() => setIsCalendarModalOpen(true)}
-                className={`font-black text-slate-700 flex items-center gap-2 hover:text-indigo-600 transition-colors group ${isExpanded ? 'hidden' : 'text-lg'}`}
+                className={`group flex items-center gap-2 font-bold text-fg transition-colors hover:text-accent ${isExpanded ? 'hidden' : 'text-lg'}`}
               >
-                <div className="p-1.5 bg-indigo-50 rounded-lg group-hover:bg-indigo-100 transition-colors">
-                  <CalendarIcon className="text-indigo-600" size={20}/>
+                <div className="rounded-btn bg-accent-soft p-1.5 transition-colors">
+                  <CalendarIcon className="text-accent" size={20} aria-hidden />
                 </div>
                 講師配置
               </button>
@@ -501,42 +534,42 @@ export default function TeacherDashboard({ profile, allAssignments, pendingCount
               <ShiftMonitorButton assignments={allAssignments} currentDate={currentDate} />
 
               {!isExpanded && (
-                <div className="flex bg-slate-200 p-1 rounded-lg">
-                   <button onClick={() => onViewModeChange('day')} className={`px-3 py-1 rounded-md text-[10px] font-bold transition-all flex items-center gap-1 ${viewMode === 'day' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Layout size={12}/> 1日</button>
-                   <button onClick={() => onViewModeChange('week')} className={`px-3 py-1 rounded-md text-[10px] font-bold transition-all flex items-center gap-1 ${viewMode === 'week' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><LayoutList size={12}/> 週間</button>
+                <div className="flex rounded-btn bg-slate-200 p-1">
+                   <button type="button" onClick={() => onViewModeChange('day')} className={segmentClass(viewMode === 'day')} aria-pressed={viewMode === 'day'}><Layout size={12} aria-hidden /> 1日</button>
+                   <button type="button" onClick={() => onViewModeChange('week')} className={segmentClass(viewMode === 'week')} aria-pressed={viewMode === 'week'}><LayoutList size={12} aria-hidden /> 週間</button>
                 </div>
               )}
             </div>
-            {!isExpanded && <button onClick={() => onExpandChange(true)} className="flex items-center gap-2 bg-slate-800 text-white px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-all text-xs font-bold active:scale-95"><Maximize2 size={12}/> 拡大</button>}
+            {!isExpanded && <Button variant="secondary" size="sm" onClick={() => onExpandChange(true)} icon={<Maximize2 size={14} aria-hidden />}>拡大</Button>}
           </div>
-          <div className={`${isExpanded ? 'flex-1 overflow-y-auto custom-scrollbar space-y-4 pr-1 pb-32' : 'space-y-6'}`}>
+          <div className={`${isExpanded ? 'custom-scrollbar flex-1 space-y-4 overflow-y-auto pb-32 pr-1' : 'space-y-6'}`}>
             {targetDates.map((date, idx) => {
-              const d = new Date(date);
-              const dayStr = days[d.getDay()];
-              const isToday = date === new Date().toISOString().split('T')[0];
+              // 日付キーはUTC基準で解釈し、端末のタイムゾーンで曜日・日付がずれないようにする
+              const d = new Date(`${date}T00:00:00Z`);
+              const dayStr = weekdayFromDateKey(date);
+              const isToday = date === jstDateKey();
               return (
-                <div key={date} className="animate-in fade-in slide-in-from-bottom-4 duration-500" style={{animationDelay: `${idx * 30}ms`}}>
+                <div key={date} className="motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-4 motion-safe:duration-500" style={{animationDelay: `${idx * 30}ms`}}>
                   {(viewMode === 'week' || isExpanded) && (
-                    <div className="flex items-center gap-2 mb-2 pl-1 sticky top-0 bg-slate-100 z-10 py-1 shadow-sm">
-                      <div className={`text-sm font-black ${isToday ? 'text-indigo-600' : 'text-slate-400'}`}>{d.getMonth()+1}/{d.getDate()}</div>
-                      <div className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${isToday ? 'bg-indigo-600 text-white' : 'bg-slate-200 text-slate-500'}`}>{dayStr}</div>
-                      {isToday && <span className="text-[9px] font-bold text-indigo-400 tracking-wider">TODAY</span>}
+                    <div className="sticky top-0 z-10 mb-2 flex items-center gap-2 bg-slate-100 py-1 pl-1 shadow-sm">
+                      <div className={`text-sm font-bold ${isToday ? 'text-accent' : 'text-fg-muted'}`}>{d.getUTCMonth()+1}/{d.getUTCDate()}</div>
+                      <div className={`rounded px-1.5 py-0.5 text-xs font-bold ${isToday ? 'bg-accent text-accent-ink' : 'bg-slate-200 text-fg-muted'}`}>{dayStr}</div>
+                      {isToday && <span className="text-xs font-bold text-accent">今日</span>}
                     </div>
                   )}
                   <DailyShiftViewer assignments={allAssignments} currentUserProfile={profile} isExpanded={isExpanded} date={date} />
                 </div>
               );
             })}
-            {allAssignments.length === 0 && (<div className="text-center py-10 bg-white rounded-xl border border-dashed border-slate-200"><p className="text-xs font-bold text-slate-400">シフトデータがありません</p></div>)}
+            {allAssignments.length === 0 && (<div className="rounded-card border border-dashed border-line bg-surface py-10 text-center"><p className="text-sm font-bold text-fg-muted">シフトデータがありません</p></div>)}
           </div>
         </div> : (
-          <div className="rounded-3xl border border-dashed border-slate-200 bg-white p-8 text-center text-sm font-bold text-slate-400">
+          <div className="rounded-card border border-dashed border-line bg-surface p-8 text-center text-sm font-bold text-fg-muted">
             講師配置表示は現在OFFです
           </div>
         )}
       </div>
 
-      {/* ★追加: カレンダーモーダル */}
       <FutureClassesModal 
         isOpen={isCalendarModalOpen} 
         onClose={() => setIsCalendarModalOpen(false)} 

@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { canManageAttendance, canManageAttendanceSchool, getServerUser, jsonError, requireRole } from '@/lib/server-auth';
+import { writeAuditLog } from '@/lib/server/audit-log';
 import { writeLearningEvent } from '@/lib/events';
 import {
   SCIENCE_SOCIAL_WORKPLACE_ID,
@@ -229,6 +230,8 @@ export async function POST(request: NextRequest) {
     const correctionRef = db.collection('attendance_correction_requests').doc(requestId);
     // 新規実績が不要な承認では未使用になるが、IDの予約は読み取りを発生させない。
     const createdWorkRecordRef = status === 'approved' ? db.collection('work_records').doc() : null;
+    // 操作ログ用（トランザクション内で確認した申請の値。再試行時は最後の値になる）。
+    const reviewed: { info: { teacher_id: string; teacher_name: string; target_date: string; school_id: string; request_type: string; work_record_id: string } | null } = { info: null };
     await db.runTransaction(async transaction => {
       // 二重承認や、承認中に別操作が入った場合でも、申請状態と勤務実績を必ず同じトランザクションで確定する。
       const latestCorrectionSnap = await transaction.get(correctionRef);
@@ -248,10 +251,22 @@ export async function POST(request: NextRequest) {
         resolveAttendanceSchoolCode(targetTeacher.school_id || targetTeacher.school);
       if (!canManageAttendanceSchool(user, targetSchool)) throw new Error('forbidden');
 
+      reviewed.info = {
+        teacher_id: String(latestCorrection.teacher_id || ''),
+        teacher_name: String(latestCorrection.teacher_name || targetTeacher.name || targetTeacher.teacher_name || ''),
+        target_date: String(latestCorrection.target_date || ''),
+        school_id: String(targetSchool || ''),
+        request_type: String(latestCorrection.request_type || ''),
+        work_record_id: latestWorkRecordId || (status === 'approved' ? createdWorkRecordRef?.id || '' : ''),
+      };
+
+      // 却下理由などのコメントは講師の申請一覧にそのまま表示される。
+      const reviewNote = String(body.review_note || '').normalize('NFKC').trim().slice(0, 500);
       const reviewUpdate = {
         status,
         reviewed_by: user.uid,
         reviewed_at: FieldValue.serverTimestamp(),
+        ...(reviewNote ? { review_note: reviewNote } : {}),
       };
       if (status === 'rejected') {
         transaction.set(correctionRef, reviewUpdate, { merge: true });
@@ -347,6 +362,25 @@ export async function POST(request: NextRequest) {
     }).catch(error => {
       console.error('attendance correction review event write failed', error);
       return null;
+    });
+
+    // 記録に失敗しても承認・却下そのものは成功のまま返す（writeAuditLog は例外を投げない）。
+    const reviewedInfo = reviewed.info;
+    await writeAuditLog({
+      actor: user,
+      action: status === 'approved' ? 'attendance_correction_approve' : 'attendance_correction_reject',
+      target_type: 'attendance_correction_request',
+      target_id: requestId,
+      target_label: [reviewedInfo?.teacher_name, reviewedInfo?.target_date].filter(Boolean).join(' '),
+      school_id: reviewedInfo?.school_id || null,
+      details: {
+        status,
+        reviewer_id: user.uid,
+        teacher_id: reviewedInfo?.teacher_id || null,
+        target_date: reviewedInfo?.target_date || null,
+        request_type: reviewedInfo?.request_type || null,
+        work_record_id: reviewedInfo?.work_record_id || null,
+      },
     });
 
     return Response.json({ ok: true, event_id: eventId });

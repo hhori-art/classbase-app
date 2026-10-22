@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, isAdminLike, jsonError } from '@/lib/server-auth';
+import { writeAuditLog } from '@/lib/server/audit-log';
 import { enrichCourseOptionsWithShifts } from '@/lib/course-registration-match';
 import { getCourseSubjectGroup, normalizeCourseText, toAsciiDigits } from '@/lib/course-text';
 
@@ -465,6 +466,23 @@ export async function POST(request: NextRequest) {
       });
       opCount += 1;
       await commitIfNeeded(true);
+    }
+
+    if (!dryRun) {
+      // 取込1回につき1件。件数だけ残し、生徒ごとの行の内容は残さない（確認だけの dry_run は記録しない）。
+      await writeAuditLog({
+        actor,
+        action: 'course_registrations_import',
+        target_type: 'course_registration',
+        target_label: `${year} ${term}`,
+        details: {
+          year,
+          term,
+          row_count: rows.length,
+          imported_count: registrations.length,
+          cleared_count: registrations.filter(item => item.clearOnly).length,
+        },
+      });
     }
 
     const statusCounts = results.reduce((acc, result) => {

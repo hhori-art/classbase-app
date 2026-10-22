@@ -3,11 +3,15 @@
 import { useState } from 'react';
 import { db } from '@/lib/firebase';
 import { collection, getDocs, query, where, writeBatch, doc } from 'firebase/firestore';
-import { FileText, Loader2, Download, Settings } from 'lucide-react';
+import { FileText, Download, Settings, Loader2 } from 'lucide-react';
+import { buttonClass, useConfirm, useToast } from '@/app/components/ui';
+import { cn } from '@/lib/cn';
 
 export default function PfImportButton({ onSuccess }: { onSuccess?: () => void }) {
   const [uploading, setUploading] = useState(false);
   const [encoding, setEncoding] = useState('Shift_JIS');
+  const toast = useToast();
+  const confirm = useConfirm();
 
   const downloadTemplate = () => {
     const csv = '\uFEFFNo.,氏名,性別,生涯番号,学年,クラス,曜日,教室,数学,英語,国語,理科,社会\n1,山田 太郎,男,10001,中1,A,月,本校,80,75,90,85,70';
@@ -19,15 +23,21 @@ export default function PfImportButton({ onSuccess }: { onSuccess?: () => void }
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+    const input = e.target;
+    const file = input.files?.[0];
     if (!file) return;
     
     // ファイル名から年度を取得 (例: "2025_成績.csv" -> 2025)
     const yearMatch = file.name.match(/20[0-9]{2}/);
     const year = yearMatch ? yearMatch[0] : new Date().getFullYear().toString();
 
-    if (!confirm(`${year}年度のPFデータを取り込みますか？\n(生徒の曜日・学年情報も更新されます)`)) {
-      e.target.value = '';
+    if (!(await confirm({
+      title: `${year}年度のPFデータを取り込みますか？`,
+      message: `「${file.name}」を取り込みます。生徒の曜日・学年・教室の情報もこのファイルの内容で上書きされます。`,
+      confirmLabel: '取り込む',
+      tone: 'danger',
+    }))) {
+      input.value = '';
       return;
     }
 
@@ -39,14 +49,14 @@ export default function PfImportButton({ onSuccess }: { onSuccess?: () => void }
       try {
         const text = event.target?.result as string;
         await processCSV(text, year);
-        alert('インポート完了');
+        toast.success(`${year}年度のPFデータを取り込みました`);
         if (onSuccess) onSuccess();
       } catch (err: any) {
         console.error(err);
-        alert('エラー: ' + err.message);
+        toast.error(`取り込めませんでした。${err?.message || ''}`);
       } finally {
         setUploading(false);
-        e.target.value = '';
+        input.value = '';
       }
     };
   };
@@ -120,18 +130,18 @@ export default function PfImportButton({ onSuccess }: { onSuccess?: () => void }
   return (
     <div className="flex flex-col gap-2 items-end">
       <div className="flex gap-3 text-xs">
-        <button onClick={downloadTemplate} className="text-blue-600 hover:underline flex items-center gap-1"><Download size={12}/> テンプレートDL</button>
-        <div className="flex items-center gap-1 text-gray-500"><Settings size={12}/>
-          <select value={encoding} onChange={(e) => setEncoding(e.target.value)} className="bg-transparent font-bold cursor-pointer">
+        <button type="button" onClick={downloadTemplate} className="min-h-9 text-accent hover:underline flex items-center gap-1 font-bold"><Download size={12} aria-hidden /> テンプレートDL</button>
+        <div className="flex items-center gap-1 text-slate-500"><Settings size={12} aria-hidden />
+          <select value={encoding} onChange={(e) => setEncoding(e.target.value)} aria-label="文字コード" className="bg-transparent font-bold cursor-pointer">
             <option value="Shift_JIS">Shift_JIS</option><option value="UTF-8">UTF-8</option>
           </select>
         </div>
       </div>
       <div className="relative inline-block">
-        <input type="file" accept=".csv" onChange={handleFileUpload} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" disabled={uploading} />
-        <button disabled={uploading} className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg font-bold hover:bg-blue-700 transition-colors shadow-sm disabled:opacity-50">
-          {uploading ? <Loader2 className="animate-spin" size={18}/> : <FileText size={18}/>} PFデータ取込
-        </button>
+        <input type="file" accept=".csv" onChange={handleFileUpload} aria-label="PFデータのCSVを選ぶ" className="absolute inset-0 z-10 w-full h-full opacity-0 cursor-pointer" disabled={uploading} />
+        <span aria-hidden className={cn(buttonClass('primary', 'md'), uploading && 'opacity-50')}>
+          {uploading ? <Loader2 className="animate-spin" size={18} /> : <FileText size={18} />} PFデータ取込
+        </span>
       </div>
     </div>
   );

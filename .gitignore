@@ -55,3 +55,6 @@ next-env.d.ts
 /.security-staging-service-account.json
 /firebase-security-debug.log
 /firestore-debug.log
+
+# local visual QA output
+/.visual-qa/

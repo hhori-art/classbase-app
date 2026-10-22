@@ -3,8 +3,7 @@
 import { useState, useEffect } from 'react';
 import { auth, db } from '@/lib/firebase';
 import { collection, getDocs, query, orderBy } from 'firebase/firestore';
-import { Users, Search, Plus, Edit, ArrowLeft, GraduationCap, UserCheck, Save, X, Loader2, FileUp, Shield, Printer, History } from 'lucide-react';
-import Link from 'next/link';
+import { Search, GraduationCap, UserCheck, Save, FileUp, Shield, Printer, History, RefreshCw, Loader2 } from 'lucide-react';
 import CsvSampleDownload from '@/app/components/CsvSampleDownload';
 import LastLoginCell from '@/app/components/LastLoginCell';
 import AccountGuidePrintView from '@/app/components/account-guides/AccountGuidePrintView';
@@ -12,6 +11,10 @@ import { toGuideAccount } from '@/app/components/account-guides/guide-model';
 import { describeSyncErrors, syncPrintedPasswords, type PrintedPasswordSkip } from '@/lib/client-printed-password-sync';
 import { EMPLOYMENT_CATEGORY_LABELS, normalizeEmploymentCategory } from '@/lib/employment-category';
 import { ATTENDANCE_SCHOOL_OPTION_GROUPS, attendanceSchoolName, resolveAttendanceSchoolCode } from '@/lib/attendance-schools';
+import AdminPageHeader from '@/app/components/master/AdminPageHeader';
+import AdminTabs from '@/app/components/master/AdminTabs';
+import { Button, EmptyState, ErrorState, ListSkeleton, Modal, buttonClass, useConfirm, useToast } from '@/app/components/ui';
+import { formatDate, formatDateTime } from '@/lib/format';
 
 // ユーザー型定義
 interface UserData {
@@ -68,9 +71,12 @@ interface AccountImportBatch {
 const normalizedUserRole = (role: unknown) => ['attendance_admin', 'attendance_only', 'attendance_manager'].includes(String(role || '').toLowerCase()) ? 'teacher' : String(role || 'student');
 
 export default function UserManagementPage() {
+  const toast = useToast();
+  const confirm = useConfirm();
   const [users, setUsers] = useState<UserData[]>([]);
   const [filteredUsers, setFilteredUsers] = useState<UserData[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [isMounted, setIsMounted] = useState(false);
   
   const [activeTab, setActiveTab] = useState<'student' | 'teacher' | 'master'>('student');
@@ -150,12 +156,13 @@ export default function UserManagementPage() {
   // データ取得
   const fetchUsers = async () => {
     setLoading(true);
+    setLoadError(false);
     try {
       const q = query(collection(db, 'users'), orderBy('created_at', 'desc'));
       const snap = await getDocs(q);
       const list = snap.docs.map(d => ({ id: d.id, ...d.data() } as UserData));
       setUsers(list);
-    } catch (e) { console.error(e); } finally { setLoading(false); }
+    } catch (e) { console.error(e); setLoadError(true); } finally { setLoading(false); }
   };
 
   const fetchImportBatches = async () => {
@@ -171,6 +178,7 @@ export default function UserManagementPage() {
       setImportBatches(Array.isArray(result.batches) ? result.batches : []);
     } catch (error) {
       console.error('Account import history fetch failed:', error);
+      toast.error('CSV取込履歴を読み込めませんでした。「更新」でもう一度お試しください。');
     } finally {
       setIsImportHistoryLoading(false);
     }
@@ -179,6 +187,8 @@ export default function UserManagementPage() {
   useEffect(() => {
     void fetchUsers();
     void fetchImportBatches();
+    // 初回表示時だけ読み込む（toast は安定した参照）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // フィルタリング
@@ -234,7 +244,7 @@ export default function UserManagementPage() {
    */
   const handleOpenPrintModal = async (mode: 'issue' | 'reissue' = 'issue', overrideIds?: string[]) => {
     const requestedIds = overrideIds || Array.from(selectedIds);
-    if (requestedIds.length === 0) return alert('印刷するユーザーを選択してください。');
+    if (requestedIds.length === 0) return toast.error('印刷するユーザーを選択してください。');
     const requestedSet = new Set(requestedIds);
     const parentOf = (user: UserData) => users.find(candidate => candidate.id === user.parent_uid)
       || users.find(candidate => Array.isArray(candidate.student_ids) && candidate.student_ids.includes(user.id));
@@ -249,7 +259,7 @@ export default function UserManagementPage() {
     try {
       const summary = await syncPrintedPasswords(syncIds, { mode, onProgress: (done, total) => setSyncProgress({ done, total }) });
       if (summary.errors.length > 0) {
-        throw new Error(`書面とログインのパスワードを同期できないアカウントがあります。\n${describeSyncErrors(summary.errors)}`);
+        throw new Error(`書面とログインのパスワードを同期できないアカウントがあります。 ${describeSyncErrors(summary.errors).replace(/\n/g, ' ／ ')}`);
       }
       const skippedIds = new Set(summary.skipped.map(item => item.user_id));
       const migratedId = new Map<string, string>(summary.results.map(item => [String(item.old_user_id), String(item.user_id)] as [string, string]));
@@ -288,8 +298,17 @@ export default function UserManagementPage() {
       setPrintRequestIds(nextSelectedIds);
       setPrintSkipped(summary.skipped);
       if (preparedPrintAccounts.length === 0) {
-        alert(`選んだ${summary.skipped.length}名は全員すでにログイン済みのため、書面を作成していません。\nパスワードを再発行する場合は、もう一度「ID書面を印刷」を押してから「再発行して含める」を選んでください。`);
-        if (mode === 'issue' && confirm('ログイン済みの人のパスワードを再発行して書面を作成しますか？\n本人が設定したパスワードは使えなくなります。')) {
+        if (mode !== 'issue') {
+          toast.info(`選んだ${summary.skipped.length}名は全員すでにログイン済みのため、書面を作成していません。`);
+          return;
+        }
+        if (await confirm({
+          title: `${summary.skipped.length}名のパスワードを再発行しますか？`,
+          message: `選んだ${summary.skipped.length}名は全員すでにログイン済みのため、書面を作成していません。再発行して書面を作成すると、本人が設定したパスワードは使えなくなります。`,
+          confirmLabel: '再発行する',
+          cancelLabel: '再発行しない',
+          tone: 'danger',
+        })) {
           await handleOpenPrintModal('reissue', nextSelectedIds);
         }
         return;
@@ -297,7 +316,7 @@ export default function UserManagementPage() {
       setPrintAccounts(preparedPrintAccounts);
       setIsPrintModalOpen(true);
     } catch (e: any) {
-      alert(`印刷前のパスワード確認に失敗しました。\n${e.message || e}`);
+      toast.error(`印刷前のパスワード確認に失敗しました。 ${e.message || e}`);
     } finally {
       setIsPasswordSyncing(false);
       setSyncProgress(null);
@@ -308,8 +327,14 @@ export default function UserManagementPage() {
   const handleCSVImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (!confirm(`「${file.name}」を取り込みますか？\n現在のタブ「${activeTab === 'student' ? '生徒' : activeTab === 'teacher' ? '講師' : '管理者'}」として登録されます。\n既存のIDは上書き更新されます。`)) {
-      e.target.value = ''; return;
+    const input = e.target;
+    if (!(await confirm({
+      title: `「${file.name}」を取り込みますか？`,
+      message: `「${activeTab === 'student' ? '生徒' : activeTab === 'teacher' ? '講師' : '管理者'}」として登録します。既存のIDは上書き更新されます。`,
+      confirmLabel: '取り込む',
+      tone: 'danger',
+    }))) {
+      input.value = ''; return;
     }
 
     setIsImporting(true);
@@ -412,30 +437,30 @@ export default function UserManagementPage() {
           throw new Error(`アカウントは登録されましたが、取込履歴を保存できませんでした: ${historyResult.error || '不明なエラー'}`);
         }
 
-        const errorText = errors.length > 0
-          ? `\n失敗: ${errors.length}件\n${errors.slice(0, 5).join('\n')}`
-          : '';
         await Promise.all([fetchUsers(), fetchImportBatches()]);
         setSelectedImportBatchId(importBatchId);
         setSelectedIds(new Set(importedUserIds));
-        alert(`${count} 件のユーザーをインポート/更新しました。\n取込履歴から対象者を再選択できます。${errorText}`);
+        toast.success(`${count} 件のユーザーをインポート/更新しました。取込履歴から対象者を再選択できます。`);
+        if (errors.length > 0) {
+          toast.error(`失敗: ${errors.length}件 ／ ${errors.slice(0, 5).join(' ／ ')}${errors.length > 5 ? ' ほか' : ''}`);
+        }
       } catch (e: any) {
-        alert('インポートエラー: ' + e.message);
+        toast.error('インポートエラー: ' + e.message);
       } finally {
         setIsImporting(false);
-        e.target.value = '';
+        input.value = '';
       }
     };
   };
 
   // 保存処理
   const handleSave = async () => {
-    if (!formData.displayName || !formData.lifetime_id) return alert('名前とログインIDは必須です');
-    if (formData.role !== 'master' && !resolveAttendanceSchoolCode(formData.school_id)) return alert('所属校舎を選択してください');
+    if (!formData.displayName || !formData.lifetime_id) return toast.error('名前とログインIDは必須です');
+    if (formData.role !== 'master' && !resolveAttendanceSchoolCode(formData.school_id)) return toast.error('所属校舎を選択してください');
     
     if (!editingUser) {
       const exists = users.some(u => (u.lifetime_id === formData.lifetime_id) || (u.email === formData.lifetime_id));
-      if (exists) return alert('このIDは既に使用されています');
+      if (exists) return toast.error('このIDは既に使用されています');
     }
 
     try {
@@ -472,10 +497,10 @@ export default function UserManagementPage() {
       });
       const result = await response.json().catch(() => ({}));
       if (!response.ok || !result.ok) throw new Error(result.error || '登録できませんでした');
-      alert(editingUser ? '更新しました' : '登録しました');
+      toast.success(editingUser ? '更新しました' : '登録しました');
       setIsModalOpen(false);
       fetchUsers();
-    } catch (e: any) { alert('保存エラー: ' + e.message); }
+    } catch (e: any) { toast.error('保存エラー: ' + e.message); }
   };
 
   // ハンドラ
@@ -527,21 +552,28 @@ export default function UserManagementPage() {
   const skippedStudents = printSkipped.filter(item => item.role === 'student');
   const skippedOthers = printSkipped.filter(item => item.role !== 'student');
   const printNotice = printSkipped.length > 0 ? (
-    <div className="flex flex-col gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs font-bold text-amber-900 sm:flex-row sm:items-center sm:justify-between">
+    <div className="flex flex-col gap-2 rounded-btn border border-amber-200 bg-amber-50 p-3 text-xs font-bold text-amber-900 sm:flex-row sm:items-center sm:justify-between">
       <p>
         初回ログイン済みのため、パスワードを変えずに書面から外しました：生徒 {skippedStudents.length}名・保護者など {skippedOthers.length}名
         <span className="ml-1 text-amber-700">（{printSkipped.slice(0, 4).map(item => item.display_name).join('、')}{printSkipped.length > 4 ? ' ほか' : ''}）</span>
       </p>
-      <button
-        onClick={() => {
-          if (!confirm('ログイン済みの人に新しい初期パスワードを発行して、書面に含めますか？\n本人が設定したパスワードは使えなくなります。')) return;
+      <Button
+        variant="danger"
+        size="sm"
+        className="shrink-0"
+        onClick={async () => {
+          if (!(await confirm({
+            title: `ログイン済みの${printSkipped.length}名のパスワードを再発行しますか？`,
+            message: `${printSkipped.slice(0, 4).map(item => item.display_name).join('、')}${printSkipped.length > 4 ? ' ほか' : ''} に新しい初期パスワードを発行して書面に含めます。本人が設定したパスワードは使えなくなります。`,
+            confirmLabel: '再発行する',
+            tone: 'danger',
+          }))) return;
           setIsPrintModalOpen(false);
           void handleOpenPrintModal('reissue', printRequestIds);
         }}
-        className="shrink-0 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-black text-white hover:bg-amber-700"
       >
         パスワードを再発行して含める
-      </button>
+      </Button>
     </div>
   ) : null;
 
@@ -552,92 +584,78 @@ export default function UserManagementPage() {
         <AccountGuidePrintView
           accounts={printAccounts.map(user => toGuideAccount(user, attendanceSchoolName(user.school_id || user.school || user.classroom)))}
           loginUrl={qrBaseUrl || 'https://classbase-app.vercel.app'}
-          title={`ID書面 ${new Date().toLocaleDateString('ja-JP')}発行`}
+          title={`ID書面 ${formatDate(new Date(), { withYear: true })}発行`}
           notice={printNotice}
           onClose={() => { setIsPrintModalOpen(false); setPrintAccounts([]); setPrintSkipped([]); }}
         />
       )}
 
       {/* --- メイン画面 (プレビュー時・印刷時は画面上から消す) --- */}
-      <div className={`min-h-screen bg-gray-50 p-6 pb-20 ${isPrintModalOpen ? 'hidden' : 'block'}`}>
-        <div className="max-w-6xl mx-auto">
-          
-          {/* ヘッダー */}
-          <div className="flex flex-col md:flex-row items-center justify-between mb-8 gap-4">
-            <div className="flex items-center gap-4 w-full md:w-auto">
-              <Link href="/master" className="bg-white p-2 rounded-full shadow hover:bg-gray-100 text-gray-600 transition-colors">
-                <ArrowLeft size={20} />
-              </Link>
-              <div>
-                <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
-                  <Users className="text-blue-600" /> ID書面・印刷
-                </h1>
-                <p className="text-xs text-gray-500">初期ID・初期パスワード・初回ログイン状態の確認と案内書面の印刷</p>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap gap-2 w-full md:w-auto items-center">
-               <div className="relative flex-1 md:w-64">
-                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={16}/>
-                 <input 
-                   type="text" 
-                   placeholder="名前・ID・科目で検索" 
-                   className="w-full pl-9 pr-4 py-2 border rounded-full focus:ring-2 focus:ring-blue-500 outline-none"
-                   value={searchQuery}
-                   onChange={e => setSearchQuery(e.target.value)}
-                 />
-               </div>
-            </div>
-          </div>
+      <div className={`pb-20 ${isPrintModalOpen ? 'hidden' : 'block'}`}>
+        <div>
+          <AdminPageHeader
+            description="初期ID・初期パスワード・初回ログイン状態の確認と案内書面の印刷"
+            actions={<div className="relative w-full sm:w-64">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} aria-hidden />
+              <input
+                type="text"
+                aria-label="名前・ID・科目で検索"
+                placeholder="名前・ID・科目で検索"
+                className="min-h-11 w-full rounded-input border border-line bg-white pl-9 pr-4 outline-none focus:border-accent focus:ring-2 focus:ring-accent/30"
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+              />
+            </div>}
+          />
 
           <section className="mb-6 grid gap-4 lg:grid-cols-2">
-            <div className="rounded-2xl border border-blue-100 bg-blue-50 p-5">
+            <div className="rounded-card border border-line bg-surface p-5 shadow-sm">
               <div className="flex items-start gap-3">
-                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white"><FileUp size={20} /></span>
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-btn bg-accent-soft text-accent"><FileUp size={20} aria-hidden /></span>
                 <div>
-                  <h2 className="font-black text-slate-900">CSVでアカウントを一括登録</h2>
+                  <h2 className="font-bold text-slate-900">CSVでアカウントを一括登録</h2>
                   <p className="mt-1 text-xs font-bold leading-5 text-slate-500">現在の「{activeTab === 'student' ? '生徒' : activeTab === 'teacher' ? '講師' : '管理者'}」として取り込み、履歴を自動保存します。</p>
                 </div>
               </div>
               <div className="mt-4 flex flex-wrap gap-2">
-                <CsvSampleDownload {...csvSample} label="CSV見本" className="border-blue-200 bg-white text-blue-700 hover:bg-blue-100" />
-                <label className={`relative inline-flex cursor-pointer items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-black text-white hover:bg-blue-700 ${isImporting ? 'pointer-events-none opacity-60' : ''}`}>
-                  {isImporting ? <Loader2 size={17} className="animate-spin" /> : <FileUp size={17} />}
+                <CsvSampleDownload {...csvSample} label="CSV見本" />
+                <label className={buttonClass('primary', 'md', `relative cursor-pointer ${isImporting ? 'pointer-events-none opacity-60' : ''}`)}>
+                  {isImporting ? <Loader2 size={16} className="animate-spin" aria-hidden /> : <FileUp size={16} aria-hidden />}
                   {isImporting ? '取り込み中' : 'CSVを選んで取り込む'}
                   <input type="file" accept=".csv,text/csv" onChange={handleCSVImport} disabled={isImporting} className="absolute inset-0 cursor-pointer opacity-0" />
                 </label>
               </div>
             </div>
 
-            <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-5">
+            <div className="rounded-card border border-line bg-surface p-5 shadow-sm">
               <div className="flex items-start justify-between gap-3">
                 <div className="flex items-start gap-3">
-                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-white"><History size={20} /></span>
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-btn bg-accent-soft text-accent"><History size={20} aria-hidden /></span>
                   <div>
-                    <h2 className="font-black text-slate-900">CSV取込履歴から絞り込む</h2>
+                    <h2 className="font-bold text-slate-900">CSV取込履歴から絞り込む</h2>
                     <p className="mt-1 text-xs font-bold leading-5 text-slate-500">履歴を選ぶと、そのCSVの対象者を一括選択します。</p>
                   </div>
                 </div>
-                <button type="button" onClick={() => void fetchImportBatches()} disabled={isImportHistoryLoading} className="rounded-lg border border-emerald-200 bg-white px-3 py-2 text-xs font-black text-emerald-700 disabled:opacity-50">
-                  {isImportHistoryLoading ? '更新中' : '更新'}
-                </button>
+                <Button variant="secondary" size="sm" icon={<RefreshCw size={14} aria-hidden />} onClick={() => void fetchImportBatches()} loading={isImportHistoryLoading}>
+                  更新
+                </Button>
               </div>
-              <select value={selectedImportBatchId} onChange={event => handleImportBatchChange(event.target.value)} className="mt-4 w-full rounded-xl border border-emerald-200 bg-white px-4 py-3 text-sm font-black text-slate-700 outline-none focus:ring-2 focus:ring-emerald-200">
+              <select value={selectedImportBatchId} onChange={event => handleImportBatchChange(event.target.value)} aria-label="CSV取込履歴" className="mt-4 min-h-11 w-full rounded-input border border-line bg-white px-4 text-sm font-bold text-slate-700 outline-none focus:border-accent focus:ring-2 focus:ring-accent/30">
                 <option value="">すべてのアカウントを表示</option>
                 {importBatches.map(batch => (
                   <option key={batch.id} value={batch.id}>
-                    {batch.imported_at ? new Date(batch.imported_at).toLocaleString('ja-JP') : '日時不明'} ｜ {batch.file_name} ｜ {batch.success_count}件
+                    {batch.imported_at ? (formatDateTime(batch.imported_at, { withYear: true }) || '日時不明') : '日時不明'} ｜ {batch.file_name} ｜ {batch.success_count}件
                   </option>
                 ))}
               </select>
               {selectedImportBatch && (
-                <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-100 bg-white px-4 py-3">
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-btn border border-line bg-slate-50 px-4 py-3">
                   <p className="text-xs font-bold text-slate-600">
-                    <span className="font-black text-emerald-700">{selectedImportBatch.success_count}件成功</span>
-                    {selectedImportBatch.error_count > 0 && <span className="ml-2 font-black text-rose-600">{selectedImportBatch.error_count}件失敗</span>}
+                    <span className="font-bold text-emerald-700">{selectedImportBatch.success_count}件成功</span>
+                    {selectedImportBatch.error_count > 0 && <span className="ml-2 font-bold text-rose-600">{selectedImportBatch.error_count}件失敗</span>}
                     <span className="ml-2 text-slate-400">対象を選択済み</span>
                   </p>
-                  <button type="button" onClick={() => setSelectedIds(new Set(filteredUsers.map(user => user.id)))} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-black text-white hover:bg-emerald-700">現在の絞り込みを全選択</button>
+                  <Button variant="secondary" size="sm" onClick={() => setSelectedIds(new Set(filteredUsers.map(user => user.id)))}>現在の絞り込みを全選択</Button>
                 </div>
               )}
               {importBatches.length === 0 && !isImportHistoryLoading && <p className="mt-3 text-xs font-bold text-slate-400">履歴保存機能の追加後に取り込んだCSVがここに表示されます。</p>}
@@ -645,44 +663,45 @@ export default function UserManagementPage() {
           </section>
 
           {/* タブ切り替えと操作ボタン */}
-          <div className="flex flex-col sm:flex-row justify-between items-end sm:items-center mb-4 gap-4 border-b border-gray-200 pb-2">
-            <div className="flex w-full gap-2 overflow-x-auto sm:w-auto">
-              <button onClick={() => handleTabChange('student')} className={`flex shrink-0 items-center gap-2 whitespace-nowrap border-b-2 px-6 py-3 text-sm font-bold -mb-2.5 transition-colors ${activeTab === 'student' ? 'border-blue-600 text-blue-600 bg-blue-50/50' : 'border-transparent text-gray-500'}`}>
-                <GraduationCap size={18}/> 生徒 ({users.filter(u => u.role === 'student').length})
-              </button>
-              <button onClick={() => handleTabChange('teacher')} className={`flex shrink-0 items-center gap-2 whitespace-nowrap border-b-2 px-6 py-3 text-sm font-bold -mb-2.5 transition-colors ${activeTab === 'teacher' ? 'border-purple-600 text-purple-600 bg-purple-50/50' : 'border-transparent text-gray-500'}`}>
-                <UserCheck size={18}/> 講師 ({users.filter(u => normalizedUserRole(u.role) === 'teacher').length})
-              </button>
-              <button onClick={() => handleTabChange('master')} className={`flex shrink-0 items-center gap-2 whitespace-nowrap border-b-2 px-6 py-3 text-sm font-bold -mb-2.5 transition-colors ${activeTab === 'master' ? 'border-gray-800 text-gray-800 bg-gray-100' : 'border-transparent text-gray-500'}`}>
-                <Shield size={18}/> 管理者 ({users.filter(u => u.role === 'master').length})
-              </button>
-            </div>
+          <div className="mb-4 flex flex-col items-stretch justify-between gap-4 sm:flex-row sm:items-center">
+            <AdminTabs
+              ariaLabel="アカウントの種類"
+              value={activeTab}
+              onChange={handleTabChange}
+              tabs={[
+                { id: 'student', label: '生徒', icon: GraduationCap, badge: users.filter(u => u.role === 'student').length },
+                { id: 'teacher', label: '講師', icon: UserCheck, badge: users.filter(u => normalizedUserRole(u.role) === 'teacher').length },
+                { id: 'master', label: '管理者', icon: Shield, badge: users.filter(u => u.role === 'master').length },
+              ]}
+            />
             
             <div className="flex gap-2 flex-wrap justify-end">
               <span className="self-center text-xs font-bold text-slate-400">左端のチェックで印刷対象を選択</span>
-              <button
+              <Button
                 onClick={() => void handleOpenPrintModal()}
-                disabled={isPasswordSyncing || selectedIds.size === 0}
-                className="flex items-center gap-2 rounded-full border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-bold text-indigo-600 transition-colors hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-45"
+                disabled={selectedIds.size === 0}
+                loading={isPasswordSyncing}
+                icon={<Printer size={16} aria-hidden />}
               >
-                {isPasswordSyncing ? <Loader2 size={16} className="animate-spin" /> : <Printer size={16}/>} {' '}
                 {isPasswordSyncing ? `パスワード確認中${syncProgress ? ` ${syncProgress.done}/${syncProgress.total}` : ''}` : `ID書面を印刷（${selectedIds.size}件）`}
-              </button>
+              </Button>
             </div>
           </div>
 
           {/* リスト表示 */}
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+          <div className="overflow-hidden rounded-card border border-line bg-white shadow-sm">
             {loading ? (
-              <div className="p-20 flex justify-center"><Loader2 className="animate-spin text-gray-400"/></div>
+              <div className="p-5"><ListSkeleton rows={5} /></div>
+            ) : loadError ? (
+              <ErrorState className="m-5" onRetry={fetchUsers} />
             ) : filteredUsers.length === 0 ? (
-              <div className="p-10 text-center text-gray-400">データが見つかりません</div>
+              <EmptyState className="m-5" title="該当するアカウントはありません" description={searchQuery || selectedImportBatchId ? '検索語や取込履歴の絞り込みを変えてください。' : 'CSVで一括登録すると、ここに表示されます。'} />
             ) : (
               <div className="overflow-x-auto [scrollbar-gutter:stable]">
                 <table className="w-full min-w-[1180px] whitespace-nowrap text-left text-sm">
-                  <thead className="bg-gray-50 text-gray-600 font-bold border-b border-gray-200">
+                  <thead className="bg-slate-50 text-slate-600 font-bold border-b border-slate-200">
                     <tr>
-                      <th className="p-4 w-10"><input type="checkbox" className="w-4 h-4" onChange={(e) => handleSelectAll(e.target.checked)} checked={filteredUsers.length > 0 && selectedIds.size === filteredUsers.length}/></th>
+                      <th className="p-4 w-10"><input type="checkbox" aria-label="表示中をすべて選択" className="h-4 w-4 accent-accent" onChange={(e) => handleSelectAll(e.target.checked)} checked={filteredUsers.length > 0 && selectedIds.size === filteredUsers.length}/></th>
                       <th className="p-4 w-40">氏名</th>
                       <th className="p-4 w-64">ログインID</th>
                       <th className="p-4">パスワード</th>
@@ -701,32 +720,32 @@ export default function UserManagementPage() {
                       
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-gray-100">
+                  <tbody className="divide-y divide-slate-100">
                     {filteredUsers.map((user) => (
-                      <tr key={user.id} className={`hover:bg-gray-50 transition-colors ${selectedIds.has(user.id) ? 'bg-blue-50/30' : ''}`}>
-                        <td className="p-4"><input type="checkbox" className="w-4 h-4 cursor-pointer" checked={selectedIds.has(user.id)} onChange={(e) => handleSelectOne(user.id, e.target.checked)}/></td>
+                      <tr key={user.id} className={`hover:bg-slate-50 transition-colors ${selectedIds.has(user.id) ? 'bg-accent-soft/40' : ''}`}>
+                        <td className="p-4"><input type="checkbox" aria-label={`${user.student_name || user.name || user.lifetime_id}を選択`} className="h-4 w-4 cursor-pointer accent-accent" checked={selectedIds.has(user.id)} onChange={(e) => handleSelectOne(user.id, e.target.checked)}/></td>
                         
-                        <td className="p-4 font-bold text-gray-800">
+                        <td className="p-4 font-bold text-slate-800">
                           <div className="flex items-center gap-2">
                             <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-bold text-white ${
-                              user.role === 'student' ? 'bg-blue-400' :
-                              normalizedUserRole(user.role) === 'teacher' ? 'bg-purple-400' : 'bg-gray-700'
+                              user.role === 'student' ? 'bg-sky-500' :
+                              normalizedUserRole(user.role) === 'teacher' ? 'bg-accent' : 'bg-slate-700'
                             }`}>
                               {(user.student_name || user.name || '?')[0]}
                             </div>
                             <span className="max-w-[180px] truncate" title={user.student_name || user.name || '未設定'}>
-                              {user.student_name || user.name || <span className="text-gray-400">未設定</span>}
+                              {user.student_name || user.name || <span className="text-slate-400">未設定</span>}
                             </span>
                           </div>
                         </td>
 
-                        <td className="p-4 font-mono font-medium text-gray-700">
+                        <td className="p-4 font-mono font-medium text-slate-700">
                           <span className="block max-w-[260px] truncate" title={user.lifetime_id || user.email || ''}>
-                            {user.lifetime_id || user.email || <span className="text-gray-300">-</span>}
+                            {user.lifetime_id || user.email || <span className="text-slate-300">-</span>}
                           </span>
                         </td>
 
-                        <td className="p-4 text-gray-400 text-xs font-mono">{user.initial_password || '********'}</td>
+                        <td className="p-4 text-slate-400 text-xs font-mono">{user.initial_password || '********'}</td>
                         <td className="p-4">
                           <FirstLoginBadge value={user.isFirstLogin} />
                         </td>
@@ -735,15 +754,15 @@ export default function UserManagementPage() {
                         </td>
                         {activeTab === 'teacher' && (() => {
                           const category = normalizeEmploymentCategory(user.employment_category, user.role) || 'semi_dedicated';
-                          return <><td className="p-4"><span className={`rounded-full px-3 py-1 text-xs font-black ${category === 'dedicated' ? 'bg-indigo-100 text-indigo-700' : 'bg-amber-100 text-amber-800'}`}>{EMPLOYMENT_CATEGORY_LABELS[category]}</span></td><td className="p-4 text-xs font-black text-slate-600">{Array.isArray(user.enabled_programs) && user.enabled_programs.includes('science_social') ? '理社講座あり' : '理社講座なし'}</td></>;
+                          return <><td className="p-4"><span className={`rounded-full px-3 py-1 text-xs font-bold ${category === 'dedicated' ? 'bg-accent-soft text-accent' : 'bg-amber-100 text-amber-800'}`}>{EMPLOYMENT_CATEGORY_LABELS[category]}</span></td><td className="p-4 text-xs font-bold text-slate-600">{Array.isArray(user.enabled_programs) && user.enabled_programs.includes('science_social') ? '理社講座あり' : '理社講座なし'}</td></>;
                         })()}
                         
                         {activeTab === 'student' && (
                           <>
-                            <td className="p-4"><span className="px-2 py-1 rounded bg-gray-100 text-xs font-bold text-gray-600">{user.grade || '-'}</span></td>
-                            <td className="p-4 text-gray-600">{user.classroom || '-'}</td>
-                            <td className="p-4 text-gray-600 font-bold">{user.subject_science || '-'}</td>
-                            <td className="p-4 text-gray-600 font-bold">{user.subject_social || '-'}</td>
+                            <td className="p-4"><span className="px-2 py-1 rounded-btn bg-slate-100 text-xs font-bold text-slate-600">{user.grade || '-'}</span></td>
+                            <td className="p-4 text-slate-600">{user.classroom || '-'}</td>
+                            <td className="p-4 text-slate-600 font-bold">{user.subject_science || '-'}</td>
+                            <td className="p-4 text-slate-600 font-bold">{user.subject_social || '-'}</td>
                           </>
                         )}
                         
@@ -758,20 +777,23 @@ export default function UserManagementPage() {
       </div>
 
       {/* 編集モーダル */}
-      {isModalOpen && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl w-full max-w-lg shadow-xl overflow-hidden">
-            <div className="bg-gray-800 text-white p-4 flex justify-between items-center">
-              <h2 className="font-bold flex items-center gap-2">{editingUser ? '編集' : '新規登録'}</h2>
-              <button onClick={() => setIsModalOpen(false)}><X size={20}/></button>
-            </div>
-            <div className="p-6 space-y-4">
+      <Modal
+        open={isModalOpen}
+        onClose={() => setIsModalOpen(false)}
+        title={editingUser ? 'アカウントを編集' : 'アカウントを登録'}
+        footer={(
+          <Button fullWidth onClick={handleSave} icon={<Save size={16} aria-hidden />}>
+            保存
+          </Button>
+        )}
+      >
+            <div className="space-y-4">
               
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="text-xs font-bold text-gray-500">権限</label>
+                  <label className="text-xs font-bold text-slate-500">権限</label>
                   <select 
-                    className="w-full p-2 border rounded mt-1 bg-gray-50" 
+                    className="mt-1 min-h-11 w-full rounded-input border border-line px-3 bg-slate-50" 
                     value={formData.role} 
                     onChange={e => setFormData({...formData, role: e.target.value as any})} 
                     disabled={!!editingUser}
@@ -782,87 +804,81 @@ export default function UserManagementPage() {
                   </select>
                 </div>
                 <div>
-                  <label className="text-xs font-bold text-gray-500">ID (ログイン用)</label>
-                  <input className="w-full p-2 border rounded mt-1 font-mono" value={formData.lifetime_id} onChange={e => setFormData({...formData, lifetime_id: e.target.value})}/>
+                  <label className="text-xs font-bold text-slate-500">ID (ログイン用)</label>
+                  <input className="mt-1 min-h-11 w-full rounded-input border border-line px-3 font-mono" value={formData.lifetime_id} onChange={e => setFormData({...formData, lifetime_id: e.target.value})}/>
                 </div>
               </div>
 
               <div>
-                <label className="text-xs font-bold text-gray-500">氏名</label>
-                <input className="w-full p-2 border rounded mt-1" value={formData.displayName} onChange={e => setFormData({...formData, displayName: e.target.value})}/>
+                <label className="text-xs font-bold text-slate-500">氏名</label>
+                <input className="mt-1 min-h-11 w-full rounded-input border border-line px-3" value={formData.displayName} onChange={e => setFormData({...formData, displayName: e.target.value})}/>
               </div>
 
               {formData.role !== 'master' && <div>
-                <label className="text-xs font-bold text-gray-500">所属校舎</label>
-                <select required className="w-full p-2 border rounded mt-1 bg-gray-50" value={formData.school_id || ''} onChange={e => setFormData({ ...formData, school_id: e.target.value })}>
+                <label className="text-xs font-bold text-slate-500">所属校舎</label>
+                <select required className="mt-1 min-h-11 w-full rounded-input border border-line px-3 bg-slate-50" value={formData.school_id || ''} onChange={e => setFormData({ ...formData, school_id: e.target.value })}>
                   <option value="">校舎を選択</option>
                   {ATTENDANCE_SCHOOL_OPTION_GROUPS.map(group => <optgroup key={group.label} label={group.label}>{group.schools.map(item => <option key={item.code} value={item.code}>{item.name}</option>)}</optgroup>)}
                 </select>
               </div>}
               
               <div>
-                <label className="text-xs font-bold text-gray-500">パスワード</label>
-                <input className="w-full p-2 border rounded mt-1 font-mono bg-gray-50" value={formData.initial_password} onChange={e => setFormData({...formData, initial_password: e.target.value})} placeholder="空欄ならランダム発行"/>
+                <label className="text-xs font-bold text-slate-500">パスワード</label>
+                <input className="mt-1 min-h-11 w-full rounded-input border border-line px-3 font-mono bg-slate-50" value={formData.initial_password} onChange={e => setFormData({...formData, initial_password: e.target.value})} placeholder="空欄ならランダム発行"/>
               </div>
 
               {formData.role === 'teacher' && (
-                <div className="rounded-xl border border-indigo-100 bg-indigo-50 p-4">
-                  <label className="text-xs font-bold text-indigo-700">専任区分</label>
-                  <select className="mt-1 w-full rounded-lg border border-indigo-200 bg-white p-2 font-bold" value={formData.employment_category || 'semi_dedicated'} onChange={e => setFormData({ ...formData, employment_category: e.target.value as 'dedicated' | 'semi_dedicated' })}>
+                <div className="rounded-card border border-line bg-accent-soft p-4">
+                  <label className="text-xs font-bold text-accent">専任区分</label>
+                  <select className="mt-1 min-h-11 w-full rounded-input border border-line bg-white px-3 font-bold" value={formData.employment_category || 'semi_dedicated'} onChange={e => setFormData({ ...formData, employment_category: e.target.value as 'dedicated' | 'semi_dedicated' })}>
                     <option value="dedicated">専任</option>
                     <option value="semi_dedicated">準専任</option>
                   </select>
-                  <label className="mt-3 flex cursor-pointer items-center gap-3 rounded-lg bg-white p-3 text-sm font-bold text-slate-700"><input type="checkbox" checked={formData.enabled_programs?.includes('science_social') || false} onChange={event => setFormData({ ...formData, enabled_programs: event.target.checked ? ['science_social'] : [] })} className="h-5 w-5 accent-indigo-600" /><span>理社講座を利用する<span className="block text-[10px] text-slate-400">ONの場合は理社講座画面から勤怠へ移動できます。OFFの場合は勤怠画面を直接開きます。</span></span></label>
-                  {formData.employment_category === 'dedicated' && <div className="mt-3 rounded-lg bg-white p-3"><div className="grid grid-cols-3 gap-2"><label className="text-[10px] font-black text-slate-500">規定開始<input type="time" value={formData.prescribed_work_start || '09:00'} onChange={event => setFormData({ ...formData, prescribed_work_start: event.target.value })} className="mt-1 w-full rounded border p-2 text-xs" /></label><label className="text-[10px] font-black text-slate-500">規定終了<input type="time" value={formData.prescribed_work_end || '18:00'} onChange={event => setFormData({ ...formData, prescribed_work_end: event.target.value })} className="mt-1 w-full rounded border p-2 text-xs" /></label><label className="text-[10px] font-black text-slate-500">休憩（分）<input type="number" min="0" max="240" step="5" value={formData.prescribed_break_minutes ?? 60} onChange={event => setFormData({ ...formData, prescribed_break_minutes: Number(event.target.value) })} className="mt-1 w-full rounded border p-2 text-xs" /></label></div><div className="mt-2 flex flex-wrap gap-1">{['日', '月', '火', '水', '木', '金', '土'].map((label, day) => <label key={day} className={`cursor-pointer rounded border px-2 py-1 text-[10px] font-black ${(formData.prescribed_work_days || []).includes(day) ? 'bg-indigo-600 text-white' : 'text-slate-500'}`}><input type="checkbox" className="sr-only" checked={(formData.prescribed_work_days || []).includes(day)} onChange={event => setFormData({ ...formData, prescribed_work_days: event.target.checked ? [...(formData.prescribed_work_days || []), day].sort() : (formData.prescribed_work_days || []).filter(value => value !== day) })} />{label}</label>)}</div></div>}
-                  {formData.employment_category === 'dedicated' && <label className="mt-3 flex cursor-pointer items-start gap-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3"><input type="checkbox" checked={formData.attendance_school_manager === true} onChange={event => setFormData({ ...formData, attendance_school_manager: event.target.checked })} className="mt-0.5 h-5 w-5 accent-emerald-600" /><span><span className="block text-sm font-black text-emerald-900">自校舎の勤怠責任者</span><span className="mt-1 block text-[10px] font-bold leading-relaxed text-emerald-700">理社講座の利用設定にかかわらず、自校舎の打刻修正依頼と勤務詳細を承認できます。</span></span></label>}
+                  <label className="mt-3 flex cursor-pointer items-center gap-3 rounded-btn bg-white p-3 text-sm font-bold text-slate-700"><input type="checkbox" checked={formData.enabled_programs?.includes('science_social') || false} onChange={event => setFormData({ ...formData, enabled_programs: event.target.checked ? ['science_social'] : [] })} className="h-5 w-5 accent-accent" /><span>理社講座を利用する<span className="block text-xs text-slate-400">ONの場合は理社講座画面から勤怠へ移動できます。OFFの場合は勤怠画面を直接開きます。</span></span></label>
+                  {formData.employment_category === 'dedicated' && <div className="mt-3 rounded-btn bg-white p-3"><div className="grid grid-cols-3 gap-2"><label className="text-xs font-bold text-slate-500">規定開始<input type="time" value={formData.prescribed_work_start || '09:00'} onChange={event => setFormData({ ...formData, prescribed_work_start: event.target.value })} className="mt-1 w-full rounded-input border border-line p-2 text-xs" /></label><label className="text-xs font-bold text-slate-500">規定終了<input type="time" value={formData.prescribed_work_end || '18:00'} onChange={event => setFormData({ ...formData, prescribed_work_end: event.target.value })} className="mt-1 w-full rounded-input border border-line p-2 text-xs" /></label><label className="text-xs font-bold text-slate-500">休憩（分）<input type="number" min="0" max="240" step="5" value={formData.prescribed_break_minutes ?? 60} onChange={event => setFormData({ ...formData, prescribed_break_minutes: Number(event.target.value) })} className="mt-1 w-full rounded-input border border-line p-2 text-xs" /></label></div><div className="mt-2 flex flex-wrap gap-1">{['日', '月', '火', '水', '木', '金', '土'].map((label, day) => <label key={day} className={`cursor-pointer rounded-btn border px-2 py-1 text-xs font-bold ${(formData.prescribed_work_days || []).includes(day) ? 'border-accent bg-accent text-accent-ink' : 'border-line text-slate-500'}`}><input type="checkbox" className="sr-only" checked={(formData.prescribed_work_days || []).includes(day)} onChange={event => setFormData({ ...formData, prescribed_work_days: event.target.checked ? [...(formData.prescribed_work_days || []), day].sort() : (formData.prescribed_work_days || []).filter(value => value !== day) })} />{label}</label>)}</div></div>}
+                  {formData.employment_category === 'dedicated' && <label className="mt-3 flex cursor-pointer items-start gap-3 rounded-btn border border-emerald-200 bg-emerald-50 p-3"><input type="checkbox" checked={formData.attendance_school_manager === true} onChange={event => setFormData({ ...formData, attendance_school_manager: event.target.checked })} className="mt-0.5 h-5 w-5 accent-emerald-600" /><span><span className="block text-sm font-bold text-emerald-900">自校舎の勤怠責任者</span><span className="mt-1 block text-xs font-bold leading-relaxed text-emerald-700">理社講座の利用設定にかかわらず、自校舎の打刻修正依頼と勤務詳細を承認できます。</span></span></label>}
                 </div>
               )}
               
               {formData.role === 'student' && (
-                <div className="p-4 bg-blue-50/50 rounded-xl space-y-4 border border-blue-100">
+                <div className="space-y-4 rounded-card border border-line bg-slate-50 p-4">
                   <div className="grid grid-cols-2 gap-4">
                      <div>
-                       <label className="text-xs font-bold text-gray-500">学年</label>
-                       <select className="w-full p-2 border rounded mt-1" value={formData.grade} onChange={e => setFormData({...formData, grade: e.target.value})}>
+                       <label className="text-xs font-bold text-slate-500">学年</label>
+                       <select className="mt-1 min-h-11 w-full rounded-input border border-line px-3" value={formData.grade} onChange={e => setFormData({...formData, grade: e.target.value})}>
                          <option value="">選択</option><option>中1</option><option>中2</option><option>中3</option>
                        </select>
                      </div>
                      <div>
-                       <label className="text-xs font-bold text-gray-500">教室</label>
-                       <input className="w-full p-2 border rounded mt-1" value={formData.classroom} onChange={e => setFormData({...formData, classroom: e.target.value})}/>
+                       <label className="text-xs font-bold text-slate-500">教室</label>
+                       <input className="mt-1 min-h-11 w-full rounded-input border border-line px-3" value={formData.classroom} onChange={e => setFormData({...formData, classroom: e.target.value})}/>
                      </div>
                   </div>
                   <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <label className="text-xs font-bold text-gray-500">理科科目</label>
+                      <label className="text-xs font-bold text-slate-500">理科科目</label>
                       <input 
-                        className="w-full p-2 border rounded mt-1" 
+                        className="mt-1 min-h-11 w-full rounded-input border border-line px-3" 
                         value={formData.subject_science} 
                         onChange={e => setFormData({...formData, subject_science: e.target.value})}
                         placeholder="例: 地学"
                       />
                     </div>
                     <div>
-                      <label className="text-xs font-bold text-gray-500">社会科目</label>
+                      <label className="text-xs font-bold text-slate-500">社会科目</label>
                       <input 
-                        className="w-full p-2 border rounded mt-1" 
+                        className="mt-1 min-h-11 w-full rounded-input border border-line px-3" 
                         value={formData.subject_social} 
                         onChange={e => setFormData({...formData, subject_social: e.target.value})}
                         placeholder="例: 歴史A"
                       />
                     </div>
                   </div>
-                  <label className="flex cursor-pointer items-center gap-3 rounded-lg border border-violet-200 bg-white p-3 text-sm font-bold text-violet-900"><input type="checkbox" checked={formData.enabled_programs?.includes('online_school') || false} onChange={event => setFormData({ ...formData, enabled_programs: event.target.checked ? ['online_school'] : [] })} className="h-5 w-5 accent-violet-600" /><span>オンライン校を利用する<span className="block text-[10px] text-violet-500">生徒のアプリ一覧に10分学習を表示</span></span></label>
+                  <label className="flex cursor-pointer items-center gap-3 rounded-btn border border-line bg-white p-3 text-sm font-bold text-slate-800"><input type="checkbox" checked={formData.enabled_programs?.includes('online_school') || false} onChange={event => setFormData({ ...formData, enabled_programs: event.target.checked ? ['online_school'] : [] })} className="h-5 w-5 accent-accent" /><span>オンライン校を利用する<span className="block text-xs text-slate-500">生徒のアプリ一覧に10分学習を表示</span></span></label>
                 </div>
               )}
-              
-              <button onClick={handleSave} className="w-full bg-blue-600 text-white py-3 rounded-lg font-bold hover:bg-blue-700 shadow mt-4 flex justify-center items-center gap-2">
-                <Save size={18}/> 保存
-              </button>
             </div>
-          </div>
-        </div>
-      )}
+      </Modal>
     </>
   );
 }
@@ -870,7 +886,7 @@ export default function UserManagementPage() {
 function FirstLoginBadge({ value }: { value: unknown }) {
   const completed = value === false;
   return (
-    <span className={`inline-flex items-center rounded-full px-3 py-1 text-[11px] font-black ${completed ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
+    <span className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-bold ${completed ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
       {completed ? '初回ログイン済み' : '初回変更待ち'}
     </span>
   );

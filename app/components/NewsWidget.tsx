@@ -76,7 +76,7 @@ export default function NewsWidget({ role, pendingRequests = [], onOpenRequest }
       case 'alert':
         return { bg: 'bg-yellow-100', text: 'text-yellow-700', label: '緊急', icon: <Megaphone size={12} /> };
       case 'maintenance':
-        return { bg: 'bg-gray-100', text: 'text-gray-600', label: 'メンテ', icon: <Info size={12} /> };
+        return { bg: 'bg-slate-100', text: 'text-slate-600', label: 'メンテ', icon: <Info size={12} /> };
       default:
         return { bg: 'bg-blue-100', text: 'text-blue-600', label: 'お知らせ', icon: <Bell size={12} /> };
     }
@@ -84,8 +84,8 @@ export default function NewsWidget({ role, pendingRequests = [], onOpenRequest }
 
   if (loading) {
     return (
-      <div className="bg-white p-4 rounded-3xl shadow-sm border border-gray-100 animate-pulse h-24 flex items-center justify-center mb-6">
-        <span className="text-gray-300 text-xs font-bold">読み込み中...</span>
+      <div className="bg-white p-4 rounded-3xl shadow-sm border border-slate-100 animate-pulse h-24 flex items-center justify-center mb-6">
+        <span className="text-slate-300 text-xs font-bold">読み込み中...</span>
       </div>
     );
   }
@@ -93,8 +93,8 @@ export default function NewsWidget({ role, pendingRequests = [], onOpenRequest }
   if (loadError) {
     return (
       <div className="mb-6 rounded-3xl border border-amber-200 bg-amber-50 p-5 text-center">
-        <p className="text-sm font-black text-amber-800">お知らせを読み込めませんでした</p>
-        <button type="button" onClick={() => setReloadKey(value => value + 1)} className="mt-3 rounded-xl bg-amber-700 px-4 py-2 text-xs font-black text-white">
+        <p className="text-sm font-bold text-amber-800">お知らせを読み込めませんでした</p>
+        <button type="button" onClick={() => setReloadKey(value => value + 1)} className="mt-3 rounded-xl bg-amber-700 px-4 py-2 text-xs font-bold text-white">
           もう一度読み込む
         </button>
       </div>
@@ -104,18 +104,18 @@ export default function NewsWidget({ role, pendingRequests = [], onOpenRequest }
   const isEmpty = news.length === 0 && pendingRequests.length === 0;
 
   return (
-    <div className="bg-white rounded-3xl shadow-sm border border-gray-100 overflow-hidden mb-6">
-      <div className="bg-gray-50 px-4 py-3 border-b border-gray-100 flex items-center gap-2">
-        <Bell size={16} className="text-gray-400" />
-        <span className="text-xs font-bold text-gray-500">連絡事項</span>
+    <div className="bg-white rounded-3xl shadow-sm border border-slate-100 overflow-hidden mb-6">
+      <div className="bg-slate-50 px-4 py-3 border-b border-slate-100 flex items-center gap-2">
+        <Bell size={16} className="text-slate-400" />
+        <span className="text-xs font-bold text-slate-500">連絡事項</span>
       </div>
       
       <div className="p-2">
-        <div className="divide-y divide-gray-50">
+        <div className="divide-y divide-slate-50">
           
           {isEmpty && (
             <div className="py-8 text-center">
-              <p className="text-xs font-bold text-gray-400">新しいお知らせはありません</p>
+              <p className="text-xs font-bold text-slate-400">新しいお知らせはありません</p>
             </div>
           )}
 
@@ -127,18 +127,18 @@ export default function NewsWidget({ role, pendingRequests = [], onOpenRequest }
               className="w-full text-left p-3 hover:bg-red-50 transition-colors group bg-red-50/30 rounded-xl mb-2"
             >
               <div className="flex items-start gap-3">
-                <span className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-bold bg-red-100 text-red-600 animate-pulse">
+                <span className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-bold bg-red-100 text-red-600 animate-pulse">
                   <AlertCircle size={12} /> 未登録
                 </span>
                 
                 <div className="flex-1 min-w-0">
                   <div className="flex justify-between items-center mb-1">
-                    <h4 className="text-sm font-bold text-gray-800 line-clamp-1 group-hover:text-red-600 transition-colors">
+                    <h4 className="text-sm font-bold text-slate-800 line-clamp-1 group-hover:text-red-600 transition-colors">
                       {req.title}
                     </h4>
-                    <ChevronRight size={16} className="text-gray-300 group-hover:text-red-400"/>
+                    <ChevronRight size={16} className="text-slate-300 group-hover:text-red-400"/>
                   </div>
-                  <p className="text-xs text-gray-500 mt-0.5">
+                  <p className="text-xs text-slate-500 mt-0.5">
                     期限: {req.deadline ? new Date(req.deadline).toLocaleDateString() : 'お早めに'} までに登録してください
                   </p>
                 </div>
@@ -155,23 +155,23 @@ export default function NewsWidget({ role, pendingRequests = [], onOpenRequest }
               <Link 
                 href={`${detailPagePrefix}/${item.id}`} 
                 key={item.id} 
-                className="block p-3 hover:bg-gray-50 transition-colors no-underline group rounded-xl"
+                className="block p-3 hover:bg-slate-50 transition-colors no-underline group rounded-xl"
               >
                 <div className="flex items-start gap-3">
-                  <span className={`shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-bold ${style.bg} ${style.text}`}>
+                  <span className={`shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-bold ${style.bg} ${style.text}`}>
                     {style.icon} {style.label}
                   </span>
                   
                   <div className="flex-1 min-w-0">
                     <div className="flex justify-between items-baseline mb-1">
-                      <h4 className="text-sm font-bold text-gray-800 line-clamp-1 group-hover:text-indigo-600 transition-colors">
+                      <h4 className="text-sm font-bold text-slate-800 line-clamp-1 group-hover:text-indigo-600 transition-colors">
                         {item.title}
                       </h4>
-                      <span className="text-[10px] text-gray-400 shrink-0 ml-2">
+                      <span className="text-[11px] text-slate-400 shrink-0 ml-2">
                         {dateLabel}
                       </span>
                     </div>
-                    <p className="text-xs text-gray-500 line-clamp-2 leading-relaxed">
+                    <p className="text-xs text-slate-500 line-clamp-2 leading-relaxed">
                       {newsPreview(item.content) || '詳細を開いて内容を確認してください。'}
                     </p>
                   </div>
@@ -185,7 +185,7 @@ export default function NewsWidget({ role, pendingRequests = [], onOpenRequest }
         {!isEmpty && (
           <Link 
             href={listPagePath} 
-            className="mt-2 flex items-center justify-center w-full py-2.5 text-xs font-bold text-gray-500 bg-gray-50 hover:bg-gray-100 hover:text-indigo-600 rounded-xl transition-colors gap-2 no-underline"
+            className="mt-2 flex items-center justify-center w-full py-2.5 text-xs font-bold text-slate-500 bg-slate-50 hover:bg-slate-100 hover:text-indigo-600 rounded-xl transition-colors gap-2 no-underline"
           >
             <List size={14} /> すべてのお知らせを見る{news.length > 3 ? `（ほか${news.length - 3}件）` : ''}
           </Link>

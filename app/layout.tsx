@@ -1,9 +1,20 @@
 import './globals.css';
+import { Noto_Sans_JP } from 'next/font/google';
+import { FeedbackProvider } from '@/app/components/ui/feedback';
 import { AuthProvider } from '@/app/context/AuthContext';
 import { SettingsProvider } from '@/app/context/SettingsContext';
 import SoundEffectsBootstrap from '@/app/components/SoundEffectsBootstrap';
 import BetaAnalyticsTracker from '@/app/components/BetaAnalyticsTracker';
 import ContextHelp from '@/app/components/ContextHelp';
+
+// 全アプリ共通の書体。本文は標準（400/500）、見出しと数字だけ太字（700/900）。
+const notoSansJp = Noto_Sans_JP({
+  weight: ['400', '500', '700', '900'],
+  subsets: ['latin'],
+  display: 'swap',
+  preload: false,
+  variable: '--font-noto-sans-jp',
+});
 
 export const metadata = {
   title: '創造学園アプリ',
@@ -29,14 +40,16 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="ja">
-      <body className="bg-gray-50 text-gray-900 font-sans">
+    <html lang="ja" className={notoSansJp.variable}>
+      <body className="bg-canvas text-fg font-sans antialiased">
         <AuthProvider>
           <SettingsProvider>
             <SoundEffectsBootstrap />
             <BetaAnalyticsTracker />
-            {children}
-            <ContextHelp />
+            <FeedbackProvider>
+              {children}
+              <ContextHelp />
+            </FeedbackProvider>
           </SettingsProvider>
         </AuthProvider>
       </body>

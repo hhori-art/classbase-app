@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
-import { getServerUser, jsonError, requireRole } from '@/lib/server-auth';
+import { getServerUser, jsonError, requireScienceSocialStaff } from '@/lib/server-auth';
 import { jstDateKey, weekdayFromDateKey } from '@/lib/date-key';
 
 export const runtime = 'nodejs';
@@ -27,7 +27,7 @@ const isSafeStampUrl = (value: unknown) => {
 export async function POST(request: NextRequest) {
   try {
     const user = await getServerUser(request);
-    requireRole(user, ['teacher', 'admin', 'master']);
+    requireScienceSocialStaff(user);
 
     const body = await request.json();
     const action = String(body.action || 'create');

@@ -23,12 +23,16 @@ export function accountEmailCandidates(loginId: string, email?: unknown) {
   const normalizedLoginId = normalizeAccountLoginId(loginId);
   const requestedEmail = normalizeEmail(email);
   const loginEmail = normalizeEmail(normalizedLoginId);
+  // 通常ログイン画面は、職員番号等のログインIDから classbase.local / sozogakuen.co.jp
+  // の順で認証メールを生成する。新規作成時も同じ順序を正本にし、連絡先メールが
+  // 入力されていても、それをFirebase Authのログイン識別子にはしない。
+  // requestedEmail は既存アカウントの探索・移行候補として残す。
   return Array.from(new Set([
-    isEmail(requestedEmail) ? requestedEmail : '',
     isEmail(loginEmail) ? loginEmail : '',
     ...(!normalizedLoginId.includes('@')
       ? EMAIL_DOMAINS.map(domain => `${normalizedLoginId}@${domain}`.toLowerCase())
       : []),
+    isEmail(requestedEmail) ? requestedEmail : '',
   ].filter(Boolean)));
 }
 
@@ -81,6 +85,8 @@ type CredentialInput = {
   preferredUid?: string;
   // 保存済みの初期PWと同じでも Auth へ書き込む（印刷PWの再同期用）。
   forcePassword?: boolean;
+  // 初回ログイン済み（本人がパスワードを変更済み）のアカウントはパスワードを変えない（CSV再取込用）。
+  preserveActivatedPassword?: boolean;
 };
 
 // Resolve and authorize every representation before changing any credentials.
@@ -101,6 +107,7 @@ export async function prepareAuthAccountCredentials(input: CredentialInput) {
     displayName: string;
     disabled: boolean;
     storedPassword: string;
+    activated: boolean;
   }>();
   const remember = async (getUser: () => Promise<{ uid: string; email?: string; displayName?: string; disabled?: boolean }>) => {
     try {
@@ -117,6 +124,7 @@ export async function prepareAuthAccountCredentials(input: CredentialInput) {
         displayName: String(user.displayName || ''),
         disabled: Boolean(user.disabled),
         storedPassword: normalizeInitialPassword(profileData.initial_password || profileData.raw_password),
+        activated: profileData.isFirstLogin === false && !normalizeInitialPassword(profileData.initial_password || profileData.raw_password),
       });
     } catch (error: any) {
       if (!isNotFoundAuthError(error)) throw error;
@@ -127,11 +135,14 @@ export async function prepareAuthAccountCredentials(input: CredentialInput) {
 
   return async () => {
     const revokedAuthUids: string[] = [];
+    let passwordPreserved = false;
     for (const user of existing.values()) {
       const disabled = Boolean(input.disabled);
+      const keepPassword = Boolean(input.preserveActivatedPassword) && user.activated;
+      if (keepPassword) passwordPreserved = true;
       // 画面は既存の初期PWも送るため、保存のたびにパスワードを
       // 再設定すると全セッションが不要に失効する。実際に変更された時だけ更新する。
-      const passwordChanged = Boolean(password) && (
+      const passwordChanged = !keepPassword && Boolean(password) && (
         Boolean(input.forcePassword) || !user.storedPassword || user.storedPassword !== password
       );
       const disabledChanged = user.disabled !== disabled;
@@ -162,6 +173,7 @@ export async function prepareAuthAccountCredentials(input: CredentialInput) {
       synchronized_auth_uids: Array.from(existing.keys()),
       revoked_auth_uids: revokedAuthUids,
       reauth_required: revokedAuthUids.includes(input.actor.uid),
+      password_preserved: passwordPreserved,
     };
   };
 }

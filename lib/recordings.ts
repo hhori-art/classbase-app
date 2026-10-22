@@ -1,4 +1,4 @@
-export type RecordingType = 'regular' | 'test_prep';
+export type RecordingType = 'regular' | 'test_prep' | 'group_meeting';
 export type RecordingYearScope = 'current' | 'past';
 
 export function getSchoolYearFromDate(targetDate?: string) {
@@ -22,6 +22,8 @@ export function getRecordingYearScope(schoolYear?: number | string): RecordingYe
 
 export function normalizeRecordingType(value?: string | null): RecordingType {
   const normalized = String(value || '').trim().toLowerCase();
+  // 授業の前後の集会（グループミーティング）の録画。管理画面から公開する。
+  if (normalized === 'group_meeting' || normalized.includes('グループミーティング') || normalized.includes('集会')) return 'group_meeting';
   if (
     normalized.includes('test') ||
     normalized.includes('exam') ||
@@ -35,7 +37,8 @@ export function normalizeRecordingType(value?: string | null): RecordingType {
 }
 
 export function recordingTypeLabel(type?: string | null) {
-  return normalizeRecordingType(type) === 'test_prep' ? 'テスト対策' : '通常授業';
+  const normalized = normalizeRecordingType(type);
+  return normalized === 'test_prep' ? 'テスト対策' : normalized === 'group_meeting' ? 'グループミーティング' : '通常授業';
 }
 
 export function normalizeSchoolYear(targetDate?: string, value?: string | number | null) {

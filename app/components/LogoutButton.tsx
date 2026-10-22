@@ -2,22 +2,25 @@
 
 import { LogOut } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
+import { IconButton, useConfirm } from '@/app/components/ui';
 
 export default function LogoutButton() {
   const { logout } = useAuth();
+  const confirm = useConfirm();
 
   const handleLogout = async () => {
-    if (!confirm('ログアウトしますか？')) return;
+    const ok = await confirm({ title: 'ログアウトしますか？', confirmLabel: 'ログアウト' });
+    if (!ok) return;
     await logout();
   };
 
   return (
-    <button
+    <IconButton
+      label="ログアウト"
       onClick={handleLogout}
-      className="text-gray-400 hover:text-red-500 p-2 rounded-full transition-colors flex items-center gap-2"
-      title="ログアウト"
+      className="rounded-full hover:!bg-rose-50 hover:!text-rose-600"
     >
-      <LogOut size={20} />
-    </button>
+      <LogOut size={20} aria-hidden />
+    </IconButton>
   );
 }

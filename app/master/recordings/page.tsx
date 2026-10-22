@@ -1,1685 +1,961 @@
 'use client';
 
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { auth, db } from '@/lib/firebase';
-import { 
-  collection, query, orderBy, limit, getDocs, doc, writeBatch, where, deleteDoc, updateDoc 
-} from 'firebase/firestore';
-import { 
-  Video, CheckCircle, ArrowLeft, Calendar as CalendarIcon, ExternalLink, 
-  RefreshCw, Loader2, Link as LinkIcon, Clock, Trash2, Search, 
-  Check, List, CheckSquare, Layers, XCircle, FileUp, Scissors, PlayCircle, Replace
-} from 'lucide-react';
-import Link from 'next/link';
+import { collection, doc, getDocs, limit, orderBy, query, startAfter, where, writeBatch, type Query, type QueryDocumentSnapshot, type QuerySnapshot } from 'firebase/firestore';
+import { reportAuditLog } from '@/app/components/master/audit-log-client';
 import {
-  getCurrentSchoolYear,
-  getRecordingYearScope,
-  isZoomRecordingShareUrl,
-  normalizeRecordingType,
-  normalizeSchoolYear,
-  recordingTypeLabel,
-  type RecordingType,
-  type RecordingYearScope,
-} from '@/lib/recordings';
+  AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, Clock, FileUp, Loader2, PauseCircle, PlayCircle,
+  RefreshCw, Replace, Scissors, Search, Upload, Video,
+} from 'lucide-react';
+import AdminPageHeader from '@/app/components/master/AdminPageHeader';
+import AdminTabs from '@/app/components/master/AdminTabs';
+import { Button, EmptyState, ErrorState, IconButton, ListSkeleton, Modal, Spinner, buttonClass, useConfirm, usePrompt, useToast } from '@/app/components/ui';
+import { formatDate, formatDateTime, formatTime } from '@/lib/format';
+import { cn } from '@/lib/cn';
+import { getCurrentSchoolYear, getRecordingYearScope, isZoomRecordingShareUrl, normalizeSchoolYear, recordingTypeLabel } from '@/lib/recordings';
+import {
+  PERIOD_WINDOWS, RECORDING_UPLOAD_STATE_LABELS, REQUIRED_RECORDING_TYPE,
+  type MeetingTrimOptions, type RecordingIssue, type RecordingUploadState,
+} from '@/lib/recording-publish-rules';
+import { normalizeRecording, parseRecordingCsv, stableCsvRecordingDocId, type PublishedData } from './recording-csv';
 
-// 型定義
+// 録画の管理。録画の確認基盤は講師配置（shift_assignments）。Zoomの録画完了通知・日次同期で
+// 講師配置に一致した「共有画面付きスピーカービュー」の録画は、不具合がなければ自動でアップされる。
+// この画面では講師配置ごとのアップ状況を確認し、停止・再開・差し替え・保留分の公開を行う。
+
+type ZoomCandidate = {
+  url?: string; file_id?: string; recording_type?: string; duration_seconds?: number; recording_start?: string; meeting_id?: string; meeting_uuid?: string;
+  /** 授業の前後の集会（グループミーティング）の録画。 */
+  kind?: 'group_meeting'; meeting_position?: 'before' | 'after';
+};
+
 type ShiftData = {
-  id: string; 
+  id: string;
   target_date: string;
-  target_grade: string;
-  target_subject: string;
+  target_grade?: string;
+  target_subject?: string;
   target_detail_subject?: string;
   unit?: string;
-  teacher_name: string;
-  target_recording_url?: string; 
+  teacher_name?: string;
+  note?: string;
+  period?: string;
+  target_period?: string;
+  role_type?: string;
+  target_meeting_id?: string;
+  target_recording_url?: string;
   target_recording_file_id?: string;
   target_recording_type?: string;
+  target_recording_duration_seconds?: number;
   target_recording_trim_start_seconds?: number;
   target_recording_trim_end_seconds?: number | null;
   zoom_recording_files?: any[];
-  target_meeting_id?: string;
-  note?: string;
-  defaultTitle?: string;
+  zoom_recording_candidates?: ZoomCandidate[];
+  recording_status?: string;
+  recording_issues?: RecordingIssue[];
+  recording_publish_mode?: string;
+  /** 別の録画にあった集会（グループミーティング）の位置。自動で授業の録画から除いている。 */
+  recording_group_meeting?: 'before' | 'after' | null;
+  /** 集会と授業が1つの録画につながっているときの切り取り位置の候補。 */
+  recording_meeting_trim_options?: MeetingTrimOptions | null;
 };
 
-type PublishedData = {
-  id: string;
-  original_shift_id?: string;
-  target_date: string;
-  title: string;
-  video_url: string;
-  grade: string;
-  subject: string;
-  unit?: string;
-  detail_subject?: string;
-  teacher_name?: string;
-  recording_type?: RecordingType;
-  recording_type_label?: string;
-  school_year?: number;
-  year_scope?: RecordingYearScope;
-  source?: string;
-  difficulty?: string;
-  csv_import_key?: string;
-  zoom_recording_file_id?: string;
-  target_recording_file_id?: string;
-  target_recording_type?: string;
-  zoom_recording_files?: any[];
-  recording_meeting_id?: string;
-  trim_start_seconds?: number;
-  trim_end_seconds?: number | null;
-};
+const MEETING_POSITION_LABELS = { before: '授業の前', after: '授業の後' } as const;
+
+const groupMeetingCandidates = (shift: ShiftData) => (shift.zoom_recording_candidates || []).filter(candidate => candidate.kind === 'group_meeting' && candidate.url && candidate.file_id);
+const groupMeetingRecordingId = (shiftId: string, fileId: string) => `meeting_${shiftId}_${fileId}`.replace(/[\/\s#?]/g, '_');
+const groupMeetingTitle = (candidate: ZoomCandidate) => `グループミーティング${candidate.meeting_position ? `（${MEETING_POSITION_LABELS[candidate.meeting_position]}）` : ''}`;
+
+type Row = { shift: ShiftData; period: string; state: RecordingUploadState; published?: PublishedData };
 
 type PreviewTarget =
   | { kind: 'shift'; item: ShiftData }
-  | { kind: 'published'; item: PublishedData };
-
-type ReplacementTarget =
-  | { kind: 'shift'; item: ShiftData }
   | { kind: 'published'; item: PublishedData }
-  | { kind: 'group'; group: MissingRecordingGroup };
+  | { kind: 'candidate'; item: ShiftData; candidate: ZoomCandidate };
 
-type MissingRecordingGroup = {
-  key: string;
-  weekLabel: string;
-  grade: string;
-  subject: string;
-  detailSubject: string;
-  unit: string;
-  shifts: ShiftData[];
+const STATE_TONES: Record<RecordingUploadState, string> = {
+  published: 'bg-emerald-50 text-emerald-700 ring-emerald-200',
+  replaced: 'bg-emerald-50 text-emerald-800 ring-emerald-300',
+  stopped: 'bg-slate-100 text-slate-600 ring-slate-300',
+  blocked: 'bg-rose-50 text-rose-700 ring-rose-200',
+  pending: 'bg-amber-50 text-amber-800 ring-amber-200',
+  waiting: 'bg-sky-50 text-sky-700 ring-sky-200',
+  missing: 'bg-amber-100 text-amber-900 ring-amber-300',
 };
 
-type RecordingInput = Omit<Partial<PublishedData>, 'school_year' | 'recording_type'> & {
-  school_year?: string | number | null;
-  recording_type?: string | null;
+const SOURCE_LABELS: Record<string, string> = {
+  zoom_auto: '自動アップ', zoom_approval: '手動で公開', recording_replacement: '差し替え',
+  csv_import: 'CSV取込', annual_recording_csv_up: 'CSV取込', manual: '手動登録',
 };
 
-const csvHeaderAliases = {
-  target_date: ['日付', '授業日', 'target_date', 'date'],
-  title: ['タイトル', '録画タイトル', 'title'],
-  video_url: ['URL', '録画URL', '動画URL', 'video_url', 'url'],
-  grade: ['学年', 'grade'],
-  subject: ['科目', '教科', 'subject'],
-  unit: ['単元', '単元名', '分野', 'unit'],
-  detail_subject: ['分野', '詳細科目', 'detail_subject'],
-  teacher_name: ['講師', '担当講師', 'teacher_name'],
-  school_year: ['年度', 'school_year'],
-  recording_type: ['種別', '授業種別', 'recording_type', 'type'],
-  difficulty: ['難易度', 'レベル', 'difficulty'],
-} as const;
+const pad = (value: number) => String(value).padStart(2, '0');
+const dateKeyOf = (date: Date) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+const addDays = (key: string, days: number) => { const date = new Date(`${key}T12:00:00`); date.setDate(date.getDate() + days); return dateKeyOf(date); };
+const dateLabel = (key: string) => formatDate(key, { withWeekday: true }) || key;
+const minutesLabel = (seconds?: number) => seconds ? `${Math.round(seconds / 60)}分` : '';
 
-const annualRecordingCsvAliases = {
-  class_name: ['クラス', '講座', 'class_name', 'class'],
-  publish: ['UP', '公開', '公開対象', 'publish', 'is_published'],
-} as const;
-
-function parseCsv(text: string) {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let cell = '';
-  let quoted = false;
-
-  for (let i = 0; i < text.length; i += 1) {
-    const char = text[i];
-    const next = text[i + 1];
-    if (char === '"' && quoted && next === '"') {
-      cell += '"';
-      i += 1;
-    } else if (char === '"') {
-      quoted = !quoted;
-    } else if (char === ',' && !quoted) {
-      row.push(cell.trim());
-      cell = '';
-    } else if ((char === '\n' || char === '\r') && !quoted) {
-      if (char === '\r' && next === '\n') i += 1;
-      row.push(cell.trim());
-      if (row.some(value => value !== '')) rows.push(row);
-      row = [];
-      cell = '';
-    } else {
-      cell += char;
-    }
-  }
-
-  row.push(cell.trim());
-  if (row.some(value => value !== '')) rows.push(row);
-  return rows;
-}
-
-function findCsvValue(row: Record<string, string>, key: keyof typeof csvHeaderAliases) {
-  const aliases = csvHeaderAliases[key];
-  for (const alias of aliases) {
-    const value = row[alias];
-    if (value !== undefined && value !== '') return value;
-  }
+const periodOf = (shift: ShiftData) => {
+  const text = [shift.period, shift.target_period, shift.note].map(value => String(value || '').normalize('NFKC')).join(' ');
+  if (/(^|\D)1限|第1|^1$/.test(text) || String(shift.period || '') === '1') return '1限';
+  if (/(^|\D)2限|第2|^2$/.test(text) || String(shift.period || '') === '2') return '2限';
   return '';
-}
+};
 
-function normalizeCsvHeader(value?: string | null) {
-  return String(value || '').replace(/^\uFEFF/, '').normalize('NFKC').trim().toLowerCase();
-}
+const isSupportShift = (shift: ShiftData) => {
+  const roleType = String(shift.role_type || 'main').toLowerCase();
+  if (roleType && !['main', 'teacher', 'primary'].includes(roleType)) return true;
+  return [shift.teacher_name, shift.note].some(value => String(value || '').includes('サポート') || String(value || '').includes('チューター')) || shift.target_subject === '学習サポート';
+};
 
-function findCsvHeaderIndex(rows: string[][]) {
-  const knownHeaders = Object.values(csvHeaderAliases).flat().map(value => normalizeCsvHeader(value));
-  return rows.findIndex(row => {
-    const normalized = row.map(value => normalizeCsvHeader(value));
-    const matches = normalized.filter(value => knownHeaders.includes(value));
-    return matches.length >= 2 && normalized.some(value => csvHeaderAliases.video_url.map(alias => normalizeCsvHeader(alias)).includes(value));
-  });
-}
+const shiftTitle = (shift: ShiftData) => `${shift.target_detail_subject || ''} ${shift.unit || ''}`.trim() || `${shift.target_subject || '授業'}の授業`;
 
-function findHeaderColumn(headers: string[], aliases: readonly string[]) {
-  const normalizedAliases = aliases.map(alias => normalizeCsvHeader(alias));
-  return headers.findIndex(header => normalizedAliases.includes(normalizeCsvHeader(header)));
-}
-
-function isCsvTruthy(value?: string | null) {
-  return ['true', '1', 'yes', 'y', 'up', '公開', '済', '✓', '✔'].includes(normalizeCsvHeader(value));
-}
-
-function isHttpUrl(value?: string | null) {
-  return /^https?:\/\/\S+$/i.test(String(value || '').trim());
-}
-
-function detectCsvSchoolYear(rows: string[][], headerIndex: number) {
-  for (const value of rows.slice(0, Math.max(headerIndex, 0)).flat()) {
-    const match = String(value || '').normalize('NFKC').match(/(20\d{2})\s*年度/);
-    if (match) return Number(match[1]);
+function deriveState(shift: ShiftData, period: string, published: PublishedData | undefined, now: Date): RecordingUploadState {
+  if (published) {
+    if (published.status === 'stopped') return 'stopped';
+    return published.is_replacement ? 'replaced' : 'published';
   }
-  return getCurrentSchoolYear();
+  if (shift.recording_publish_mode === 'stopped') return 'stopped';
+  if (shift.recording_status === 'blocked') return 'blocked';
+  if (shift.target_recording_url) return 'pending';
+  const today = dateKeyOf(now);
+  const window = PERIOD_WINDOWS[period] || PERIOD_WINDOWS['2限'];
+  const minutesNow = now.getHours() * 60 + now.getMinutes();
+  // Zoomの録画処理には時間がかかるため、授業終了から3時間は「録画待ち」とする。
+  const overdue = shift.target_date < today || (shift.target_date === today && minutesNow > window.end + 180);
+  return overdue ? 'missing' : 'waiting';
 }
 
-function normalizeCsvGrade(value?: string | null) {
-  const text = String(value || '').normalize('NFKC').replace(/\s+/g, '');
-  if (/中(?:学)?1|1年/.test(text)) return '中1';
-  if (/中(?:学)?2|2年/.test(text)) return '中2';
-  if (/中(?:学)?3|3年/.test(text)) return '中3';
-  return text || 'その他';
-}
-
-function subjectFromClassName(value?: string | null) {
-  const text = String(value || '').normalize('NFKC').trim();
-  if (/理科|物理|化学|生物|地学/.test(text)) return '理科';
-  if (/社会|地理|歴史|公民/.test(text)) return '社会';
-  return '全科目';
-}
-
-function monthDayParts(value?: string | null) {
-  const match = String(value || '').normalize('NFKC').trim().match(/^(\d{1,2})[\/.-](\d{1,2})/);
-  if (!match) return null;
-  const month = Number(match[1]);
-  const day = Number(match[2]);
-  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
-  return { month, day };
-}
-
-function dateKeyFromMonthDay(year: number, month: number, day: number) {
-  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-}
-
-function toJstDateKeyFromMillis(ms: number) {
-  if (!Number.isFinite(ms) || ms <= 0) return '';
-  return new Date(ms + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
-}
-
-function dateFromRecordingUrl(url?: string | null) {
-  const text = String(url || '').trim();
-  const match = text.match(/[?&]startTime=(\d{10,})/);
-  return match ? toJstDateKeyFromMillis(Number(match[1])) : '';
-}
-
-function normalizeCsvDate(value?: string | null, url?: string | null, schoolYearValue?: string | number | null) {
-  const text = String(value || '').trim();
-  const ymd = text.match(/^(\d{4})[\/\-.年](\d{1,2})[\/\-.月](\d{1,2})/);
-  if (ymd) {
-    return `${ymd[1]}-${ymd[2].padStart(2, '0')}-${ymd[3].padStart(2, '0')}`;
-  }
-
-  const urlDate = dateFromRecordingUrl(url);
-  if (urlDate) return urlDate;
-
-  const schoolYear = normalizeSchoolYear(undefined, schoolYearValue);
-  return `${schoolYear}-04-01`;
-}
-
-function recordingImportKey(item: Pick<PublishedData, 'video_url' | 'title' | 'grade' | 'subject' | 'unit' | 'recording_type'>) {
-  return [
-    item.recording_type || '',
-    item.grade || '',
-    item.subject || '',
-    item.unit || '',
-    item.title || '',
-    item.video_url || '',
-  ].join('|').trim();
-}
-
-function stableCsvRecordingDocId(item: Pick<PublishedData, 'video_url' | 'title' | 'grade' | 'subject' | 'unit' | 'recording_type'>) {
-  const key = recordingImportKey(item);
-  let hash = 2166136261;
-  for (let i = 0; i < key.length; i += 1) {
-    hash ^= key.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  return `csv_recording_${(hash >>> 0).toString(36)}`;
-}
-
-function normalizeRecording(raw: RecordingInput): Omit<PublishedData, 'id'> {
-  const schoolYear = normalizeSchoolYear(raw.target_date, raw.school_year);
-  const recordingType = normalizeRecordingType(raw.recording_type);
-  return {
-    target_date: raw.target_date || '',
-    title: raw.title || 'タイトルなし',
-    video_url: raw.video_url || '',
-    grade: raw.grade || 'その他',
-    subject: raw.subject || '全科目',
-    unit: raw.unit || '',
-    detail_subject: raw.detail_subject || '',
-    teacher_name: raw.teacher_name || '',
-    recording_type: recordingType,
-    recording_type_label: recordingTypeLabel(recordingType),
-    school_year: schoolYear,
-    year_scope: getRecordingYearScope(schoolYear),
-    source: raw.source || 'manual',
-    difficulty: raw.difficulty || '',
-    csv_import_key: raw.csv_import_key || '',
-    zoom_recording_file_id: raw.zoom_recording_file_id || raw.target_recording_file_id || '',
-    target_recording_file_id: raw.target_recording_file_id || raw.zoom_recording_file_id || '',
-    target_recording_type: raw.target_recording_type || '',
-    zoom_recording_files: raw.zoom_recording_files || [],
-    recording_meeting_id: raw.recording_meeting_id || '',
-    ...(raw.original_shift_id ? { original_shift_id: raw.original_shift_id } : {}),
-  };
-}
-
-function shiftDefaultTitle(shift: ShiftData) {
-  return `${shift.target_detail_subject || ''} ${shift.unit || ''}`.trim() || `${shift.target_subject || '授業'}の授業`;
-}
-
-function dateKeyToWeekStart(dateKey: string) {
-  const date = new Date(`${dateKey}T12:00:00`);
-  if (Number.isNaN(date.getTime())) return dateKey || '日付未設定';
-  const day = date.getDay();
-  const mondayOffset = day === 0 ? -6 : 1 - day;
-  date.setDate(date.getDate() + mondayOffset);
-  return [
-    date.getFullYear(),
-    String(date.getMonth() + 1).padStart(2, '0'),
-    String(date.getDate()).padStart(2, '0'),
-  ].join('-');
-}
-
-function dateKeyToWeekLabel(dateKey: string) {
-  const start = dateKeyToWeekStart(dateKey);
-  const date = new Date(`${start}T12:00:00`);
-  if (Number.isNaN(date.getTime())) return start;
-  const end = new Date(date);
-  end.setDate(date.getDate() + 6);
-  const endLabel = `${String(end.getMonth() + 1).padStart(2, '0')}-${String(end.getDate()).padStart(2, '0')}`;
-  return `${start}〜${endLabel}`;
-}
-
-function dateKeyFromDate(date: Date) {
-  return [
-    date.getFullYear(),
-    String(date.getMonth() + 1).padStart(2, '0'),
-    String(date.getDate()).padStart(2, '0'),
-  ].join('-');
-}
-
-function dateKeyDaysAgo(days: number) {
-  const date = new Date();
-  date.setDate(date.getDate() - days);
-  return dateKeyFromDate(date);
-}
-
-function isSupportShift(shift: ShiftData) {
-  const teacherName = String(shift.teacher_name || '');
-  const subject = String(shift.target_subject || '');
-  const note = String(shift.note || '');
-  return (
-    teacherName.includes('サポート') ||
-    teacherName.includes('チューター') ||
-    subject === '学習サポート' ||
-    note.includes('サポート')
-  );
-}
-
-export default function MasterApprovalPage() {
-  const previewVideoRef = useRef<HTMLVideoElement | null>(null);
-  const [candidates, setCandidates] = useState<ShiftData[]>([]);
-  const [unpublishedShifts, setUnpublishedShifts] = useState<ShiftData[]>([]);
+export default function RecordingAdminPage() {
+  const toast = useToast();
+  const confirm = useConfirm();
+  const ask = usePrompt();
+  const [tab, setTab] = useState<'status' | 'library' | 'import'>('status');
+  const [endDate, setEndDate] = useState(() => dateKeyOf(new Date()));
+  const [rangeDays, setRangeDays] = useState(7);
+  const [shifts, setShifts] = useState<ShiftData[]>([]);
   const [published, setPublished] = useState<PublishedData[]>([]);
   const [loading, setLoading] = useState(true);
-  const [processing, setProcessing] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const [processing, setProcessing] = useState('');
+  const [stateFilter, setStateFilter] = useState<'all' | 'attention' | RecordingUploadState>('all');
+  const [search, setSearch] = useState('');
+  const [zoomSyncLog, setZoomSyncLog] = useState('');
   const [previewTarget, setPreviewTarget] = useState<PreviewTarget | null>(null);
   const [previewToken, setPreviewToken] = useState('');
-  const [replacementTarget, setReplacementTarget] = useState<ReplacementTarget | null>(null);
-  const [replacementSourceId, setReplacementSourceId] = useState('');
-  const [replacementReason, setReplacementReason] = useState('');
-  const [replacementSearch, setReplacementSearch] = useState('');
-  const [missingShiftSearch, setMissingShiftSearch] = useState('');
-  const [replacementSaving, setReplacementSaving] = useState(false);
-  
-  // --- 左カラム用State ---
-  const [viewMode, setViewMode] = useState<'calendar' | 'list'>('calendar');
-  const [currentDate, setCurrentDate] = useState(new Date());
-  const [selectedDateFilter, setSelectedDateFilter] = useState<string | null>(null);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [titles, setTitles] = useState<{ [key: string]: string }>({});
-  const [trimStart, setTrimStart] = useState<{ [key: string]: string }>({});
-  const [trimEnd, setTrimEnd] = useState<{ [key: string]: string }>({});
+  const [replaceRow, setReplaceRow] = useState<Row | null>(null);
 
-  // --- 右カラム（公開済み）用State ---
-  const [publishedSearch, setPublishedSearch] = useState('');
-  const [pubFilterDate, setPubFilterDate] = useState('');
-  const [pubFilterSubject, setPubFilterSubject] = useState('all');
-  const [pubFilterYearScope, setPubFilterYearScope] = useState<'all' | RecordingYearScope>('all');
-  const [pubFilterType, setPubFilterType] = useState<'all' | RecordingType>('all');
-  const [pubSelectedIds, setPubSelectedIds] = useState<Set<string>>(new Set());
-  const [pubTrimStart, setPubTrimStart] = useState<{ [key: string]: string }>({});
-  const [pubTrimEnd, setPubTrimEnd] = useState<{ [key: string]: string }>({});
-  const [csvImporting, setCsvImporting] = useState(false);
-  const [zoomSyncing, setZoomSyncing] = useState(false);
-  const [csvEncoding, setCsvEncoding] = useState<'utf-8' | 'shift-jis'>('utf-8');
-  const [csvLog, setCsvLog] = useState('');
-  const [zoomSyncLog, setZoomSyncLog] = useState('');
+  const startDate = addDays(endDate, -(rangeDays - 1));
 
-  const previewTitle = previewTarget?.kind === 'shift'
-    ? `${previewTarget.item.target_date} ${previewTarget.item.target_grade || ''} ${previewTarget.item.target_subject || ''}`
-    : `${previewTarget?.item.target_date || ''} ${previewTarget?.item.title || ''}`;
-
-  const previewExternalUrl = previewTarget?.kind === 'shift'
-    ? previewTarget.item.target_recording_url || ''
-    : previewTarget?.item.video_url || '';
-
-  const previewUsesZoomPlayer = isZoomRecordingShareUrl(previewExternalUrl);
-
-  const previewSrc = previewTarget?.kind === 'shift'
-    ? (previewUsesZoomPlayer ? `/api/zoom/recordings/file?mode=share&shift_id=${encodeURIComponent(previewTarget.item.id)}&token=${encodeURIComponent(previewToken)}` : (previewTarget.item.target_recording_file_id ? `/api/zoom/recordings/file?shift_id=${encodeURIComponent(previewTarget.item.id)}&token=${encodeURIComponent(previewToken)}` : previewExternalUrl))
-    : previewTarget?.kind === 'published'
-      ? (previewUsesZoomPlayer ? `/api/zoom/recordings/file?mode=share&recording_id=${encodeURIComponent(previewTarget.item.id)}&token=${encodeURIComponent(previewToken)}` : ((previewTarget.item.zoom_recording_file_id || previewTarget.item.target_recording_file_id || previewTarget.item.original_shift_id) ? `/api/zoom/recordings/file?recording_id=${encodeURIComponent(previewTarget.item.id)}&token=${encodeURIComponent(previewToken)}` : previewExternalUrl))
-      : '';
-
-  const openPreview = async (target: PreviewTarget) => {
-    const token = await auth.currentUser?.getIdToken();
-    setPreviewToken(token || '');
-    setPreviewTarget(target);
-  };
-
-  const setTrimFromPreview = (field: 'start' | 'end') => {
-    if (!previewTarget || !previewVideoRef.current) return;
-    const seconds = String(Math.max(0, Math.floor(previewVideoRef.current.currentTime || 0)));
-    if (previewTarget.kind === 'shift') {
-      if (field === 'start') setTrimStart(prev => ({ ...prev, [previewTarget.item.id]: seconds }));
-      else setTrimEnd(prev => ({ ...prev, [previewTarget.item.id]: seconds }));
-      return;
+  // 録画は年度をまたいで1000件を超えるため、500件ずつ最後まで読み込む（固定件数で打ち切ると過去の年度が欠ける）。
+  const loadAllRecordings = async () => {
+    const docs: QueryDocumentSnapshot[] = [];
+    let cursor: QueryDocumentSnapshot | null = null;
+    for (let page = 0; page < 20; page += 1) {
+      const pageQuery: Query = cursor
+        ? query(collection(db, 'class_recordings'), orderBy('target_date', 'desc'), startAfter(cursor), limit(500))
+        : query(collection(db, 'class_recordings'), orderBy('target_date', 'desc'), limit(500));
+      const snap: QuerySnapshot = await getDocs(pageQuery);
+      docs.push(...snap.docs);
+      if (snap.size < 500) break;
+      cursor = snap.docs[snap.docs.length - 1];
     }
-
-    if (field === 'start') setPubTrimStart(prev => ({ ...prev, [previewTarget.item.id]: seconds }));
-    else setPubTrimEnd(prev => ({ ...prev, [previewTarget.item.id]: seconds }));
+    return docs;
   };
 
-  // データ取得
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     setLoading(true);
+    setLoadError('');
     try {
-      // 1. 公開済みデータ
-      const pubQ = query(collection(db, 'class_recordings'), orderBy('target_date', 'desc'), limit(500));
-      const pubSnap = await getDocs(pubQ);
-      const pubList = pubSnap.docs.map(d => {
-        const raw = d.data() as Partial<PublishedData>;
-        return { id: d.id, ...normalizeRecording(raw) } as PublishedData;
-      });
-      setPublished(pubList);
-      setPubTrimStart(Object.fromEntries(pubList.map(item => [item.id, item.trim_start_seconds ? String(item.trim_start_seconds) : ''])));
-      setPubTrimEnd(Object.fromEntries(pubList.map(item => [item.id, item.trim_end_seconds ? String(item.trim_end_seconds) : ''])));
-
-      const publishedShiftIds = new Set(pubList.map(p => p.original_shift_id).filter(Boolean));
-
-      const todayKey = dateKeyFromDate(new Date());
-      const recentFromKey = dateKeyDaysAgo(90);
-
-      // 2. 承認候補
-      const shiftQ = query(
-        collection(db, 'shift_assignments'),
-        where('target_date', '>=', recentFromKey),
-        where('target_date', '<=', todayKey),
-        orderBy('target_date', 'desc'),
-        limit(800)
-      );
-      
-      const shiftSnap = await getDocs(shiftQ);
-      const rawCandidates = shiftSnap.docs.map(d => ({ id: d.id, ...d.data() } as ShiftData));
-
-      // 3. フィルタリング (未公開 かつ メイン講師のみ)
-      const validCandidates = rawCandidates.filter(c => {
-        const isPublished = publishedShiftIds.has(c.id);
-        
-        return !isPublished && !isSupportShift(c) && Boolean(c.target_recording_url);
-      });
-
-      setCandidates(validCandidates);
-
-      const allShiftQ = query(
-        collection(db, 'shift_assignments'),
-        where('target_date', '>=', recentFromKey),
-        where('target_date', '<=', todayKey),
-        orderBy('target_date', 'desc'),
-        limit(800)
-      );
-      const allShiftSnap = await getDocs(allShiftQ);
-      const allMainUnpublished = allShiftSnap.docs
-        .map(d => ({ id: d.id, ...d.data() } as ShiftData))
-        .filter(shift => !publishedShiftIds.has(shift.id) && !isSupportShift(shift));
-      setUnpublishedShifts(allMainUnpublished);
-
-      // タイトル初期値
-      const initialTitles: any = {};
-      const initialTrimStart: Record<string, string> = {};
-      const initialTrimEnd: Record<string, string> = {};
-      validCandidates.forEach(c => {
-        const t = shiftDefaultTitle(c);
-        initialTitles[c.id] = t;
-        initialTrimStart[c.id] = c.target_recording_trim_start_seconds ? String(c.target_recording_trim_start_seconds) : '';
-        initialTrimEnd[c.id] = c.target_recording_trim_end_seconds ? String(c.target_recording_trim_end_seconds) : '';
-        c.defaultTitle = t;
-      });
-      setTitles(initialTitles);
-      setTrimStart(initialTrimStart);
-      setTrimEnd(initialTrimEnd);
-      
-      // 日付フィルターの初期選択
-      if (validCandidates.length > 0) {
-        const latestDate = validCandidates[0].target_date;
-        if (!selectedDateFilter) {
-            setSelectedDateFilter(latestDate);
-            setCurrentDate(new Date(latestDate));
-        }
-      }
-
-    } catch (e: any) {
-      console.error(e);
-      if (e.code === 'failed-precondition') {
-        alert('システム設定が必要です。開発者コンソール(F12)のリンクからインデックスを作成してください。');
-      }
+      const [pubSnap, shiftSnap] = await Promise.all([
+        loadAllRecordings(),
+        getDocs(query(collection(db, 'shift_assignments'), where('target_date', '>=', startDate), where('target_date', '<=', endDate), orderBy('target_date', 'desc'), limit(800))),
+      ]);
+      setPublished(pubSnap.map(snap => ({ id: snap.id, ...normalizeRecording(snap.data() as any), ...snap.data() } as PublishedData)));
+      setShifts(shiftSnap.docs.map(snap => ({ id: snap.id, ...snap.data() } as ShiftData)).filter(shift => !isSupportShift(shift)));
+    } catch (error: any) {
+      console.error(error);
+      setLoadError(String(error?.message || error || ''));
     } finally {
       setLoading(false);
     }
-  };
+  }, [startDate, endDate]);
 
-  useEffect(() => {
-    fetchData();
-  }, []);
+  useEffect(() => { void fetchData(); }, [fetchData]);
 
-  // --- 左カラム：一括操作 ---
-  const toggleSelect = (id: string) => {
-    const newSet = new Set(selectedIds);
-    if (newSet.has(id)) newSet.delete(id); else newSet.add(id);
-    setSelectedIds(newSet);
-  };
+  const publishedByShift = useMemo(() => {
+    const map = new Map<string, PublishedData>();
+    published.forEach(item => {
+      if (!item.original_shift_id) return;
+      const current = map.get(item.original_shift_id);
+      // 停止中より公開中を優先して表示する。
+      if (!current || (current.status === 'stopped' && item.status !== 'stopped')) map.set(item.original_shift_id, item);
+    });
+    return map;
+  }, [published]);
 
-  const toggleSelectAll = () => {
-    const targetIds = displayedCandidates.map(c => c.id);
-    const allSelected = targetIds.every(id => selectedIds.has(id));
-    const newSet = new Set(selectedIds);
-    if (allSelected) {
-      targetIds.forEach(id => newSet.delete(id));
-    } else {
-      targetIds.forEach(id => newSet.add(id));
-    }
-    setSelectedIds(newSet);
-  };
+  const rows = useMemo<Row[]>(() => {
+    const now = new Date();
+    return shifts
+      .map(shift => {
+        const period = periodOf(shift);
+        const pub = publishedByShift.get(shift.id);
+        return { shift, period, published: pub, state: deriveState(shift, period, pub, now) };
+      })
+      .sort((a, b) => b.shift.target_date.localeCompare(a.shift.target_date) || a.period.localeCompare(b.period) || String(a.shift.target_grade || '').localeCompare(String(b.shift.target_grade || '')));
+  }, [shifts, publishedByShift]);
 
-  const handleBulkApprove = async () => {
-    if (selectedIds.size === 0) return;
-    if (!confirm(`${selectedIds.size}件を一括公開しますか？`)) return;
-    setProcessing(true);
+  const counts = useMemo(() => rows.reduce<Record<string, number>>((acc, row) => { acc[row.state] = (acc[row.state] || 0) + 1; return acc; }, {}), [rows]);
+  const attentionCount = (counts.blocked || 0) + (counts.pending || 0) + (counts.missing || 0);
+
+  const visibleRows = useMemo(() => {
+    const text = search.trim().toLowerCase();
+    return rows.filter(row => {
+      if (stateFilter === 'attention' && !['blocked', 'pending', 'missing'].includes(row.state)) return false;
+      if (stateFilter !== 'all' && stateFilter !== 'attention' && row.state !== stateFilter) return false;
+      if (!text) return true;
+      return [row.shift.target_date, row.shift.target_grade, row.shift.target_subject, row.shift.target_detail_subject, row.shift.unit, row.shift.teacher_name, row.period]
+        .filter(Boolean).join(' ').toLowerCase().includes(text);
+    });
+  }, [rows, stateFilter, search]);
+
+  const groupedRows = useMemo(() => {
+    const groups = new Map<string, Row[]>();
+    visibleRows.forEach(row => groups.set(row.shift.target_date, [...(groups.get(row.shift.target_date) || []), row]));
+    return Array.from(groups.entries());
+  }, [visibleRows]);
+
+  // ---------- 操作 ----------
+  const now = () => new Date().toISOString();
+
+  const stopRow = async (row: Row) => {
+    if (!row.published) return;
+    const reason = await ask({
+      title: `「${row.published.title || shiftTitle(row.shift)}」の公開を停止しますか？`,
+      message: '停止中は自動アップでも再公開されません。',
+      label: '停止する理由（任意）',
+      defaultValue: '',
+      multiline: true,
+      confirmLabel: '停止する',
+    });
+    if (reason === null) return;
+    setProcessing(row.shift.id);
     try {
       const batch = writeBatch(db);
-      const targets = candidates.filter(c => selectedIds.has(c.id));
-      const newPublished: PublishedData[] = [];
-
-      targets.forEach(shift => {
-        const ref = doc(collection(db, 'class_recordings'));
-        const data = {
-          ...normalizeRecording({
-            original_shift_id: shift.id,
-            target_date: shift.target_date,
-            grade: shift.target_grade || 'その他',
-            subject: shift.target_subject || '全科目',
-            detail_subject: shift.target_detail_subject || '',
-            unit: shift.unit || '',
-            teacher_name: shift.teacher_name || '',
-            title: titles[shift.id] || shift.defaultTitle || 'タイトルなし',
-            video_url: shift.target_recording_url || '',
-            recording_type: 'regular',
-            zoom_recording_file_id: shift.target_recording_file_id || '',
-            target_recording_file_id: shift.target_recording_file_id || '',
-            target_recording_type: shift.target_recording_type || '',
-            zoom_recording_files: shift.zoom_recording_files || [],
-            recording_meeting_id: shift.target_meeting_id || '',
-            source: 'zoom_approval',
-          }),
-          original_shift_id: shift.id,
-          trim_start_seconds: Number(trimStart[shift.id] || 0),
-          trim_end_seconds: trimEnd[shift.id] ? Number(trimEnd[shift.id]) : null,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        };
-        batch.set(ref, data);
-        newPublished.push({ id: ref.id, ...data });
-      });
-
+      batch.update(doc(db, 'class_recordings', row.published.id), { status: 'stopped', stopped_reason: reason.trim(), stopped_at: now(), updated_at: now() });
+      batch.set(doc(db, 'shift_assignments', row.shift.id), { recording_publish_mode: 'stopped', recording_status: 'stopped' }, { merge: true });
       await batch.commit();
-      setPublished(prev => [...newPublished, ...prev].sort((a,b) => b.target_date.localeCompare(a.target_date)));
-      setCandidates(prev => prev.filter(c => !selectedIds.has(c.id)));
-      setSelectedIds(new Set());
-    } catch (e) { alert('エラー'); } finally { setProcessing(false); }
+      void reportAuditLog({ action: 'recording_stop', target_type: 'class_recording', target_id: row.published.id, target_label: row.published.title || shiftTitle(row.shift), details: { shift_id: row.shift.id, target_date: row.shift.target_date, reason: reason.trim() } });
+      await fetchData();
+    } catch (error) { console.error(error); toast.error('停止できませんでした。もう一度お試しください。'); } finally { setProcessing(''); }
   };
 
-  const handleBulkReject = async () => {
-    if (selectedIds.size === 0) return;
-    if (!confirm(`${selectedIds.size}件のZoom連携を解除しますか？`)) return;
-    setProcessing(true);
+  const resumeRow = async (row: Row) => {
+    if (!row.published) return;
+    if (!(await confirm({ title: `「${row.published.title || shiftTitle(row.shift)}」の公開を再開しますか？`, confirmLabel: '再開する' }))) return;
+    setProcessing(row.shift.id);
     try {
       const batch = writeBatch(db);
-      selectedIds.forEach(id => {
-        const ref = doc(db, 'shift_assignments', id);
-        batch.update(ref, { target_recording_url: null });
-      });
+      batch.update(doc(db, 'class_recordings', row.published.id), { status: 'published', stopped_reason: '', resumed_at: now(), updated_at: now() });
+      batch.set(doc(db, 'shift_assignments', row.shift.id), { recording_publish_mode: null, recording_status: 'published' }, { merge: true });
       await batch.commit();
-      setCandidates(prev => prev.filter(c => !selectedIds.has(c.id)));
-      setSelectedIds(new Set());
-    } catch (e) { alert('エラー'); } finally { setProcessing(false); }
+      void reportAuditLog({ action: 'recording_resume', target_type: 'class_recording', target_id: row.published.id, target_label: row.published.title || shiftTitle(row.shift), details: { shift_id: row.shift.id, target_date: row.shift.target_date } });
+      await fetchData();
+    } catch (error) { console.error(error); toast.error('再開できませんでした。もう一度お試しください。'); } finally { setProcessing(''); }
   };
 
-  // --- 右カラム：公開済みフィルター ---
-  const filteredPublished = useMemo(() => {
-    return published.filter(p => {
-      const matchesSearch = 
-        p.title.includes(publishedSearch) || 
-        p.target_date.includes(publishedSearch) || 
-        p.subject.includes(publishedSearch) ||
-        (p.unit || '').includes(publishedSearch) ||
-        (p.recording_type_label || '').includes(publishedSearch);
-      
-      const matchesDate = pubFilterDate ? p.target_date === pubFilterDate : true;
-      const matchesSubject = pubFilterSubject !== 'all' ? p.subject === pubFilterSubject : true;
-      const matchesYearScope = pubFilterYearScope !== 'all' ? p.year_scope === pubFilterYearScope : true;
-      const matchesType = pubFilterType !== 'all' ? p.recording_type === pubFilterType : true;
+  const recordFromShift = (shift: ShiftData, period: string, extra: Record<string, unknown>) => ({
+    ...normalizeRecording({
+      original_shift_id: shift.id,
+      target_date: shift.target_date,
+      grade: shift.target_grade || 'その他',
+      subject: shift.target_subject || '全科目',
+      detail_subject: shift.target_detail_subject || '',
+      unit: shift.unit || '',
+      teacher_name: shift.teacher_name || '',
+      title: shiftTitle(shift),
+      video_url: shift.target_recording_url || '',
+      recording_type: 'regular',
+      zoom_recording_file_id: shift.target_recording_file_id || '',
+      target_recording_file_id: shift.target_recording_file_id || '',
+      target_recording_type: shift.target_recording_type || '',
+      zoom_recording_files: shift.zoom_recording_files || [],
+      recording_meeting_id: shift.target_meeting_id || '',
+    }),
+    original_shift_id: shift.id,
+    period,
+    status: 'published',
+    trim_start_seconds: Number(shift.target_recording_trim_start_seconds || 0),
+    trim_end_seconds: shift.target_recording_trim_end_seconds ? Number(shift.target_recording_trim_end_seconds) : null,
+    created_at: now(),
+    updated_at: now(),
+    ...extra,
+  });
 
-      return matchesSearch && matchesDate && matchesSubject && matchesYearScope && matchesType;
-    });
-  }, [published, publishedSearch, pubFilterDate, pubFilterSubject, pubFilterYearScope, pubFilterType]);
-
-  const uniqueSubjects = useMemo(() => Array.from(new Set(published.map(p => p.subject))), [published]);
-  const currentPublishedCount = useMemo(() => published.filter(p => p.year_scope === 'current').length, [published]);
-  const pastPublishedCount = useMemo(() => published.filter(p => p.year_scope === 'past').length, [published]);
-  const testPrepPublishedCount = useMemo(() => published.filter(p => p.recording_type === 'test_prep').length, [published]);
-  const missingRecordingShifts = useMemo(() => {
-    const text = missingShiftSearch.trim().toLowerCase();
-    return unpublishedShifts.filter(shift => {
-      if (shift.target_recording_url) return false;
-      if (!text) return true;
-      return [
-        shift.target_date,
-        shift.target_grade,
-        shift.target_subject,
-        shift.target_detail_subject,
-        shift.unit,
-        shift.teacher_name,
-        shift.note,
-      ].filter(Boolean).join(' ').toLowerCase().includes(text);
-    });
-  }, [unpublishedShifts, missingShiftSearch]);
-  const missingRecordingGroups = useMemo<MissingRecordingGroup[]>(() => {
-    const groups = new Map<string, MissingRecordingGroup>();
-    missingRecordingShifts.forEach(shift => {
-      const weekStart = dateKeyToWeekStart(shift.target_date);
-      const grade = shift.target_grade || '学年未設定';
-      const subject = shift.target_subject || '科目未設定';
-      const detailSubject = shift.target_detail_subject || '';
-      const unit = shift.unit || shiftDefaultTitle(shift);
-      const key = [weekStart, grade, subject, detailSubject, unit].join('|');
-      const existing = groups.get(key);
-      if (existing) {
-        existing.shifts.push(shift);
-        return;
-      }
-
-      groups.set(key, {
-        key,
-        weekLabel: dateKeyToWeekLabel(shift.target_date),
-        grade,
-        subject,
-        detailSubject,
-        unit,
-        shifts: [shift],
-      });
-    });
-
-    return Array.from(groups.values())
-      .map(group => ({
-        ...group,
-        shifts: group.shifts.sort((a, b) => `${a.target_date} ${a.note || ''}`.localeCompare(`${b.target_date} ${b.note || ''}`)),
-      }))
-      .sort((a, b) => b.weekLabel.localeCompare(a.weekLabel) || b.shifts.length - a.shifts.length);
-  }, [missingRecordingShifts]);
-  const replacementSources = useMemo(() => {
-    const text = replacementSearch.trim().toLowerCase();
-    const group = replacementTarget?.kind === 'group' ? replacementTarget.group : null;
-    return published.filter(item => {
-      if (replacementTarget?.kind === 'published' && item.id === replacementTarget.item.id) return false;
-      if (group && !text) {
-        const sameUnit = [item.unit, item.detail_subject, item.title].filter(Boolean).join(' ').toLowerCase();
-        const groupTerms = [group.unit, group.detailSubject].filter(Boolean).join(' ').toLowerCase();
-        return item.grade === group.grade && item.subject === group.subject && (!groupTerms || sameUnit.includes(groupTerms) || groupTerms.includes(sameUnit));
-      }
-      if (!text) return true;
-      return [
-        item.target_date,
-        item.grade,
-        item.subject,
-        item.detail_subject,
-        item.unit,
-        item.title,
-        item.teacher_name,
-      ].filter(Boolean).join(' ').toLowerCase().includes(text);
-    }).sort((a, b) => {
-      if (!group) return b.target_date.localeCompare(a.target_date);
-      const aScore = Number(a.grade === group.grade) + Number(a.subject === group.subject) + Number((a.unit || a.title || '').includes(group.unit));
-      const bScore = Number(b.grade === group.grade) + Number(b.subject === group.subject) + Number((b.unit || b.title || '').includes(group.unit));
-      return bScore - aScore || b.target_date.localeCompare(a.target_date);
-    });
-  }, [published, replacementSearch, replacementTarget]);
-  const selectedReplacementSource = useMemo(
-    () => published.find(item => item.id === replacementSourceId) || null,
-    [published, replacementSourceId]
-  );
-
-  const openReplacement = (target: ReplacementTarget) => {
-    setReplacementTarget(target);
-    setReplacementSourceId('');
-    setReplacementReason('');
-    setReplacementSearch('');
-  };
-
-  const replacementTargetLabel = replacementTarget?.kind === 'shift'
-    ? `${replacementTarget.item.target_date} ${replacementTarget.item.target_grade || ''} ${replacementTarget.item.target_subject || ''} ${shiftDefaultTitle(replacementTarget.item)}`
-    : replacementTarget?.kind === 'group'
-      ? `${replacementTarget.group.weekLabel} ${replacementTarget.group.grade} ${replacementTarget.group.subject} ${replacementTarget.group.unit}（${replacementTarget.group.shifts.length}件）`
-    : `${replacementTarget?.item.target_date || ''} ${replacementTarget?.item.grade || ''} ${replacementTarget?.item.subject || ''} ${replacementTarget?.item.title || ''}`;
-
-  const applyReplacement = async () => {
-    if (!replacementTarget || !selectedReplacementSource) {
-      alert('差し替え元の録画を選択してください。');
+  /** 保留・確認待ちの録画を、管理者が内容を確認したうえで公開する。 */
+  const publishRow = async (row: Row, meetingPosition?: 'before' | 'after') => {
+    const trimOption = meetingPosition ? row.shift.recording_meeting_trim_options?.[meetingPosition] : undefined;
+    // 集会の位置を選んだときは、その切り取り位置で公開する。
+    const shift: ShiftData = trimOption
+      ? { ...row.shift, target_recording_trim_start_seconds: trimOption.start, target_recording_trim_end_seconds: trimOption.end }
+      : row.shift;
+    if (!shift.target_recording_url) return;
+    if (shift.target_recording_type !== REQUIRED_RECORDING_TYPE) {
+      toast.error('この録画は共有画面付きスピーカービューではないため公開できません。「差し替え」から正しい録画を選んでください。');
       return;
     }
-    const reason = replacementReason.trim();
-    if (!reason) {
-      alert('差し替え理由を入力してください。');
-      return;
-    }
-
-    setReplacementSaving(true);
-    setProcessing(true);
-    try {
-      const now = new Date().toISOString();
-      const replacementFields = {
-        video_url: selectedReplacementSource.video_url,
-        zoom_recording_file_id: selectedReplacementSource.zoom_recording_file_id || selectedReplacementSource.target_recording_file_id || '',
-        target_recording_file_id: selectedReplacementSource.target_recording_file_id || selectedReplacementSource.zoom_recording_file_id || '',
-        target_recording_type: selectedReplacementSource.target_recording_type || '',
-        zoom_recording_files: selectedReplacementSource.zoom_recording_files || [],
-        recording_meeting_id: selectedReplacementSource.recording_meeting_id || '',
-        is_replacement: true,
-        replacement_source_recording_id: selectedReplacementSource.id,
-        replacement_source_title: selectedReplacementSource.title,
-        replacement_source_date: selectedReplacementSource.target_date,
-        replacement_reason: reason,
-        replacement_updated_at: now,
-        source: 'recording_replacement',
-        updated_at: now,
-      };
-
-      if (replacementTarget.kind === 'published') {
-        await updateDoc(doc(db, 'class_recordings', replacementTarget.item.id), replacementFields);
-        setPublished(prev => prev.map(item => item.id === replacementTarget.item.id ? {
-          ...item,
-          ...replacementFields,
-        } : item));
-      } else if (replacementTarget.kind === 'group') {
-        const batch = writeBatch(db);
-        const newPublished: PublishedData[] = [];
-        replacementTarget.group.shifts.forEach(shift => {
-          const ref = doc(collection(db, 'class_recordings'));
-          const data = {
-            ...normalizeRecording({
-              original_shift_id: shift.id,
-              target_date: shift.target_date,
-              grade: shift.target_grade || 'その他',
-              subject: shift.target_subject || '全科目',
-              detail_subject: shift.target_detail_subject || '',
-              unit: shift.unit || '',
-              teacher_name: shift.teacher_name || '',
-              title: `${shiftDefaultTitle(shift)}（代替録画）`,
-              video_url: selectedReplacementSource.video_url,
-              recording_type: selectedReplacementSource.recording_type || 'regular',
-              zoom_recording_file_id: selectedReplacementSource.zoom_recording_file_id || selectedReplacementSource.target_recording_file_id || '',
-              target_recording_file_id: selectedReplacementSource.target_recording_file_id || selectedReplacementSource.zoom_recording_file_id || '',
-              target_recording_type: selectedReplacementSource.target_recording_type || '',
-              zoom_recording_files: selectedReplacementSource.zoom_recording_files || [],
-              recording_meeting_id: selectedReplacementSource.recording_meeting_id || '',
-              source: 'recording_replacement',
-            }),
-            original_shift_id: shift.id,
-            is_replacement: true,
-            replacement_source_recording_id: selectedReplacementSource.id,
-            replacement_source_title: selectedReplacementSource.title,
-            replacement_source_date: selectedReplacementSource.target_date,
-            replacement_reason: reason,
-            replacement_group_key: replacementTarget.group.key,
-            trim_start_seconds: 0,
-            trim_end_seconds: null,
-            created_at: now,
-            updated_at: now,
-          };
-          batch.set(ref, data);
-          newPublished.push({ id: ref.id, ...data });
-        });
-        await batch.commit();
-        const replacedShiftIds = new Set(replacementTarget.group.shifts.map(shift => shift.id));
-        setPublished(prev => [...newPublished, ...prev].sort((a, b) => b.target_date.localeCompare(a.target_date)));
-        setUnpublishedShifts(prev => prev.filter(item => !replacedShiftIds.has(item.id)));
-      } else {
-        const shift = replacementTarget.item;
-        const ref = doc(collection(db, 'class_recordings'));
-        const data = {
-          ...normalizeRecording({
-            original_shift_id: shift.id,
-            target_date: shift.target_date,
-            grade: shift.target_grade || 'その他',
-            subject: shift.target_subject || '全科目',
-            detail_subject: shift.target_detail_subject || '',
-            unit: shift.unit || '',
-            teacher_name: shift.teacher_name || '',
-            title: `${shiftDefaultTitle(shift)}（代替録画）`,
-            video_url: selectedReplacementSource.video_url,
-            recording_type: selectedReplacementSource.recording_type || 'regular',
-            zoom_recording_file_id: selectedReplacementSource.zoom_recording_file_id || selectedReplacementSource.target_recording_file_id || '',
-            target_recording_file_id: selectedReplacementSource.target_recording_file_id || selectedReplacementSource.zoom_recording_file_id || '',
-            target_recording_type: selectedReplacementSource.target_recording_type || '',
-            zoom_recording_files: selectedReplacementSource.zoom_recording_files || [],
-            recording_meeting_id: selectedReplacementSource.recording_meeting_id || '',
-            source: 'recording_replacement',
-          }),
-          original_shift_id: shift.id,
-          is_replacement: true,
-          replacement_source_recording_id: selectedReplacementSource.id,
-          replacement_source_title: selectedReplacementSource.title,
-          replacement_source_date: selectedReplacementSource.target_date,
-          replacement_reason: reason,
-          trim_start_seconds: 0,
-          trim_end_seconds: null,
-          created_at: now,
-          updated_at: now,
-        };
-        await writeBatch(db).set(ref, data).commit();
-        setPublished(prev => [{ id: ref.id, ...data }, ...prev].sort((a, b) => b.target_date.localeCompare(a.target_date)));
-        setUnpublishedShifts(prev => prev.filter(item => item.id !== shift.id));
-      }
-
-      setReplacementTarget(null);
-      setReplacementSourceId('');
-      setReplacementReason('');
-      await fetchData();
-    } catch (error) {
-      console.error(error);
-      alert('録画の差し替えに失敗しました。');
-    } finally {
-      setReplacementSaving(false);
-      setProcessing(false);
-    }
-  };
-
-  // --- 右カラム：一括操作 ---
-  const togglePubSelect = (id: string) => {
-    const newSet = new Set(pubSelectedIds);
-    if (newSet.has(id)) newSet.delete(id); else newSet.add(id);
-    setPubSelectedIds(newSet);
-  };
-
-  const togglePubSelectAll = () => {
-    const targetIds = filteredPublished.map(p => p.id);
-    const allSelected = targetIds.length > 0 && targetIds.every(id => pubSelectedIds.has(id));
-    const newSet = new Set(pubSelectedIds);
-    if (allSelected) {
-      targetIds.forEach(id => newSet.delete(id));
-    } else {
-      targetIds.forEach(id => newSet.add(id));
-    }
-    setPubSelectedIds(newSet);
-  };
-
-  const handleBulkUnpublish = async () => {
-    if (pubSelectedIds.size === 0) return;
-    if (!confirm(`選択した${pubSelectedIds.size}件の動画を削除（公開停止）しますか？`)) return;
-    setProcessing(true);
+    const issues = (shift.recording_issues || []).map(issue => `・${issue.label}${issue.detail ? `（${issue.detail}）` : ''}`).join('\n');
+    if (!(await confirm({
+      title: `「${shiftTitle(shift)}」の録画を生徒に公開しますか？`,
+      message: issues ? (
+        <div className="space-y-2">
+          <p className="font-bold">自動アップを止めた理由</p>
+          <p className="whitespace-pre-wrap">{issues}</p>
+          <p>プレビューで内容を確認してから公開してください。</p>
+        </div>
+      ) : undefined,
+      confirmLabel: '公開する',
+      ...(meetingPosition && trimOption ? {
+        title: `集会は${MEETING_POSITION_LABELS[meetingPosition]}として、「${shiftTitle(shift)}」の録画を公開しますか？`,
+        message: (
+          <div className="space-y-2">
+            <p>{meetingPosition === 'before' ? '録画の前側にある集会を除き、' : '録画の後ろ側にある集会を除き、'}録画の{trimOption.start ? minutesLabel(trimOption.start) : '最初'}〜{trimOption.end ? minutesLabel(trimOption.end) : '最後'}を授業として公開します。</p>
+            <p>公開後に「確認」で切り取り位置が合っているかを見てください。</p>
+          </div>
+        ),
+      } : {}),
+    }))) return;
+    setProcessing(shift.id);
     try {
       const batch = writeBatch(db);
-      pubSelectedIds.forEach(id => {
-        const ref = doc(db, 'class_recordings', id);
-        batch.delete(ref);
-      });
+      const ref = doc(db, 'class_recordings', `auto_${shift.id}`);
+      batch.set(ref, recordFromShift(shift, row.period, { source: 'zoom_approval', approved_after_review: Boolean(issues) }), { merge: true });
+      batch.set(doc(db, 'shift_assignments', shift.id), {
+        recording_status: 'published', published_recording_id: ref.id, recording_publish_mode: null,
+        ...(trimOption ? { target_recording_trim_start_seconds: trimOption.start, target_recording_trim_end_seconds: trimOption.end, recording_group_meeting: meetingPosition } : {}),
+      }, { merge: true });
       await batch.commit();
-      
-      // シフト由来のものは候補に戻したいが、複雑になるため今回は単純削除後のリロード
-      setPublished(prev => prev.filter(p => !pubSelectedIds.has(p.id)));
-      setPubSelectedIds(new Set());
-      fetchData(); // 整合性のため再取得
-    } catch (e) { alert('エラー'); } finally { setProcessing(false); }
-  };
-
-  const handleUnpublish = async (pubId: string) => {
-    if(!confirm('公開を取り下げますか？')) return;
-    setProcessing(true);
-    try {
-      await deleteDoc(doc(db, 'class_recordings', pubId));
-      fetchData(); 
-    } catch (e) { alert('削除失敗'); } finally { setProcessing(false); }
-  };
-
-  const handlePublishedTrimSave = async (pubId: string) => {
-    setProcessing(true);
-    try {
-      const startValue = pubTrimStart[pubId] ? Number(pubTrimStart[pubId]) : 0;
-      const endValue = pubTrimEnd[pubId] ? Number(pubTrimEnd[pubId]) : null;
-      if (startValue < 0 || (endValue !== null && endValue < 0)) {
-        alert('トリミング秒数は0以上で入力してください。');
-        return;
-      }
-      if (endValue !== null && endValue <= startValue) {
-        alert('終了秒は開始秒より大きい値にしてください。');
-        return;
-      }
-      await updateDoc(doc(db, 'class_recordings', pubId), {
-        trim_start_seconds: startValue,
-        trim_end_seconds: endValue,
-        updated_at: new Date().toISOString(),
-      });
-      setPublished(prev => prev.map(item => item.id === pubId ? { ...item, trim_start_seconds: startValue, trim_end_seconds: endValue } : item));
-    } catch (error) {
-      console.error(error);
-      alert('トリミング設定の保存に失敗しました。');
-    } finally {
-      setProcessing(false);
-    }
-  };
-
-  const handleCsvImport = async (file?: File) => {
-    if (!file) return;
-    setCsvImporting(true);
-    setCsvLog('');
-    try {
-      const buffer = await file.arrayBuffer();
-      const text = new TextDecoder(csvEncoding).decode(buffer);
-      const rows = parseCsv(text.replace(/^\uFEFF/, ''));
-      if (rows.length < 2) {
-        alert('CSVに取り込める行がありません。');
-        return;
-      }
-
-      const headerIndex = findCsvHeaderIndex(rows);
-      if (headerIndex < 0) {
-        alert('CSVの見出し行を判定できませんでした。URL列と学年・タイトルなどの列名を確認してください。');
-        return;
-      }
-
-      const headers = rows[headerIndex].map(header => header.trim());
-      const dataRows = rows.slice(headerIndex + 1);
-      const publishColumn = findHeaderColumn(headers, annualRecordingCsvAliases.publish);
-      const classColumn = findHeaderColumn(headers, annualRecordingCsvAliases.class_name);
-      const urlColumn = findHeaderColumn(headers, csvHeaderAliases.video_url);
-      const dateColumn = findHeaderColumn(headers, csvHeaderAliases.target_date);
-      const isAnnualRecordingList = publishColumn >= 0 && classColumn >= 0;
-      const detectedSchoolYear = detectCsvSchoolYear(rows, headerIndex);
-      const items: Omit<PublishedData, 'id'>[] = [];
-      let eligibleRows = 0;
-      let excludedRows = 0;
-      let noUrlRows = 0;
-      let annualCalendarYear = detectedSchoolYear;
-      let previousAnnualMonth: number | null = null;
-
-      dataRows.forEach(values => {
-        let annualTargetDate = '';
-        if (isAnnualRecordingList && dateColumn >= 0) {
-          const parts = monthDayParts(values[dateColumn]);
-          if (parts) {
-            if (previousAnnualMonth !== null && previousAnnualMonth >= 10 && parts.month <= 3) {
-              annualCalendarYear += 1;
-            }
-            previousAnnualMonth = parts.month;
-            annualTargetDate = dateKeyFromMonthDay(annualCalendarYear, parts.month, parts.day);
-          }
-        }
-
-        if (isAnnualRecordingList && !isCsvTruthy(values[publishColumn])) {
-          excludedRows += 1;
-          return;
-        }
-        eligibleRows += 1;
-
-        const row = headers.reduce<Record<string, string>>((acc, header, index) => {
-          if (header) acc[header] = values[index]?.trim() || '';
-          return acc;
-        }, {});
-
-        const videoUrls = isAnnualRecordingList
-          ? values.slice(Math.max(urlColumn, 0)).map(value => String(value || '').trim()).filter(isHttpUrl)
-          : [findCsvValue(row, 'video_url')].filter(isHttpUrl);
-        if (videoUrls.length === 0) {
-          noUrlRows += 1;
-          return;
-        }
-
-        const rawDate = findCsvValue(row, 'target_date');
-        const csvSchoolYear = findCsvValue(row, 'school_year');
-        const schoolYearValue = isAnnualRecordingList ? detectedSchoolYear : csvSchoolYear;
-        const hasExplicitDate = rawDate.trim() !== '';
-        const effectiveSchoolYear = !isAnnualRecordingList && !hasExplicitDate && !schoolYearValue
-          ? getCurrentSchoolYear() - 1
-          : schoolYearValue;
-
-        const className = isAnnualRecordingList ? values[classColumn]?.trim() || '' : '';
-        const unit = findCsvValue(row, 'unit');
-        const baseTitle = findCsvValue(row, 'title') || `${className} ${unit}`.trim() || unit || className;
-        videoUrls.forEach((videoUrl, urlIndex) => {
-          const targetDate = isAnnualRecordingList
-            ? annualTargetDate || dateFromRecordingUrl(videoUrl) || normalizeCsvDate(rawDate, videoUrl, effectiveSchoolYear)
-            : normalizeCsvDate(rawDate, videoUrl, effectiveSchoolYear);
-          const title = videoUrls.length > 1 ? `${baseTitle}（${urlIndex + 1}）` : baseTitle;
-          const item = normalizeRecording({
-            target_date: targetDate,
-            title,
-            video_url: videoUrl,
-            grade: isAnnualRecordingList ? normalizeCsvGrade(findCsvValue(row, 'grade')) : findCsvValue(row, 'grade'),
-            subject: findCsvValue(row, 'subject') || subjectFromClassName(className),
-            unit,
-            detail_subject: findCsvValue(row, 'detail_subject') || className,
-            teacher_name: findCsvValue(row, 'teacher_name'),
-            school_year: effectiveSchoolYear,
-            recording_type: findCsvValue(row, 'recording_type'),
-            difficulty: findCsvValue(row, 'difficulty'),
-            source: isAnnualRecordingList ? 'annual_recording_csv_up' : 'csv_import',
-          });
-          items.push({
-            ...item,
-            csv_import_key: recordingImportKey(item),
-          });
-        });
-      });
-
-      if (items.length === 0) {
-        alert(isAnnualRecordingList
-          ? 'UPにチェックが入り、録画URLが設定された行が見つかりませんでした。'
-          : '録画URLが入った行が見つかりませんでした。');
-        return;
-      }
-
-      for (let i = 0; i < items.length; i += 400) {
-        const batch = writeBatch(db);
-        items.slice(i, i + 400).forEach(item => {
-          const ref = doc(db, 'class_recordings', stableCsvRecordingDocId(item));
-          batch.set(ref, {
-            ...item,
-            imported_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          }, { merge: true });
-        });
-        await batch.commit();
-      }
-
-      setCsvLog(isAnnualRecordingList
-        ? `UP対象${eligibleRows}行の録画${items.length}件を取り込みました。UP対象外: ${excludedRows}行 / URLなし: ${noUrlRows}行。同じ録画は上書き更新されます。`
-        : `${items.length}件を取り込みました。同じ録画は上書き更新されます。URLなし: ${noUrlRows}行`);
+      void reportAuditLog({ action: 'recording_publish', target_type: 'class_recording', target_id: ref.id, target_label: shiftTitle(shift), details: { shift_id: shift.id, target_date: shift.target_date, approved_after_review: Boolean(issues) } });
       await fetchData();
-    } catch (error) {
-      console.error(error);
-      alert('CSV取り込みに失敗しました。文字コードや列名を確認してください。');
-    } finally {
-      setCsvImporting(false);
-    }
+    } catch (error) { console.error(error); toast.error('公開できませんでした。もう一度お試しください。'); } finally { setProcessing(''); }
   };
 
-  const handleZoomSync = async () => {
-    if (!confirm('Zoom APIから直近30日分の録画を同期しますか？')) return;
-    setZoomSyncing(true);
+  /** 授業の前後の集会の録画を「グループミーティング」として生徒に公開する。授業の録画とは別に扱う。 */
+  const publishGroupMeeting = async (row: Row, candidate: ZoomCandidate) => {
+    const shift = row.shift;
+    if (!candidate.url || !candidate.file_id) return;
+    if (!(await confirm({
+      title: `「${groupMeetingTitle(candidate)}」を生徒に公開しますか？`,
+      message: (
+        <div className="space-y-2">
+          <p>{formatDate(shift.target_date)} {row.period} ・ {[shift.target_grade, shift.target_subject].filter(Boolean).join(' ')}の会議の録画（{candidate.recording_start ? formatTime(candidate.recording_start) : '時刻不明'}から{minutesLabel(candidate.duration_seconds) || '長さ不明'}）です。</p>
+          <p>授業の録画とは別に「グループミーティング」として、{shift.target_grade || '対象学年'}の生徒に表示します。視聴コインは付きません。</p>
+          <p>公開前に「集会を確認」で内容を見てください。</p>
+        </div>
+      ),
+      confirmLabel: '公開する',
+    }))) return;
+    setProcessing(shift.id);
+    try {
+      const targetDate = String(shift.target_date || '').slice(0, 10);
+      const schoolYear = normalizeSchoolYear(targetDate);
+      const id = groupMeetingRecordingId(shift.id, candidate.file_id);
+      const batch = writeBatch(db);
+      batch.set(doc(db, 'class_recordings', id), {
+        // original_shift_id は授業の録画だけに使う（自動公開が授業の録画を手動公開と取り違えないよう別の項目にする）。
+        group_meeting_shift_id: shift.id,
+        target_date: targetDate,
+        grade: shift.target_grade || 'その他',
+        subject: '全科目',
+        detail_subject: '',
+        unit: '',
+        teacher_name: shift.teacher_name || '',
+        title: groupMeetingTitle(candidate),
+        period: row.period,
+        video_url: candidate.url,
+        recording_type: 'group_meeting',
+        recording_type_label: recordingTypeLabel('group_meeting'),
+        school_year: schoolYear,
+        year_scope: getRecordingYearScope(schoolYear),
+        zoom_recording_file_id: candidate.file_id,
+        target_recording_file_id: candidate.file_id,
+        target_recording_type: candidate.recording_type || '',
+        zoom_recording_files: [],
+        recording_meeting_id: shift.target_meeting_id || candidate.meeting_id || '',
+        recording_duration_seconds: Number(candidate.duration_seconds || 0),
+        trim_start_seconds: 0,
+        trim_end_seconds: null,
+        source: 'group_meeting',
+        status: 'published',
+        created_at: now(),
+        updated_at: now(),
+      }, { merge: true });
+      await batch.commit();
+      void reportAuditLog({ action: 'recording_publish', target_type: 'class_recording', target_id: id, target_label: groupMeetingTitle(candidate), details: { shift_id: shift.id, target_date: targetDate, group_meeting: true } });
+      toast.success('グループミーティングを公開しました。');
+      await fetchData();
+    } catch (error) { console.error(error); toast.error('公開できませんでした。もう一度お試しください。'); } finally { setProcessing(''); }
+  };
+
+  const syncZoom = async () => {
+    if (!(await confirm({
+      title: 'Zoomから直近14日分の録画を取得しますか？',
+      message: '講師配置と照合し、問題のない録画は自動でアップされます。',
+      confirmLabel: '取得する',
+    }))) return;
+    setProcessing('sync');
     setZoomSyncLog('');
     try {
       const token = await auth.currentUser?.getIdToken();
       const res = await fetch('/api/zoom/recordings/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ days: 30, max_meetings: 180 }),
+        body: JSON.stringify({ days: 14, max_meetings: 180 }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || data.ok === false) throw new Error(data.error || 'Zoom録画同期に失敗しました');
-      const reasonCounts = data.reason_counts || {};
-      const unmatched = Number(reasonCounts['no-matching-shift'] || 0);
-      const noUrl = Number(reasonCounts['no-recording-url'] || 0);
-      setZoomSyncLog(`Zoom録画同期(${data.scope === 'account' ? 'アカウント全体' : 'ユーザー'}): 取得${data.meetings || 0}件 / 対象${data.eligible || 0}件 / 講師配置一致${data.matched || 0}件 / 更新${data.updated || 0}件${unmatched ? ` / 未一致${unmatched}件` : ''}${noUrl ? ` / URLなし${noUrl}件` : ''}${data.truncated ? ' / 件数が多いため一部のみ処理' : ''}`);
+      if (!res.ok || data.ok === false) throw new Error(data.error || 'Zoom録画の取得に失敗しました');
+      setZoomSyncLog(`Zoomの録画 ${data.meetings || 0}件を確認：講師配置と一致 ${data.matched || 0}件 / 自動アップ ${data.published || 0}件 / 保留 ${data.blocked || 0}件${data.truncated ? '（件数が多いため一部のみ）' : ''}`);
       await fetchData();
     } catch (error: any) {
-      console.error(error);
-      setZoomSyncLog(`Zoom録画同期エラー: ${error.message || error}`);
-    } finally {
-      setZoomSyncing(false);
-    }
+      setZoomSyncLog(`エラー: ${error?.message || error}`);
+    } finally { setProcessing(''); }
   };
 
-  // --- カレンダーロジック ---
-  const getDaysInMonth = (year: number, month: number) => new Date(year, month + 1, 0).getDate();
-  const getFirstDayOfMonth = (year: number, month: number) => new Date(year, month, 1).getDay();
-  const year = currentDate.getFullYear();
-  const month = currentDate.getMonth();
-  const days = [];
-  for (let i = 0; i < getFirstDayOfMonth(year, month); i++) days.push(null);
-  for (let i = 1; i <= getDaysInMonth(year, month); i++) days.push(i);
-
-  const displayedCandidates = useMemo(() => {
-    if (viewMode === 'list') return candidates;
-    if (!selectedDateFilter) return [];
-    return candidates.filter(c => c.target_date === selectedDateFilter);
-  }, [candidates, viewMode, selectedDateFilter]);
-
-  const dateCounts = useMemo(() => {
-    const counts: {[key:string]: number} = {};
-    candidates.forEach(c => {
-      counts[c.target_date] = (counts[c.target_date] || 0) + 1;
-    });
-    return counts;
-  }, [candidates]);
+  const openPreview = async (target: PreviewTarget) => {
+    setPreviewToken((await auth.currentUser?.getIdToken()) || '');
+    setPreviewTarget(target);
+  };
 
   return (
-    <div className="min-h-screen bg-[#F0F4F8] p-6 pb-40 font-sans text-slate-800">
-      {previewTarget && (
-        <div className="fixed inset-0 z-[200] bg-slate-950/80 p-4 backdrop-blur-sm">
-          <div className="mx-auto flex h-full max-w-6xl flex-col overflow-hidden rounded-[28px] bg-white shadow-2xl">
-            <div className="flex flex-col gap-3 border-b border-slate-100 p-4 sm:flex-row sm:items-center sm:justify-between">
-              <div className="min-w-0">
-                <p className="truncate text-sm font-black text-slate-900">{previewTitle}</p>
-                <p className="text-xs font-bold text-slate-400">動画を再生し、現在位置を開始秒・終了秒へ反映できます。</p>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  onClick={() => setTrimFromPreview('start')}
-                  disabled={previewUsesZoomPlayer}
-                  title={previewUsesZoomPlayer ? 'Zoomプレイヤーでは下の秒数入力欄を使用してください' : undefined}
-                  className="flex items-center gap-1 rounded-xl bg-blue-50 px-3 py-2 text-xs font-black text-blue-700 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  <Scissors size={14}/> 現在位置を開始秒
-                </button>
-                <button
-                  onClick={() => setTrimFromPreview('end')}
-                  disabled={previewUsesZoomPlayer}
-                  title={previewUsesZoomPlayer ? 'Zoomプレイヤーでは下の秒数入力欄を使用してください' : undefined}
-                  className="flex items-center gap-1 rounded-xl bg-amber-50 px-3 py-2 text-xs font-black text-amber-700 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  <Scissors size={14}/> 現在位置を終了秒
-                </button>
-                {previewExternalUrl && (
-                  <a href={previewExternalUrl} target="_blank" rel="noreferrer" className="rounded-xl bg-slate-100 px-3 py-2 text-xs font-black text-slate-600 hover:bg-slate-200">
-                    外部で開く
-                  </a>
-                )}
-                <button onClick={() => setPreviewTarget(null)} className="rounded-xl bg-slate-900 px-4 py-2 text-xs font-black text-white hover:bg-slate-800">
-                  閉じる
-                </button>
-              </div>
-            </div>
-            <div className="min-h-0 flex-1 bg-slate-950">
-              {previewSrc ? (
-                previewUsesZoomPlayer ? (
-                  <div className="flex h-full items-center justify-center p-6 text-center text-white">
-                    <div>
-                      <PlayCircle className="mx-auto text-red-400" size={48} />
-                      <p className="mt-4 text-sm font-black">Zoom録画は公式プレイヤーで確認してください</p>
-                      <p className="mt-2 text-xs font-bold text-slate-400">Zoom側の制限により管理画面内へ埋め込めません。</p>
-                      <a href={previewSrc} target="_blank" rel="noopener noreferrer" className="mt-5 inline-flex rounded-xl bg-white px-5 py-3 text-xs font-black text-slate-900 hover:bg-slate-100">
-                        Zoomで録画を開く
-                      </a>
-                    </div>
-                  </div>
-                ) : (
-                  <video
-                    key={previewSrc}
-                    ref={previewVideoRef}
-                    src={previewSrc}
-                    className="h-full w-full"
-                    controls
-                    playsInline
-                    preload="metadata"
-                  />
-                )
-              ) : (
-                <div className="flex h-full items-center justify-center p-6 text-center text-sm font-bold text-white">
-                  この録画は画面内再生に必要なZoom録画ファイル情報がありません。
-                </div>
-              )}
-            </div>
-            <div className="grid gap-2 border-t border-slate-100 bg-slate-50 p-4 text-xs font-bold text-slate-500 sm:grid-cols-2">
-              <div>
-                開始秒: {previewTarget.kind === 'shift' ? (trimStart[previewTarget.item.id] || '0') : (pubTrimStart[previewTarget.item.id] || '0')}
-              </div>
-              <div>
-                終了秒: {previewTarget.kind === 'shift' ? (trimEnd[previewTarget.item.id] || '未指定') : (pubTrimEnd[previewTarget.item.id] || '未指定')}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-      {replacementTarget && (
-        <div className="fixed inset-0 z-[210] bg-slate-950/80 p-4 backdrop-blur-sm">
-          <div className="mx-auto flex max-h-full max-w-4xl flex-col overflow-hidden rounded-[28px] bg-white shadow-2xl">
-            <div className="border-b border-slate-100 p-5">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                <div className="min-w-0">
-                  <h2 className="flex items-center gap-2 text-lg font-black text-slate-900">
-                    <span className="rounded-xl bg-purple-50 p-2 text-purple-700"><Replace size={18}/></span>
-                    録画を別録画で置き換え
-                  </h2>
-                  <p className="mt-2 line-clamp-2 text-xs font-bold text-slate-500">
-                    対象: {replacementTargetLabel}
-                  </p>
-                </div>
-                <button
-                  onClick={() => setReplacementTarget(null)}
-                  className="rounded-xl bg-slate-100 px-4 py-2 text-xs font-black text-slate-600 hover:bg-slate-200"
-                >
-                  閉じる
-                </button>
-              </div>
-            </div>
-            <div className="grid min-h-0 flex-1 gap-4 overflow-hidden p-5 lg:grid-cols-[1fr_320px]">
-              <div className="flex min-h-0 flex-col">
-                <div className="relative mb-3 shrink-0">
-                  <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"/>
-                  <input
-                    value={replacementSearch}
-                    onChange={(e) => setReplacementSearch(e.target.value)}
-                    placeholder="差し替え元の録画を検索（日付・単元・講師など）"
-                    className="w-full rounded-2xl border border-slate-200 bg-slate-50 py-3 pl-9 pr-3 text-sm font-bold outline-none focus:border-purple-400 focus:bg-white"
-                  />
-                </div>
-                <div className="min-h-[320px] flex-1 overflow-y-auto rounded-2xl border border-slate-100 bg-slate-50 p-2">
-                  {replacementSources.length === 0 ? (
-                    <div className="flex h-full items-center justify-center p-8 text-center text-xs font-bold text-slate-400">
-                      差し替え元にできる公開済み録画がありません。
-                    </div>
-                  ) : replacementSources.map(source => {
-                    const selected = replacementSourceId === source.id;
-                    return (
-                      <button
-                        key={source.id}
-                        onClick={() => setReplacementSourceId(source.id)}
-                        className={`mb-2 w-full rounded-2xl border p-3 text-left transition-all ${selected ? 'border-purple-400 bg-purple-50 shadow-sm' : 'border-white bg-white hover:border-purple-200'}`}
-                      >
-                        <div className="mb-1 flex flex-wrap items-center gap-1 text-[10px] font-black text-slate-400">
-                          <span>{source.target_date}</span>
-                          <span className="rounded bg-slate-100 px-1.5 text-slate-500">{source.grade}</span>
-                          <span className="rounded bg-slate-100 px-1.5 text-slate-500">{source.subject}</span>
-                          {source.recording_type_label && <span className="rounded bg-blue-50 px-1.5 text-blue-600">{source.recording_type_label}</span>}
-                        </div>
-                        <p className="line-clamp-2 text-xs font-black text-slate-800">{source.title}</p>
-                        {source.unit && <p className="mt-1 line-clamp-1 text-[10px] font-bold text-slate-400">{source.unit}</p>}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-              <div className="space-y-3 rounded-2xl border border-slate-100 bg-slate-50 p-4">
-                <div>
-                  <p className="mb-1 text-[10px] font-black text-slate-400">選択中の差し替え元</p>
-                  <div className="rounded-2xl bg-white p-3 text-xs font-bold text-slate-600">
-                    {selectedReplacementSource ? (
-                      <>
-                        <p className="font-black text-slate-800">{selectedReplacementSource.title}</p>
-                        <p className="mt-1 text-[10px] text-slate-400">{selectedReplacementSource.target_date} / {selectedReplacementSource.grade} / {selectedReplacementSource.subject}</p>
-                      </>
-                    ) : '未選択'}
-                  </div>
-                </div>
-                <div>
-                  <label className="mb-1 block text-[10px] font-black text-slate-400">差し替え理由</label>
-                  <textarea
-                    value={replacementReason}
-                    onChange={(e) => setReplacementReason(e.target.value)}
-                    placeholder="例: 録画押し忘れのため、同一単元の別日録画で代替"
-                    className="h-28 w-full resize-none rounded-2xl border border-slate-200 bg-white p-3 text-xs font-bold text-slate-700 outline-none focus:border-purple-400"
-                  />
-                </div>
-                <button
-                  onClick={applyReplacement}
-                  disabled={replacementSaving || !selectedReplacementSource}
-                  className="flex w-full items-center justify-center gap-2 rounded-2xl bg-purple-600 px-4 py-3 text-sm font-black text-white shadow-sm hover:bg-purple-700 disabled:opacity-50"
-                >
-                  {replacementSaving ? <Loader2 className="animate-spin" size={16}/> : <Replace size={16}/>}
-                  この録画で置き換える
-                </button>
-                <p className="text-[10px] font-bold leading-relaxed text-slate-400">
-                  授業日・学年・科目などの表示情報は対象授業のまま残し、動画だけを選択した録画に差し替えます。
-                </p>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-      <div className="max-w-[1800px] mx-auto">
-        
-        {/* ヘッダー */}
-        <div className="flex flex-col md:flex-row items-center justify-between mb-8 gap-6">
-          <div className="flex items-center gap-4">
-            <Link href="/master" className="bg-white p-4 rounded-full shadow-sm text-gray-400 hover:text-red-600 hover:shadow-md transition-all active:scale-95">
-              <ArrowLeft size={24} strokeWidth={3} />
-            </Link>
-            <div>
-              <h1 className="text-2xl font-black text-gray-800 flex items-center gap-3 tracking-tight">
-                <span className="bg-gradient-to-br from-red-500 to-pink-600 text-white p-2.5 rounded-2xl shadow-lg shadow-red-200">
-                  <Video size={24} strokeWidth={3} />
-                </span>
-                録画承認センター
-              </h1>
-              <p className="text-xs font-bold text-gray-400 mt-1 pl-1">未承認: {candidates.length}件</p>
-            </div>
-          </div>
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <button onClick={handleZoomSync} disabled={zoomSyncing} className="flex items-center justify-center gap-2 bg-slate-900 px-5 py-3 rounded-2xl text-sm font-black text-white hover:bg-slate-800 shadow-sm transition-colors disabled:opacity-60">
-              {zoomSyncing ? <Loader2 className="animate-spin" size={18} /> : <RefreshCw size={18} strokeWidth={2.5} />} Zoom録画を同期
-            </button>
-            <button onClick={fetchData} className="flex items-center justify-center gap-2 bg-white px-5 py-3 rounded-2xl text-sm font-black text-gray-600 hover:bg-gray-50 shadow-sm transition-colors">
-              <RefreshCw size={18} strokeWidth={2.5} /> 更新
-            </button>
-          </div>
-        </div>
-        {zoomSyncLog && (
-          <div className={`mb-4 rounded-2xl px-4 py-3 text-xs font-black ${zoomSyncLog.includes('エラー') ? 'bg-red-50 text-red-700' : 'bg-slate-900 text-white'}`}>
-            {zoomSyncLog}
-          </div>
+    <div className="pb-24 text-slate-800">
+      <AdminPageHeader
+        description="講師配置に一致した「共有画面付きスピーカービュー」の録画は、時間などに問題がなければZoomから届いた時点で自動でアップされます。問題がある録画は保留になります。"
+        actions={(
+          <>
+            <Button onClick={() => void syncZoom()} disabled={Boolean(processing)} loading={processing === 'sync'} icon={<Upload size={16} aria-hidden />}>
+              Zoomから今すぐ取得
+            </Button>
+            <Button variant="secondary" onClick={() => void fetchData()} loading={loading} icon={<RefreshCw size={16} aria-hidden />}>
+              再読み込み
+            </Button>
+          </>
         )}
+      />
+      {zoomSyncLog && (
+        <p className={cn('mb-4 rounded-card border px-4 py-3 text-sm font-bold', zoomSyncLog.startsWith('エラー') ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-sky-200 bg-sky-50 text-sky-800')}>{zoomSyncLog}</p>
+      )}
 
-        <div className="mb-8 bg-white rounded-[28px] border border-slate-100 p-4 shadow-sm">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
-            <div>
-              <h2 className="text-sm font-black text-slate-700 flex items-center gap-2">
-                <span className="bg-blue-50 text-blue-600 p-2 rounded-xl"><FileUp size={16}/></span>
-                録画CSV取り込み
-              </h2>
-              <p className="mt-1 text-xs font-bold text-slate-400">
-                年度録画一覧は「UP」が有効な行だけを公開します。1行に複数の録画URLがある場合も、すべて取り込みます。
-              </p>
-            </div>
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-              <select
-                className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-bold text-slate-600 outline-none focus:border-blue-400"
-                value={csvEncoding}
-                onChange={(e) => setCsvEncoding(e.target.value as 'utf-8' | 'shift-jis')}
-                disabled={csvImporting}
-              >
-                <option value="utf-8">UTF-8</option>
-                <option value="shift-jis">Shift_JIS</option>
+      <AdminTabs
+        className="mb-5"
+        ariaLabel="録画の管理"
+        urlParam="tab"
+        value={tab}
+        onChange={setTab}
+        tabs={[
+          { id: 'status', label: 'アップ状況（講師配置ごと）', badge: attentionCount > 0 ? attentionCount : undefined },
+          { id: 'library', label: '公開中の録画' },
+          { id: 'import', label: '過去録画の取込' },
+        ]}
+      />
+
+      {tab === 'status' && (
+        <section className="space-y-4">
+          <div className="flex flex-col gap-3 rounded-card border border-line bg-surface p-4 shadow-sm lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-wrap items-center gap-2">
+              <IconButton variant="secondary" size="sm" label="前の期間" onClick={() => setEndDate(addDays(endDate, -rangeDays))}><ChevronLeft size={18} aria-hidden /></IconButton>
+              <div className="text-center">
+                <p className="text-sm font-bold text-slate-900">{dateLabel(startDate)} 〜 {dateLabel(endDate)}</p>
+                <p className="text-xs font-bold text-slate-500">講師配置 {rows.length}件</p>
+              </div>
+              <IconButton variant="secondary" size="sm" label="次の期間" onClick={() => setEndDate(addDays(endDate, rangeDays))} disabled={endDate >= dateKeyOf(new Date())}><ChevronRight size={18} aria-hidden /></IconButton>
+              <select value={rangeDays} onChange={event => setRangeDays(Number(event.target.value))} aria-label="表示する期間" className="ml-2 min-h-10 rounded-input border border-line bg-surface px-3 py-2 text-sm font-bold text-slate-700">
+                <option value={1}>1日</option><option value={7}>1週間</option><option value={14}>2週間</option><option value={31}>1か月</option>
               </select>
-              <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl bg-slate-800 px-4 py-2 text-xs font-black text-white shadow-sm transition-colors hover:bg-slate-700">
-                {csvImporting ? <Loader2 className="animate-spin" size={16}/> : <FileUp size={16}/>}
-                CSVを選択して取り込み
-                <input
-                  type="file"
-                  accept=".csv,text/csv"
-                  className="hidden"
-                  disabled={csvImporting}
-                  onChange={(e) => {
-                    handleCsvImport(e.target.files?.[0]);
-                    e.currentTarget.value = '';
-                  }}
-                />
-              </label>
+              {endDate !== dateKeyOf(new Date()) && <Button size="sm" variant="ghost" onClick={() => setEndDate(dateKeyOf(new Date()))}>今日まで</Button>}
             </div>
+            <label className="flex min-h-10 items-center gap-2 rounded-input border border-line bg-surface px-3">
+              <Search size={15} className="text-slate-400" aria-hidden />
+              <input value={search} onChange={event => setSearch(event.target.value)} placeholder="学年・科目・単元・講師で検索" aria-label="講師配置を検索" className="w-56 bg-transparent py-2 text-sm outline-none" />
+            </label>
           </div>
-          {csvLog && <p className="mt-3 rounded-xl bg-green-50 px-3 py-2 text-xs font-black text-green-700">{csvLog}</p>}
-        </div>
 
-        <div className="mb-8 rounded-[28px] border border-purple-100 bg-white p-4 shadow-sm">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
-            <div>
-              <h2 className="flex items-center gap-2 text-sm font-black text-slate-700">
-                <span className="rounded-xl bg-purple-50 p-2 text-purple-700"><Replace size={16}/></span>
-                録画なし授業へのまとめて割り当て
-              </h2>
-              <p className="mt-1 text-xs font-bold text-slate-400">
-                1週間の講師配置から同じ学年・科目・単元をまとめています。良い録画を選ぶと、同じ単元の録画なし授業へ一括で割り当てできます。
-              </p>
-            </div>
-            <div className="relative w-full xl:w-96">
-              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"/>
-              <input
-                value={missingShiftSearch}
-                onChange={(e) => setMissingShiftSearch(e.target.value)}
-                placeholder="日付・学年・科目・単元で検索"
-                className="w-full rounded-2xl border border-slate-200 bg-slate-50 py-3 pl-9 pr-3 text-xs font-bold outline-none focus:border-purple-400 focus:bg-white"
-              />
-            </div>
+          <div className="grid grid-cols-3 gap-2 sm:grid-cols-5 xl:grid-cols-9">
+            {([['all', 'すべて', rows.length], ['attention', '要対応', attentionCount], ...(Object.keys(RECORDING_UPLOAD_STATE_LABELS) as RecordingUploadState[]).map(state => [state, RECORDING_UPLOAD_STATE_LABELS[state], counts[state] || 0])] as [string, string, number][]).map(([key, label, count]) => (
+              <button key={key} onClick={() => setStateFilter(key as typeof stateFilter)}
+                aria-pressed={stateFilter === key}
+                className={cn('rounded-btn border px-3 py-2.5 text-left transition', stateFilter === key ? 'border-accent bg-accent text-accent-ink' : 'border-line bg-surface text-slate-600 hover:border-slate-300')}>
+                <span className="block text-xs font-bold opacity-80">{label}</span>
+                <span className="text-lg font-bold">{count}</span>
+              </button>
+            ))}
           </div>
-          <div className="mt-4 max-h-80 overflow-y-auto rounded-2xl border border-slate-100 bg-slate-50 p-2">
-            {missingRecordingGroups.length === 0 ? (
-              <div className="p-6 text-center text-xs font-bold text-slate-400">
-                録画なしの未公開授業は見つかりません。
+
+          {loading ? (
+            <ListSkeleton rows={4} />
+          ) : loadError ? (
+            <ErrorState title="録画データを読み込めませんでした" message={loadError || undefined} onRetry={() => void fetchData()} />
+          ) : groupedRows.length === 0 ? (
+            <EmptyState icon={Video} title="該当する講師配置はありません" description="期間や絞り込み条件を変えてください。" />
+          ) : groupedRows.map(([date, dateRows]) => (
+            <div key={date} className="overflow-hidden rounded-card border border-line bg-surface shadow-sm">
+              <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50 px-5 py-2.5">
+                <p className="text-sm font-bold text-slate-800">{dateLabel(date)}</p>
+                <p className="text-xs font-bold text-slate-500">{dateRows.length}件</p>
               </div>
-            ) : (
-              <div className="grid gap-2 lg:grid-cols-2 xl:grid-cols-3">
-                {missingRecordingGroups.slice(0, 60).map(group => {
-                  const dates = Array.from(new Set(group.shifts.map(shift => shift.target_date))).join(' / ');
-                  const teachers = Array.from(new Set(group.shifts.map(shift => shift.teacher_name).filter(Boolean))).slice(0, 4).join('、');
-                  return (
-                  <div key={group.key} className="rounded-2xl border border-white bg-white p-3">
-                    <div className="mb-2 flex flex-wrap items-center gap-1 text-[10px] font-black text-slate-400">
-                      <span>{group.weekLabel}</span>
-                      <span className="rounded bg-slate-100 px-1.5 text-slate-500">{group.grade}</span>
-                      <span className="rounded bg-slate-100 px-1.5 text-slate-500">{group.subject}</span>
-                      <span className="rounded bg-purple-50 px-1.5 text-purple-700">{group.shifts.length}件</span>
-                    </div>
-                    <p className="line-clamp-2 text-sm font-black text-slate-800">{group.unit}</p>
-                    {group.detailSubject && <p className="mt-1 text-[10px] font-bold text-slate-500">{group.detailSubject}</p>}
-                    <div className="mt-2 rounded-xl bg-slate-50 p-2 text-[10px] font-bold leading-relaxed text-slate-500">
-                      <p className="line-clamp-2">日付: {dates}</p>
-                      <p className="line-clamp-1">講師: {teachers || '未設定'}</p>
-                    </div>
-                    <button
-                      onClick={() => openReplacement({ kind: 'group', group })}
-                      className="mt-3 flex w-full items-center justify-center gap-1 rounded-xl bg-purple-600 px-3 py-2 text-[10px] font-black text-white hover:bg-purple-700"
-                    >
-                      <Replace size={12}/> この単元へまとめて割り当て
-                    </button>
-                  </div>
+              <ul className="divide-y divide-slate-100">
+                {dateRows.map(row => <StatusRow key={row.shift.id} row={row} busy={processing === row.shift.id}
+                  onPreview={() => void openPreview(row.published ? { kind: 'published', item: row.published } : { kind: 'shift', item: row.shift })}
+                  onStop={() => void stopRow(row)} onResume={() => void resumeRow(row)} onPublish={position => void publishRow(row, position)}
+                  meetingRecordings={published.filter(item => item.group_meeting_shift_id === row.shift.id)}
+                  onPreviewMeeting={candidate => void openPreview({ kind: 'candidate', item: row.shift, candidate })}
+                  onPublishMeeting={candidate => void publishGroupMeeting(row, candidate)} onReplace={() => setReplaceRow(row)} />)}
+              </ul>
+            </div>
+          ))}
+        </section>
+      )}
+
+      {tab === 'library' && (loadError
+        ? <ErrorState title="録画データを読み込めませんでした" message={loadError || undefined} onRetry={() => void fetchData()} />
+        : <LibraryTab published={published} loading={loading} onChanged={fetchData} onPreview={item => void openPreview({ kind: 'published', item })} />)}
+      {tab === 'import' && <ImportTab onImported={fetchData} />}
+
+      {previewTarget && <PreviewModal target={previewTarget} token={previewToken} onClose={() => setPreviewTarget(null)} />}
+      {replaceRow && <ReplaceModal row={replaceRow} published={published} previewOpen={Boolean(previewTarget)} onClose={() => setReplaceRow(null)} onDone={async () => { setReplaceRow(null); await fetchData(); }} recordFromShift={recordFromShift} onPreview={target => void openPreview(target)} />}
+    </div>
+  );
+}
+
+function StatusRow({ row, busy, onPreview, onStop, onResume, onPublish, onReplace, meetingRecordings, onPreviewMeeting, onPublishMeeting }: {
+  row: Row; busy: boolean; onPreview: () => void; onStop: () => void; onResume: () => void; onPublish: (meetingPosition?: 'before' | 'after') => void; onReplace: () => void;
+  meetingRecordings: PublishedData[]; onPreviewMeeting: (candidate: ZoomCandidate) => void; onPublishMeeting: (candidate: ZoomCandidate) => void;
+}) {
+  const { shift, published } = row;
+  const hasVideo = Boolean(published?.video_url || shift.target_recording_url);
+  const issues = shift.recording_issues || [];
+  const meetingChoice = (row.state === 'blocked' || row.state === 'pending') && Boolean(shift.target_recording_url && shift.recording_meeting_trim_options)
+    && issues.some(issue => issue.code === 'meeting-suspected');
+  return (
+    <li className="flex flex-col gap-3 px-5 py-4 lg:flex-row lg:items-center">
+      <div className="flex min-w-0 flex-1 items-start gap-3">
+        <span className="mt-0.5 shrink-0 rounded-btn bg-slate-800 px-2 py-1 text-xs font-bold text-white">{row.period || '時限?'}</span>
+        <div className="min-w-0">
+          <p className="truncate text-sm font-bold text-slate-900">{[shift.target_grade, shift.target_subject].filter(Boolean).join(' ')} ・ {published?.title || shiftTitle(shift)}</p>
+          <p className="mt-0.5 text-xs font-bold text-slate-500">
+            {shift.teacher_name || '講師未設定'}{shift.target_meeting_id ? ` ・ 会議ID ${shift.target_meeting_id}` : ' ・ 会議ID未登録'}
+            {shift.target_recording_duration_seconds ? ` ・ 録画 ${minutesLabel(shift.target_recording_duration_seconds)}` : ''}
+            {published ? ` ・ ${SOURCE_LABELS[published.source || ''] || published.source || ''}` : ''}
+          </p>
+          {row.state === 'blocked' && issues.length > 0 && (
+            <ul className="mt-2 space-y-0.5">
+              {issues.map(issue => <li key={issue.code} className="flex items-start gap-1.5 text-xs font-bold text-rose-700"><AlertTriangle size={12} className="mt-0.5 shrink-0" aria-hidden />{issue.label}{issue.detail ? `（${issue.detail}）` : ''}</li>)}
+            </ul>
+          )}
+          {shift.recording_group_meeting && <p className="mt-1 text-xs font-bold text-sky-800">集会（{MEETING_POSITION_LABELS[shift.recording_group_meeting]}）の録画を除いて、授業の録画を設定しました。</p>}
+          {groupMeetingCandidates(shift).length > 0 && (
+            <ul className="mt-2 space-y-1.5">
+              {groupMeetingCandidates(shift).map(candidate => {
+                const live = meetingRecordings.find(item => item.zoom_recording_file_id === candidate.file_id);
+                return (
+                  <li key={`${candidate.file_id}|${candidate.recording_start}`} className="flex flex-wrap items-center gap-2 rounded-btn bg-sky-50 px-3 py-2 text-xs font-bold text-sky-900">
+                    <span className="min-w-0 flex-1">{groupMeetingTitle(candidate)}の録画 ・ {candidate.recording_start ? formatTime(candidate.recording_start) : '時刻不明'}から{minutesLabel(candidate.duration_seconds) || '長さ不明'}</span>
+                    {live
+                      ? <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-emerald-800">{live.status === 'stopped' ? '停止中（ライブラリで再開）' : '公開中'}</span>
+                      : <>
+                        <Button size="sm" variant="secondary" onClick={() => onPreviewMeeting(candidate)} icon={<PlayCircle size={14} aria-hidden />}>集会を確認</Button>
+                        <Button size="sm" variant="secondary" onClick={() => onPublishMeeting(candidate)} icon={<Upload size={14} aria-hidden />}>グループミーティングとして公開</Button>
+                      </>}
+                  </li>
                 );
-                })}
-              </div>
-            )}
+              })}
+            </ul>
+          )}
+          {row.state === 'stopped' && published?.stopped_reason && <p className="mt-1 text-xs font-bold text-slate-500">停止理由：{published.stopped_reason}</p>}
+          {row.state === 'replaced' && published?.replacement_reason && <p className="mt-1 text-xs font-bold text-emerald-800">差し替え理由：{published.replacement_reason}</p>}
+          {row.state === 'missing' && <p className="mt-1 text-xs font-bold text-amber-800">授業後に録画が届いていません。Zoomの録画設定と会議IDを確認するか、「差し替え」で別の録画を設定してください。</p>}
+        </div>
+      </div>
+      <div className="flex shrink-0 flex-wrap items-center gap-2 lg:justify-end">
+        <span className={`rounded-full px-3 py-1 text-xs font-bold ring-1 ${STATE_TONES[row.state]}`}>{RECORDING_UPLOAD_STATE_LABELS[row.state]}</span>
+        {busy && <Spinner size={16} label="処理中" />}
+        {hasVideo && <ActionButton onClick={onPreview} icon={PlayCircle} label="確認" />}
+        {(row.state === 'published' || row.state === 'replaced') && <ActionButton onClick={onStop} icon={PauseCircle} label="停止" tone="danger" />}
+        {row.state === 'stopped' && published && <ActionButton onClick={onResume} icon={CheckCircle2} label="再開" />}
+        {meetingChoice && <ActionButton onClick={() => onPublish('before')} icon={Upload} label="集会は授業の前" tone="primary" />}
+        {meetingChoice && <ActionButton onClick={() => onPublish('after')} icon={Upload} label="集会は授業の後" tone="primary" />}
+        {(row.state === 'blocked' || row.state === 'pending') && shift.target_recording_url && <ActionButton onClick={() => onPublish()} icon={Upload} label={meetingChoice ? 'そのまま公開' : '確認して公開'} tone={meetingChoice ? 'secondary' : 'primary'} />}
+        {row.state !== 'waiting' && <ActionButton onClick={onReplace} icon={Replace} label="差し替え" />}
+      </div>
+    </li>
+  );
+}
+
+function ActionButton({ onClick, icon: Icon, label, tone = 'secondary' }: { onClick: () => void; icon: typeof PlayCircle; label: string; tone?: 'secondary' | 'primary' | 'danger' }) {
+  return <Button size="sm" variant={tone} onClick={onClick} icon={<Icon size={14} aria-hidden />}>{label}</Button>;
+}
+
+function ReplaceModal({ row, published, previewOpen, onClose, onDone, recordFromShift, onPreview }: {
+  row: Row;
+  /** 確認用の再生画面が上に開いている間は、Esc などでこの画面を閉じない。 */
+  previewOpen?: boolean;
+  onPreview: (target: PreviewTarget) => void;
+  published: PublishedData[];
+  onClose: () => void;
+  onDone: () => Promise<void>;
+  recordFromShift: (shift: ShiftData, period: string, extra: Record<string, unknown>) => Record<string, unknown>;
+}) {
+  const { shift } = row;
+  const toast = useToast();
+  const confirm = useConfirm();
+  const [mode, setMode] = useState<'zoom' | 'library'>((shift.zoom_recording_candidates || []).length > 0 ? 'zoom' : 'library');
+  const [selected, setSelected] = useState('');
+  const [reason, setReason] = useState('');
+  const [search, setSearch] = useState('');
+  const [saving, setSaving] = useState(false);
+  const zoomCandidates = (shift.zoom_recording_candidates || []).filter(candidate => candidate.url);
+  const library = useMemo(() => {
+    const text = search.trim().toLowerCase();
+    return published
+      .filter(item => item.id !== row.published?.id && item.status !== 'stopped')
+      .filter(item => !text || [item.target_date, item.grade, item.subject, item.unit, item.title, item.teacher_name].filter(Boolean).join(' ').toLowerCase().includes(text))
+      .sort((a, b) => Number(b.grade === shift.target_grade && b.subject === shift.target_subject) - Number(a.grade === shift.target_grade && a.subject === shift.target_subject) || b.target_date.localeCompare(a.target_date))
+      .slice(0, 80);
+  }, [published, search, row.published?.id, shift.target_grade, shift.target_subject]);
+
+  const apply = async () => {
+    if (!selected) { toast.error('差し替える録画を選んでください。'); return; }
+    if (!reason.trim()) { toast.error('差し替えの理由を入力してください。'); return; }
+    const at = new Date().toISOString();
+    let fields: Record<string, unknown>;
+    if (mode === 'zoom') {
+      const candidate = zoomCandidates.find(item => `${item.file_id}|${item.recording_start}` === selected);
+      if (!candidate) return;
+      if (candidate.recording_type !== REQUIRED_RECORDING_TYPE && !(await confirm({
+        title: `「${shiftTitle(shift)}」の録画を差し替えますか？`,
+        message: '選んだ録画は共有画面付きスピーカービューではありません。',
+        confirmLabel: '差し替える',
+        tone: 'danger',
+      }))) return;
+      fields = {
+        video_url: candidate.url, zoom_recording_file_id: candidate.file_id || '', target_recording_file_id: candidate.file_id || '',
+        target_recording_type: candidate.recording_type || '', recording_meeting_id: candidate.meeting_id || shift.target_meeting_id || '', zoom_meeting_uuid: candidate.meeting_uuid || '',
+        zoom_recording_files: [], trim_start_seconds: 0, trim_end_seconds: null, replacement_source_title: `Zoom録画 ${candidate.recording_start || ''}`,
+      };
+    } else {
+      const source = published.find(item => item.id === selected);
+      if (!source) return;
+      fields = {
+        video_url: source.video_url, zoom_recording_file_id: source.zoom_recording_file_id || source.target_recording_file_id || '',
+        target_recording_file_id: source.target_recording_file_id || source.zoom_recording_file_id || '', target_recording_type: source.target_recording_type || '',
+        zoom_recording_files: source.zoom_recording_files || [], recording_meeting_id: source.recording_meeting_id || '',
+        trim_start_seconds: source.trim_start_seconds || 0, trim_end_seconds: source.trim_end_seconds ?? null,
+        replacement_source_recording_id: source.id, replacement_source_title: source.title, replacement_source_date: source.target_date,
+      };
+    }
+    Object.assign(fields, { is_replacement: true, replacement_reason: reason.trim(), replacement_updated_at: at, source: 'recording_replacement', status: 'published', updated_at: at });
+    setSaving(true);
+    try {
+      const batch = writeBatch(db);
+      const ref = row.published ? doc(db, 'class_recordings', row.published.id) : doc(db, 'class_recordings', `auto_${shift.id}`);
+      if (row.published) batch.update(ref, fields);
+      else batch.set(ref, recordFromShift(shift, row.period, fields), { merge: true });
+      batch.set(doc(db, 'shift_assignments', shift.id), { recording_status: 'published', published_recording_id: ref.id, recording_publish_mode: null }, { merge: true });
+      await batch.commit();
+      await onDone();
+    } catch (error) { console.error(error); toast.error('差し替えできませんでした。もう一度お試しください。'); } finally { setSaving(false); }
+  };
+
+  return (
+    <Modal
+      open
+      size="lg"
+      onClose={onClose}
+      dismissible={!previewOpen}
+      title="録画を差し替える"
+      description={`${formatDate(shift.target_date)} ${row.period} ${shift.target_grade || ''} ${shift.target_subject || ''} ・ ${shiftTitle(shift)}`}
+      footer={(
+        <Button fullWidth onClick={() => void apply()} disabled={saving || !selected || !reason.trim()} loading={saving} icon={<Replace size={16} aria-hidden />}>
+          この録画に差し替えて公開
+        </Button>
+      )}
+    >
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-2">
+            <button type="button" aria-pressed={mode === 'zoom'} onClick={() => { setMode('zoom'); setSelected(''); }} disabled={zoomCandidates.length === 0} className={cn('min-h-11 rounded-btn border px-3 py-2.5 text-xs font-bold disabled:opacity-40', mode === 'zoom' ? 'border-accent bg-accent-soft text-accent' : 'border-line text-slate-600')}>この授業のZoom録画から（{zoomCandidates.length}件）</button>
+            <button type="button" aria-pressed={mode === 'library'} onClick={() => { setMode('library'); setSelected(''); }} className={cn('min-h-11 rounded-btn border px-3 py-2.5 text-xs font-bold', mode === 'library' ? 'border-accent bg-accent-soft text-accent' : 'border-line text-slate-600')}>公開済みの別の録画から</button>
           </div>
-          {missingRecordingGroups.length > 60 && (
-            <p className="mt-2 text-right text-[10px] font-bold text-slate-400">表示は先頭60件です。検索で絞り込んでください。</p>
+          {mode === 'zoom' ? (
+            <div className="space-y-2">
+              {zoomCandidates.map(candidate => {
+                const key = `${candidate.file_id}|${candidate.recording_start}`;
+                const ok = candidate.recording_type === REQUIRED_RECORDING_TYPE;
+                return (
+                  <label key={key} className={cn('flex cursor-pointer items-center gap-3 rounded-btn border p-3', selected === key ? 'border-accent bg-accent-soft' : 'border-line')}>
+                    <input type="radio" checked={selected === key} onChange={() => setSelected(key)} className="accent-accent" />
+                    <span className="min-w-0 flex-1 text-xs font-bold text-slate-700">
+                      {candidate.recording_start ? formatDateTime(candidate.recording_start, { withYear: true }) : '開始時刻不明'} ・ {minutesLabel(candidate.duration_seconds) || '長さ不明'}
+                      <span className={`ml-2 rounded-full px-2 py-0.5 text-xs font-bold ${ok ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>{ok ? '共有画面付きスピーカービュー' : candidate.recording_type === 'active_speaker' ? 'アクティブスピーカー' : candidate.recording_type || '種類不明'}</span>
+                      {candidate.kind === 'group_meeting' && <span className="ml-2 rounded-full bg-sky-50 px-2 py-0.5 text-xs font-bold text-sky-700">集会（{candidate.meeting_position ? MEETING_POSITION_LABELS[candidate.meeting_position] : '授業の前後'}）</span>}
+                      <span className="mt-0.5 block text-xs text-slate-500">講師：{shift.teacher_name || '未設定'}</span>
+                    </span>
+                    <Button size="sm" variant="secondary" className="shrink-0" onClick={event => { event.preventDefault(); onPreview({ kind: 'candidate', item: shift, candidate }); }}>確認</Button>
+                  </label>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <input value={search} onChange={event => setSearch(event.target.value)} placeholder="日付・学年・科目・単元で検索" aria-label="録画を検索" className="min-h-10 w-full rounded-input border border-line bg-surface px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-accent/30" />
+              <div className="max-h-72 space-y-1.5 overflow-y-auto">
+                {library.length === 0 && <EmptyState title="該当する録画はありません" description="検索語を変えてください。" />}
+                {library.map(item => (
+                  <label key={item.id} className={cn('flex cursor-pointer items-center gap-3 rounded-btn border p-3', selected === item.id ? 'border-accent bg-accent-soft' : 'border-line')}>
+                    <input type="radio" checked={selected === item.id} onChange={() => setSelected(item.id)} className="accent-accent" />
+                    <span className="min-w-0 flex-1 text-xs font-bold text-slate-700">
+                      <span className="mr-2 rounded-btn bg-slate-100 px-1.5 py-0.5 text-xs font-bold text-slate-500">{normalizeSchoolYear(item.target_date, item.school_year)}年度</span>
+                      {item.target_date} ・ {item.grade} {item.subject} ・ {item.title}
+                      <span className="mt-0.5 block text-xs text-slate-500">講師：{item.teacher_name || '未設定'}{item.period ? ` ・ ${item.period}` : ''}</span>
+                    </span>
+                    <Button size="sm" variant="secondary" className="shrink-0" onClick={event => { event.preventDefault(); onPreview({ kind: 'published', item }); }}>確認</Button>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+          <label className="block">
+            <span className="text-xs font-bold text-slate-600">差し替えの理由（必須）</span>
+            <input value={reason} onChange={event => setReason(event.target.value)} placeholder="例：録画が途中で切れたため、同じ単元の別日の録画に差し替え" className="mt-1 min-h-11 w-full rounded-input border border-line bg-surface px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-accent/30" />
+          </label>
+          <p className="text-xs font-bold text-slate-500">差し替えた録画は、Zoomから新しい録画が届いても自動では上書きされません。</p>
+        </div>
+    </Modal>
+  );
+}
+
+function LibraryTab({ published, loading, onChanged, onPreview }: { published: PublishedData[]; loading?: boolean; onChanged: () => Promise<void>; onPreview: (item: PublishedData) => void }) {
+  const toast = useToast();
+  const ask = usePrompt();
+  const currentYear = getCurrentSchoolYear();
+  const [scope, setScope] = useState<'current' | 'past' | 'stopped'>('current');
+  const [search, setSearch] = useState('');
+  const [trim, setTrim] = useState<Record<string, { start: string; end: string }>>({});
+  const [busy, setBusy] = useState('');
+  const list = useMemo(() => {
+    const text = search.trim().toLowerCase();
+    return published.filter(item => {
+      const year = normalizeSchoolYear(item.target_date, item.school_year);
+      if (scope === 'stopped' ? item.status !== 'stopped' : item.status === 'stopped') return false;
+      if (scope === 'current' && getRecordingYearScope(year) !== 'current') return false;
+      if (scope === 'past' && getRecordingYearScope(year) !== 'past') return false;
+      return !text || [item.target_date, item.title, item.grade, item.subject, item.unit, item.teacher_name].filter(Boolean).join(' ').toLowerCase().includes(text);
+    });
+  }, [published, scope, search]);
+  const setStatus = async (item: PublishedData, status: 'published' | 'stopped') => {
+    const reason = status === 'stopped'
+      ? await ask({
+        title: `「${item.title || '録画'}」の公開を停止しますか？`,
+        message: '停止中は自動アップでも再公開されません。',
+        label: '停止する理由（任意）',
+        defaultValue: '',
+        multiline: true,
+        confirmLabel: '停止する',
+      })
+      : '';
+    if (reason === null) return;
+    setBusy(item.id);
+    try {
+      const batch = writeBatch(db);
+      batch.update(doc(db, 'class_recordings', item.id), { status, stopped_reason: status === 'stopped' ? reason.trim() : '', updated_at: new Date().toISOString() });
+      if (item.original_shift_id) batch.set(doc(db, 'shift_assignments', item.original_shift_id), { recording_publish_mode: status === 'stopped' ? 'stopped' : null, recording_status: status }, { merge: true });
+      await batch.commit();
+      await onChanged();
+    } catch (error) { console.error(error); toast.error('更新できませんでした。もう一度お試しください。'); } finally { setBusy(''); }
+  };
+  const saveTrim = async (item: PublishedData) => {
+    const value = trim[item.id];
+    const start = Number(value?.start || 0);
+    const end = value?.end ? Number(value.end) : null;
+    if (start < 0 || (end !== null && end <= start)) { toast.error('終了秒は開始秒より大きい値にしてください。'); return; }
+    setBusy(item.id);
+    try {
+      const batch = writeBatch(db);
+      batch.update(doc(db, 'class_recordings', item.id), { trim_start_seconds: start, trim_end_seconds: end, updated_at: new Date().toISOString() });
+      await batch.commit();
+      await onChanged();
+      toast.success('切り出しを保存しました。');
+    } catch (error) { console.error(error); toast.error('保存できませんでした。もう一度お試しください。'); } finally { setBusy(''); }
+  };
+  const count = (target: typeof scope) => published.filter(item => {
+    const year = normalizeSchoolYear(item.target_date, item.school_year);
+    if (target === 'stopped') return item.status === 'stopped';
+    return item.status !== 'stopped' && getRecordingYearScope(year) === target;
+  }).length;
+
+  return (
+    <section className="space-y-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex gap-2">
+          {([['current', `今年度（${currentYear}年度）`], ['past', '過去の年度'], ['stopped', '停止中']] as const).map(([key, label]) => (
+            <button key={key} type="button" aria-pressed={scope === key} onClick={() => setScope(key)} className={cn('min-h-10 rounded-full px-4 py-2 text-xs font-bold', scope === key ? 'bg-accent text-accent-ink' : 'bg-surface text-slate-600 ring-1 ring-line')}>{label} {count(key)}</button>
+          ))}
+        </div>
+        <label className="flex min-h-10 items-center gap-2 rounded-input border border-line bg-surface px-3"><Search size={15} className="text-slate-400" aria-hidden /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="タイトル・単元・日付で検索" aria-label="録画を検索" className="w-56 bg-transparent py-2 text-sm outline-none" /></label>
+      </div>
+      <div className="overflow-hidden rounded-card border border-line bg-surface shadow-sm">
+        {loading && published.length === 0 ? <div className="p-4"><ListSkeleton rows={4} /></div> : list.length === 0 ? <EmptyState icon={Video} title="該当する録画はありません" description={search ? '検索語を変えてください。' : undefined} /> : (
+          <ul className="divide-y divide-slate-100">
+            {list.map(item => {
+              const year = normalizeSchoolYear(item.target_date, item.school_year);
+              const value = trim[item.id] || { start: item.trim_start_seconds ? String(item.trim_start_seconds) : '', end: item.trim_end_seconds ? String(item.trim_end_seconds) : '' };
+              return (
+                <li key={item.id} className="flex flex-col gap-3 px-5 py-4 xl:flex-row xl:items-center">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className={`rounded-full px-2 py-0.5 text-xs font-bold ${getRecordingYearScope(year) === 'current' ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{year}年度</span>
+                      <span className="text-xs font-bold text-slate-500">{formatDate(item.target_date, { withYear: true }) || item.target_date} ・ {item.grade} {item.subject}</span>
+                      <span className="rounded-full bg-slate-50 px-2 py-0.5 text-xs font-bold text-slate-500 ring-1 ring-slate-200">{SOURCE_LABELS[item.source || ''] || item.source || '手動'}</span>
+                      <span className="rounded-full bg-sky-50 px-2 py-0.5 text-xs font-bold text-sky-700">{recordingTypeLabel(item.recording_type)}</span>
+                    </div>
+                    <p className="mt-1 truncate text-sm font-bold text-slate-900">{item.title}</p>
+                  </div>
+                  <div className="flex shrink-0 flex-wrap items-center gap-2">
+                    <span className="flex items-center gap-1 text-xs font-bold text-slate-500"><Scissors size={12} aria-hidden /><span className="sr-only">切り出し</span>
+                      <input value={value.start} onChange={event => setTrim(prev => ({ ...prev, [item.id]: { ...value, start: event.target.value } }))} placeholder="開始秒" aria-label="開始秒" className="min-h-9 w-16 rounded-input border border-line bg-surface px-2 py-1" />
+                      〜<input value={value.end} onChange={event => setTrim(prev => ({ ...prev, [item.id]: { ...value, end: event.target.value } }))} placeholder="終了秒" aria-label="終了秒" className="min-h-9 w-16 rounded-input border border-line bg-surface px-2 py-1" />
+                      <Button size="sm" variant="secondary" onClick={() => void saveTrim(item)}>保存</Button>
+                    </span>
+                    {busy === item.id && <Spinner size={15} label="処理中" />}
+                    <ActionButton onClick={() => onPreview(item)} icon={PlayCircle} label="確認" />
+                    {item.status === 'stopped'
+                      ? <ActionButton onClick={() => void setStatus(item, 'published')} icon={CheckCircle2} label="再開" />
+                      : <ActionButton onClick={() => void setStatus(item, 'stopped')} icon={PauseCircle} label="停止" tone="danger" />}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ImportTab({ onImported }: { onImported: () => Promise<void> }) {
+  const [encoding, setEncoding] = useState<'utf-8' | 'shift-jis'>('utf-8');
+  const [importing, setImporting] = useState(false);
+  const [log, setLog] = useState('');
+  const importCsv = async (file?: File) => {
+    if (!file) return;
+    setImporting(true);
+    setLog('');
+    try {
+      const text = new TextDecoder(encoding).decode(await file.arrayBuffer());
+      const result = parseRecordingCsv(text);
+      if (result.items.length === 0) throw new Error(result.isAnnualRecordingList ? 'UPにチェックが入り、録画URLが設定された行が見つかりませんでした。' : '録画URLが入った行が見つかりませんでした。');
+      const at = new Date().toISOString();
+      for (let index = 0; index < result.items.length; index += 400) {
+        const batch = writeBatch(db);
+        result.items.slice(index, index + 400).forEach(item => batch.set(doc(db, 'class_recordings', stableCsvRecordingDocId(item)), { ...item, status: 'published', imported_at: at, updated_at: at }, { merge: true }));
+        await batch.commit();
+      }
+      // Zoom APIで録画ファイルを特定する（生徒がパスコードなしでアプリ内で再生できるようにする）。
+      const ids = result.items.filter(item => isZoomRecordingShareUrl(item.video_url)).map(item => stableCsvRecordingDocId(item));
+      let resolved = 0;
+      let linked = 0;
+      const unresolved: string[] = [];
+      if (ids.length > 0 && auth.currentUser) {
+        const token = await auth.currentUser.getIdToken();
+        for (let index = 0; index < ids.length; index += 60) {
+          setLog(`Zoomの録画と照合しています… ${Math.min(index + 60, ids.length)} / ${ids.length}`);
+          const response = await fetch('/api/admin/recordings/resolve-zoom', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ ids: ids.slice(index, index + 60) }),
+          });
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok || data.ok === false) throw new Error(data.error || 'Zoomの録画との照合に失敗しました。');
+          resolved += Number(data.resolved || 0);
+          linked += Number(data.linked_shifts || 0);
+          unresolved.push(...(Array.isArray(data.unresolved) ? data.unresolved.map((item: any) => String(item.id)) : []));
+        }
+      }
+      const zoomNote = ids.length > 0
+        ? ` Zoomの録画と照合できた${resolved}件はパスコードなしでアプリ内再生できます（講師配置とのひも付け ${linked}件）。${unresolved.length ? `照合できなかった${unresolved.length}件はZoomの公式プレイヤーで開きます。` : ''}`
+        : '';
+      setLog((result.isAnnualRecordingList
+        ? `UP対象${result.eligibleRows}行の録画${result.items.length}件を取り込みました（UP対象外 ${result.excludedRows}行 / URLなし ${result.noUrlRows}行）。同じ録画は上書き更新されます。`
+        : `${result.items.length}件を取り込みました（URLなし ${result.noUrlRows}行）。同じ録画は上書き更新されます。`) + zoomNote);
+      await onImported();
+    } catch (error: any) {
+      setLog(`エラー: ${error?.message || error}`);
+    } finally { setImporting(false); }
+  };
+  return (
+    <section className="max-w-3xl space-y-4 rounded-card border border-line bg-surface p-6 shadow-sm">
+      <div>
+        <h2 className="flex items-center gap-2 text-base font-bold text-slate-900"><FileUp size={18} aria-hidden />過去録画の取込（CSV）</h2>
+        <p className="mt-1 text-xs font-bold leading-relaxed text-slate-500">
+          年度ごとの録画一覧（「UP」列にチェックがある行だけ取込）または、日付・タイトル・URL・学年・科目の列があるCSVを取り込みます。録画一覧の「ID」列のZoomアカウントとURLの開始時刻からZoomの録画を特定するので、生徒は録画パスコードなしでアプリ内で視聴できます。日付の後ろにあるURLは差し替え録画として扱います。
+        </p>
+      </div>
+      <div className="flex flex-wrap items-center gap-3">
+        <select value={encoding} onChange={event => setEncoding(event.target.value as typeof encoding)} aria-label="文字コード" className="min-h-11 rounded-input border border-line bg-surface px-3 py-2 text-sm font-bold text-slate-700">
+          <option value="utf-8">UTF-8</option><option value="shift-jis">Shift_JIS（Excel）</option>
+        </select>
+        <label className={buttonClass('primary', 'md', cn('cursor-pointer', importing && 'cursor-not-allowed opacity-60'))}>
+          {importing ? <Loader2 size={16} className="animate-spin" aria-hidden /> : <FileUp size={16} aria-hidden />}CSVを選んで取込
+          <input type="file" accept=".csv,text/csv" className="hidden" disabled={importing} onChange={event => { void importCsv(event.target.files?.[0]); event.target.value = ''; }} />
+        </label>
+      </div>
+      {log && <p role={log.startsWith('エラー') ? 'alert' : 'status'} className={cn('rounded-card px-4 py-3 text-sm font-bold', log.startsWith('エラー') ? 'bg-rose-50 text-rose-700' : 'bg-emerald-50 text-emerald-700')}>{log}</p>}
+    </section>
+  );
+}
+
+function PreviewModal({ target, token, onClose }: { target: PreviewTarget; token: string; onClose: () => void }) {
+  const externalUrl = target.kind === 'shift' ? target.item.target_recording_url || ''
+    : target.kind === 'candidate' ? target.candidate.url || ''
+      : target.item.video_url || '';
+  // Zoomの録画ファイルが分かっているものは、その時限のファイルだけをアプリ内で再生する
+  // （共有リンクを開くと、1限と2限がつながった会議全体が表示されるため）。
+  const resolvedZoomFile = target.kind === 'candidate'
+    ? Boolean(target.candidate.file_id && target.candidate.meeting_uuid)
+    : target.kind === 'shift'
+      ? Boolean(target.item.target_meeting_id && target.item.target_recording_file_id && (target.item.zoom_recording_files || []).length > 0)
+      : Boolean(target.item.recording_meeting_id && (target.item.zoom_recording_file_id || target.item.target_recording_file_id));
+  const usesZoomPlayer = !resolvedZoomFile && isZoomRecordingShareUrl(externalUrl);
+  const idParam = target.kind === 'published'
+    ? `recording_id=${encodeURIComponent(target.item.id)}`
+    : `shift_id=${encodeURIComponent(target.item.id)}${target.kind === 'candidate' ? `&candidate_file_id=${encodeURIComponent(target.candidate.file_id || '')}` : ''}`;
+  const src = usesZoomPlayer
+    ? `/api/zoom/recordings/file?mode=share&${idParam}&token=${encodeURIComponent(token)}`
+    : `/api/zoom/recordings/file?${idParam}&token=${encodeURIComponent(token)}`;
+  const title = target.kind === 'published'
+    ? `${target.item.target_date} ${target.item.title}${target.item.teacher_name ? ` ・ ${target.item.teacher_name}` : ''}`
+    : `${target.item.target_date} ${target.item.target_grade || ''} ${target.item.target_subject || ''} ${shiftTitle(target.item)}${target.item.teacher_name ? ` ・ ${target.item.teacher_name}` : ''}${target.kind === 'candidate' && target.candidate.recording_start ? ` ・ ${formatTime(target.candidate.recording_start)}開始の録画` : ''}`;
+  return (
+    <div className="fixed inset-0 z-[220] bg-slate-950/80 p-4 backdrop-blur-sm">
+      <div role="dialog" aria-modal="true" aria-label={title} className="mx-auto flex h-full max-w-6xl flex-col overflow-hidden rounded-card bg-surface shadow-2xl">
+        <div className="flex items-center justify-between gap-3 border-b border-slate-100 p-4">
+          <p className="min-w-0 truncate text-sm font-bold text-slate-900">{title}</p>
+          <div className="flex gap-2">
+            {externalUrl && <a href={externalUrl} target="_blank" rel="noreferrer" className={buttonClass('secondary', 'sm')}>外部で開く</a>}
+            <Button size="sm" onClick={onClose}>閉じる</Button>
+          </div>
+        </div>
+        <div className="min-h-0 flex-1 bg-slate-950">
+          {usesZoomPlayer ? (
+            <div className="flex h-full items-center justify-center p-6 text-center text-white">
+              <div>
+                <PlayCircle className="mx-auto text-sky-300" size={48} aria-hidden />
+                <p className="mt-4 text-sm font-bold">Zoom録画は公式プレイヤーで確認してください</p>
+                <a href={src} target="_blank" rel="noopener noreferrer" className={buttonClass('secondary', 'md', 'mt-5')}>Zoomで録画を開く</a>
+              </div>
+            </div>
+          ) : (
+            <video key={src} src={src} className="h-full w-full" controls playsInline preload="metadata" />
           )}
         </div>
-
-        <div className="grid grid-cols-1 xl:grid-cols-12 gap-8 items-start">
-          
-          {/* === 左カラム: 承認ワークスペース === */}
-          <div className="xl:col-span-8 space-y-6">
-            
-            {/* 左コントロールバー */}
-            <div className="bg-white p-2 rounded-[24px] shadow-sm border border-slate-100 flex flex-wrap items-center justify-between gap-3 sticky top-4 z-20">
-              <div className="bg-slate-100 p-1 rounded-xl flex gap-1">
-                <button onClick={() => setViewMode('calendar')} className={`px-4 py-2 rounded-lg text-xs font-black flex items-center gap-2 transition-all ${viewMode==='calendar' ? 'bg-white text-red-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}>
-                  <CalendarIcon size={16}/> カレンダー
-                </button>
-                <button onClick={() => setViewMode('list')} className={`px-4 py-2 rounded-lg text-xs font-black flex items-center gap-2 transition-all ${viewMode==='list' ? 'bg-white text-red-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}>
-                  <List size={16}/> 全リスト
-                </button>
-              </div>
-
-              {selectedIds.size > 0 && (
-                <div className="flex items-center gap-2 mr-2 animate-in fade-in">
-                  <span className="text-xs font-bold text-slate-500 mr-2">{selectedIds.size}件選択中</span>
-                  <button onClick={handleBulkReject} disabled={processing} className="bg-slate-200 text-slate-600 px-4 py-2 rounded-xl text-xs font-bold hover:bg-slate-300 transition-colors flex items-center gap-1">
-                    <Trash2 size={14}/> 却下
-                  </button>
-                  <button onClick={handleBulkApprove} disabled={processing} className="bg-red-600 text-white px-5 py-2 rounded-xl text-xs font-bold hover:bg-red-700 shadow-md shadow-red-200 transition-all active:scale-95 flex items-center gap-1">
-                    {processing ? <Loader2 className="animate-spin" size={14}/> : <CheckCircle size={14}/>} 
-                    一括承認
-                  </button>
-                </div>
-              )}
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
-              {/* カレンダー */}
-              {viewMode === 'calendar' && (
-                <div className="md:col-span-5 lg:col-span-4">
-                  <div className="bg-white p-6 rounded-[32px] shadow-sm border border-slate-100">
-                    <div className="flex items-center justify-between mb-4">
-                      <button onClick={() => setCurrentDate(new Date(year, month - 1, 1))} className="p-2 hover:bg-slate-50 rounded-full text-slate-400"><ArrowLeft size={18}/></button>
-                      <h2 className="text-lg font-black text-slate-700">{year}年 <span className="text-red-500">{month + 1}月</span></h2>
-                      <button onClick={() => setCurrentDate(new Date(year, month + 1, 1))} className="p-2 hover:bg-slate-50 rounded-full text-slate-400"><ArrowLeft size={18} className="rotate-180"/></button>
-                    </div>
-                    <div className="grid grid-cols-7 text-center mb-2">
-                      {['日', '月', '火', '水', '木', '金', '土'].map((d, i) => (<div key={i} className={`text-xs font-black ${i===0?'text-red-400':i===6?'text-blue-400':'text-slate-300'}`}>{d}</div>))}
-                    </div>
-                    <div className="grid grid-cols-7 gap-1.5">
-                      {days.map((day, idx) => {
-                        if (!day) return <div key={idx}></div>;
-                        const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-                        const count = dateCounts[dateStr] || 0;
-                        const isSelected = selectedDateFilter === dateStr;
-                        return (
-                          <button key={idx} onClick={() => setSelectedDateFilter(dateStr)} className={`aspect-square rounded-2xl flex flex-col items-center justify-center relative transition-all duration-200 ${isSelected ? 'bg-red-600 text-white shadow-lg shadow-red-200 scale-105 z-10' : count > 0 ? 'bg-red-50 text-red-600 border-2 border-red-100 hover:border-red-300' : 'text-slate-300 hover:bg-slate-50'}`}>
-                            <span className={`text-sm ${isSelected||count>0 ? 'font-black' : 'font-bold'}`}>{day}</span>
-                            {count > 0 && !isSelected && <span className="absolute bottom-1 right-1 bg-red-500 text-white text-[9px] font-bold w-4 h-4 rounded-full flex items-center justify-center">{count}</span>}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* 承認リスト */}
-              <div className={viewMode === 'calendar' ? 'md:col-span-7 lg:col-span-8' : 'md:col-span-12'}>
-                <div className="flex items-center justify-between mb-4 px-2">
-                  <h3 className="font-black text-slate-700 flex items-center gap-2">
-                    {viewMode === 'calendar' && selectedDateFilter ? <><span className="bg-red-500 text-white p-1.5 rounded-lg"><CalendarIcon size={16}/></span>{new Date(selectedDateFilter).toLocaleDateString()} の承認待ち</> : <><span className="bg-red-500 text-white p-1.5 rounded-lg"><List size={16}/></span>全ての承認待ち</>}
-                  </h3>
-                  {displayedCandidates.length > 0 && (
-                    <button onClick={toggleSelectAll} className="text-xs font-bold text-slate-500 hover:text-red-600 flex items-center gap-1 transition-colors"><CheckSquare size={14}/> {displayedCandidates.every(c => selectedIds.has(c.id)) ? '選択解除' : 'すべて選択'}</button>
-                  )}
-                </div>
-
-                {loading ? <div className="p-20 text-center"><Loader2 className="animate-spin inline text-red-400" size={32}/></div> : displayedCandidates.length === 0 ? <div className="bg-white p-12 rounded-[32px] border-4 border-dashed border-slate-100 text-center text-slate-300"><p className="font-bold">この条件の承認待ちはありません</p></div> : (
-                  <div className="space-y-4">
-                    {displayedCandidates.map((shift) => {
-                      const isSelected = selectedIds.has(shift.id);
-                      return (
-                        <div key={shift.id} className={`bg-white p-5 rounded-[28px] border-2 transition-all group relative overflow-hidden ${isSelected ? 'border-red-400 bg-red-50/30' : 'border-slate-100 hover:border-red-200'}`}>
-                          <div className="absolute inset-0 cursor-pointer z-0" onClick={() => toggleSelect(shift.id)} />
-                          <div className="relative z-10 flex gap-4 items-start pointer-events-none">
-                            <div className={`w-6 h-6 rounded-lg border-2 flex items-center justify-center shrink-0 mt-1 transition-colors ${isSelected ? 'bg-red-500 border-red-500 text-white' : 'border-slate-300 bg-white'}`}>{isSelected && <Check size={16} strokeWidth={4}/>}</div>
-                            <div className="flex-1">
-                              <div className="flex flex-wrap items-center gap-2 mb-2 pointer-events-auto">
-                                <span className="bg-slate-100 text-slate-500 text-[10px] font-bold px-2 py-0.5 rounded flex items-center gap-1"><Clock size={10}/> {shift.target_date} {shift.note || ''}</span>
-                                <span className="bg-blue-50 text-blue-600 text-[10px] font-bold px-2 py-0.5 rounded flex items-center gap-1"><LinkIcon size={10}/> Zoom連携済</span>
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); openPreview({ kind: 'shift', item: shift }); }}
-                                  className="ml-auto flex items-center gap-1 rounded-lg bg-slate-900 px-2 py-1 text-[10px] font-black text-white hover:bg-slate-700"
-                                >
-                                  <PlayCircle size={10}/> 画面内で確認
-                                </button>
-                                <a href={shift.target_recording_url} target="_blank" rel="noreferrer" className="text-[10px] font-bold text-blue-500 hover:underline flex items-center gap-1 z-20"><ExternalLink size={10}/> 外部</a>
-                              </div>
-                              <h4 className="text-lg font-black text-slate-800 leading-snug">{shift.target_grade} {shift.target_subject}<span className="text-sm text-slate-400 ml-2 font-bold">by {shift.teacher_name}</span></h4>
-                              <div className="mt-3 pointer-events-auto">
-                                <input type="text" className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-700 outline-none focus:bg-white focus:border-red-300 transition-colors" value={titles[shift.id] || ''} onChange={(e) => setTitles(prev => ({...prev, [shift.id]: e.target.value}))} onClick={(e) => e.stopPropagation()} placeholder="公開タイトル"/>
-                              </div>
-                              <div className="mt-2 grid grid-cols-2 gap-2 pointer-events-auto">
-                                <input type="number" min="0" className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 outline-none focus:bg-white focus:border-red-300 transition-colors" value={trimStart[shift.id] || ''} onChange={(e) => setTrimStart(prev => ({...prev, [shift.id]: e.target.value}))} onClick={(e) => e.stopPropagation()} placeholder="開始秒 例: 60"/>
-                                <input type="number" min="0" className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 outline-none focus:bg-white focus:border-red-300 transition-colors" value={trimEnd[shift.id] || ''} onChange={(e) => setTrimEnd(prev => ({...prev, [shift.id]: e.target.value}))} onClick={(e) => e.stopPropagation()} placeholder="終了秒 任意"/>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* === 右カラム: 公開済み管理 === */}
-          <div className="xl:col-span-4 space-y-4">
-            <div className="bg-white p-5 rounded-[32px] shadow-sm border border-slate-100 h-full max-h-[calc(100vh-100px)] flex flex-col">
-              
-              {/* 右カラムヘッダー */}
-              <div className="flex items-center justify-between mb-4 shrink-0">
-                <h2 className="font-black text-slate-700 flex items-center gap-2">
-                  <span className="bg-green-100 text-green-700 p-1.5 rounded-lg"><Layers size={16}/></span>
-                  公開済み
-                  <span className="bg-slate-100 text-slate-500 text-xs px-2 py-0.5 rounded-full">{published.length}</span>
-                </h2>
-                
-                {/* 一括削除ボタン (選択時) */}
-                {pubSelectedIds.size > 0 && (
-                  <button onClick={handleBulkUnpublish} disabled={processing} className="text-xs bg-red-50 text-red-600 px-3 py-1.5 rounded-full font-bold hover:bg-red-100 transition-colors flex items-center gap-1 animate-in zoom-in">
-                    <Trash2 size={12}/> {pubSelectedIds.size}件削除
-                  </button>
-                  )}
-              </div>
-              <div className="mb-4 grid grid-cols-3 gap-2 shrink-0">
-                <button onClick={() => setPubFilterYearScope('current')} className={`rounded-xl px-2 py-2 text-left transition-colors ${pubFilterYearScope === 'current' ? 'bg-green-600 text-white' : 'bg-slate-50 text-slate-500 hover:bg-green-50 hover:text-green-700'}`}>
-                  <p className="text-[10px] font-black">今年度</p>
-                  <p className="text-sm font-black">{currentPublishedCount}</p>
-                </button>
-                <button onClick={() => setPubFilterYearScope('past')} className={`rounded-xl px-2 py-2 text-left transition-colors ${pubFilterYearScope === 'past' ? 'bg-slate-700 text-white' : 'bg-slate-50 text-slate-500 hover:bg-slate-100'}`}>
-                  <p className="text-[10px] font-black">過去</p>
-                  <p className="text-sm font-black">{pastPublishedCount}</p>
-                </button>
-                <button onClick={() => setPubFilterType('test_prep')} className={`rounded-xl px-2 py-2 text-left transition-colors ${pubFilterType === 'test_prep' ? 'bg-amber-500 text-white' : 'bg-amber-50 text-amber-700 hover:bg-amber-100'}`}>
-                  <p className="text-[10px] font-black">テスト対策</p>
-                  <p className="text-sm font-black">{testPrepPublishedCount}</p>
-                </button>
-              </div>
-
-              {/* フィルターエリア */}
-              <div className="space-y-2 mb-4 shrink-0">
-                {/* テキスト検索 */}
-                <div className="relative">
-                  <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"/>
-                  <input type="text" placeholder="検索..." className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold outline-none focus:border-green-400 transition-colors" value={publishedSearch} onChange={(e) => setPublishedSearch(e.target.value)} />
-                </div>
-                
-                {/* 詳細フィルター */}
-                <div className="flex gap-2">
-                  <input type="date" className="flex-1 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-xs font-bold text-slate-600 outline-none focus:border-green-400" value={pubFilterDate} onChange={(e) => setPubFilterDate(e.target.value)} />
-                  <select className="flex-1 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-xs font-bold text-slate-600 outline-none focus:border-green-400" value={pubFilterSubject} onChange={(e) => setPubFilterSubject(e.target.value)}>
-                    <option value="all">全科目</option>
-                    {uniqueSubjects.map(sub => <option key={sub} value={sub}>{sub}</option>)}
-                  </select>
-                </div>
-                <div className="flex gap-2">
-                  <select className="flex-1 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-xs font-bold text-slate-600 outline-none focus:border-green-400" value={pubFilterYearScope} onChange={(e) => setPubFilterYearScope(e.target.value as 'all' | RecordingYearScope)}>
-                    <option value="all">全年度</option>
-                    <option value="current">今年度</option>
-                    <option value="past">過去</option>
-                  </select>
-                  <select className="flex-1 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-xs font-bold text-slate-600 outline-none focus:border-green-400" value={pubFilterType} onChange={(e) => setPubFilterType(e.target.value as 'all' | RecordingType)}>
-                    <option value="all">全種別</option>
-                    <option value="regular">通常授業</option>
-                    <option value="test_prep">テスト対策</option>
-                  </select>
-                  {(pubFilterDate || pubFilterSubject !== 'all' || pubFilterYearScope !== 'all' || pubFilterType !== 'all') && (
-                    <button onClick={() => { setPubFilterDate(''); setPubFilterSubject('all'); setPubFilterYearScope('all'); setPubFilterType('all'); }} className="p-1.5 bg-gray-100 rounded-lg text-gray-500 hover:text-red-500 hover:bg-red-50"><XCircle size={16}/></button>
-                  )}
-                </div>
-
-                {/* 全選択ボタン */}
-                {filteredPublished.length > 0 && (
-                  <div className="flex justify-end">
-                    <button onClick={togglePubSelectAll} className="text-[10px] font-bold text-slate-400 hover:text-green-600 flex items-center gap-1 transition-colors">
-                      <CheckSquare size={12}/> {filteredPublished.every(p => pubSelectedIds.has(p.id)) ? '解除' : 'すべて選択'}
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {/* リスト */}
-              <div className="overflow-y-auto custom-scrollbar space-y-2 flex-1 pr-1">
-                {filteredPublished.length === 0 ? (
-                  <div className="text-center py-10 text-slate-300 text-xs font-bold">該当なし</div>
-                ) : (
-                  filteredPublished.map((pub) => {
-                    const isSelected = pubSelectedIds.has(pub.id);
-                    return (
-                      <div 
-                        key={pub.id} 
-                        className={`p-3 rounded-2xl border transition-all group flex gap-3 items-start cursor-pointer ${isSelected ? 'border-green-400 bg-green-50/30' : 'border-slate-100 hover:border-green-200 hover:bg-green-50/10'}`}
-                        onClick={() => togglePubSelect(pub.id)}
-                      >
-                        <div className={`w-5 h-5 rounded border-2 flex items-center justify-center shrink-0 mt-1.5 transition-colors ${isSelected ? 'bg-green-500 border-green-500 text-white' : 'border-slate-200 bg-white'}`}>
-                          {isSelected && <Check size={12} strokeWidth={4}/>}
-                        </div>
-                        
-                        <div className="flex-1 min-w-0">
-                          <p className="text-[10px] font-bold text-slate-400 mb-1 flex flex-wrap items-center gap-1">
-                            <span>{pub.target_date}</span>
-                            <span className="bg-slate-100 px-1.5 rounded text-slate-500">{pub.subject}</span>
-                            <span className={pub.year_scope === 'current' ? 'bg-green-100 text-green-700 px-1.5 rounded' : 'bg-slate-100 text-slate-500 px-1.5 rounded'}>{pub.school_year}年度</span>
-                            <span className={pub.recording_type === 'test_prep' ? 'bg-amber-100 text-amber-700 px-1.5 rounded' : 'bg-blue-50 text-blue-600 px-1.5 rounded'}>{pub.recording_type_label}</span>
-                          </p>
-                          <h5 className="text-xs font-black text-slate-700 truncate mb-1">{pub.title}</h5>
-                          {pub.unit && <p className="mb-1 truncate text-[10px] font-bold text-slate-400">{pub.unit}</p>}
-                          <div className="mb-2 grid grid-cols-[1fr_1fr_auto] gap-1 pointer-events-auto" onClick={(e) => e.stopPropagation()}>
-                            <input
-                              type="number"
-                              min="0"
-                              value={pubTrimStart[pub.id] || ''}
-                              onChange={(e) => setPubTrimStart(prev => ({ ...prev, [pub.id]: e.target.value }))}
-                              className="min-w-0 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-[10px] font-bold text-slate-600 outline-none focus:border-green-400"
-                              placeholder="開始秒"
-                            />
-                            <input
-                              type="number"
-                              min="0"
-                              value={pubTrimEnd[pub.id] || ''}
-                              onChange={(e) => setPubTrimEnd(prev => ({ ...prev, [pub.id]: e.target.value }))}
-                              className="min-w-0 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-[10px] font-bold text-slate-600 outline-none focus:border-green-400"
-                              placeholder="終了秒"
-                            />
-                            <button
-                              onClick={() => handlePublishedTrimSave(pub.id)}
-                              disabled={processing}
-                              className="rounded-lg bg-green-600 px-2 py-1.5 text-[10px] font-black text-white hover:bg-green-700 disabled:opacity-50"
-                            >
-                              保存
-                            </button>
-                          </div>
-                          <div className="flex justify-between items-center pointer-events-auto"> {/* リンクなどはクリック可能に */}
-                            <div className="flex items-center gap-2">
-                              <button
-                                onClick={(e) => { e.stopPropagation(); openPreview({ kind: 'published', item: pub }); }}
-                                className="flex items-center gap-1 rounded-lg bg-slate-900 px-2 py-1 text-[10px] font-black text-white hover:bg-slate-700"
-                              >
-                                <PlayCircle size={10}/> 確認
-                              </button>
-                              <button
-                                onClick={(e) => { e.stopPropagation(); openReplacement({ kind: 'published', item: pub }); }}
-                                className="flex items-center gap-1 rounded-lg bg-purple-50 px-2 py-1 text-[10px] font-black text-purple-700 hover:bg-purple-100"
-                              >
-                                <Replace size={10}/> 差替
-                              </button>
-                              <a href={pub.video_url} target="_blank" rel="noreferrer" className="text-[10px] text-blue-500 hover:underline flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-                                <ExternalLink size={10}/> 外部
-                              </a>
-                            </div>
-                            {/* 個別削除ボタンも維持 */}
-                            <button onClick={(e) => { e.stopPropagation(); handleUnpublish(pub.id); }} className="text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity">
-                              <Trash2 size={14}/>
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            </div>
-          </div>
-
-        </div>
+        <p className="flex items-center gap-2 border-t border-slate-100 bg-slate-50 px-4 py-2 text-xs font-bold text-slate-500"><Clock size={13} aria-hidden />切り出し（開始秒・終了秒）は「公開中の録画」タブで設定できます。</p>
       </div>
     </div>
   );

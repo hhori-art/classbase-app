@@ -3,6 +3,7 @@ import { revalidateTag } from 'next/cache';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, jsonError } from '@/lib/server-auth';
+import { writeAuditLog } from '@/lib/server/audit-log';
 import { writeLearningEvent } from '@/lib/events';
 
 export const runtime = 'nodejs';
@@ -773,6 +774,15 @@ export async function POST(request: NextRequest) {
     });
 
     revalidateTag('course-registration-options');
+
+    // 取込1回につき1件（件数だけ。行の内容は残さない）。
+    await writeAuditLog({
+      actor: user,
+      action: 'annual_schedule_import',
+      target_type: collectionName,
+      target_label: `${defaultYear}年度 ${type === 'curriculum' ? 'カリキュラム' : '年間授業予定'}`,
+      details: { type, year: defaultYear, imported_count: imported, skipped_count: skipped, deleted_annual_count: deletedAnnual, deleted_related_count: deletedRelated },
+    });
 
     return Response.json({
       ok: true,

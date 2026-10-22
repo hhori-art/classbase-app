@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
-import { canViewSchoolStudents, getServerUser, isAdminLike, jsonError } from '@/lib/server-auth';
+import { canManageAdminAppSchool, canViewSchoolStudents, getServerUser, jsonError } from '@/lib/server-auth';
+import { canManageAdminApp } from '@/lib/admin-app-access';
 import { ONLINE_SCHOOL_SUBJECT_IDS, type ManualProblemInput } from '@/lib/online-school/types';
 import { categorySummary, japanDate, progressFromData, progressId } from '@/lib/online-school/server';
 import { unstable_cache } from 'next/cache';
@@ -12,13 +13,14 @@ const loadOnlineSchoolStudentRoster = unstable_cache(async () => {
   return snap.docs.map(doc => ({ id: doc.id, data: doc.data() }));
 }, ['online-school-student-roster-v1'], { revalidate: 300, tags: ['users', 'online-school-roster'] });
 
+// オンライン校は理社講座とは別の権限（admin_permissions.online_school）で管理する。
 function requireViewer(user: Awaited<ReturnType<typeof getServerUser>>) {
-  if (!isAdminLike(user) && user.role !== 'teacher') throw new Error('forbidden');
+  if (!canManageAdminApp(user, 'online_school') && user.role !== 'teacher') throw new Error('forbidden');
 }
 
 function requireProblemEditor(user: Awaited<ReturnType<typeof getServerUser>>) {
-  // 問題バンクは全校共通。校舎管理者の権限を越えるためマスターだけが編集する。
-  if (user.role !== 'master') throw new Error('forbidden');
+  // 問題バンクは全校共通。オンライン校の管理権限を持つ管理者（とマスター）が編集する。
+  if (!canManageAdminApp(user, 'online_school') || user.role === 'teacher') throw new Error('forbidden');
 }
 
 function allowedStudent(user: Awaited<ReturnType<typeof getServerUser>>, studentId: string, profile: FirebaseFirestore.DocumentData) {
@@ -28,7 +30,8 @@ function allowedStudent(user: Awaited<ReturnType<typeof getServerUser>>, student
     if (assigned.includes(studentId)) return true;
   }
   const school = String(profile.school_id || profile.school_code || profile.school_name || profile.school || '');
-  return canViewSchoolStudents(user, school);
+  if (canManageAdminApp(user, 'online_school')) return canManageAdminAppSchool(user, 'online_school', school);
+  return user.role === 'teacher' && canViewSchoolStudents(user, school);
 }
 
 const sessionView = (doc: FirebaseFirestore.QueryDocumentSnapshot) => {

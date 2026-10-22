@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
-import { getServerUser, jsonError, requireRole } from '@/lib/server-auth';
+import { getServerUser, jsonError, requireScienceSocialStaff } from '@/lib/server-auth';
 import { accessibleTeacherStudents, requireAccessibleStudent } from '@/lib/server/teacher-student-access';
 import { consumeRateLimit } from '@/lib/server/password-recovery';
 
@@ -12,7 +12,7 @@ const millis = (value: any) => value?.toMillis?.() || value?.toDate?.()?.getTime
 
 export async function GET(request: NextRequest) {
   try {
-    const actor = await getServerUser(request); requireRole(actor, ['teacher', 'admin', 'master']);
+    const actor = await getServerUser(request); requireScienceSocialStaff(actor);
     const students = await accessibleTeacherStudents(actor);
     const studentId = clean(request.nextUrl.searchParams.get('student_id'), 128);
     if (studentId) {
@@ -55,7 +55,7 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const actor = await getServerUser(request); requireRole(actor, ['teacher', 'admin', 'master']);
+    const actor = await getServerUser(request); requireScienceSocialStaff(actor);
     const body = await request.json();
     const message = clean(body.message);
     if (!message || String(body.message || '').trim().length > 2000) return Response.json({ ok: false, error: 'invalid-message' }, { status: 400 });

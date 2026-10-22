@@ -1,6 +1,7 @@
 'use client';
 
 import { Download } from 'lucide-react';
+import { buttonClass } from '@/app/components/ui';
 
 type CsvValue = string | number | boolean | null | undefined;
 
@@ -42,9 +43,9 @@ export default function CsvSampleDownload({
     <button
       type="button"
       onClick={handleDownload}
-      className={`inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-black text-slate-600 shadow-sm transition-colors hover:bg-slate-50 ${className}`}
+      className={buttonClass('secondary', 'sm', className)}
     >
-      <Download size={14} />
+      <Download size={14} aria-hidden />
       {label}
     </button>
   );

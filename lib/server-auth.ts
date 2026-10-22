@@ -143,6 +143,34 @@ export function canManageSchool(user: ServerUser, targetSchool?: string | null) 
   );
 }
 
+/** 管理アプリ（勤怠・オンライン校など）の権限を持つ管理者が、その校舎の生徒・講師を扱えるか。マスターは全校。 */
+export function canManageAdminAppSchool(user: ServerUser, app: Parameters<typeof canManageAdminApp>[1], targetSchool?: string | null) {
+  if (user.role === 'master') return true;
+  if (!canManageAdminApp(user, app) || !targetSchool) return false;
+  const canonicalTarget = resolveAttendanceSchoolCode(targetSchool) || String(targetSchool).trim();
+  return [user.school, ...user.school_ids].some(value =>
+    (resolveAttendanceSchoolCode(value) || String(value || '').trim()) === canonicalTarget
+  );
+}
+
+/**
+ * 理社講座の講師向け機能（生徒一覧・生徒とのチャット・連絡・宿題・スライド等）を使える職員か。
+ * 管理者は理社講座の管理権限が必要。講師は担当プログラムが設定されている場合は理社講座を含むこと
+ * （プログラム未設定の古い講師アカウントは従来どおり許可し、校舎の範囲は各APIで絞る）。
+ */
+export function canUseScienceSocialStaffTools(user: ServerUser) {
+  if (user.role === 'master') return true;
+  if (user.role === 'admin') return isAdminLike(user);
+  if (user.role === 'teacher') {
+    return !Array.isArray(user.profile.enabled_programs) || hasScienceSocialProgram(user.profile);
+  }
+  return false;
+}
+
+export function requireScienceSocialStaff(user: ServerUser) {
+  if (!canUseScienceSocialStaffTools(user)) throw new Error('forbidden');
+}
+
 export function canViewSchoolStudents(user: ServerUser, targetSchool?: string | null) {
   if (isAdminLike(user)) return canManageSchool(user, targetSchool);
   if (user.role !== 'teacher' || !isDedicatedProfile(user.profile) || !hasScienceSocialProgram(user.profile)) return false;

@@ -11,7 +11,7 @@ const globalGrades = new Set(['', '全学年', '共通', 'その他']);
 const globalSubjects = new Set(['', '全科目', '共通']);
 
 export function canAccessClassRecording(user: ServerUser, recording: FirebaseFirestore.DocumentData) {
-  if (recording.archived === true || recording.is_active === false || ['archived', 'draft', 'private'].includes(String(recording.status || '').toLowerCase())) return false;
+  if (recording.archived === true || recording.is_active === false || ['archived', 'draft', 'private', 'stopped'].includes(String(recording.status || '').toLowerCase())) return false;
   if (user.role === 'teacher' || user.role === 'admin' || user.role === 'master') return true;
   if (user.role !== 'student') return false;
 

@@ -60,7 +60,7 @@ export default function TransportLineSelect({
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className="min-h-[44px] w-full rounded-lg border border-gray-100 bg-white px-3 text-sm font-bold text-gray-700 outline-none focus:border-green-400 focus:ring-2 focus:ring-green-100"
+      className="min-h-11 w-full rounded-input border border-line bg-surface px-3 text-sm font-bold text-fg outline-none focus:border-accent focus:ring-2 focus:ring-accent/30"
     >
       <option value="">{loading ? '路線確認中' : '路線を選択'}</option>
       {lines.map(line => (

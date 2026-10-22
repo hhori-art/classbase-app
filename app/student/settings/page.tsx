@@ -6,15 +6,17 @@ import { useSettings } from '@/app/context/SettingsContext';
 import { auth, db } from '@/lib/firebase';
 import { doc, updateDoc } from 'firebase/firestore';
 import { signInWithEmailAndPassword } from 'firebase/auth';
-import { 
-  ArrowLeft, User, Lock, LogOut, ChevronRight, 
-  Save, Loader2, Shield, Target, Type, 
-  Volume2, Smartphone, Download, Share, PlusSquare, HelpCircle, Check, Copy,
-  Palette, LayoutGrid
+import {
+  User, Lock, LogOut, ChevronRight,
+  Save, Type,
+  Volume2, Smartphone, Download, Share, PlusSquare, HelpCircle, Check,
+  Palette, LayoutGrid, Settings
 } from 'lucide-react';
-import Link from 'next/link';
+import { Button, ButtonLink, Card, PageHeader, SectionTitle, useToast } from '@/app/components/ui';
 import LineLinkPanel from '@/app/components/LineLinkPanel';
+import PushNotificationToggle from '@/app/components/PushNotificationToggle';
 import RecoveryEmailSettings from '@/app/components/RecoveryEmailSettings';
+import SignedInPasswordHelp, { displayLoginId } from '@/app/components/SignedInPasswordHelp';
 import { usePortalVisibility } from '@/app/hooks/usePortalVisibility';
 import { isStudentFeatureEnabled } from '@/lib/portal-feature-access';
 import { playSoundEffect, useSound } from '@/lib/sound';
@@ -49,6 +51,7 @@ export default function StudentSettingsPage() {
   const { user, profile, logout } = useAuth();
   const { textSize, setTextSize } = useSettings();
   const { visibility } = usePortalVisibility('student');
+  const toast = useToast();
   
   // --- State ---
   const [name, setName] = useState('');
@@ -71,7 +74,6 @@ export default function StudentSettingsPage() {
   });
 
   const [loading, setLoading] = useState(false);
-  const [message, setMessage] = useState<{type: 'success'|'error', text: string} | null>(null);
   const [hasChanges, setHasChanges] = useState(false);
   const { play } = useSound(settings.sound_se !== false);
 
@@ -131,7 +133,7 @@ export default function StudentSettingsPage() {
           'settings.sound_se': value,
           updated_at: new Date().toISOString(),
         }).catch(() => {
-          showMessage('error', '効果音設定の保存に失敗しました');
+          showMessage('error', '効果音の設定を保存できませんでした。もう一度お試しください。');
           setSettings(prev => ({ ...prev, sound_se: !value }));
         });
       }
@@ -179,7 +181,7 @@ export default function StudentSettingsPage() {
       if (settings.sound_se) play('notification');
       setHasChanges(false);
     } catch (e: any) {
-      showMessage('error', '保存に失敗しました');
+      showMessage('error', '設定を保存できませんでした。もう一度お試しください。');
     } finally {
       setLoading(false);
     }
@@ -199,8 +201,8 @@ export default function StudentSettingsPage() {
   };
 
   const showMessage = (type: 'success'|'error', text: string) => {
-    setMessage({ type, text });
-    setTimeout(() => setMessage(null), 5000);
+    if (type === 'success') toast.success(text);
+    else toast.error(text);
   };
 
   const appearance = normalizeStudentAppearance(settings.appearance, profile?.owned_cosmetics);
@@ -231,9 +233,9 @@ export default function StudentSettingsPage() {
       steps: [
         'ホーム画面または設定から「受講講座を登録・変更」を開きます。',
         '現在実施中の期と、受付期間中の次期講座が表示されます。',
-        'Step 1で受講したい科目を選びます。',
-        'Step 2でその科目の開講曜日・時間を選びます。同じ曜日・同じ時限に複数講座は選べません。',
-        '右側の「保存される講座」を確認し、「すぐに変更する」を押します。',
+        '手順1で受講したい科目を選びます。',
+        '手順2でその科目の開講曜日・時間を選びます。同じ曜日・同じ時限に複数講座は選べません。',
+        '右側の「保存される講座」を確認し、「登録する」を押します。',
       ],
       trouble: [
         '選びたい講座が出ない場合は、現在の期・学年に該当する講座候補がない可能性があります。',
@@ -327,16 +329,16 @@ export default function StudentSettingsPage() {
       ],
     },
     isStudentFeatureEnabled(visibility, profile, 'shop') && {
-      title: 'ポイント・バッジを確認したいとき',
+      title: 'コイン・バッジを確認したいとき',
       summary: 'ログイン、録画視聴、ミッション達成などで獲得した内容を確認します。',
       steps: [
-        'ホーム画面のポイント・バッジ表示を確認します。',
+        'ホーム画面のコイン・バッジ表示を確認します。',
         'ランキングやバッジ一覧を開き、獲得状況を確認します。',
         'デイリーミッションが表示されている場合は、条件を達成して受け取ります。',
       ],
       trouble: [
-        'ポイントやバッジがすぐ反映されない場合は、画面を更新して確認してください。',
-        '時期によってはポイント機能が表示されない場合があります。',
+        'コインやバッジがすぐ反映されない場合は、画面を更新して確認してください。',
+        '時期によってはコイン機能が表示されない場合があります。',
       ],
     },
     {
@@ -356,7 +358,7 @@ export default function StudentSettingsPage() {
   ].filter(Boolean) as ManualItem[];
 
   const handleChangePassword = async () => {
-    if (!newPassword || newPassword !== confirmPassword) return showMessage('error', 'パスワード不一致');
+    if (!newPassword || newPassword !== confirmPassword) return showMessage('error', 'パスワードが一致しません');
     if (newPassword.length < 6) return showMessage('error', 'パスワードは6文字以上で入力してください');
     if (!user) return showMessage('error', 'ログイン情報を確認できません');
     setLoading(true);
@@ -375,478 +377,488 @@ export default function StudentSettingsPage() {
       await refreshedCredential.user.getIdToken(true);
       showMessage('success', 'パスワードを変更し、ログイン状態を更新しました');
       setNewPassword(''); setConfirmPassword(''); setIsPasswordExpanded(false);
-    } catch(e) { showMessage('error', 'パスワード変更に失敗しました'); }
+    } catch(e) { showMessage('error', 'パスワードを変更できませんでした。もう一度お試しください。'); }
     finally { setLoading(false); }
   };
 
+  const choiceClass = (active: boolean, locked = false) => `rounded-btn border-2 p-3 transition-colors ${active ? 'border-accent bg-accent-soft text-fg' : 'border-line bg-surface text-fg-muted hover:bg-canvas'} ${locked ? 'cursor-not-allowed opacity-50' : ''}`;
+  const fieldLabel = 'mb-2 block text-xs font-bold text-fg-muted';
+  const switchClass = 'relative inline-flex h-11 w-14 shrink-0 items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent';
+  const switchTrack = (on: boolean) => `block h-7 w-12 rounded-full p-1 transition-colors ${on ? 'bg-accent' : 'bg-slate-200'}`;
+  const switchKnob = (on: boolean) => `block h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${on ? 'translate-x-5' : 'translate-x-0'}`;
+
   return (
-    <div className={`min-h-screen ${currentTheme.pageBg} p-6 pb-40 font-sans`} style={studentBackgroundPatternStyle(appearance.backgroundPattern)}>
-      <div className="max-w-xl mx-auto space-y-8">
-        
-        {/* ヘッダー */}
-        <div className={`${currentTheme.heroBg} ${currentHeader.heroShape} p-5 text-white relative overflow-hidden`}>
-          <div className={`absolute -right-8 -top-8 h-28 w-28 rounded-full ${currentTheme.heroAccent} blur-xl ${currentHeader.decoration}`}></div>
-          <div className="relative z-10 flex items-center gap-4">
-          <Link href="/student" className="bg-white/20 p-3 rounded-full shadow-sm text-white hover:bg-white/30 transition-colors">
-            <ArrowLeft size={20} />
-          </Link>
-            <div>
-              <p className="text-xs font-black opacity-80">現在のテーマ: {currentTheme.label}</p>
-              <h1 className="text-2xl font-extrabold">設定・アカウント</h1>
-            </div>
-          </div>
+    <div className="mx-auto max-w-xl space-y-5 px-4 py-6">
+      <PageHeader
+        tone="hero"
+        eyebrow={`現在のテーマ: ${currentTheme.label}`}
+        title="設定・アカウント"
+        icon={Settings}
+        backHref="/student"
+      />
+
+      {profile?.isFirstLogin === true && (
+        <div role="alert" className="rounded-card border-2 border-warning/40 bg-warning-soft p-4 text-sm font-bold leading-relaxed text-fg">
+          初回ログインのため、下の「セキュリティ」から新しいパスワードを設定してください。
         </div>
+      )}
 
-        {message && (
-          <div className={`p-4 rounded-2xl font-bold flex items-center gap-3 shadow-sm ${message.type === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-            <Shield size={20}/> {message.text}
-          </div>
-        )}
-
-        {profile?.isFirstLogin === true && (
-          <div className="rounded-2xl border-2 border-amber-300 bg-amber-50 p-4 text-sm font-black leading-relaxed text-amber-900">
-            初回ログインのため、下の「セキュリティ」から新しいパスワードを設定してください。
-          </div>
-        )}
-
-        {/* --- 0. アプリインストール (PWA) --- */}
-        {!isStandalone && (
-          <section className="bg-gradient-to-br from-indigo-600 to-blue-600 p-6 rounded-3xl shadow-lg text-white relative overflow-hidden">
-            <div className="absolute top-0 right-0 w-32 h-32 bg-white/10 rounded-full blur-3xl transform translate-x-10 -translate-y-10"></div>
-            
-            <h2 className="text-lg font-black flex items-center gap-2 mb-2 relative z-10">
-              <Smartphone size={24}/> ショートカットを作成
-            </h2>
-            <p className="text-sm font-bold opacity-90 mb-6 relative z-10">
-              ホーム画面に追加すると、全画面でアプリのように使えます。
-            </p>
-
-            {deferredPrompt ? (
-              <button 
-                onClick={handleInstallClick}
-                className="relative z-10 w-full bg-white text-indigo-600 py-4 rounded-xl font-black shadow-lg flex items-center justify-center gap-2 active:scale-95 transition-transform animate-pulse"
-              >
-                <Download size={22}/> 今すぐ追加する
-              </button>
-            ) : (
-              <div className="relative z-10">
-                 {!showManual ? (
-                   <button 
-                     onClick={() => setShowManual(true)}
-                     className="w-full bg-white/20 border border-white/30 text-white py-3 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-white/30 transition-all"
-                   >
-                     <HelpCircle size={20}/> 追加ボタンが出ない場合
-                   </button>
-                 ) : (
-                   <div className="bg-white/10 backdrop-blur-md p-4 rounded-xl border border-white/20 animate-in fade-in">
-                     <p className="font-bold mb-3 flex items-center gap-2 text-sm">
-                       {isIos ? 'iPhone・iPadの手順' : 'ブラウザメニューの手順'}
-                     </p>
-                     
-                     {isIos ? (
-                       <ol className="space-y-3 text-sm font-bold opacity-90">
-                         <li className="flex items-center gap-2">
-                           <span className="bg-white text-indigo-600 w-6 h-6 rounded-full flex items-center justify-center shrink-0 text-xs">1</span>
-                           <span>画面下の <Share size={16} className="inline mx-1"/> (共有) をタップ</span>
-                         </li>
-                         <li className="flex items-center gap-2">
-                           <span className="bg-white text-indigo-600 w-6 h-6 rounded-full flex items-center justify-center shrink-0 text-xs">2</span>
-                           <span>「ホーム画面に追加」<PlusSquare size={16} className="inline mx-1"/> を探してタップ</span>
-                         </li>
-                         <li className="flex items-center gap-2">
-                           <span className="bg-white text-indigo-600 w-6 h-6 rounded-full flex items-center justify-center shrink-0 text-xs">3</span>
-                           <span>右上の「追加」をタップ</span>
-                         </li>
-                       </ol>
-                     ) : (
-                       <div className="text-sm font-bold opacity-90">
-                         ブラウザのメニューから「アプリをインストール」または「ホーム画面に追加」を選んでください。
-                       </div>
-                     )}
-                     
-                     <button 
-                       onClick={() => setShowManual(false)} 
-                       className="mt-4 w-full bg-white/20 py-2 rounded-lg text-xs font-bold hover:bg-white/30"
-                     >
-                       閉じる
-                     </button>
-                   </div>
-                 )}
-              </div>
-            )}
-          </section>
-        )}
-
-        {isStandalone && (
-           <div className="bg-blue-50 text-blue-600 p-4 rounded-2xl text-center font-bold text-sm flex items-center justify-center gap-2 border border-blue-100">
-             <Check size={18}/> アプリとして使用中
-           </div>
-        )}
-
-        {/* --- 1. 文字サイズ設定 --- */}
-        <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
-          <h2 className="text-lg font-extrabold text-gray-800 mb-4 flex items-center gap-2">
-            <Type size={20} className="text-orange-500"/> 文字の大きさ
+      {/* --- 0. アプリインストール (PWA) --- */}
+      {!isStandalone && (
+        <section className="rounded-card bg-accent p-card text-accent-ink shadow-card">
+          <h2 className="mb-2 flex items-center gap-2 text-lg font-bold">
+            <Smartphone size={24} aria-hidden /> ショートカットを作成
           </h2>
-          <div className="flex bg-gray-100 p-1.5 rounded-2xl mb-4">
-            <button 
-              onClick={() => handleTextSizeChange('normal')} 
-              className={`flex-1 py-3 rounded-xl text-sm font-bold transition-all ${textSize === 'normal' ? 'bg-white shadow text-gray-800' : 'text-gray-400'}`}
-            >
-              ふつう
-            </button>
-            <button 
-              onClick={() => handleTextSizeChange('large')} 
-              className={`flex-1 py-3 rounded-xl text-lg font-bold transition-all ${textSize === 'large' ? 'bg-white shadow text-gray-800' : 'text-gray-400'}`}
-            >
-              おおきめ
-            </button>
-          </div>
-        </section>
-
-        {/* --- 2. 見た目カスタム --- */}
-        <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
-          <h2 className="text-lg font-extrabold text-gray-800 mb-2 flex items-center gap-2">
-            <Palette size={20} className="text-pink-500"/> ホームのデザイン
-          </h2>
-          <p className="mb-5 text-xs font-bold leading-relaxed text-gray-400">
-            生徒ホームの色やカードの雰囲気を自分好みに変えられます。
+          <p className="mb-5 text-sm font-medium text-accent-ink/90">
+            ホーム画面に追加すると、全画面でアプリのように使えます。
           </p>
 
-          <div className={`${currentTheme.pageBg} rounded-3xl p-3 border border-gray-100 mb-5`} style={studentBackgroundPatternStyle(appearance.backgroundPattern)}>
-            <div className={`${currentTheme.heroBg} ${currentHeader.heroShape} p-4 text-white relative overflow-hidden`}>
-              <div className={`absolute -right-5 -top-5 h-20 w-20 rounded-full ${currentTheme.heroAccent} blur-xl ${currentHeader.decoration}`}></div>
-              <p className="text-[10px] font-black opacity-80">プレビュー</p>
-              <div className="mt-2 flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-black">こんにちは！</p>
-                  <p className={`text-xl font-black ${currentTheme.nameColor}`}>{name || '生徒'} さん</p>
-                </div>
-                {appearance.showMascot && (
-                  <div className="rounded-2xl bg-white/20 px-3 py-2 text-2xl">🎓</div>
-                )}
-              </div>
-            </div>
-            <div className={`mt-3 ${STUDENT_CARD_STYLES[appearance.cardStyle].panel} ${STUDENT_DENSITIES[appearance.density].cardPadding}`}>
-              <div className="flex items-center gap-3">
-                <span className={`h-9 w-9 rounded-2xl ${currentTheme.badgeBg} ${currentTheme.badgeText} flex items-center justify-center font-black`}>
-                  <LayoutGrid size={18} />
-                </span>
-                <div>
-                  <p className="text-sm font-black text-gray-800">カードの見本</p>
-                  <p className="text-[10px] font-bold text-gray-400">{STUDENT_CARD_STYLES[appearance.cardStyle].label} / {STUDENT_DENSITIES[appearance.density].label}</p>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="space-y-5">
+          {deferredPrompt ? (
+            <button
+              type="button"
+              onClick={handleInstallClick}
+              className="flex min-h-12 w-full items-center justify-center gap-2 rounded-btn bg-white py-3 font-bold text-accent shadow-card transition-transform active:scale-95"
+            >
+              <Download size={22} aria-hidden /> 今すぐ追加する
+            </button>
+          ) : (
             <div>
-              <label className="mb-2 block text-xs font-black text-gray-400">テーマカラー</label>
-              <div className="grid grid-cols-2 gap-2">
-                {(Object.keys(STUDENT_THEMES) as StudentThemeId[]).map(themeId => {
-                  const theme = STUDENT_THEMES[themeId];
-                  const active = appearance.theme === themeId;
-                  const locked = Boolean(theme.premium && !ownedCosmetics.includes(theme.premium));
-                  return (
-                    <button
-                      key={themeId}
-                      type="button"
-                      disabled={locked}
-                      onClick={() => handleAppearanceChange('theme', themeId)}
-                      className={`rounded-2xl border-2 p-3 text-left transition-all ${active ? 'border-gray-900 bg-gray-50' : 'border-gray-100 bg-white hover:bg-gray-50'} ${locked ? 'cursor-not-allowed opacity-50' : ''}`}
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className={`h-5 w-5 rounded-full ${theme.previewDot}`}></span>
-                        <span className="text-sm font-black text-gray-800">{theme.label}</span>
-                        {theme.premium && <span className="rounded-full bg-amber-100 px-1.5 text-[9px] font-black text-amber-700">{locked ? '🔒 限定' : '限定'}</span>}
-                      </div>
-                      <p className="mt-1 text-[10px] font-bold text-gray-400">{locked ? '交換所・ガチャで手に入るよ' : theme.description}</p>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div>
-              <label className="mb-2 block text-xs font-black text-gray-400">カードの雰囲気</label>
-              <div className="grid grid-cols-3 gap-2">
-                {(Object.keys(STUDENT_CARD_STYLES) as StudentCardStyle[]).map(styleId => {
-                  const style = STUDENT_CARD_STYLES[styleId];
-                  const active = appearance.cardStyle === styleId;
-                  return (
-                    <button
-                      key={styleId}
-                      type="button"
-                      onClick={() => handleAppearanceChange('cardStyle', styleId)}
-                      className={`rounded-2xl border-2 p-3 text-center transition-all ${active ? 'border-gray-900 bg-gray-50 text-gray-900' : 'border-gray-100 bg-white text-gray-400 hover:bg-gray-50'}`}
-                    >
-                      <span className="block text-xs font-black">{style.label}</span>
-                      <span className="mt-1 block text-[9px] font-bold leading-relaxed">{style.description}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div>
-              <label className="mb-2 block text-xs font-black text-gray-400">表示の詰め具合</label>
-              <div className="grid grid-cols-2 gap-2">
-                {(Object.keys(STUDENT_DENSITIES) as StudentDensity[]).map(densityId => {
-                  const density = STUDENT_DENSITIES[densityId];
-                  const active = appearance.density === densityId;
-                  return (
-                    <button
-                      key={densityId}
-                      type="button"
-                      onClick={() => handleAppearanceChange('density', densityId)}
-                      className={`rounded-2xl border-2 p-3 text-left transition-all ${active ? 'border-gray-900 bg-gray-50' : 'border-gray-100 bg-white hover:bg-gray-50'}`}
-                    >
-                      <span className="text-sm font-black text-gray-800">{density.label}</span>
-                      <p className="mt-1 text-[10px] font-bold text-gray-400">{density.description}</p>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div>
-              <label className="mb-2 block text-xs font-black text-gray-400">ヘッダーの形</label>
-              <div className="grid grid-cols-3 gap-2">
-                {(Object.keys(STUDENT_HEADER_STYLES) as StudentHeaderStyle[]).map(headerId => {
-                  const header = STUDENT_HEADER_STYLES[headerId];
-                  const active = appearance.headerStyle === headerId;
-                  return (
-                    <button
-                      key={headerId}
-                      type="button"
-                      onClick={() => handleAppearanceChange('headerStyle', headerId)}
-                      className={`rounded-2xl border-2 p-3 text-center transition-all ${active ? 'border-gray-900 bg-gray-50 text-gray-900' : 'border-gray-100 bg-white text-gray-400 hover:bg-gray-50'}`}
-                    >
-                      <span className="block text-xs font-black">{header.label}</span>
-                      <span className="mt-1 block text-[9px] font-bold leading-relaxed">{header.description}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div>
-              <label className="mb-2 block text-xs font-black text-gray-400">背景パターン</label>
-              <div className="grid grid-cols-3 gap-2">
-                {(Object.keys(STUDENT_BACKGROUND_PATTERNS) as StudentBackgroundPattern[]).map(patternId => {
-                  const pattern = STUDENT_BACKGROUND_PATTERNS[patternId];
-                  const active = appearance.backgroundPattern === patternId;
-                  const locked = Boolean(pattern.premium && !ownedCosmetics.includes(pattern.premium));
-                  return (
-                    <button
-                      key={patternId}
-                      type="button"
-                      disabled={locked}
-                      onClick={() => handleAppearanceChange('backgroundPattern', patternId)}
-                      className={`rounded-2xl border-2 p-3 text-center transition-all ${active ? 'border-gray-900 bg-gray-50 text-gray-900' : 'border-gray-100 bg-white text-gray-400 hover:bg-gray-50'} ${locked ? 'cursor-not-allowed opacity-50' : ''}`}
-                    >
-                      <span className="block text-xs font-black">{locked ? '🔒 ' : ''}{pattern.label}</span>
-                      <span className="mt-1 block text-[9px] font-bold leading-relaxed">{locked ? '交換所で手に入るよ' : pattern.description}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div>
-              <label className="mb-2 block text-xs font-black text-gray-400">名前の上の称号（交換所で手に入る）</label>
-              {ownedTitles.length === 0 ? (
-                <p className="rounded-2xl bg-gray-50 p-3 text-[11px] font-bold text-gray-400">まだ称号を持っていません。コイン交換所やガチャで手に入れよう！</p>
+              {!showManual ? (
+                <button
+                  type="button"
+                  onClick={() => setShowManual(true)}
+                  className="flex min-h-11 w-full items-center justify-center gap-2 rounded-btn border border-white/30 bg-white/20 py-3 font-bold transition-colors hover:bg-white/30"
+                >
+                  <HelpCircle size={20} aria-hidden /> 追加ボタンが出ない場合
+                </button>
               ) : (
-                <div className="flex flex-wrap gap-2">
-                  {['', ...ownedTitles].map(titleId => (
-                    <button key={titleId || 'none'} type="button" onClick={() => handleAppearanceChange('title', titleId)}
-                      className={`rounded-full border-2 px-3 py-1.5 text-xs font-black ${appearance.title === titleId ? 'border-gray-900 bg-gray-900 text-white' : 'border-gray-100 bg-white text-gray-500'}`}>
-                      {titleId ? presetTitleText(titleId) : '表示しない'}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
+                <div className="rounded-btn border border-white/20 bg-white/10 p-4">
+                  <p className="mb-3 flex items-center gap-2 text-sm font-bold">
+                    {isIos ? 'iPhone・iPadの手順' : 'ブラウザメニューの手順'}
+                  </p>
 
-            <div>
-              <label className="mb-2 block text-xs font-black text-gray-400">バッジのフレーム（交換所で手に入る）</label>
-              {ownedFrames.length === 0 ? (
-                <p className="rounded-2xl bg-gray-50 p-3 text-[11px] font-bold text-gray-400">まだフレームを持っていません。コイン交換所やガチャで手に入れよう！</p>
-              ) : (
-                <div className="flex flex-wrap gap-3">
-                  {['', ...ownedFrames].map(frameId => (
-                    <button key={frameId || 'none'} type="button" onClick={() => handleAppearanceChange('frame', frameId)}
-                      className={`flex flex-col items-center gap-1 rounded-2xl border-2 p-2 ${appearance.frame === frameId ? 'border-gray-900 bg-gray-50' : 'border-gray-100 bg-white'}`}>
-                      <span className="rounded-xl" style={studentBadgeFrameStyle(frameId) || { padding: 3 }}>
-                        <span className="flex h-9 w-9 items-center justify-center rounded-[9px] bg-white text-xl">🎓</span>
-                      </span>
-                      <span className="text-[10px] font-black text-gray-500">{frameId ? STUDENT_BADGE_FRAMES[frameId]?.label : 'なし'}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <label className="flex items-center justify-between rounded-2xl bg-gray-50 p-4">
-              <span>
-                <span className="block text-sm font-black text-gray-700">ヘッダーにバッジを表示</span>
-                <span className="mt-1 block text-[10px] font-bold text-gray-400">ホーム上部に現在のバッジを飾ります。</span>
-              </span>
-              <button
-                type="button"
-                onClick={() => handleAppearanceChange('showMascot', !appearance.showMascot)}
-                className={`h-7 w-12 rounded-full p-1 transition-colors ${appearance.showMascot ? 'bg-pink-500' : 'bg-gray-200'}`}
-              >
-                <span className={`block h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${appearance.showMascot ? 'translate-x-5' : 'translate-x-0'}`}></span>
-              </button>
-            </label>
-          </div>
-        </section>
-
-        {/* --- 3. プロフィール設定 (表示のみ) --- */}
-        <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
-          <h2 className="text-lg font-extrabold text-gray-800 mb-6 flex items-center gap-2">
-            <User size={20} className="text-indigo-500"/> プロフィール
-          </h2>
-          <div className="space-y-4">
-            <div>
-              <label className="block text-xs font-bold text-gray-400 mb-2">お名前</label>
-              <div className="w-full p-4 bg-gray-50 border border-gray-100 rounded-xl font-bold text-gray-700">
-                {name}
-              </div>
-              <p className="text-[10px] text-gray-400 mt-1 pl-1">※お名前の変更は先生にお伝えください</p>
-            </div>
-            <div>
-              <label className="block text-xs font-bold text-gray-400 mb-2">目標</label>
-              <div className="grid grid-cols-2 gap-2">
-                {['定期テスト対策', '受験対策', '苦手克服', '予習中心'].map((t) => (
-                  <button key={t} onClick={() => { setTarget(t); setHasChanges(true); }} className={`p-3 rounded-xl text-sm font-bold border-2 transition-all ${target === t ? 'bg-indigo-50 border-indigo-500 text-indigo-700' : 'bg-white border-gray-100 text-gray-400 hover:bg-gray-50'}`}>{t}</button>
-                ))}
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <LineLinkPanel
-          role="student"
-          lineUserId={profile?.line_user_id}
-          description="連携すると、授業開始・宿題・お知らせなどの大切な通知をLINEでも受け取れます。"
-        />
-
-        <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
-          <h2 className="text-lg font-extrabold text-gray-800 mb-4 flex items-center gap-2">
-            <HelpCircle size={20} className="text-sky-500"/> 使用マニュアル
-          </h2>
-          <p className="mb-4 rounded-2xl bg-sky-50 px-4 py-3 text-xs font-bold leading-relaxed text-sky-700">
-            困った時は、問い合わせ前に該当する項目を開いて確認してください。今表示されている機能に関係する手順だけを表示しています。
-          </p>
-          <Link href="/manual" className="mb-4 flex min-h-12 items-center justify-between rounded-2xl bg-indigo-600 px-5 py-3 text-sm font-black text-white">生徒向け操作マニュアル <ChevronRight size={19} /></Link>
-          <div className="space-y-3">
-            {manualItems.map(item => (
-              <details key={item.title} className="rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3">
-                <summary className="cursor-pointer text-sm font-black text-slate-800">{item.title}</summary>
-                <div className="mt-3 space-y-3">
-                  <p className="rounded-xl bg-white px-3 py-2 text-xs font-bold leading-relaxed text-slate-600">{item.summary}</p>
-                  <div>
-                    <p className="mb-2 text-[11px] font-black text-slate-400">操作の流れ</p>
-                    <ol className="space-y-1.5">
-                      {item.steps.map((step, index) => (
-                        <li key={`${item.title}-step-${index}`} className="flex gap-2 text-xs font-bold leading-relaxed text-slate-600">
-                          <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-sky-100 text-[10px] font-black text-sky-700">{index + 1}</span>
-                          <span>{step}</span>
-                        </li>
-                      ))}
+                  {isIos ? (
+                    <ol className="space-y-3 text-sm font-medium">
+                      <li className="flex items-center gap-2">
+                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white text-xs font-bold text-accent">1</span>
+                        <span>画面下の <Share size={16} className="mx-1 inline" aria-hidden /> (共有) をタップ</span>
+                      </li>
+                      <li className="flex items-center gap-2">
+                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white text-xs font-bold text-accent">2</span>
+                        <span>「ホーム画面に追加」<PlusSquare size={16} className="mx-1 inline" aria-hidden /> を探してタップ</span>
+                      </li>
+                      <li className="flex items-center gap-2">
+                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white text-xs font-bold text-accent">3</span>
+                        <span>右上の「追加」をタップ</span>
+                      </li>
                     </ol>
-                  </div>
-                  {item.trouble && item.trouble.length > 0 && (
-                    <div className="rounded-xl border border-amber-100 bg-amber-50 px-3 py-2">
-                      <p className="mb-2 text-[11px] font-black text-amber-700">うまくいかない時</p>
-                      <ul className="space-y-1.5">
-                        {item.trouble.map((text, index) => (
-                          <li key={`${item.title}-trouble-${index}`} className="flex gap-2 text-xs font-bold leading-relaxed text-amber-800">
-                            <Check size={13} className="mt-0.5 shrink-0" strokeWidth={4} />
-                            <span>{text}</span>
-                          </li>
-                        ))}
-                      </ul>
+                  ) : (
+                    <div className="text-sm font-medium">
+                      ブラウザのメニューから「アプリをインストール」または「ホーム画面に追加」を選んでください。
                     </div>
                   )}
+
+                  <button
+                    type="button"
+                    onClick={() => setShowManual(false)}
+                    className="mt-4 min-h-11 w-full rounded-btn bg-white/20 text-sm font-bold hover:bg-white/30"
+                  >
+                    閉じる
+                  </button>
                 </div>
-              </details>
-            ))}
-          </div>
-        </section>
-
-        {/* --- 4. 音・通知 --- */}
-        <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
-          <h2 className="text-lg font-extrabold text-gray-800 mb-6 flex items-center gap-2">
-            <Volume2 size={20} className="text-teal-500"/> 音・通知
-          </h2>
-          <div className="space-y-4">
-            {[
-              { key: 'notification_homework', label: '宿題の通知' },
-              { key: 'notification_class', label: '授業開始の通知' },
-              { key: 'sound_se', label: '効果音 (SE)' },
-            ].map((item) => (
-              <div key={item.key} className="flex items-center justify-between">
-                <span className="font-bold text-gray-700 text-sm">{item.label}</span>
-                <button 
-                  onClick={() => handleChange(item.key, !settings[item.key])}
-                  className={`w-12 h-7 rounded-full p-1 transition-colors duration-300 ${settings[item.key] ? 'bg-teal-500' : 'bg-gray-200'}`}
-                >
-                  <div className={`w-5 h-5 bg-white rounded-full shadow-sm transition-transform duration-300 ${settings[item.key] ? 'translate-x-5' : 'translate-x-0'}`} />
-                </button>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        {/* --- 保存ボタン --- */}
-        <div className="sticky bottom-20 z-20">
-          <button 
-            onClick={handleSaveSettings}
-            disabled={loading}
-            className={`w-full py-4 rounded-2xl font-black text-lg shadow-xl flex items-center justify-center gap-2 transition-all transform ${hasChanges ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white hover:scale-[1.02] active:scale-95 shadow-indigo-200' : 'bg-gray-200 text-gray-400'}`}
-          >
-            {loading ? <Loader2 className="animate-spin" size={24}/> : <Save size={24}/>} 
-            {hasChanges ? '変更を保存する' : '保存済み'}
-          </button>
-        </div>
-
-        {/* --- 5. セキュリティ --- */}
-        <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
-          <h2 className="text-lg font-extrabold text-gray-800 mb-2 flex items-center gap-2">
-            <Lock size={20} className="text-gray-400"/> セキュリティ
-          </h2>
-          {!isPasswordExpanded ? (
-            <button onClick={() => setIsPasswordExpanded(true)} className="w-full py-3 text-left font-bold text-gray-500 hover:text-gray-800 flex items-center justify-between"><span>パスワードを変更する</span><ChevronRight size={18}/></button>
-          ) : (
-            <div className="space-y-4 mt-4 animate-in fade-in">
-              <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="w-full p-3 bg-gray-50 rounded-xl font-bold" placeholder="新しいパスワード" />
-              <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className="w-full p-3 bg-gray-50 rounded-xl font-bold" placeholder="確認用" />
-              <div className="flex justify-end gap-2">
-                <button onClick={() => setIsPasswordExpanded(false)} className="px-4 py-2 text-gray-400 font-bold text-sm">キャンセル</button>
-                <button onClick={handleChangePassword} className="bg-gray-800 text-white px-6 py-2 rounded-xl font-bold text-sm">変更</button>
-              </div>
+              )}
             </div>
           )}
-          <div className="mt-5 border-t border-gray-100 pt-5">
-            <RecoveryEmailSettings
-              currentEmail={profile?.recovery_email}
-              verified={Boolean(profile?.recovery_email_verified_at)}
-            />
-          </div>
         </section>
+      )}
 
-        <div className="pt-4 pb-10">
-           <button onClick={logout} className="w-full bg-white border-2 border-red-50 text-red-400 py-4 rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-red-50">
-             <LogOut size={20}/> ログアウト
-           </button>
+      {isStandalone && (
+        <div className="flex items-center justify-center gap-2 rounded-card border border-accent/20 bg-accent-soft p-4 text-center text-sm font-bold text-accent">
+          <Check size={18} aria-hidden /> アプリとして使用中
+        </div>
+      )}
+
+      {/* --- 1. 文字サイズ設定 --- */}
+      <Card>
+        <SectionTitle icon={Type} title="文字の大きさ" />
+        <div className="flex rounded-btn bg-canvas p-1.5" role="group" aria-label="文字の大きさ">
+          <button
+            type="button"
+            onClick={() => handleTextSizeChange('normal')}
+            aria-pressed={textSize === 'normal'}
+            className={`min-h-11 flex-1 rounded-btn text-sm font-bold transition-colors ${textSize === 'normal' ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted'}`}
+          >
+            ふつう
+          </button>
+          <button
+            type="button"
+            onClick={() => handleTextSizeChange('large')}
+            aria-pressed={textSize === 'large'}
+            className={`min-h-11 flex-1 rounded-btn text-lg font-bold transition-colors ${textSize === 'large' ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted'}`}
+          >
+            おおきめ
+          </button>
+        </div>
+      </Card>
+
+      {/* --- 2. 見た目カスタム --- */}
+      <Card>
+        <SectionTitle icon={Palette} title="ホームのデザイン" description="生徒ホームの色やカードの雰囲気を自分好みに変えられます。" />
+
+        {/* プレビュー：保存前のテーマ・カードの形を、そのテーマ自身の色で見せる */}
+        <div className={`${currentTheme.pageBg} mb-5 rounded-card border border-line p-3`} style={studentBackgroundPatternStyle(appearance.backgroundPattern)}>
+          <div className={`${currentTheme.heroBg} ${currentHeader.heroShape} relative overflow-hidden p-4 text-white`}>
+            <div className={`absolute -right-5 -top-5 h-20 w-20 rounded-full ${currentTheme.heroAccent} blur-xl ${currentHeader.decoration}`}></div>
+            <p className="text-xs font-bold opacity-80">プレビュー</p>
+            <div className="mt-2 flex items-center justify-between">
+              <div>
+                <p className="text-sm font-bold">こんにちは！</p>
+                <p className={`text-xl font-black ${currentTheme.nameColor}`}>{name || '生徒'} さん</p>
+              </div>
+              {appearance.showMascot && (
+                <div className="rounded-2xl bg-white/20 px-3 py-2 text-2xl">🎓</div>
+              )}
+            </div>
+          </div>
+          <div className={`mt-3 ${STUDENT_CARD_STYLES[appearance.cardStyle].panel} ${STUDENT_DENSITIES[appearance.density].cardPadding}`}>
+            <div className="flex items-center gap-3">
+              <span className={`flex h-9 w-9 items-center justify-center rounded-2xl font-bold ${currentTheme.badgeBg} ${currentTheme.badgeText}`}>
+                <LayoutGrid size={18} aria-hidden />
+              </span>
+              <div>
+                <p className="text-sm font-bold text-slate-800">カードの見本</p>
+                <p className="text-xs font-medium text-slate-500">{STUDENT_CARD_STYLES[appearance.cardStyle].label} / {STUDENT_DENSITIES[appearance.density].label}</p>
+              </div>
+            </div>
+          </div>
         </div>
 
+        <div className="space-y-5">
+          <div>
+            <p className={fieldLabel}>テーマカラー</p>
+            <div className="grid grid-cols-2 gap-2">
+              {(Object.keys(STUDENT_THEMES) as StudentThemeId[]).map(themeId => {
+                const theme = STUDENT_THEMES[themeId];
+                const active = appearance.theme === themeId;
+                const locked = Boolean(theme.premium && !ownedCosmetics.includes(theme.premium));
+                return (
+                  <button
+                    key={themeId}
+                    type="button"
+                    disabled={locked}
+                    aria-pressed={active}
+                    onClick={() => handleAppearanceChange('theme', themeId)}
+                    className={`${choiceClass(active, locked)} text-left`}
+                  >
+                    {/* スマホの2列表示では幅が狭いので、名前は1行のまま、「限定」は入りきらなければ次の行へ。 */}
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <span className={`h-5 w-5 shrink-0 rounded-full ${theme.previewDot}`}></span>
+                      <span className="whitespace-nowrap text-sm font-bold text-fg">{theme.label}</span>
+                      {theme.premium && <span className="shrink-0 whitespace-nowrap rounded-full bg-amber-100 px-1.5 text-[11px] font-bold text-amber-700">{locked ? '🔒 限定' : '限定'}</span>}
+                    </div>
+                    <p className="mt-1 text-xs font-medium text-fg-muted">{locked ? '交換所・ガチャで手に入るよ' : theme.description}</p>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div>
+            <p className={fieldLabel}>カードの雰囲気</p>
+            <div className="grid grid-cols-3 gap-2">
+              {(Object.keys(STUDENT_CARD_STYLES) as StudentCardStyle[]).map(styleId => {
+                const style = STUDENT_CARD_STYLES[styleId];
+                const active = appearance.cardStyle === styleId;
+                return (
+                  <button
+                    key={styleId}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => handleAppearanceChange('cardStyle', styleId)}
+                    className={`${choiceClass(active)} text-center`}
+                  >
+                    <span className="block text-xs font-bold">{style.label}</span>
+                    <span className="mt-1 block text-xs font-medium leading-relaxed">{style.description}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div>
+            <p className={fieldLabel}>表示の詰め具合</p>
+            <div className="grid grid-cols-2 gap-2">
+              {(Object.keys(STUDENT_DENSITIES) as StudentDensity[]).map(densityId => {
+                const density = STUDENT_DENSITIES[densityId];
+                const active = appearance.density === densityId;
+                return (
+                  <button
+                    key={densityId}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => handleAppearanceChange('density', densityId)}
+                    className={`${choiceClass(active)} text-left`}
+                  >
+                    <span className="text-sm font-bold text-fg">{density.label}</span>
+                    <p className="mt-1 text-xs font-medium text-fg-muted">{density.description}</p>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div>
+            <p className={fieldLabel}>ヘッダーの形</p>
+            <div className="grid grid-cols-3 gap-2">
+              {(Object.keys(STUDENT_HEADER_STYLES) as StudentHeaderStyle[]).map(headerId => {
+                const header = STUDENT_HEADER_STYLES[headerId];
+                const active = appearance.headerStyle === headerId;
+                return (
+                  <button
+                    key={headerId}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => handleAppearanceChange('headerStyle', headerId)}
+                    className={`${choiceClass(active)} text-center`}
+                  >
+                    <span className="block text-xs font-bold">{header.label}</span>
+                    <span className="mt-1 block text-xs font-medium leading-relaxed">{header.description}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div>
+            <p className={fieldLabel}>背景パターン</p>
+            <div className="grid grid-cols-3 gap-2">
+              {(Object.keys(STUDENT_BACKGROUND_PATTERNS) as StudentBackgroundPattern[]).map(patternId => {
+                const pattern = STUDENT_BACKGROUND_PATTERNS[patternId];
+                const active = appearance.backgroundPattern === patternId;
+                const locked = Boolean(pattern.premium && !ownedCosmetics.includes(pattern.premium));
+                return (
+                  <button
+                    key={patternId}
+                    type="button"
+                    disabled={locked}
+                    aria-pressed={active}
+                    onClick={() => handleAppearanceChange('backgroundPattern', patternId)}
+                    className={`${choiceClass(active, locked)} text-center`}
+                  >
+                    <span className="block text-xs font-bold">{locked ? '🔒 ' : ''}{pattern.label}</span>
+                    <span className="mt-1 block text-xs font-medium leading-relaxed">{locked ? '交換所で手に入るよ' : pattern.description}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div>
+            <p className={fieldLabel}>名前の上の称号（交換所で手に入る）</p>
+            {ownedTitles.length === 0 ? (
+              <p className="rounded-btn bg-canvas p-3 text-xs font-medium text-fg-muted">まだ称号を持っていません。コイン交換所やガチャで手に入れよう！</p>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {['', ...ownedTitles].map(titleId => (
+                  <button key={titleId || 'none'} type="button" aria-pressed={appearance.title === titleId} onClick={() => handleAppearanceChange('title', titleId)}
+                    className={`min-h-9 rounded-full border-2 px-3 py-1.5 text-xs font-bold transition-colors ${appearance.title === titleId ? 'border-accent bg-accent text-accent-ink' : 'border-line bg-surface text-fg-muted hover:bg-canvas'}`}>
+                    {titleId ? presetTitleText(titleId) : '表示しない'}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div>
+            <p className={fieldLabel}>バッジのフレーム（交換所で手に入る）</p>
+            {ownedFrames.length === 0 ? (
+              <p className="rounded-btn bg-canvas p-3 text-xs font-medium text-fg-muted">まだフレームを持っていません。コイン交換所やガチャで手に入れよう！</p>
+            ) : (
+              <div className="flex flex-wrap gap-3">
+                {['', ...ownedFrames].map(frameId => (
+                  <button key={frameId || 'none'} type="button" aria-pressed={appearance.frame === frameId} onClick={() => handleAppearanceChange('frame', frameId)}
+                    className={`flex flex-col items-center gap-1 rounded-btn border-2 p-2 transition-colors ${appearance.frame === frameId ? 'border-accent bg-accent-soft' : 'border-line bg-surface hover:bg-canvas'}`}>
+                    <span className="rounded-xl" style={studentBadgeFrameStyle(frameId) || { padding: 3 }}>
+                      <span className="flex h-9 w-9 items-center justify-center rounded-input bg-white text-xl">🎓</span>
+                    </span>
+                    <span className="text-xs font-bold text-fg-muted">{frameId ? STUDENT_BADGE_FRAMES[frameId]?.label : 'なし'}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center justify-between gap-3 rounded-btn bg-canvas p-4">
+            <span>
+              <span className="block text-sm font-bold text-fg">ヘッダーにバッジを表示</span>
+              <span className="mt-1 block text-xs font-medium text-fg-muted">ホーム上部に現在のバッジを飾ります。</span>
+            </span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={appearance.showMascot}
+              aria-label="ヘッダーにバッジを表示"
+              onClick={() => handleAppearanceChange('showMascot', !appearance.showMascot)}
+              className={switchClass}
+            >
+              <span className={switchTrack(appearance.showMascot)}>
+                <span className={switchKnob(appearance.showMascot)}></span>
+              </span>
+            </button>
+          </div>
+        </div>
+      </Card>
+
+      {/* --- 3. プロフィール設定 (表示のみ) --- */}
+      <Card>
+        <SectionTitle icon={User} title="プロフィール" />
+        <div className="space-y-4">
+          <div>
+            <p className={fieldLabel}>お名前</p>
+            <div className="w-full rounded-input border border-line bg-canvas p-4 font-bold text-fg">
+              {name}
+            </div>
+            <p className="mt-1 pl-1 text-xs text-fg-muted">※お名前の変更は先生にお伝えください</p>
+          </div>
+          <div>
+            <p className={fieldLabel}>目標</p>
+            <div className="grid grid-cols-2 gap-2">
+              {['定期テスト対策', '受験対策', '苦手克服', '予習中心'].map((t) => (
+                <button key={t} type="button" aria-pressed={target === t} onClick={() => { setTarget(t); setHasChanges(true); }} className={`min-h-11 rounded-btn border-2 p-3 text-sm font-bold transition-colors ${target === t ? 'border-accent bg-accent-soft text-accent' : 'border-line bg-surface text-fg-muted hover:bg-canvas'}`}>{t}</button>
+              ))}
+            </div>
+          </div>
+        </div>
+      </Card>
+
+      <LineLinkPanel
+        role="student"
+        lineUserId={profile?.line_user_id}
+        description="連携すると、授業開始・宿題・お知らせなどの大切な通知をLINEでも受け取れます。"
+      />
+
+      <PushNotificationToggle />
+
+      <Card>
+        <SectionTitle icon={HelpCircle} title="使用マニュアル" />
+        <p className="mb-4 rounded-btn bg-info-soft px-4 py-3 text-xs font-medium leading-relaxed text-info">
+          困った時は、問い合わせ前に該当する項目を開いて確認してください。今表示されている機能に関係する手順だけを表示しています。
+        </p>
+        <ButtonLink href="/manual" fullWidth className="mb-4 justify-between">生徒向け操作マニュアル <ChevronRight size={19} aria-hidden /></ButtonLink>
+        <div className="space-y-3">
+          {manualItems.map(item => (
+            <details key={item.title} className="rounded-btn border border-line bg-canvas px-4 py-3">
+              <summary className="flex min-h-9 cursor-pointer items-center text-sm font-bold text-fg">{item.title}</summary>
+              <div className="mt-3 space-y-3">
+                <p className="rounded-input bg-surface px-3 py-2 text-xs font-medium leading-relaxed text-fg-muted">{item.summary}</p>
+                <div>
+                  <p className="mb-2 text-xs font-bold text-fg-muted">操作の流れ</p>
+                  <ol className="space-y-1.5">
+                    {item.steps.map((step, index) => (
+                      <li key={`${item.title}-step-${index}`} className="flex gap-2 text-xs font-medium leading-relaxed text-fg">
+                        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent-soft text-[11px] font-bold text-accent">{index + 1}</span>
+                        <span>{step}</span>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+                {item.trouble && item.trouble.length > 0 && (
+                  <div className="rounded-input border border-warning/20 bg-warning-soft px-3 py-2">
+                    <p className="mb-2 text-xs font-bold text-warning">うまくいかない時</p>
+                    <ul className="space-y-1.5">
+                      {item.trouble.map((text, index) => (
+                        <li key={`${item.title}-trouble-${index}`} className="flex gap-2 text-xs font-medium leading-relaxed text-fg">
+                          <Check size={13} className="mt-0.5 shrink-0 text-warning" strokeWidth={4} aria-hidden />
+                          <span>{text}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            </details>
+          ))}
+        </div>
+      </Card>
+
+      {/* --- 4. 音・通知 --- */}
+      <Card>
+        <SectionTitle icon={Volume2} title="音・通知" />
+        <div className="space-y-2">
+          {[
+            { key: 'notification_homework', label: '宿題の通知' },
+            { key: 'notification_class', label: '授業開始の通知' },
+            { key: 'sound_se', label: '効果音' },
+          ].map((item) => (
+            <div key={item.key} className="flex items-center justify-between gap-3">
+              <span className="text-sm font-bold text-fg">{item.label}</span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={Boolean(settings[item.key])}
+                aria-label={item.label}
+                onClick={() => handleChange(item.key, !settings[item.key])}
+                className={switchClass}
+              >
+                <span className={switchTrack(Boolean(settings[item.key]))}>
+                  <span className={switchKnob(Boolean(settings[item.key]))} />
+                </span>
+              </button>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      {/* --- 保存ボタン --- */}
+      <div className="sticky bottom-20 z-20">
+        <Button
+          size="lg"
+          fullWidth
+          onClick={handleSaveSettings}
+          loading={loading}
+          variant={hasChanges ? 'primary' : 'secondary'}
+          icon={<Save size={22} aria-hidden />}
+          className="min-h-14 shadow-card"
+        >
+          {hasChanges ? '変更を保存する' : '保存済み'}
+        </Button>
       </div>
+
+      {/* --- 5. セキュリティ --- */}
+      <Card>
+        <SectionTitle icon={Lock} title="セキュリティ" className="mb-2" />
+        <SignedInPasswordHelp
+          loginId={displayLoginId(profile, user?.email)}
+          hasVerifiedRecoveryEmail={Boolean(profile?.recovery_email && profile?.recovery_email_verified_at)}
+          audience="student"
+        />
+        {!isPasswordExpanded ? (
+          <button type="button" onClick={() => setIsPasswordExpanded(true)} className="mt-2 flex min-h-11 w-full items-center justify-between py-3 text-left font-bold text-fg-muted hover:text-fg"><span>パスワードを変更する（今のパスワードは不要）</span><ChevronRight size={18} aria-hidden /></button>
+        ) : (
+          <div className="mt-4 space-y-4">
+            <p className="text-xs font-medium text-fg-muted">新しいパスワード（6文字以上）を2回入力してください。今のパスワードは入力しなくて大丈夫です。</p>
+            <input type="password" aria-label="新しいパスワード" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="min-h-11 w-full rounded-input border border-line bg-canvas p-3 font-medium text-fg outline-none focus:border-accent focus:ring-2 focus:ring-accent/20" placeholder="新しいパスワード" />
+            <input type="password" aria-label="確認用" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className="min-h-11 w-full rounded-input border border-line bg-canvas p-3 font-medium text-fg outline-none focus:border-accent focus:ring-2 focus:ring-accent/20" placeholder="確認用" />
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" onClick={() => setIsPasswordExpanded(false)}>キャンセル</Button>
+              <Button onClick={handleChangePassword} loading={loading}>変更</Button>
+            </div>
+          </div>
+        )}
+        <div className="mt-5 border-t border-line pt-5">
+          <RecoveryEmailSettings
+            currentEmail={profile?.recovery_email}
+            verified={Boolean(profile?.recovery_email_verified_at)}
+          />
+        </div>
+      </Card>
+
+      <div className="pb-6 pt-2">
+        <button type="button" onClick={logout} className="flex min-h-12 w-full items-center justify-center gap-2 rounded-btn border-2 border-danger/20 bg-surface py-3 font-bold text-danger transition-colors hover:bg-danger-soft">
+          <LogOut size={20} aria-hidden /> ログアウト
+        </button>
+      </div>
+
     </div>
   );
 }

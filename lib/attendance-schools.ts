@@ -1,7 +1,7 @@
 export type AttendanceSchool = {
   code: string;
   name: string;
-  group: '集団' | '個別' | '中学受験' | '学童保育' | 'Gakken高等学院';
+  group: '集団' | '個別' | '中学受験' | '創学' | '学童保育' | 'Gakken高等学院';
 };
 
 // 2026年度 教室番号一覧表（2026年1月22日）を正規データとして使用する。
@@ -118,6 +118,18 @@ souzogakuen_hq|創造学園本部|集団
 245|エディック個別 西飾磨校|個別
 163|温真会|集団
 263|個別 温真会|個別
+652|創学ゼミ 三田校|創学
+653|創学ゼミ 姫路城西校|創学
+654|創学ゼミ 長田校|創学
+656|創学ゼミ 岡本校|創学
+660|創学ゼミ オンライン校|創学
+691|創学ゼミ 加古川校|創学
+692|創学ゼミ 名谷校|創学
+694|創学ゼミ 垂水校|創学
+695|創学ゼミ 学園都市校|創学
+696|創学ゼミ 姫路校|創学
+697|創学ゼミ 大久保校|創学
+296|創学個別 姫路校|個別
 `;
 
 export const ATTENDANCE_SCHOOL_DIRECTORY: readonly AttendanceSchool[] = RAW_DIRECTORY.trim().split('\n').map(line => {
@@ -131,7 +143,7 @@ export type AttendanceSchoolOptionGroup = { label: string; schools: readonly Att
 export const SCIENCE_SOCIAL_WORKPLACE_ID = 'science_social';
 export const SCIENCE_SOCIAL_WORKPLACE_LABEL = '理社講座';
 
-const GROUPS: readonly AttendanceSchool['group'][] = ['集団', '個別', '中学受験', '学童保育', 'Gakken高等学院'];
+const GROUPS: readonly AttendanceSchool['group'][] = ['集団', '個別', '中学受験', '創学', '学童保育', 'Gakken高等学院'];
 export const ATTENDANCE_SCHOOL_OPTION_GROUPS: readonly AttendanceSchoolOptionGroup[] = GROUPS.map(label => ({
   label,
   schools: ATTENDANCE_SCHOOL_DIRECTORY.filter(school => school.group === label),
@@ -153,13 +165,20 @@ const LEGACY_CODE_ALIASES = new Map([['166', '178']]);
 export function resolveAttendanceSchoolEntry(value: unknown): AttendanceSchool | undefined {
   const raw = String(value || '').trim();
   if (!raw) return undefined;
-  const exact = byCode.get(LEGACY_CODE_ALIASES.get(raw) || raw) || byName.get(compact(raw));
+  // 旧勤怠の教室番号は「0694」のように先頭0付きの4桁で届く。
+  const code = /^0\d{3}$/.test(raw) ? raw.slice(1) : raw;
+  const exact = byCode.get(LEGACY_CODE_ALIASES.get(code) || code) || byName.get(compact(raw));
   if (exact) return exact;
-  const withoutBrand = (name: string) => compact(name).replace(/^(エディック個別|創造学園個別|エディックNEXT|エディック|創造学園|創学アカデミー|エディックきっず|Gakken高等学院|個別)/, '');
+  const withoutBrand = (name: string) => compact(name).replace(/^(エディック個別|創造学園個別|エディックNEXT|エディック|創造学園|創学アカデミー|創学ゼミ|創学個別|創学|エディックきっず|Gakken高等学院|個別)/, '');
   const key = withoutBrand(raw).replace(/本部|校/g, '');
   let matches = ATTENDANCE_SCHOOL_DIRECTORY.filter(school => withoutBrand(school.name).replace(/本部|校/g, '') === key);
   const normalized = compact(raw);
-  if (/^(エディック個別|創造学園個別|個別)/.test(normalized)) {
+  // 創学（創学ゼミ・創学個別）と創学アカデミーは別の教室。
+  if (normalized.startsWith('創学アカデミー')) {
+    matches = matches.filter(school => school.name.startsWith('創学アカデミー'));
+  } else if (normalized.startsWith('創学')) {
+    matches = matches.filter(school => isSogakuSchoolName(school.name) && (school.group === '個別') === normalized.startsWith('創学個別'));
+  } else if (/^(エディック個別|創造学園個別|個別)/.test(normalized)) {
     matches = matches.filter(school => school.group === '個別');
   } else if (/^エディック(?!NEXT)/.test(normalized)) {
     matches = matches.filter(school => school.group === '集団');
@@ -168,6 +187,18 @@ export function resolveAttendanceSchoolEntry(value: unknown): AttendanceSchool |
     if (headquarters.length) matches = headquarters;
   }
   return matches.length === 1 ? matches[0] : undefined;
+}
+
+/** 創学（創学ゼミ・創学個別）の教室か。創学アカデミーは別の教室なので含めない。 */
+function isSogakuSchoolName(name: string) {
+  const normalized = compact(name);
+  return normalized.startsWith('創学') && !normalized.startsWith('創学アカデミー');
+}
+
+/** 勤務校舎が創学か（教室番号・校舎名のどちらでも判定できる）。創学の授業は創学単価（分給）で計算する。 */
+export function isSogakuAttendanceSchool(value: unknown) {
+  const entry = resolveAttendanceSchoolEntry(value);
+  return entry ? isSogakuSchoolName(entry.name) : false;
 }
 
 export function isAttendanceSchool(value: unknown) {

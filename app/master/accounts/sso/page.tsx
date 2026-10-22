@@ -9,21 +9,23 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
-  Loader2,
+  Download,
   LockKeyhole,
   KeyRound,
   PauseCircle,
   Plus,
+  RefreshCw,
   Search,
-  Shield,
   UserCog,
   UserPlus,
   UsersRound,
-  X,
   XCircle,
 } from 'lucide-react';
-import LastLoginCell from '@/app/components/LastLoginCell';
-import { normalizeAdminAppPermissions } from '@/lib/admin-app-permissions';
+import LastLoginCell, { lastLoginToDate } from '@/app/components/LastLoginCell';
+import { SortableHeader, useTableSort } from '@/app/components/master/SortableHeader';
+import { downloadCsv } from '@/lib/csv-export';
+import { formatDateTime, jstDateKey } from '@/lib/format';
+import { ADMIN_APP_IDS, ADMIN_APP_LABELS, normalizeAdminAppPermissions } from '@/lib/admin-app-permissions';
 import { EMPLOYMENT_CATEGORY_LABELS, isAttendanceUserRole, normalizeEmploymentCategory } from '@/lib/employment-category';
 import { useAuth } from '@/app/context/AuthContext';
 import {
@@ -31,6 +33,8 @@ import {
   attendanceSchoolName,
   resolveAttendanceSchoolCode,
 } from '@/lib/attendance-schools';
+import AdminPageHeader from '@/app/components/master/AdminPageHeader';
+import { Button, EmptyState, ErrorState, IconButton, ListSkeleton, Modal, useConfirm, useToast } from '@/app/components/ui';
 
 const STATUSES = [
   { id: 'active', label: '有効', icon: CheckCircle2, className: 'bg-emerald-50 text-emerald-700 border-emerald-100' },
@@ -74,6 +78,7 @@ const initialForm = {
     science_social: true,
     eiken: false,
     attendance: false,
+    online_school: false,
   },
 };
 
@@ -102,6 +107,21 @@ const schoolCodeOf = (profile: any) => resolveAttendanceSchoolCode(
 const schoolNameOf = (profile: any) => attendanceSchoolName(
   profile?.school_id || profile?.school_code || profile?.school_name || profile?.school || profile?.classroom
 ) || '校舎未設定';
+const roleLabel = (value: string) => ROLES.find(r => r.id === value)?.label || value;
+const accountDisplayName = (u: any) => u.student_name || u.parent_name || u.name || u.teacher_name || '名称未設定';
+const accountStatusOf = (u: any) => u.account_status || u.status || 'active';
+const accountStatusLabel = (u: any) => STATUSES.find(s => s.id === accountStatusOf(u))?.label || accountStatusOf(u);
+const accountLoginId = (u: any) => u.lifetime_id || u.initial_login_id || '';
+const accountLastLogin = (u: any) => lastLoginToDate(u.last_login_at || u.last_login);
+const ACCOUNT_SORT_ACCESSORS = {
+  name: (u: any) => accountDisplayName(u),
+  role: (u: any) => roleLabel(accountRole(u.role)),
+  school: (u: any) => schoolNameOf(u),
+  loginId: (u: any) => accountLoginId(u),
+  firstLogin: (u: any) => u.isFirstLogin === false ? 1 : 0,
+  lastLogin: (u: any) => accountLastLogin(u),
+  status: (u: any) => accountStatusLabel(u),
+};
 const schoolOptions = () => ATTENDANCE_SCHOOL_OPTION_GROUPS.map(group => (
   <optgroup key={group.label} label={group.label}>
     {group.schools.map(item => <option key={item.code} value={item.code}>{item.name}</option>)}
@@ -110,8 +130,11 @@ const schoolOptions = () => ATTENDANCE_SCHOOL_OPTION_GROUPS.map(group => (
 
 export default function SsoAccountConsolePage() {
   const { profile } = useAuth();
+  const toast = useToast();
+  const confirm = useConfirm();
   const [users, setUsers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [school, setSchool] = useState('all');
   const [status, setStatus] = useState('all');
   const [firstLoginFilter, setFirstLoginFilter] = useState('all');
@@ -150,11 +173,21 @@ export default function SsoAccountConsolePage() {
     });
   }, [users, school, status, role, employmentCategory, search, firstLoginFilter]);
 
+  const { sorted: sortedUsers, sort: accountSort, headerProps: accountSortProps } = useTableSort(filteredUsers, ACCOUNT_SORT_ACCESSORS);
   const totalPages = Math.max(1, Math.ceil(filteredUsers.length / ACCOUNT_PAGE_SIZE));
   const paginatedUsers = useMemo(() => {
     const start = (page - 1) * ACCOUNT_PAGE_SIZE;
-    return filteredUsers.slice(start, start + ACCOUNT_PAGE_SIZE);
-  }, [filteredUsers, page]);
+    return sortedUsers.slice(start, start + ACCOUNT_PAGE_SIZE);
+  }, [sortedUsers, page]);
+
+  // 絞り込み・並べ替え後の一覧をそのまま書き出す（パスワードは含めない）。
+  const exportAccountsCsv = () => {
+    downloadCsv(`アカウント一覧_${jstDateKey()}.csv`, ['種別', '氏名', 'ログインID', '校舎', '状態', '最終ログイン'], sortedUsers.map(u => {
+      const lastLogin = accountLastLogin(u);
+      return [roleLabel(accountRole(u.role)), accountDisplayName(u), accountLoginId(u), schoolNameOf(u), accountStatusLabel(u), lastLogin ? formatDateTime(lastLogin, { withYear: true }) : ''];
+    }));
+    toast.success(`${sortedUsers.length}件をCSVに書き出しました`);
+  };
 
   const visibleTeacherIds = useMemo(
     () => paginatedUsers.filter(user => accountRole(user.role) === 'teacher').map(user => user.id),
@@ -164,7 +197,7 @@ export default function SsoAccountConsolePage() {
 
   useEffect(() => {
     setPage(1);
-  }, [school, status, role, employmentCategory, search, firstLoginFilter]);
+  }, [school, status, role, employmentCategory, search, firstLoginFilter, accountSort]);
 
   useEffect(() => {
     if (page > totalPages) setPage(totalPages);
@@ -192,12 +225,18 @@ export default function SsoAccountConsolePage() {
 
   const fetchUsers = async () => {
     setLoading(true);
+    setLoadError(false);
     try {
-      const snap = await getDocs(query(collection(db, 'users'), orderBy('created_at', 'desc')));
-      setUsers(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-    } catch {
-      const snap = await getDocs(query(collection(db, 'users'), where('role', 'in', ['student', 'teacher', 'parent', 'admin', 'master', 'attendance_admin'])));
-      setUsers(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      try {
+        const snap = await getDocs(query(collection(db, 'users'), orderBy('created_at', 'desc')));
+        setUsers(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      } catch {
+        const snap = await getDocs(query(collection(db, 'users'), where('role', 'in', ['student', 'teacher', 'parent', 'admin', 'master', 'attendance_admin'])));
+        setUsers(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      }
+    } catch (error) {
+      console.error('Failed to load accounts', error);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -286,10 +325,15 @@ export default function SsoAccountConsolePage() {
 
   const changePassword = async () => {
     if (!passwordTarget) return;
-    if (newPassword.length < 6) return alert('新しいパスワードは6文字以上で入力してください。');
-    if (newPassword !== newPasswordConfirmation) return alert('確認用パスワードが一致しません。');
+    if (newPassword.length < 6) return toast.error('新しいパスワードは6文字以上で入力してください。');
+    if (newPassword !== newPasswordConfirmation) return toast.error('確認用パスワードが一致しません。');
     const targetName = passwordTarget.student_name || passwordTarget.parent_name || passwordTarget.name || passwordTarget.email || passwordTarget.id;
-    if (!confirm(`${targetName} のパスワードを変更しますか？\n変更後、対象者は新しいパスワードで再ログインが必要です。`)) return;
+    if (!(await confirm({
+      title: `「${targetName}」のパスワードを変更しますか？`,
+      message: '変更後、対象者は新しいパスワードで再ログインが必要です。',
+      confirmLabel: '変更する',
+      tone: 'danger',
+    }))) return;
     setSavingPassword(true);
     try {
       const token = await freshAdminToken();
@@ -304,27 +348,34 @@ export default function SsoAccountConsolePage() {
       setNewPassword('');
       setNewPasswordConfirmation('');
       if (body.reauth_required) {
-        alert('パスワードを変更しました。新しいパスワードで再度ログインしてください。');
+        toast.success('パスワードを変更しました。新しいパスワードで再度ログインしてください。');
         await firebaseSignOut(auth).catch(() => undefined);
         window.location.replace('/admin/login?reason=credentials-changed');
         return;
       }
-      alert(`${targetName} のパスワードを変更しました。`);
+      toast.success(`${targetName} のパスワードを変更しました。`);
     } catch (error: any) {
       if (isExpiredSessionError(error)) {
-        alert(SESSION_EXPIRED_MESSAGE);
+        toast.error(SESSION_EXPIRED_MESSAGE);
         await firebaseSignOut(auth).catch(() => undefined);
         window.location.replace('/admin/login?reason=session-expired');
         return;
       }
-      alert(`パスワード変更に失敗しました: ${error.message || error}`);
+      toast.error(`パスワード変更に失敗しました: ${error.message || error}`);
     } finally {
       setSavingPassword(false);
     }
   };
 
   const updateStatus = async (target: any, nextStatus: string) => {
-    if (!confirm(`${target.student_name || target.parent_name || target.name || target.email || target.id} を「${STATUSES.find(s => s.id === nextStatus)?.label}」に変更しますか？`)) return;
+    const targetName = target.student_name || target.parent_name || target.name || target.email || target.id;
+    const nextLabel = STATUSES.find(s => s.id === nextStatus)?.label;
+    const destructive = nextStatus !== 'active';
+    if (!(await confirm({
+      title: `「${targetName}」を「${nextLabel}」に変更しますか？`,
+      confirmLabel: destructive ? `${nextLabel}にする` : '変更する',
+      tone: destructive ? 'danger' : 'default',
+    }))) return;
     setSavingId(target.id);
     try {
       const token = await freshAdminToken();
@@ -337,31 +388,31 @@ export default function SsoAccountConsolePage() {
       setUsers(prev => prev.map(u => u.id === target.id ? { ...u, account_status: nextStatus, status: nextStatus } : u));
     } catch (error) {
       if (isExpiredSessionError(error)) {
-        alert(SESSION_EXPIRED_MESSAGE);
+        toast.error(SESSION_EXPIRED_MESSAGE);
         await firebaseSignOut(auth).catch(() => undefined);
         window.location.replace('/admin/login?reason=session-expired');
         return;
       }
-      alert('状態変更に失敗しました。権限または校舎設定を確認してください。');
+      toast.error('状態変更に失敗しました。権限または校舎設定を確認してください。');
     } finally {
       setSavingId('');
     }
   };
 
   const saveAccount = async () => {
-    if (!form.display_name.trim()) return alert('氏名は必須です');
-    if (!form.login_id.trim()) return alert('初期IDは必須です');
-    if (form.password.trim() && form.password.length < 6) return alert('パスワードは6文字以上で入力してください');
-    if (!form.user_id && form.role !== 'student' && !form.password.trim()) return alert('生徒以外はパスワードを入力してください');
-    if (form.role !== 'master' && !resolveAttendanceSchoolCode(form.school_id)) return alert('所属校舎を選択してください');
+    if (!form.display_name.trim()) return toast.error('氏名は必須です');
+    if (!form.login_id.trim()) return toast.error('初期IDは必須です');
+    if (form.password.trim() && form.password.length < 6) return toast.error('パスワードは6文字以上で入力してください');
+    if (!form.user_id && form.role !== 'student' && !form.password.trim()) return toast.error('生徒以外はパスワードを入力してください');
+    if (form.role !== 'master' && !resolveAttendanceSchoolCode(form.school_id)) return toast.error('所属校舎を選択してください');
     if ((form.role === 'admin' || form.role === 'master') && !form.school_ids.trim() && form.role === 'admin') {
-      return alert('校舎管理者には管理できる校舎を入力してください');
+      return toast.error('校舎管理者には管理できる校舎を入力してください');
     }
     if (form.role === 'teacher' && form.attendance_school_manager && !form.school_ids.trim()) {
-      return alert('勤怠承認者には承認できる校舎を選択してください');
+      return toast.error('勤怠承認者には承認できる校舎を選択してください');
     }
     if (form.role === 'parent' && !form.student_ids.trim()) {
-      return alert('保護者には紐づく生徒IDを入力してください');
+      return toast.error('保護者には紐づく生徒IDを入力してください');
     }
 
     setSavingAccount(true);
@@ -377,20 +428,20 @@ export default function SsoAccountConsolePage() {
       setModalOpen(false);
       await fetchUsers();
       if (data.reauth_required) {
-        alert('アカウントを更新しました。認証情報を変更したため、再度ログインしてください。');
+        toast.success('アカウントを更新しました。認証情報を変更したため、再度ログインしてください。');
         await firebaseSignOut(auth).catch(() => undefined);
         window.location.replace('/admin/login?reason=credentials-changed');
         return;
       }
-      alert(data.updated ? 'アカウントを更新しました' : 'アカウントを作成しました');
+      toast.success(data.updated ? 'アカウントを更新しました' : 'アカウントを作成しました');
     } catch (error: any) {
       if (isExpiredSessionError(error)) {
-        alert(SESSION_EXPIRED_MESSAGE);
+        toast.error(SESSION_EXPIRED_MESSAGE);
         await firebaseSignOut(auth).catch(() => undefined);
         window.location.replace('/admin/login?reason=session-expired');
         return;
       }
-      alert(`保存に失敗しました: ${error.message || error}`);
+      toast.error(`保存に失敗しました: ${error.message || error}`);
     } finally {
       setSavingAccount(false);
     }
@@ -398,8 +449,13 @@ export default function SsoAccountConsolePage() {
 
   const initializeEmploymentCategories = async () => {
     const targets = users.filter(item => isAttendanceUserRole(item.role) && (!item.employment_category || accountRole(item.role) !== item.role)).length;
-    if (!targets) return alert('移行が必要な講師アカウントはありません。');
-    if (!confirm(`対象${targets}アカウントについて、旧勤怠管理者を講師へ統合し、区分未設定を「準専任」に設定しますか？`)) return;
+    if (!targets) return toast.info('移行が必要な講師アカウントはありません。');
+    if (!(await confirm({
+      title: `${targets}アカウントを一括移行しますか？`,
+      message: '旧勤怠管理者を講師へ統合し、区分未設定を「準専任」に設定します。',
+      confirmLabel: '一括移行する',
+      tone: 'danger',
+    }))) return;
     setInitializingCategories(true);
     try {
       const token = await freshAdminToken();
@@ -411,9 +467,9 @@ export default function SsoAccountConsolePage() {
       const body = await response.json().catch(() => ({}));
       if (!response.ok || body.ok === false) throw new Error(body.error || '一括設定に失敗しました。');
       await fetchUsers();
-      alert(`${body.updated || 0}アカウントを更新しました（講師へ統合: ${body.migrated_roles || 0}件）。`);
+      toast.success(`${body.updated || 0}アカウントを更新しました（講師へ統合: ${body.migrated_roles || 0}件）。`);
     } catch (error: any) {
-      alert(`一括設定に失敗しました: ${error.message || error}`);
+      toast.error(`一括設定に失敗しました: ${error.message || error}`);
     } finally {
       setInitializingCategories(false);
     }
@@ -429,9 +485,13 @@ export default function SsoAccountConsolePage() {
 
   const bulkUpdateScienceSocial = async (enabled: boolean) => {
     const userIds = Array.from(selectedTeacherIds);
-    if (!userIds.length) return alert('対象の講師を選択してください。');
+    if (!userIds.length) return toast.error('対象の講師を選択してください。');
     const actionLabel = enabled ? 'ON' : 'OFF';
-    if (!confirm(`選択した${userIds.length}名の理社講座を一括${actionLabel}にしますか？`)) return;
+    if (!(await confirm({
+      title: `選択した${userIds.length}名の理社講座を一括${actionLabel}にしますか？`,
+      confirmLabel: `一括${actionLabel}にする`,
+      tone: enabled ? 'default' : 'danger',
+    }))) return;
     setUpdatingTeacherPrograms(true);
     try {
       const token = await freshAdminToken();
@@ -444,63 +504,45 @@ export default function SsoAccountConsolePage() {
       if (!response.ok || body.ok === false) throw new Error(body.error || '一括更新に失敗しました。');
       await fetchUsers();
       setSelectedTeacherIds(new Set());
-      alert(`${body.updated || 0}名の理社講座を${actionLabel}にしました。`);
+      toast.success(`${body.updated || 0}名の理社講座を${actionLabel}にしました。`);
     } catch (error: any) {
-      alert(`一括更新に失敗しました: ${error.message || error}`);
+      toast.error(`一括更新に失敗しました: ${error.message || error}`);
     } finally {
       setUpdatingTeacherPrograms(false);
     }
   };
 
-  const roleLabel = (value: string) => ROLES.find(r => r.id === value)?.label || value;
-
   return (
     <div className="space-y-6">
-      <section className="overflow-hidden rounded-[28px] bg-slate-950 text-white shadow-xl">
-        <div className="border-b border-white/10 px-6 py-4">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-            <div className="flex items-center gap-4">
-              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white text-slate-950">
-                <Shield size={24} />
-              </div>
-              <div>
-                <p className="text-xs font-black uppercase tracking-[0.25em] text-slate-400">Single Sign-On</p>
-                <h1 className="text-2xl font-black">校舎別アカウント管理</h1>
-              </div>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <button onClick={() => openCreateModal('student')} className="flex items-center justify-center gap-2 rounded-2xl bg-white px-4 py-3 text-sm font-black text-slate-950 hover:bg-indigo-50">
-                <UserPlus size={18} /> 新規作成
-              </button>
-              <button onClick={() => openCreateModal('parent')} className="flex items-center justify-center gap-2 rounded-2xl bg-indigo-500 px-4 py-3 text-sm font-black text-white hover:bg-indigo-400">
-                <UsersRound size={18} /> 保護者作成
-              </button>
-              <button onClick={() => openCreateModal('admin')} className="flex items-center justify-center gap-2 rounded-2xl bg-slate-800 px-4 py-3 text-sm font-black text-white ring-1 ring-white/10 hover:bg-slate-700">
-                <UserCog size={18} /> 校舎管理者
-              </button>
-            </div>
-          </div>
-        </div>
+      <AdminPageHeader
+        actions={<>
+          <Button variant="secondary" icon={<RefreshCw size={16} aria-hidden />} onClick={fetchUsers} loading={loading}>再読み込み</Button>
+          <Button variant="secondary" icon={<UsersRound size={16} aria-hidden />} onClick={() => openCreateModal('parent')}>保護者作成</Button>
+          <Button variant="secondary" icon={<UserCog size={16} aria-hidden />} onClick={() => openCreateModal('admin')}>校舎管理者</Button>
+          <Button icon={<UserPlus size={16} aria-hidden />} onClick={() => openCreateModal('student')}>新規作成</Button>
+        </>}
+      />
 
-        <div className="grid gap-3 p-6 sm:grid-cols-2 lg:grid-cols-6">
+      <section>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
           {STATUSES.map(item => {
             const Icon = item.icon;
             return (
-              <button key={item.id} onClick={() => setStatus(item.id)} className={`rounded-2xl border p-4 text-left ${item.className}`}>
+              <button key={item.id} onClick={() => setStatus(item.id)} className={`rounded-card border p-4 text-left ${item.className}`}>
                 <Icon size={20} />
-                <p className="mt-3 text-xs font-black">{item.label}</p>
+                <p className="mt-3 text-xs font-bold">{item.label}</p>
                 <p className="text-3xl font-black">{stats[item.id] || 0}</p>
               </button>
             );
           })}
-          <button onClick={() => setFirstLoginFilter('pending')} className={`rounded-2xl border p-4 text-left ${firstLoginFilter === 'pending' ? 'border-amber-300 bg-amber-50 text-amber-700' : 'border-amber-100 bg-amber-50/70 text-amber-700'}`}>
+          <button onClick={() => setFirstLoginFilter('pending')} className={`rounded-card border p-4 text-left ${firstLoginFilter === 'pending' ? 'border-amber-300 bg-amber-50 text-amber-700' : 'border-amber-100 bg-amber-50/70 text-amber-700'}`}>
             <LockKeyhole size={20} />
-            <p className="mt-3 text-xs font-black">初回変更待ち</p>
+            <p className="mt-3 text-xs font-bold">初回変更待ち</p>
             <p className="text-3xl font-black">{firstLoginStats.pending}</p>
           </button>
-          <button onClick={() => setFirstLoginFilter('completed')} className={`rounded-2xl border p-4 text-left ${firstLoginFilter === 'completed' ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-emerald-100 bg-emerald-50/70 text-emerald-700'}`}>
+          <button onClick={() => setFirstLoginFilter('completed')} className={`rounded-card border p-4 text-left ${firstLoginFilter === 'completed' ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-emerald-100 bg-emerald-50/70 text-emerald-700'}`}>
             <CheckCircle2 size={20} />
-            <p className="mt-3 text-xs font-black">初回ログイン済み</p>
+            <p className="mt-3 text-xs font-bold">初回ログイン済み</p>
             <p className="text-3xl font-black">{firstLoginStats.completed}</p>
           </button>
         </div>
@@ -511,79 +553,84 @@ export default function SsoAccountConsolePage() {
           <button
             key={item.id}
             onClick={() => setRole(item.id)}
-            className={`rounded-2xl border p-4 text-left shadow-sm transition ${role === item.id ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : 'border-white bg-white text-slate-600 hover:border-slate-200'}`}
+            className={`rounded-card border p-4 text-left shadow-sm transition ${role === item.id ? 'border-accent bg-accent-soft text-accent' : 'border-white bg-white text-slate-600 hover:border-slate-200'}`}
           >
-            <p className="text-xs font-black">{item.label}</p>
+            <p className="text-xs font-bold">{item.label}</p>
             <p className="mt-1 text-2xl font-black">{roleStats[item.id] || 0}</p>
           </button>
         ))}
       </section>
 
-      <section className="rounded-2xl bg-white p-4 shadow-sm">
+      <section className="rounded-card bg-white p-4 shadow-sm">
         <div className="grid gap-3 xl:grid-cols-[1fr_190px_160px_150px_160px_180px]">
           <div className="relative">
             <Search className="absolute left-4 top-3.5 text-slate-400" size={18} />
-            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="氏名・ID・メールで検索" className="w-full rounded-2xl border border-slate-200 bg-slate-50 py-3 pl-11 pr-4 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100" />
+            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="氏名・ID・メールで検索" className="w-full rounded-input border border-line bg-slate-50 py-3 pl-11 pr-4 text-sm font-bold outline-none focus:ring-2 focus:ring-accent/30" />
           </div>
-          <select value={school} onChange={e => setSchool(e.target.value)} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-black outline-none">
+          <select value={school} onChange={e => setSchool(e.target.value)} className="rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none">
             <option value="all">すべての校舎</option>
             {schoolOptions()}
           </select>
-          <select value={role} onChange={e => setRole(e.target.value)} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-black outline-none">
+          <select value={role} onChange={e => setRole(e.target.value)} className="rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none">
             <option value="all">すべての権限</option>
             {ROLES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
           </select>
-          <select value={employmentCategory} onChange={e => setEmploymentCategory(e.target.value)} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-black outline-none">
+          <select value={employmentCategory} onChange={e => setEmploymentCategory(e.target.value)} className="rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none">
             <option value="all">専任区分すべて</option>
             <option value="dedicated">専任</option>
             <option value="semi_dedicated">準専任</option>
           </select>
-          <select value={status} onChange={e => setStatus(e.target.value)} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-black outline-none">
+          <select value={status} onChange={e => setStatus(e.target.value)} className="rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none">
             <option value="all">すべての状態</option>
             {STATUSES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
           </select>
-          <select value={firstLoginFilter} onChange={e => setFirstLoginFilter(e.target.value)} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-black outline-none">
+          <select value={firstLoginFilter} onChange={e => setFirstLoginFilter(e.target.value)} className="rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none">
             <option value="all">初回状態すべて</option>
             <option value="pending">初回変更待ち</option>
             <option value="completed">初回ログイン済み</option>
           </select>
         </div>
-        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 px-4 py-3">
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-btn bg-slate-50 px-4 py-3">
           <p className="text-xs font-bold text-slate-500">旧勤怠管理者は講師・職員アカウントへ統合します。理社講座を利用しない職員は、ログイン後に勤怠画面を直接開きます。</p>
-          <button type="button" onClick={initializeEmploymentCategories} disabled={initializingCategories} className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2 text-xs font-black text-white disabled:opacity-50">{initializingCategories && <Loader2 size={14} className="animate-spin" />} 旧権限・未設定区分を一括移行</button>
+          <Button variant="secondary" size="sm" onClick={initializeEmploymentCategories} loading={initializingCategories}>旧権限・未設定区分を一括移行</Button>
         </div>
       </section>
 
-      <section className="overflow-hidden rounded-2xl bg-white shadow-sm">
+      <section className="overflow-hidden rounded-card bg-white shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4">
           <div>
-            <h2 className="flex items-center gap-2 text-sm font-black text-slate-700"><UsersRound size={18} /> アカウント一覧</h2>
+            <h2 className="flex items-center gap-2 text-sm font-bold text-slate-700"><UsersRound size={18} /> アカウント一覧</h2>
             <p className="mt-1 text-xs font-bold text-slate-400">{filteredUsers.length}件 / 講師{selectedTeacherIds.size}名を選択中</p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <button type="button" onClick={() => bulkUpdateScienceSocial(true)} disabled={!selectedTeacherIds.size || updatingTeacherPrograms} className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-black text-white disabled:opacity-40">{updatingTeacherPrograms && <Loader2 size={14} className="animate-spin" />} 理社講座 一括ON</button>
-            <button type="button" onClick={() => bulkUpdateScienceSocial(false)} disabled={!selectedTeacherIds.size || updatingTeacherPrograms} className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-black text-slate-600 disabled:opacity-40">理社講座 一括OFF</button>
+            <Button variant="secondary" size="sm" icon={<Download size={14} aria-hidden />} onClick={exportAccountsCsv} disabled={loading || loadError || !filteredUsers.length}>CSV出力</Button>
+            <Button size="sm" onClick={() => bulkUpdateScienceSocial(true)} disabled={!selectedTeacherIds.size} loading={updatingTeacherPrograms}>理社講座 一括ON</Button>
+            <Button variant="secondary" size="sm" onClick={() => bulkUpdateScienceSocial(false)} disabled={!selectedTeacherIds.size || updatingTeacherPrograms}>理社講座 一括OFF</Button>
           </div>
         </div>
         {loading ? (
-          <div className="flex justify-center p-10"><Loader2 className="animate-spin text-indigo-500" /></div>
+          <div className="p-5"><ListSkeleton rows={5} /></div>
+        ) : loadError ? (
+          <ErrorState className="m-5" onRetry={fetchUsers} />
+        ) : filteredUsers.length === 0 ? (
+          <EmptyState className="m-5" title={users.length ? '条件に合うアカウントはありません' : 'アカウントがまだありません'} description={users.length ? '検索語や絞り込み条件を変えてください。' : '「新規作成」からアカウントを登録できます。'} />
         ) : (
           <div className="overflow-x-auto [scrollbar-gutter:stable]">
             <table className="w-full min-w-[1380px] whitespace-nowrap text-left text-sm">
-              <thead className="bg-slate-50 text-xs font-black text-slate-400">
+              <thead className="bg-slate-50 text-xs font-bold text-slate-400">
                 <tr>
                   <th className="px-5 py-3">
-                    <input type="checkbox" aria-label="このページの講師をすべて選択" checked={allVisibleTeachersSelected} disabled={!visibleTeacherIds.length} onChange={event => toggleVisibleTeachers(event.target.checked)} className="h-4 w-4 accent-indigo-600 disabled:opacity-30" />
+                    <input type="checkbox" aria-label="このページの講師をすべて選択" checked={allVisibleTeachersSelected} disabled={!visibleTeacherIds.length} onChange={event => toggleVisibleTeachers(event.target.checked)} className="h-4 w-4 accent-accent disabled:opacity-30" />
                   </th>
-                  <th className="px-5 py-3">ユーザー</th>
-                  <th className="px-5 py-3">権限</th>
+                  <SortableHeader {...accountSortProps('name')} className="px-5 py-1">ユーザー</SortableHeader>
+                  <SortableHeader {...accountSortProps('role')} className="px-5 py-1">権限</SortableHeader>
                   <th className="px-5 py-3">専任区分</th>
-                  <th className="px-5 py-3">校舎</th>
-                  <th className="px-5 py-3">初期ID</th>
-                  <th className="px-5 py-3">初回ログイン</th>
-                  <th className="px-5 py-3">最終ログイン</th>
+                  <SortableHeader {...accountSortProps('school')} className="px-5 py-1">校舎</SortableHeader>
+                  <SortableHeader {...accountSortProps('loginId')} className="px-5 py-1">初期ID</SortableHeader>
+                  <SortableHeader {...accountSortProps('firstLogin')} className="px-5 py-1">初回ログイン</SortableHeader>
+                  <SortableHeader {...accountSortProps('lastLogin')} className="px-5 py-1">最終ログイン</SortableHeader>
                   <th className="px-5 py-3">紐づけ</th>
-                  <th className="px-5 py-3">状態</th>
+                  <SortableHeader {...accountSortProps('status')} className="px-5 py-1">状態</SortableHeader>
                   <th className="px-5 py-3">操作</th>
                 </tr>
               </thead>
@@ -595,12 +642,12 @@ export default function SsoAccountConsolePage() {
                     <tr key={u.id} className="hover:bg-slate-50">
                       <td className="px-5 py-4">
                         {accountRole(u.role) === 'teacher' ? (
-                          <input type="checkbox" aria-label={`${displayName}を選択`} checked={selectedTeacherIds.has(u.id)} onChange={event => setSelectedTeacherIds(current => { const next = new Set(current); event.target.checked ? next.add(u.id) : next.delete(u.id); return next; })} className="h-4 w-4 accent-indigo-600" />
+                          <input type="checkbox" aria-label={`${displayName}を選択`} checked={selectedTeacherIds.has(u.id)} onChange={event => setSelectedTeacherIds(current => { const next = new Set(current); event.target.checked ? next.add(u.id) : next.delete(u.id); return next; })} className="h-4 w-4 accent-accent" />
                         ) : <span className="text-slate-200">―</span>}
                       </td>
                       <td className="px-5 py-4">
-                        <button onClick={() => openEditModal(u)} className="max-w-[240px] text-left hover:text-indigo-600" title={`${displayName} / ${u.email || u.id}`}>
-                          <p className="truncate font-black text-slate-800">{displayName}</p>
+                        <button onClick={() => openEditModal(u)} className="max-w-[240px] text-left hover:text-accent" title={`${displayName} / ${u.email || u.id}`}>
+                          <p className="truncate font-bold text-slate-800">{displayName}</p>
                           <p className="truncate text-xs font-bold text-slate-400">{u.email || u.id}</p>
                         </button>
                       </td>
@@ -608,11 +655,11 @@ export default function SsoAccountConsolePage() {
                       <td className="px-5 py-4">
                         {isAttendanceUserRole(u.role) ? (() => {
                           const category = normalizeEmploymentCategory(u.employment_category || u.employment_type || u.worker_type, u.role) || 'semi_dedicated';
-                          return <div className="flex flex-wrap gap-1"><span className={`rounded-full px-3 py-1 text-xs font-black ${category === 'dedicated' ? 'bg-indigo-100 text-indigo-700' : 'bg-amber-100 text-amber-800'}`}>{EMPLOYMENT_CATEGORY_LABELS[category]}</span>{u.attendance_school_manager === true && <span className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-black text-emerald-700">勤怠責任者</span>}</div>;
+                          return <div className="flex flex-wrap gap-1"><span className={`rounded-full px-3 py-1 text-xs font-bold ${category === 'dedicated' ? 'bg-accent-soft text-accent' : 'bg-amber-100 text-amber-800'}`}>{EMPLOYMENT_CATEGORY_LABELS[category]}</span>{u.attendance_school_manager === true && <span className="rounded-full bg-emerald-100 px-2 py-1 text-xs font-bold text-emerald-700">勤怠責任者</span>}</div>;
                         })() : <span className="text-slate-300">―</span>}
                       </td>
                       <td className="px-5 py-4">
-                        <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-black text-slate-600">
+                        <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-600">
                           <Building2 size={12} /> {schoolNameOf(u)}
                         </span>
                       </td>
@@ -633,20 +680,20 @@ export default function SsoAccountConsolePage() {
                             : Array.isArray(u.school_ids) && u.school_ids.length ? `${u.school_ids.length}校舎` : '-'}
                       </td>
                       <td className="px-5 py-4">
-                        <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-600">
+                        <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-600">
                           {STATUSES.find(s => s.id === currentStatus)?.label || currentStatus}
                         </span>
                       </td>
                       <td className="px-5 py-4">
                         <div className="flex items-center gap-2">
-                          <button onClick={() => openEditModal(u)} className="shrink-0 rounded-lg border border-indigo-200 px-3 py-2 text-xs font-black text-indigo-600 hover:bg-indigo-50">編集</button>
-                          {profile?.role === 'master' && <button onClick={() => openPasswordModal(u)} className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-black text-amber-700 hover:bg-amber-100"><KeyRound size={13} /> PW変更</button>}
+                          <Button variant="secondary" size="sm" className="shrink-0" onClick={() => openEditModal(u)}>編集</Button>
+                          {profile?.role === 'master' && <Button variant="secondary" size="sm" className="shrink-0" icon={<KeyRound size={14} aria-hidden />} onClick={() => openPasswordModal(u)}>PW変更</Button>}
                           <select
                             aria-label={`${displayName}のアカウント状態`}
                             value={currentStatus}
                             onChange={e => updateStatus(u, e.target.value)}
                             disabled={savingId === u.id}
-                            className="min-w-[112px] rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-black text-slate-600 outline-none hover:border-slate-300 disabled:cursor-wait disabled:opacity-50"
+                            className="min-w-[112px] rounded-input border border-line bg-white px-3 py-2 text-xs font-bold text-slate-600 outline-none hover:border-slate-300 disabled:cursor-wait disabled:opacity-50"
                           >
                             {STATUSES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
                           </select>
@@ -659,122 +706,119 @@ export default function SsoAccountConsolePage() {
             </table>
           </div>
         )}
-        {!loading && filteredUsers.length > ACCOUNT_PAGE_SIZE && (
+        {!loading && !loadError && filteredUsers.length > ACCOUNT_PAGE_SIZE && (
           <div className="flex flex-col gap-3 border-t border-slate-100 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
             <p className="text-xs font-bold text-slate-400">
               {(page - 1) * ACCOUNT_PAGE_SIZE + 1}〜{Math.min(page * ACCOUNT_PAGE_SIZE, filteredUsers.length)}件を表示 / 全{filteredUsers.length}件
             </p>
             <div className="flex items-center gap-2">
-              <button type="button" onClick={() => setPage(current => Math.max(1, current - 1))} disabled={page <= 1} aria-label="前のページ" className="rounded-xl border border-slate-200 p-2 text-slate-500 disabled:opacity-30">
-                <ChevronLeft size={18} />
-              </button>
-              <span className="min-w-20 text-center text-xs font-black text-slate-600">{page} / {totalPages}</span>
-              <button type="button" onClick={() => setPage(current => Math.min(totalPages, current + 1))} disabled={page >= totalPages} aria-label="次のページ" className="rounded-xl border border-slate-200 p-2 text-slate-500 disabled:opacity-30">
-                <ChevronRight size={18} />
-              </button>
+              <IconButton label="前のページ" variant="secondary" size="sm" onClick={() => setPage(current => Math.max(1, current - 1))} disabled={page <= 1}>
+                <ChevronLeft size={18} aria-hidden />
+              </IconButton>
+              <span className="min-w-20 text-center text-xs font-bold text-slate-600">{page} / {totalPages}</span>
+              <IconButton label="次のページ" variant="secondary" size="sm" onClick={() => setPage(current => Math.min(totalPages, current + 1))} disabled={page >= totalPages}>
+                <ChevronRight size={18} aria-hidden />
+              </IconButton>
             </div>
           </div>
         )}
       </section>
 
-      {modalOpen && (
-        <div className="fixed inset-0 z-[1000] flex items-end justify-center bg-slate-950/50 p-0 backdrop-blur-sm sm:items-center sm:p-6">
-          <div className="max-h-[92dvh] w-full max-w-3xl overflow-hidden rounded-t-[28px] bg-white shadow-2xl sm:rounded-[28px]">
-            <div className="flex items-center justify-between border-b border-slate-100 px-6 py-4">
-              <div>
-                <p className="text-xs font-black uppercase tracking-wider text-indigo-400">Account Provisioning</p>
-                <h3 className="text-xl font-black text-slate-900">新規・更新アカウント</h3>
-              </div>
-              <button onClick={() => setModalOpen(false)} className="rounded-full bg-slate-100 p-2 text-slate-500 hover:bg-slate-200">
-                <X size={18} />
-              </button>
-            </div>
-
-            <div className="max-h-[70dvh] overflow-y-auto p-6">
+      <Modal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        size="lg"
+        title={form.user_id ? 'アカウントを編集' : 'アカウントを作成'}
+        footer={(
+          <Button fullWidth onClick={saveAccount} loading={savingAccount} icon={<Plus size={16} aria-hidden />}>
+            アカウントを保存
+          </Button>
+        )}
+      >
               <div className="grid gap-4 sm:grid-cols-2">
                 <label className="space-y-1">
-                  <span className="text-xs font-black text-slate-500">権限</span>
-                  <select value={form.role} onChange={e => setForm(prev => ({ ...prev, role: e.target.value }))} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-black outline-none">
+                  <span className="text-xs font-bold text-slate-500">権限</span>
+                  <select value={form.role} onChange={e => setForm(prev => ({ ...prev, role: e.target.value }))} className="w-full rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none">
                     {ROLES
                       .filter(r => profile?.role === 'master' || !['admin', 'master'].includes(r.id))
                       .map(r => <option key={r.id} value={r.id}>{r.label}</option>)}
                   </select>
                 </label>
                 <label className="space-y-1">
-                  <span className="text-xs font-black text-slate-500">状態</span>
-                  <select value={form.account_status} onChange={e => setForm(prev => ({ ...prev, account_status: e.target.value }))} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-black outline-none">
+                  <span className="text-xs font-bold text-slate-500">状態</span>
+                  <select value={form.account_status} onChange={e => setForm(prev => ({ ...prev, account_status: e.target.value }))} className="w-full rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none">
                     {STATUSES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
                   </select>
                 </label>
                 {form.role === 'teacher' && (
                   <label className="space-y-1 sm:col-span-2">
-                    <span className="text-xs font-black text-slate-500">専任区分</span>
-                    <select value={form.employment_category} onChange={e => setForm(prev => ({ ...prev, employment_category: e.target.value }))} className="w-full rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm font-black text-indigo-900 outline-none">
+                    <span className="text-xs font-bold text-slate-500">専任区分</span>
+                    <select value={form.employment_category} onChange={e => setForm(prev => ({ ...prev, employment_category: e.target.value }))} className="w-full rounded-input border border-line bg-accent-soft px-4 py-3 text-sm font-bold text-fg outline-none">
                       <option value="dedicated">専任</option>
                       <option value="semi_dedicated">準専任</option>
                     </select>
-                    <span className="block text-[11px] font-bold text-slate-400">勤怠画面・給与集計・授業実績の対象をこの区分で分離します。</span>
+                    <span className="block text-xs font-bold text-slate-400">勤怠画面・給与集計・授業実績の対象をこの区分で分離します。</span>
                   </label>
                 )}
                 {form.role === 'teacher' && form.employment_category === 'dedicated' && (
-                  <fieldset className="rounded-2xl border border-indigo-200 bg-indigo-50 p-4 sm:col-span-2">
-                    <legend className="px-2 text-xs font-black text-indigo-700">専任の規定勤務時間</legend>
+                  <fieldset className="rounded-card border border-line bg-accent-soft p-4 sm:col-span-2">
+                    <legend className="px-2 text-xs font-bold text-accent">専任の規定勤務時間</legend>
                     <div className="grid gap-3 sm:grid-cols-3">
-                      <label className="text-xs font-black text-slate-600">開始<input required type="time" value={form.prescribed_work_start} onChange={event => setForm(prev => ({ ...prev, prescribed_work_start: event.target.value }))} className="mt-1 w-full rounded-xl border border-indigo-200 bg-white px-3 py-2.5" /></label>
-                      <label className="text-xs font-black text-slate-600">終了<input required type="time" value={form.prescribed_work_end} onChange={event => setForm(prev => ({ ...prev, prescribed_work_end: event.target.value }))} className="mt-1 w-full rounded-xl border border-indigo-200 bg-white px-3 py-2.5" /></label>
-                      <label className="text-xs font-black text-slate-600">休憩（分）<input required type="number" min="0" max="240" step="5" value={form.prescribed_break_minutes} onChange={event => setForm(prev => ({ ...prev, prescribed_break_minutes: Number(event.target.value) }))} className="mt-1 w-full rounded-xl border border-indigo-200 bg-white px-3 py-2.5" /></label>
+                      <label className="text-xs font-bold text-slate-600">開始<input required type="time" value={form.prescribed_work_start} onChange={event => setForm(prev => ({ ...prev, prescribed_work_start: event.target.value }))} className="mt-1 w-full rounded-input border border-line bg-white px-3 py-2.5" /></label>
+                      <label className="text-xs font-bold text-slate-600">終了<input required type="time" value={form.prescribed_work_end} onChange={event => setForm(prev => ({ ...prev, prescribed_work_end: event.target.value }))} className="mt-1 w-full rounded-input border border-line bg-white px-3 py-2.5" /></label>
+                      <label className="text-xs font-bold text-slate-600">休憩（分）<input required type="number" min="0" max="240" step="5" value={form.prescribed_break_minutes} onChange={event => setForm(prev => ({ ...prev, prescribed_break_minutes: Number(event.target.value) }))} className="mt-1 w-full rounded-input border border-line bg-white px-3 py-2.5" /></label>
                     </div>
                     <div className="mt-3 flex flex-wrap gap-2">
-                      {['日', '月', '火', '水', '木', '金', '土'].map((label, day) => <label key={day} className={`cursor-pointer rounded-lg border px-3 py-2 text-xs font-black ${form.prescribed_work_days.includes(day) ? 'border-indigo-500 bg-indigo-600 text-white' : 'border-indigo-200 bg-white text-slate-500'}`}><input type="checkbox" className="sr-only" checked={form.prescribed_work_days.includes(day)} onChange={event => setForm(prev => ({ ...prev, prescribed_work_days: event.target.checked ? [...prev.prescribed_work_days, day].sort() : prev.prescribed_work_days.filter(value => value !== day) }))} />{label}</label>)}
+                      {['日', '月', '火', '水', '木', '金', '土'].map((label, day) => <label key={day} className={`cursor-pointer rounded-btn border px-3 py-2 text-xs font-bold ${form.prescribed_work_days.includes(day) ? 'border-accent bg-accent text-accent-ink' : 'border-line bg-white text-slate-500'}`}><input type="checkbox" className="sr-only" checked={form.prescribed_work_days.includes(day)} onChange={event => setForm(prev => ({ ...prev, prescribed_work_days: event.target.checked ? [...prev.prescribed_work_days, day].sort() : prev.prescribed_work_days.filter(value => value !== day) }))} />{label}</label>)}
                     </div>
-                    <p className="mt-2 text-[11px] font-bold text-indigo-600">この時間より前・後の打刻実績を時間外候補として自動抽出します。</p>
+                    <p className="mt-2 text-xs font-bold text-accent">この時間より前・後の打刻実績を時間外候補として自動抽出します。</p>
                   </fieldset>
                 )}
                 {form.role === 'teacher' && form.employment_category === 'dedicated' && (
-                  <label className="sm:col-span-2 flex cursor-pointer items-start gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                  <label className="sm:col-span-2 flex cursor-pointer items-start gap-3 rounded-card border border-emerald-200 bg-emerald-50 p-4">
                     <input type="checkbox" checked={form.attendance_school_manager} onChange={event => setForm(prev => ({
                       ...prev,
                       attendance_school_manager: event.target.checked,
                       school_ids: event.target.checked && !prev.school_ids && prev.school_id ? prev.school_id : prev.school_ids,
                     }))} className="mt-0.5 h-5 w-5 accent-emerald-600" />
-                    <span><span className="block text-sm font-black text-emerald-950">勤怠承認者</span><span className="mt-1 block text-[11px] font-bold leading-relaxed text-emerald-700">下で登録した校舎の打刻修正依頼と勤務詳細を確認・承認できます。他校舎や給与設定は表示されません。</span></span>
+                    <span><span className="block text-sm font-bold text-emerald-950">勤怠承認者</span><span className="mt-1 block text-xs font-bold leading-relaxed text-emerald-700">下で登録した校舎の打刻修正依頼と勤務詳細を確認・承認できます。他校舎や給与設定は表示されません。</span></span>
                   </label>
                 )}
                 {form.role === 'teacher' && (
                   <label className="space-y-1 sm:col-span-2">
-                    <span className="text-xs font-black text-slate-500">利用する講座</span>
-                    <span className="flex min-h-14 cursor-pointer items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4">
-                      <input type="checkbox" checked={form.enabled_programs.includes('science_social')} onChange={event => setForm(prev => ({ ...prev, enabled_programs: event.target.checked ? ['science_social'] : [] }))} className="h-5 w-5 accent-indigo-600" />
-                      <span><span className="block text-sm font-black text-slate-800">理社講座</span><span className="block text-[11px] font-bold text-slate-400">ONの場合は理社講座画面内から勤怠も利用できます。OFFの場合はログイン後に勤怠画面を直接開きます。</span></span>
+                    <span className="text-xs font-bold text-slate-500">利用する講座</span>
+                    <span className="flex min-h-14 cursor-pointer items-center gap-3 rounded-input border border-line bg-slate-50 px-4">
+                      <input type="checkbox" checked={form.enabled_programs.includes('science_social')} onChange={event => setForm(prev => ({ ...prev, enabled_programs: event.target.checked ? ['science_social'] : [] }))} className="h-5 w-5 accent-accent" />
+                      <span><span className="block text-sm font-bold text-slate-800">理社講座</span><span className="block text-xs font-bold text-slate-400">ONの場合は理社講座画面内から勤怠も利用できます。OFFの場合はログイン後に勤怠画面を直接開きます。</span></span>
                     </span>
                   </label>
                 )}
                 <label className="space-y-1">
-                  <span className="text-xs font-black text-slate-500">氏名</span>
-                  <input value={form.display_name} onChange={e => setForm(prev => ({ ...prev, display_name: e.target.value }))} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none" />
+                  <span className="text-xs font-bold text-slate-500">氏名</span>
+                  <input value={form.display_name} onChange={e => setForm(prev => ({ ...prev, display_name: e.target.value }))} className="w-full rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none" />
                 </label>
                 <label className="space-y-1">
-                  <span className="text-xs font-black text-slate-500">初期ID</span>
-                  <input value={form.login_id} onChange={e => setForm(prev => ({ ...prev, login_id: e.target.value }))} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 font-mono text-sm font-bold outline-none" />
+                  <span className="text-xs font-bold text-slate-500">初期ID</span>
+                  <input value={form.login_id} onChange={e => setForm(prev => ({ ...prev, login_id: e.target.value }))} className="w-full rounded-input border border-line bg-slate-50 px-4 py-3 font-mono text-sm font-bold outline-none" />
                 </label>
                 {!form.user_id ? <label className="space-y-1">
-                  <span className="text-xs font-black text-slate-500">初期パスワード</span>
+                  <span className="text-xs font-bold text-slate-500">初期パスワード</span>
                   <input
                     type="password"
                     autoComplete="new-password"
                     value={form.password}
                     onChange={e => setForm(prev => ({ ...prev, password: e.target.value }))}
                     placeholder={form.role === 'student' ? '空欄なら自動発行' : '6文字以上で入力'}
-                    className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 font-mono text-sm font-bold outline-none"
+                    className="w-full rounded-input border border-line bg-slate-50 px-4 py-3 font-mono text-sm font-bold outline-none"
                   />
-                </label> : <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-bold leading-5 text-amber-800">パスワードは一覧の「PW変更」から個別に変更できます。</div>}
+                </label> : <div className="rounded-card border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-bold leading-5 text-amber-800">パスワードは一覧の「PW変更」から個別に変更できます。</div>}
                 <label className="space-y-1">
-                  <span className="text-xs font-black text-slate-500">メール</span>
-                  <input value={form.email} onChange={e => setForm(prev => ({ ...prev, email: e.target.value }))} placeholder="空欄なら 初期ID@classbase.local" className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none" />
+                  <span className="text-xs font-bold text-slate-500">メール</span>
+                  <input value={form.email} onChange={e => setForm(prev => ({ ...prev, email: e.target.value }))} placeholder="空欄なら 初期ID@classbase.local" className="w-full rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none" />
                 </label>
                 <label className="space-y-1">
-                  <span className="text-xs font-black text-slate-500">所属校舎</span>
-                  <select required={form.role !== 'master'} value={form.school_id} onChange={e => setForm(prev => ({ ...prev, school_id: e.target.value }))} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none">
+                  <span className="text-xs font-bold text-slate-500">所属校舎</span>
+                  <select required={form.role !== 'master'} value={form.school_id} onChange={e => setForm(prev => ({ ...prev, school_id: e.target.value }))} className="w-full rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none">
                     <option value="">校舎を選択</option>
                     {schoolOptions()}
                   </select>
@@ -783,26 +827,26 @@ export default function SsoAccountConsolePage() {
                 {form.role === 'student' && (
                   <>
                     <label className="space-y-1">
-                      <span className="text-xs font-black text-slate-500">学年</span>
-                      <select value={form.grade} onChange={e => setForm(prev => ({ ...prev, grade: e.target.value }))} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-black outline-none">
+                      <span className="text-xs font-bold text-slate-500">学年</span>
+                      <select value={form.grade} onChange={e => setForm(prev => ({ ...prev, grade: e.target.value }))} className="w-full rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none">
                         {['中1', '中2', '中3', 'その他'].map(g => <option key={g}>{g}</option>)}
                       </select>
                     </label>
                     <label className="space-y-1">
-                      <span className="text-xs font-black text-slate-500">教室</span>
-                      <input value={form.classroom} onChange={e => setForm(prev => ({ ...prev, classroom: e.target.value }))} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none" />
+                      <span className="text-xs font-bold text-slate-500">教室</span>
+                      <input value={form.classroom} onChange={e => setForm(prev => ({ ...prev, classroom: e.target.value }))} className="w-full rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none" />
                     </label>
                     <label className="space-y-1">
-                      <span className="text-xs font-black text-slate-500">理科科目</span>
-                      <input value={form.subject_science} onChange={e => setForm(prev => ({ ...prev, subject_science: e.target.value }))} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none" />
+                      <span className="text-xs font-bold text-slate-500">理科科目</span>
+                      <input value={form.subject_science} onChange={e => setForm(prev => ({ ...prev, subject_science: e.target.value }))} className="w-full rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none" />
                     </label>
                     <label className="space-y-1">
-                      <span className="text-xs font-black text-slate-500">社会科目</span>
-                      <input value={form.subject_social} onChange={e => setForm(prev => ({ ...prev, subject_social: e.target.value }))} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none" />
+                      <span className="text-xs font-bold text-slate-500">社会科目</span>
+                      <input value={form.subject_social} onChange={e => setForm(prev => ({ ...prev, subject_social: e.target.value }))} className="w-full rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none" />
                     </label>
-                    <label className="flex cursor-pointer items-center gap-3 rounded-2xl border border-violet-200 bg-violet-50 p-4 sm:col-span-2">
-                      <input type="checkbox" checked={form.enabled_programs.includes('online_school')} onChange={event => setForm(prev => ({ ...prev, enabled_programs: event.target.checked ? ['online_school'] : [] }))} className="h-5 w-5 accent-violet-600" />
-                      <span><span className="block text-sm font-black text-violet-950">オンライン校を利用する</span><span className="block text-[11px] font-bold text-violet-600">ONにすると、生徒のアプリ選択画面に10分学習が表示されます。</span></span>
+                    <label className="flex cursor-pointer items-center gap-3 rounded-card border border-line bg-accent-soft p-4 sm:col-span-2">
+                      <input type="checkbox" checked={form.enabled_programs.includes('online_school')} onChange={event => setForm(prev => ({ ...prev, enabled_programs: event.target.checked ? ['online_school'] : [] }))} className="h-5 w-5 accent-accent" />
+                      <span><span className="block text-sm font-bold text-slate-900">オンライン校を利用する</span><span className="block text-xs font-bold text-slate-500">ONにすると、生徒のアプリ選択画面に10分学習が表示されます。</span></span>
                     </label>
                   </>
                 )}
@@ -810,21 +854,21 @@ export default function SsoAccountConsolePage() {
                 {form.role === 'parent' && (
                   <div className="space-y-3 sm:col-span-2">
                     <label className="space-y-1">
-                      <span className="text-xs font-black text-slate-500">紐づく生徒</span>
-                      <input value={studentSearch} onChange={e => setStudentSearch(e.target.value)} placeholder="生徒名・ログインID・校舎で検索" className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:border-indigo-300" />
+                      <span className="text-xs font-bold text-slate-500">紐づく生徒</span>
+                      <input value={studentSearch} onChange={e => setStudentSearch(e.target.value)} placeholder="生徒名・ログインID・校舎で検索" className="w-full rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:border-accent" />
                     </label>
                     {selectedStudentIds.length > 0 && (
-                      <p className="text-xs font-black text-indigo-600">{selectedStudentIds.length}名を選択中</p>
+                      <p className="text-xs font-bold text-accent">{selectedStudentIds.length}名を選択中</p>
                     )}
-                    <div className="max-h-56 space-y-2 overflow-y-auto rounded-2xl border border-slate-200 bg-slate-50 p-2">
+                    <div className="max-h-56 space-y-2 overflow-y-auto rounded-input border border-line bg-slate-50 p-2">
                       {parentStudentCandidates.length > 0 ? parentStudentCandidates.map(student => {
                         const checked = selectedStudentIds.includes(student.id);
                         return (
-                          <label key={student.id} className="flex cursor-pointer items-center gap-3 rounded-xl bg-white px-3 py-3 shadow-sm">
-                            <input type="checkbox" checked={checked} onChange={() => toggleParentStudent(student.id)} className="h-5 w-5 accent-indigo-600" />
+                          <label key={student.id} className="flex cursor-pointer items-center gap-3 rounded-btn bg-white px-3 py-3 shadow-sm">
+                            <input type="checkbox" checked={checked} onChange={() => toggleParentStudent(student.id)} className="h-5 w-5 accent-accent" />
                             <span className="min-w-0 flex-1">
-                              <span className="block truncate text-sm font-black text-slate-800">{student.student_name || student.name || '氏名未設定'}</span>
-                              <span className="block truncate text-[11px] font-bold text-slate-400">{student.lifetime_id || student.initial_login_id || 'ID未設定'} / {schoolNameOf(student)}</span>
+                              <span className="block truncate text-sm font-bold text-slate-800">{student.student_name || student.name || '氏名未設定'}</span>
+                              <span className="block truncate text-xs font-bold text-slate-400">{student.lifetime_id || student.initial_login_id || 'ID未設定'} / {schoolNameOf(student)}</span>
                             </span>
                           </label>
                         );
@@ -837,25 +881,21 @@ export default function SsoAccountConsolePage() {
 
                 {(form.role === 'admin' || (form.role === 'teacher' && form.attendance_school_manager)) && (
                   <>
-                    <fieldset className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:col-span-2">
-                      <legend className="px-2 text-xs font-black text-slate-600">{form.role === 'admin' ? '管理できる校舎' : '勤怠を承認できる校舎'}</legend>
+                    <fieldset className="space-y-3 rounded-input border border-line bg-slate-50 p-4 sm:col-span-2">
+                      <legend className="px-2 text-xs font-bold text-slate-600">{form.role === 'admin' ? '管理できる校舎' : '勤怠を承認できる校舎'}</legend>
                       <div className="max-h-64 space-y-4 overflow-y-auto pr-1">
-                        {ATTENDANCE_SCHOOL_OPTION_GROUPS.map(group => <div key={group.label}><p className="mb-2 text-[11px] font-black text-slate-400">{group.label}</p><div className="grid gap-2 sm:grid-cols-2">{group.schools.map(item => {
+                        {ATTENDANCE_SCHOOL_OPTION_GROUPS.map(group => <div key={group.label}><p className="mb-2 text-xs font-bold text-slate-400">{group.label}</p><div className="grid gap-2 sm:grid-cols-2">{group.schools.map(item => {
                           const checked = form.school_ids.split(',').includes(item.code);
-                          return <label key={item.code} className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-xs font-bold ${checked ? 'border-indigo-300 bg-indigo-50 text-indigo-800' : 'border-slate-200 bg-white text-slate-600'}`}><input type="checkbox" checked={checked} onChange={() => toggleManagedSchool(item.code)} className="h-4 w-4 accent-indigo-600" /><span>{item.name}</span></label>;
+                          return <label key={item.code} className={`flex cursor-pointer items-center gap-2 rounded-btn border px-3 py-2 text-xs font-bold ${checked ? 'border-accent bg-accent-soft text-accent' : 'border-slate-200 bg-white text-slate-600'}`}><input type="checkbox" checked={checked} onChange={() => toggleManagedSchool(item.code)} className="h-4 w-4 accent-accent" /><span>{item.name}</span></label>;
                         })}</div></div>)}
                       </div>
                     </fieldset>
                     {profile?.role === 'master' && form.role === 'admin' && (
-                      <fieldset className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:col-span-2">
-                        <legend className="px-2 text-xs font-black text-slate-600">利用できる管理画面</legend>
-                        <div className="grid gap-3 sm:grid-cols-3">
-                          {[
-                            ['science_social', '理社講座 管理'],
-                            ['eiken', 'Booster 管理'],
-                            ['attendance', '勤怠 管理'],
-                          ].map(([key, label]) => (
-                            <label key={key} className="flex min-h-12 cursor-pointer items-center gap-3 rounded-xl border border-slate-200 bg-white px-4 text-sm font-black text-slate-700">
+                      <fieldset className="space-y-3 rounded-input border border-line bg-slate-50 p-4 sm:col-span-2">
+                        <legend className="px-2 text-xs font-bold text-slate-600">利用できる管理画面</legend>
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          {ADMIN_APP_IDS.map(key => [key, ADMIN_APP_LABELS[key]] as const).map(([key, label]) => (
+                            <label key={key} className="flex min-h-12 cursor-pointer items-center gap-3 rounded-btn border border-slate-200 bg-white px-4 text-sm font-bold text-slate-700">
                               <input
                                 type="checkbox"
                                 checked={form.admin_permissions[key as keyof typeof form.admin_permissions]}
@@ -866,7 +906,7 @@ export default function SsoAccountConsolePage() {
                                     [key]: event.target.checked,
                                   },
                                 }))}
-                                className="h-5 w-5 accent-slate-900"
+                                className="h-5 w-5 accent-accent"
                               />
                               {label}
                             </label>
@@ -877,40 +917,28 @@ export default function SsoAccountConsolePage() {
                   </>
                 )}
               </div>
-            </div>
+      </Modal>
 
-            <div className="border-t border-slate-100 bg-slate-50 px-6 py-4">
-              <button onClick={saveAccount} disabled={savingAccount} className="flex w-full items-center justify-center gap-2 rounded-2xl bg-slate-950 py-4 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-60">
-                {savingAccount ? <Loader2 className="animate-spin" size={18} /> : <Plus size={18} />}
-                アカウントを保存
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {passwordTarget && (
-        <div className="fixed inset-0 z-[1100] flex items-end justify-center bg-slate-950/55 p-0 backdrop-blur-sm sm:items-center sm:p-6">
-          <div className="w-full max-w-lg rounded-t-[28px] bg-white shadow-2xl sm:rounded-[28px]">
-            <div className="flex items-center justify-between border-b border-slate-100 px-6 py-4">
-              <div>
-                <p className="text-xs font-black uppercase tracking-wider text-amber-500">Master Password Change</p>
-                <h3 className="mt-1 text-xl font-black text-slate-900">パスワード変更</h3>
-                <p className="mt-1 text-xs font-bold text-slate-500">{passwordTarget.student_name || passwordTarget.parent_name || passwordTarget.name || passwordTarget.email || passwordTarget.id}</p>
-              </div>
-              <button onClick={closePasswordModal} disabled={savingPassword} className="rounded-full bg-slate-100 p-2 text-slate-500 disabled:opacity-50"><X size={18} /></button>
-            </div>
-            <div className="space-y-4 p-6">
-              <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-xs font-bold leading-6 text-amber-800">
+      <Modal
+        open={Boolean(passwordTarget)}
+        onClose={closePasswordModal}
+        dismissible={!savingPassword}
+        title="パスワード変更"
+        description={passwordTarget ? (passwordTarget.student_name || passwordTarget.parent_name || passwordTarget.name || passwordTarget.email || passwordTarget.id) : undefined}
+        footer={(
+          <Button variant="danger" fullWidth onClick={changePassword} loading={savingPassword} disabled={newPassword.length < 6 || newPassword !== newPasswordConfirmation} icon={<KeyRound size={16} aria-hidden />}>
+            パスワードを変更
+          </Button>
+        )}
+      >
+            <div className="space-y-4">
+              <div className="rounded-btn border border-amber-200 bg-amber-50 p-4 text-xs font-bold leading-6 text-amber-800">
                 初回ログイン済みのアカウントも変更できます。変更後は現在のログイン状態が失効し、新しいパスワードでの再ログインが必要です。
               </div>
-              <label className="block space-y-1"><span className="text-xs font-black text-slate-600">新しいパスワード</span><input type="password" autoComplete="new-password" minLength={6} maxLength={128} value={newPassword} onChange={event => setNewPassword(event.target.value)} placeholder="6文字以上" className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 font-mono outline-none focus:border-amber-300" /></label>
-              <label className="block space-y-1"><span className="text-xs font-black text-slate-600">新しいパスワード（確認）</span><input type="password" autoComplete="new-password" minLength={6} maxLength={128} value={newPasswordConfirmation} onChange={event => setNewPasswordConfirmation(event.target.value)} placeholder="同じパスワードを再入力" className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 font-mono outline-none focus:border-amber-300" /></label>
+              <label className="block space-y-1"><span className="text-xs font-bold text-slate-600">新しいパスワード</span><input type="password" autoComplete="new-password" minLength={6} maxLength={128} value={newPassword} onChange={event => setNewPassword(event.target.value)} placeholder="6文字以上" className="w-full rounded-input border border-line bg-slate-50 px-4 py-3 font-mono outline-none focus:border-accent" /></label>
+              <label className="block space-y-1"><span className="text-xs font-bold text-slate-600">新しいパスワード（確認）</span><input type="password" autoComplete="new-password" minLength={6} maxLength={128} value={newPasswordConfirmation} onChange={event => setNewPasswordConfirmation(event.target.value)} placeholder="同じパスワードを再入力" className="w-full rounded-input border border-line bg-slate-50 px-4 py-3 font-mono outline-none focus:border-accent" /></label>
             </div>
-            <div className="border-t border-slate-100 bg-slate-50 px-6 py-4"><button onClick={changePassword} disabled={savingPassword || newPassword.length < 6 || newPassword !== newPasswordConfirmation} className="flex w-full items-center justify-center gap-2 rounded-2xl bg-amber-600 py-4 text-sm font-black text-white hover:bg-amber-700 disabled:opacity-40">{savingPassword ? <Loader2 className="animate-spin" size={18} /> : <KeyRound size={18} />}パスワードを変更</button></div>
-          </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 }
@@ -918,7 +946,7 @@ export default function SsoAccountConsolePage() {
 function FirstLoginBadge({ value }: { value: unknown }) {
   const completed = value === false;
   return (
-    <span className={`inline-flex items-center rounded-full px-3 py-1 text-[11px] font-black ${completed ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
+    <span className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-bold ${completed ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
       {completed ? '初回ログイン済み' : '初回変更待ち'}
     </span>
   );

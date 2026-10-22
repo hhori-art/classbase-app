@@ -1,9 +1,11 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { auth } from '@/lib/firebase';
-import { Loader2, Coins, Sparkles, ExternalLink } from 'lucide-react';
+import { Loader2, ClipboardCheck, ExternalLink } from 'lucide-react';
 import { normalizeZoomMeetingId } from '@/lib/zoom-url';
+import { classLiveStatus } from '@/lib/class-live-status';
+import { useConfirm, useToast } from '@/app/components/ui';
 
 // 画像に基づいた校舎名の略称変換ロジック
 const getSchoolAbbreviation = (schoolName: string | undefined): string => {
@@ -74,6 +76,8 @@ const getSchoolAbbreviation = (schoolName: string | undefined): string => {
   // ルールになければ頭文字を返す
   return schoolName.charAt(0);
 };
+
+const DEFAULT_LABEL = 'Zoomに参加する';
 
 const isMobileOrTablet = () => {
   if (typeof navigator === 'undefined') return false;
@@ -169,7 +173,7 @@ export default function ZoomButton(props: {
   const { 
     url, 
     meetingId,
-    label = "Zoomに参加する", 
+    label = DEFAULT_LABEL, 
     subLabel = "現在開催中の授業",
     color = "blue",
     startTime,
@@ -182,6 +186,16 @@ export default function ZoomButton(props: {
   } = props;
 
   const [loading, setLoading] = useState(false);
+  const toast = useToast();
+  const confirm = useConfirm();
+  // 開始前／授業中の表示を時刻に合わせて切り替える（日本時間）。初回描画はサーバーとずれないよう、マウント後に判定する。
+  const [now, setNow] = useState<Date | null>(null);
+  useEffect(() => {
+    setNow(new Date());
+    const timer = window.setInterval(() => setNow(new Date()), 30 * 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const liveStatus = now ? classLiveStatus(startTime, endTime, now) : 'unknown';
 
   const handleJoinClass = async () => {
     if (loading) return;
@@ -189,11 +203,12 @@ export default function ZoomButton(props: {
     const fallbackUrl = fallbackId ? `https://zoom.us/j/${fallbackId}` : '';
     const baseUrl = url || fallbackUrl;
     if (!baseUrl) {
-      alert('この授業のZoom情報がまだ準備できていません。時間をおいて再度お試しください。解決しない場合はサポートセンターへご連絡ください。');
+      toast.error('この授業のZoom情報がまだ準備できていません。時間をおいて再度お試しください。解決しない場合はサポートセンターへご連絡ください。');
       return;
     }
 
-    if (!confirm(`${label}しますか？\n（参加ログとして記録されます）`)) return;
+    const confirmTitle = label === DEFAULT_LABEL ? 'Zoomに参加しますか？' : `「${label}」に参加しますか？`;
+    if (!(await confirm({ title: confirmTitle, message: '参加ログとして記録されます。', confirmLabel: '参加する' }))) return;
 
     setLoading(true);
     const today = new Intl.DateTimeFormat('sv-SE', {
@@ -250,48 +265,62 @@ export default function ZoomButton(props: {
     }
   };
 
-  const theme = color === 'blue' 
+  // 1限・2限の見分けは濃さで付ける（色はアプリの差し色に合わせる）。
+  const theme = color === 'blue'
     ? {
-        bg: 'bg-gradient-to-br from-cyan-500 to-blue-600',
-        shadow: 'shadow-blue-200',
-        iconText: 'text-blue-600',
-        ctaText: 'text-blue-700'
+        bg: 'bg-accent bg-gradient-to-br from-white/10 to-transparent',
+        shadow: 'shadow-accent/20',
+        iconText: 'text-accent',
+        ctaText: 'text-accent'
       }
     : {
-        bg: 'bg-gradient-to-br from-violet-500 to-fuchsia-600',
-        shadow: 'shadow-purple-200',
-        iconText: 'text-purple-600',
-        ctaText: 'text-purple-700'
+        bg: 'bg-accent bg-gradient-to-br from-transparent to-black/25',
+        shadow: 'shadow-accent/20',
+        iconText: 'text-accent',
+        ctaText: 'text-accent'
       };
   const timeLabel = [startTime, endTime].filter(Boolean).join(' - ');
 
   return (
     <div className="w-full py-1.5 sm:py-2">
       <button
+        type="button"
         onClick={handleJoinClass}
         disabled={loading}
         className={`
-          relative w-full overflow-hidden rounded-2xl sm:rounded-3xl ${theme.bg} text-white shadow-lg sm:shadow-xl ${theme.shadow}
+          relative w-full overflow-hidden rounded-card ${theme.bg} text-accent-ink shadow-lg sm:shadow-xl ${theme.shadow}
           group transition-all duration-300 active:scale-[0.99] sm:hover:scale-[1.02] sm:active:scale-[0.98]
           disabled:opacity-70 disabled:cursor-not-allowed disabled:hover:scale-100
         `}
       >
-        <div className="absolute top-0 right-0 -mt-4 -mr-4 w-32 h-32 bg-white opacity-10 rounded-full blur-2xl group-hover:opacity-20 transition-opacity"></div>
-        <div className="absolute bottom-0 left-0 -mb-4 -ml-4 w-24 h-24 bg-black opacity-10 rounded-full blur-xl"></div>
+        <div aria-hidden className="absolute top-0 right-0 -mt-4 -mr-4 w-32 h-32 bg-white opacity-10 rounded-full blur-2xl group-hover:opacity-20 transition-opacity"></div>
+        <div aria-hidden className="absolute bottom-0 left-0 -mb-4 -ml-4 w-24 h-24 bg-black opacity-10 rounded-full blur-xl"></div>
 
         <div className="relative p-2 sm:p-1">
-          <div className="flex flex-col gap-3 rounded-[18px] border border-white/20 bg-white/10 p-3 text-left backdrop-blur-[2px] sm:flex-row sm:items-stretch sm:rounded-[20px] sm:p-4">
+          <div className="flex flex-col gap-3 rounded-btn border border-white/20 bg-white/10 p-3 text-left backdrop-blur-[2px] sm:flex-row sm:items-stretch sm:p-4">
             <div className="min-w-0 flex-1">
               <div className="mb-2 flex flex-wrap items-center gap-2">
-                <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-white/10 bg-white/20 px-2 py-1 text-[10px] font-black uppercase tracking-wider shadow-sm backdrop-blur-md">
-                  <span className="relative flex h-2 w-2">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
+                {liveStatus === 'live' && (
+                  <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-white/10 bg-white/20 px-2 py-1 text-xs font-bold shadow-sm backdrop-blur-md">
+                    <span className="relative flex h-2 w-2">
+                      <span className="motion-safe:animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500"></span>
+                    </span>
+                    授業中
                   </span>
-                  Live
-                </span>
+                )}
+                {liveStatus === 'before' && (
+                  <span className="inline-flex shrink-0 items-center rounded-full border border-white/10 bg-white/20 px-2 py-1 text-xs font-bold shadow-sm backdrop-blur-md">
+                    開始前
+                  </span>
+                )}
+                {liveStatus === 'ended' && (
+                  <span className="inline-flex shrink-0 items-center rounded-full border border-white/10 bg-black/15 px-2 py-1 text-xs font-bold">
+                    授業終了
+                  </span>
+                )}
                 {timeLabel && (
-                  <span className="rounded-full bg-black/10 px-2 py-1 text-[10px] font-black text-white/90">
+                  <span className="rounded-full bg-black/10 px-2 py-1 text-xs font-bold opacity-90">
                     {timeLabel}
                   </span>
                 )}
@@ -299,29 +328,29 @@ export default function ZoomButton(props: {
               <h3 className="text-lg font-black leading-tight tracking-tight drop-shadow-sm sm:text-2xl [overflow-wrap:anywhere]">
                 {loading ? '準備中...' : label}
               </h3>
-              <p className="mt-1.5 text-xs font-bold leading-relaxed text-white/85 sm:text-[11px] [overflow-wrap:anywhere]">
+              <p className="mt-1.5 text-xs font-medium leading-relaxed opacity-85 [overflow-wrap:anywhere]">
                 {subLabel}
               </p>
             </div>
             <div className="flex items-center gap-2 sm:flex-col sm:items-center sm:justify-between sm:border-l sm:border-white/20 sm:pl-4">
-              <div className="hidden rounded-full border border-white/30 bg-white/20 px-3 py-1 text-white shadow-lg transition-transform duration-300 group-hover:-translate-y-1 sm:flex sm:items-center sm:gap-1.5">
-                <Coins size={14} className="fill-yellow-600 stroke-yellow-800" />
-                <span className="text-xs font-black">ログ</span>
-                <Sparkles size={12} className="text-yellow-700 animate-pulse" />
+              <div className="hidden rounded-full border border-white/30 bg-white/20 px-3 py-1 shadow-lg transition-transform duration-300 group-hover:-translate-y-1 sm:flex sm:items-center sm:gap-1.5">
+                <ClipboardCheck size={14} aria-hidden />
+                <span className="text-xs font-bold">参加を記録</span>
               </div>
               <div className={`
-                flex min-h-[48px] flex-1 items-center justify-center gap-2 rounded-2xl bg-white px-4 text-sm font-black ${theme.ctaText} shadow-lg
-                transition-colors group-hover:bg-white sm:h-12 sm:w-12 sm:min-h-0 sm:flex-none sm:rounded-full sm:px-0 ${theme.iconText}
+                flex min-h-[48px] flex-1 items-center justify-center gap-2 rounded-btn bg-surface px-4 text-sm font-bold ${theme.ctaText} shadow-lg
+                transition-colors group-hover:bg-surface sm:h-12 sm:w-12 sm:min-h-0 sm:flex-none sm:rounded-full sm:px-0 ${theme.iconText}
               `}>
                 {loading ? (
                   <>
-                    <Loader2 size={20} className="animate-spin text-gray-400" />
+                    <Loader2 size={20} className="animate-spin text-slate-400" aria-hidden />
                     <span className="sm:hidden">起動中</span>
                   </>
                 ) : (
                   <>
                     <span className="sm:hidden">Zoomに参加</span>
-                    <ExternalLink size={20} className="ml-0.5" strokeWidth={2.5} />
+                    <ExternalLink size={20} className="ml-0.5" strokeWidth={2.5} aria-hidden />
+                    <span className="sr-only">Zoomに参加</span>
                   </>
                 )}
               </div>

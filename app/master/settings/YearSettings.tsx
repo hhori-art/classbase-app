@@ -3,12 +3,15 @@
 import { useState, useEffect } from 'react';
 import { db } from '@/lib/firebase';
 import { doc, getDoc, setDoc, collection, getDocs, writeBatch, query, where } from 'firebase/firestore';
-import { CalendarClock, ArrowUpCircle, Loader2 } from 'lucide-react';
+import { CalendarClock, ArrowUpCircle } from 'lucide-react';
+import { Button, useConfirm, useToast } from '@/app/components/ui';
 
 export default function YearSettings() {
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear().toString());
   const [loading, setLoading] = useState(false);
   const [processing, setProcessing] = useState(false);
+  const toast = useToast();
+  const confirm = useConfirm();
 
   useEffect(() => {
     // 現在の設定年度を取得
@@ -22,13 +25,18 @@ export default function YearSettings() {
   const saveYear = async () => {
     setLoading(true);
     await setDoc(doc(db, 'settings', 'global'), { current_year: currentYear }, { merge: true });
-    alert(`システム年度を ${currentYear}年度 に設定しました。`);
+    toast.success(`システム年度を ${currentYear}年度 に設定しました。`);
     setLoading(false);
   };
 
   // 自動進級処理
   const handleUpgrade = async () => {
-    if (!confirm(`【重要】全生徒の学年を1つ上げますか？\n\n例: 中1 → 中2, 中3 → 卒業\n※この操作は取り消せません。`)) return;
+    if (!(await confirm({
+      title: '全生徒の学年を1つ上げますか？',
+      message: '例：中1 → 中2、中3 → 卒業。この操作は取り消せません。',
+      confirmLabel: '進級させる',
+      tone: 'danger',
+    }))) return;
     
     setProcessing(true);
     try {
@@ -54,52 +62,44 @@ export default function YearSettings() {
       });
 
       await batch.commit();
-      alert(`${count}名の生徒を進級させました。`);
+      toast.success(`${count}名の生徒を進級させました。`);
     } catch (e: any) {
-      alert('エラー: ' + e.message);
+      console.error(e);
+      toast.error(`進級できませんでした。${e?.message || ''}`);
     } finally {
       setProcessing(false);
     }
   };
 
   return (
-    <div className="bg-white p-6 rounded-2xl shadow-sm border-l-4 border-blue-500 mb-8">
-      <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
-        <CalendarClock className="text-blue-500" /> 年度・進級管理
+    <div className="cb-card mb-8 border-l-4 border-l-accent p-6">
+      <h2 className="text-lg font-bold text-slate-800 mb-4 flex items-center gap-2">
+        <CalendarClock className="text-accent" aria-hidden /> 年度・進級管理
       </h2>
       
       <div className="flex flex-col md:flex-row gap-6 items-start md:items-end">
         <div>
-          <label className="block text-xs font-bold text-gray-500 mb-1">現在のシステム年度</label>
+          <label className="block text-xs font-bold text-slate-500 mb-1">現在のシステム年度</label>
           <div className="flex gap-2">
             <input 
               type="number" 
-              className="p-2 border rounded-lg font-bold w-24 text-center"
+              className="min-h-10 w-24 rounded-input border border-line p-2 text-center font-bold"
               value={currentYear}
               onChange={(e) => setCurrentYear(e.target.value)}
             />
-            <button 
-              onClick={saveYear} 
-              disabled={loading}
-              className="bg-gray-800 text-white px-4 py-2 rounded-lg font-bold text-sm hover:bg-black"
-            >
-              {loading ? '...' : '保存'}
-            </button>
+            <Button variant="secondary" onClick={saveYear} loading={loading}>
+              保存
+            </Button>
           </div>
         </div>
 
-        <div className="flex-1 border-l pl-6 border-gray-100">
-          <p className="text-xs text-gray-500 mb-2">
+        <div className="flex-1 border-l pl-6 border-line">
+          <p className="text-xs text-slate-500 mb-2">
             新しい年度（2026年度など）になったら、下のボタンを押して生徒を一斉に進級させてください。
           </p>
-          <button 
-            onClick={handleUpgrade}
-            disabled={processing}
-            className="bg-blue-600 text-white px-6 py-2 rounded-lg font-bold text-sm hover:bg-blue-700 flex items-center gap-2 shadow-sm shadow-blue-200"
-          >
-            {processing ? <Loader2 className="animate-spin" size={16}/> : <ArrowUpCircle size={16}/>}
+          <Button onClick={handleUpgrade} loading={processing} icon={<ArrowUpCircle size={16} aria-hidden />}>
             全生徒を進級させる
-          </button>
+          </Button>
         </div>
       </div>
     </div>

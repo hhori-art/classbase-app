@@ -2,31 +2,56 @@
 import { useState, useEffect } from 'react';
 import { db } from '@/lib/firebase';
 import { collection, query, orderBy, onSnapshot, deleteDoc, doc, writeBatch, getDocs } from 'firebase/firestore';
-import { Trash2, RefreshCcw, AlertTriangle } from 'lucide-react';
+import { Trash2, RefreshCcw } from 'lucide-react';
+import { Button, IconButton, EmptyState, ErrorState, ListSkeleton, useToast, useConfirm } from '@/app/components/ui';
 
 export default function QuizManager() {
+  const toast = useToast();
+  const confirm = useConfirm();
   const [quizzes, setQuizzes] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
   const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
     const q = query(collection(db, 'quizzes'), orderBy('created_at', 'desc'));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       setQuizzes(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      setLoadError(false);
+      setLoading(false);
+    }, (error) => {
+      console.error(error);
+      setLoadError(true);
       setLoading(false);
     });
     return () => unsubscribe();
-  }, []);
+  }, [reloadKey]);
+
+  const reload = () => {
+    setLoading(true);
+    setLoadError(false);
+    setReloadKey(key => key + 1);
+  };
 
   // 1件削除
-  const handleDelete = async (id: string) => {
-    if (!confirm('この問題を削除しますか？')) return;
+  const handleDelete = async (id: string, question?: string) => {
+    if (!(await confirm({
+      title: question ? `「${question}」を削除しますか？` : 'この問題を削除しますか？',
+      confirmLabel: '削除する',
+      tone: 'danger',
+    }))) return;
     await deleteDoc(doc(db, 'quizzes', id));
   };
 
   // 全削除（入れ替え用）
   const handleDeleteAll = async () => {
-    if (!confirm('【警告】すべての問題を削除しますか？\nこの操作は取り消せません。')) return;
+    if (!(await confirm({
+      title: '登録済みの問題をすべて削除しますか？',
+      message: 'この操作は取り消せません。',
+      confirmLabel: 'すべて削除する',
+      tone: 'danger',
+    }))) return;
     setIsDeleting(true);
     try {
       const snapshot = await getDocs(collection(db, 'quizzes'));
@@ -35,53 +60,58 @@ export default function QuizManager() {
         batch.delete(doc.ref);
       });
       await batch.commit();
-      alert('すべての問題を削除しました。新しいCSVをインポートしてください。');
+      toast.success('すべての問題を削除しました。新しいCSVをインポートしてください。');
     } catch (e) {
       console.error(e);
-      alert('削除中にエラーが発生しました');
+      toast.error('削除できませんでした。もう一度お試しください。');
     } finally {
       setIsDeleting(false);
     }
   };
 
-  if (loading) return <div className="p-4 text-gray-500">データを読み込み中...</div>;
+  if (loading) return <div className="p-4"><ListSkeleton rows={3} /></div>;
 
   return (
-    <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 mt-6">
-      <div className="flex justify-between items-center mb-4">
-        <h3 className="font-bold text-gray-700 flex items-center gap-2">
-          <RefreshCcw size={18} />
+    <div className="mt-6 rounded-card border border-line bg-surface p-6 shadow-sm">
+      <div className="mb-4 flex items-center justify-between">
+        <h3 className="flex items-center gap-2 font-bold text-slate-700">
+          <RefreshCcw size={18} aria-hidden />
           登録済み問題一覧 ({quizzes.length}件)
         </h3>
         {quizzes.length > 0 && (
-          <button 
-            onClick={handleDeleteAll} 
+          <Button
+            variant="danger"
+            size="sm"
+            onClick={handleDeleteAll}
             disabled={isDeleting}
-            className="text-xs bg-red-100 text-red-600 px-3 py-1.5 rounded hover:bg-red-200 flex items-center gap-1 transition-colors"
+            loading={isDeleting}
+            icon={<Trash2 size={14} aria-hidden />}
           >
-            {isDeleting ? '削除中...' : <><Trash2 size={14} /> 全て削除</>}
-          </button>
+            {isDeleting ? '削除中' : '全て削除'}
+          </Button>
         )}
       </div>
 
-      <div className="overflow-y-auto max-h-[300px] space-y-2">
-        {quizzes.length === 0 ? (
-          <div className="text-center py-8 text-gray-400 bg-gray-50 rounded-lg border border-dashed border-gray-300">
-            問題が登録されていません。<br/>CSVをインポートしてください。
-          </div>
+      <div className="max-h-[300px] space-y-2 overflow-y-auto">
+        {loadError ? (
+          <ErrorState onRetry={reload} />
+        ) : quizzes.length === 0 ? (
+          <EmptyState title="問題が登録されていません" description="CSVをインポートしてください。" />
         ) : (
           quizzes.map((quiz) => (
-            <div key={quiz.id} className="flex justify-between items-start p-3 bg-gray-50 rounded-lg border border-gray-100 hover:bg-gray-100 transition-colors">
+            <div key={quiz.id} className="flex items-start justify-between rounded-btn border border-slate-100 bg-slate-50 p-3 transition-colors hover:bg-slate-100">
               <div>
-                <p className="font-bold text-sm text-gray-800">{quiz.question}</p>
-                <p className="text-xs text-blue-600 mt-1">正解: {quiz.correct_answer}</p>
+                <p className="text-sm font-bold text-slate-800">{quiz.question}</p>
+                <p className="mt-1 text-xs text-accent">正解: {quiz.correct_answer}</p>
               </div>
-              <button 
-                onClick={() => handleDelete(quiz.id)}
-                className="text-gray-400 hover:text-red-500 p-1"
+              <IconButton
+                label="削除"
+                size="sm"
+                onClick={() => handleDelete(quiz.id, quiz.question)}
+                className="text-slate-400 hover:text-rose-600"
               >
-                <Trash2 size={16} />
-              </button>
+                <Trash2 size={16} aria-hidden />
+              </IconButton>
             </div>
           ))
         )}

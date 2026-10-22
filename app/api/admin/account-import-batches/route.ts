@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { canManageSchool, getServerUser, jsonError, requireMaster } from '@/lib/server-auth';
+import { writeAuditLog } from '@/lib/server/audit-log';
 
 export const runtime = 'nodejs';
 
@@ -94,7 +95,21 @@ export async function POST(request: NextRequest) {
     });
 
     const saved = await ref.get();
-    return Response.json({ ok: true, batch: serializeBatch(ref.id, saved.data() || {}) });
+    const savedData = saved.data() || {};
+    // 一括登録の結果を1件だけ記録する（件数のみ。行の内容・エラー文は残さない）。
+    await writeAuditLog({
+      actor,
+      action: 'account_import',
+      target_type: 'account_import_batch',
+      target_id: ref.id,
+      target_label: fileName,
+      details: {
+        target_role: role,
+        success_count: Number(savedData.success_count || 0),
+        error_count: Number(savedData.error_count || 0),
+      },
+    });
+    return Response.json({ ok: true, batch: serializeBatch(ref.id, savedData) });
   } catch (error) {
     return jsonError(error);
   }

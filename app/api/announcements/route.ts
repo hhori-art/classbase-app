@@ -3,7 +3,9 @@ import { NextRequest } from 'next/server';
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { adminBucket, adminDb } from '@/lib/firebase-admin';
 import { getServerUser, jsonError, requireMaster } from '@/lib/server-auth';
-import { canReadAnnouncement, cleanAnnouncementList, serializeAnnouncement } from '@/lib/server/announcement-access';
+import { writeAuditLog } from '@/lib/server/audit-log';
+import { announcementLinkedStudentIds, canReadAnnouncement, cleanAnnouncementList, serializeAnnouncement, withAnnouncementLinkedStudents } from '@/lib/server/announcement-access';
+import { notifyAnnouncementPush, wantsAnnouncementPush, type AnnouncementPushResult } from '@/lib/server/announcement-push';
 import { ATTENDANCE_SCHOOL_DIRECTORY, resolveAttendanceSchoolCode } from '@/lib/attendance-schools';
 
 export const runtime = 'nodejs';
@@ -27,14 +29,11 @@ const parsePublishDate = (value: string) => {
 };
 
 async function audienceUser(user: any) {
-  if (!['parent', 'guardian'].includes(user.role)) return user;
+  const ids = announcementLinkedStudentIds(user);
+  if (!ids.length) return withAnnouncementLinkedStudents(user, []);
   const db = adminDb();
-  const ids = cleanAnnouncementList(user.profile?.student_ids).slice(0, 20);
-  const students = ids.length ? await db.getAll(...ids.map(id => db.collection('users').doc(id))) : [];
-  return { ...user,
-    linked_schools: students.flatMap(student => { const data = student.data() || {}; return [data.school_id, data.school_code, data.school].filter(Boolean); }),
-    linked_grades: students.map(student => student.data()?.grade).filter(Boolean),
-  };
+  const students = await db.getAll(...ids.map(id => db.collection('users').doc(id)));
+  return withAnnouncementLinkedStudents(user, students.map(student => student.data()));
 }
 
 export async function GET(request: NextRequest) {
@@ -87,6 +86,15 @@ export async function POST(request: NextRequest) {
     if (contentType.includes('application/json')) {
       const body = await request.json();
       const action = clean(body.action, 40);
+      if (action === 'notify_push') {
+        // 予約配信が始まった後や、配信時に通知しなかったお知らせを後から端末へ知らせる（1件につき1回だけ）。
+        const id = clean(body.id, 160);
+        if (!id) return Response.json({ ok: false, error: 'id is required' }, { status: 400 });
+        const push = await notifyAnnouncementPush(id, user);
+        if (push.status === 'not-found') return Response.json({ ok: false, error: 'not found' }, { status: 404 });
+        if (push.status === 'not-published') return Response.json({ ok: false, error: '配信前・取り下げ済みのお知らせは端末に通知できません' }, { status: 409 });
+        return Response.json({ ok: true, push });
+      }
       if (!['save_template', 'save_group', 'delete_template', 'delete_group'].includes(action)) return Response.json({ ok: false, error: 'invalid action' }, { status: 400 });
       const groupSchools = action === 'save_group' ? normalizeSchoolIds(body.school_ids) : null;
       if (groupSchools && !groupSchools.ok) return Response.json({ ok: false, error: `存在しない校舎が含まれています: ${groupSchools.invalid.join(', ')}` }, { status: 400 });
@@ -124,6 +132,7 @@ export async function POST(request: NextRequest) {
     const normalizedSchools = normalizeSchoolIds(form.get('school_ids'));
     const schoolIds = normalizedSchools.values, grades = cleanAnnouncementList(form.get('grades')).slice(0, 30);
     const publishText = clean(form.get('publish_at'), 80), publishDate = parsePublishDate(publishText);
+    const pushRequested = wantsAnnouncementPush(form.get('push'), label);
     const files = form.getAll('files').filter((item): item is File => item instanceof File && item.size > 0);
     if (!title || !content) return Response.json({ ok: false, error: 'タイトルと本文を入力してください' }, { status: 400 });
     if (!TARGETS.has(target) || !LABELS.has(label)) return Response.json({ ok: false, error: '配信先またはラベルが不正です' }, { status: 400 });
@@ -141,8 +150,17 @@ export async function POST(request: NextRequest) {
     }
     await ref.create({ title, content, target, label, school_ids: schoolIds, grades, attachments,
       publish_at: Timestamp.fromDate(publishDate), status: publishDate.getTime() > Date.now() ? 'scheduled' : 'published',
-      read_count: 0, archived: false, created_by: user.uid, created_at: FieldValue.serverTimestamp(), updated_at: FieldValue.serverTimestamp() });
-    return Response.json({ ok: true, id: ref.id });
+      read_count: 0, archived: false, push_requested: pushRequested, created_by: user.uid, created_at: FieldValue.serverTimestamp(), updated_at: FieldValue.serverTimestamp() });
+    // 端末への通知は補助的な経路のため、失敗してもお知らせの配信は成功として返す。
+    // 予約配信は配信時刻を過ぎてから一覧の「端末に通知」で送る（cron で決まった時刻に送る仕組みはない）。
+    let push: AnnouncementPushResult | { status: 'not-requested' | 'scheduled' | 'failed' } = { status: pushRequested ? 'scheduled' : 'not-requested' };
+    if (pushRequested && publishDate.getTime() <= Date.now()) {
+      push = await notifyAnnouncementPush(ref.id, user).catch(error => {
+        console.warn('[announcements] push failed', error instanceof Error ? error.message : 'unknown');
+        return { status: 'failed' as const };
+      });
+    }
+    return Response.json({ ok: true, id: ref.id, push });
   } catch (error) {
     await Promise.all(uploaded.map(path => adminBucket().file(path).delete({ ignoreNotFound: true }).catch(() => undefined)));
     return jsonError(error);
@@ -161,6 +179,7 @@ export async function DELETE(request: NextRequest) {
       if (code === '5' || code === 'not-found') return Response.json({ ok: false, error: 'not found' }, { status: 404 });
       throw error;
     }
+    await writeAuditLog({ actor: user, action: 'announcement_archive', target_type: 'announcement', target_id: id });
     return Response.json({ ok: true });
   } catch (error) { return jsonError(error); }
 }

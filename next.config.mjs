@@ -1,3 +1,5 @@
+import { fileURLToPath } from 'node:url';
+
 /** @type {import('next').NextConfig} */
 const contentSecurityPolicy = [
   "default-src 'self'",
@@ -19,11 +21,27 @@ const contentSecurityPolicy = [
 const nextConfig = {
   // 必要に応じて設定を追加しますが、基本は空でOKです
   reactStrictMode: true,
+  // 日本語の文節区切り（BudouX）がサーバー描画で使う linkedom は、任意の canvas が無いと代わりの簡易版を使う。
+  // その「無ければ」を毎回探して警告になるため、最初から簡易版につないでおく（動きは同じ）。
+  webpack(config) {
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      canvas: fileURLToPath(new URL('./node_modules/linkedom/commonjs/canvas-shim.cjs', import.meta.url)),
+    };
+    return config;
+  },
   // Next.js 15 の組み込みlintはFlat Configへ旧CLIオプションを渡すため、
   // buildスクリプトで先に `npm run lint` を実行してからビルドする。
   eslint: { ignoreDuringBuilds: true },
   async headers() {
     return [
+      {
+        // 端末通知の Service Worker は更新がすぐ届くよう、ブラウザに保存させない。
+        source: '/push-sw.js',
+        headers: [
+          { key: 'Cache-Control', value: 'no-cache, no-store, must-revalidate' },
+        ],
+      },
       {
         source: '/:path*',
         headers: [

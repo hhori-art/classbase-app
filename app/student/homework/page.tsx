@@ -4,9 +4,11 @@ import { useState, useEffect } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
 import { collection, query, getDocs, where } from 'firebase/firestore';
-import { ArrowLeft, BookOpen, Clock, CheckCircle, ChevronRight, AlertCircle, Loader2, Calendar, FileText, ExternalLink, Smartphone, Monitor } from 'lucide-react';
+import { BookOpen, Clock, CheckCircle, ChevronRight, AlertCircle, Calendar, FileText, ExternalLink, Smartphone, Monitor } from 'lucide-react';
+import { PageHeader, SectionTitle, StatusPill, EmptyState, ErrorState, ListSkeleton } from '@/app/components/ui';
 import Link from 'next/link';
 import { loadStudentHomework } from '@/lib/client-student-homework';
+import { formatDateKeyMonthDay, formatDateKeySlash, isHomeworkOverdue, jstDateKeyOf, parseHomeworkDeadline } from '@/lib/homework-deadline';
 
 const MONOXER_WEB_URL = process.env.NEXT_PUBLIC_MONOXER_WEB_URL || 'https://app.monoxer.com/';
 const MONOXER_APP_URL = process.env.NEXT_PUBLIC_MONOXER_APP_URL || 'monoxer://';
@@ -45,6 +47,9 @@ export default function StudentHomeworkListPage() {
   const { user, profile } = useAuth();
   const [assignments, setAssignments] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  // 読み込みに失敗したとき「宿題なし」と見分けるためのエラー表示
+  const [loadError, setLoadError] = useState('');
+  const [reloadKey, setReloadKey] = useState(0);
   const [studentInfo, setStudentInfo] = useState<{ grade: string, subjects: string[] } | null>(null);
   
   // 自分の提出状況 {課題ID: true/false}
@@ -62,6 +67,8 @@ export default function StudentHomeworkListPage() {
     const fetchData = async () => {
       if (!user) return;
 
+      setLoading(true);
+      setLoadError('');
       try {
         const userGrade = String(profile?.grade || '');
         const userSubjects = Array.isArray(profile?.subjects) ? profile.subjects : [];
@@ -81,170 +88,151 @@ export default function StudentHomeworkListPage() {
 
       } catch (e) {
         console.error("Data fetch error:", e);
+        setLoadError('宿題を読み込めませんでした。通信状況を確認して、もう一度お試しください。');
       } finally {
         setLoading(false);
       }
     };
 
     fetchData();
-  }, [profile, user]);
+  }, [profile, user, reloadKey]);
 
-  if (loading) return <div className="min-h-screen flex items-center justify-center bg-indigo-50"><Loader2 className="animate-spin text-indigo-400" size={40}/></div>;
+  if (loading) {
+    return (
+      <div className="mx-auto max-w-xl space-y-5 px-4 py-6">
+        <ListSkeleton rows={4} />
+      </div>
+    );
+  }
 
   return (
-    <div className="min-h-screen bg-[#F0F4F8] p-4 pb-24 font-sans sm:p-8">
-      <div className="max-w-xl mx-auto">
-        
-        {/* ヘッダー */}
-        <div className="flex items-center gap-4 mb-8">
-          <Link href="/student" className="bg-white p-4 rounded-full shadow-sm text-gray-400 hover:text-indigo-600 hover:shadow-md transition-all active:scale-95">
-            <ArrowLeft size={24} strokeWidth={3} />
-          </Link>
-          <div>
-            <h1 className="text-2xl font-black text-gray-800 flex items-center gap-2 tracking-tight">
-              <span className="bg-orange-100 text-orange-500 p-2 rounded-xl">
-                <BookOpen size={24} strokeWidth={3} />
-              </span>
-              Monoxer宿題
-            </h1>
-            <p className="text-xs font-bold text-gray-400 mt-1 pl-1">
-              メインの宿題はMonoxerで取り組みます
-            </p>
-          </div>
-        </div>
+    <div className="mx-auto max-w-xl space-y-5 px-4 py-6">
+      <PageHeader
+        tone="hero"
+        title="Monoxer宿題"
+        description="メインの宿題はMonoxerで取り組みます"
+        icon={BookOpen}
+        backHref="/student"
+      />
 
-        <section className="mb-6 overflow-hidden rounded-[32px] bg-slate-950 text-white shadow-xl">
-          <div className="p-6">
-            <div className="flex items-start gap-4">
-              <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-white/10">
-                {typeof window !== 'undefined' && isMobileOrTablet() ? <Smartphone size={28} /> : <Monitor size={28} />}
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-xs font-black uppercase tracking-[0.2em] text-orange-200">Main Homework</p>
-                <h2 className="mt-1 text-2xl font-black">Monoxerで宿題を進める</h2>
-                <p className="mt-2 text-sm font-bold leading-relaxed text-slate-300">
-                  スマホ・タブレットではMonoxerアプリ、PCではブラウザ版を開きます。
-                </p>
-              </div>
+      <section className="overflow-hidden rounded-card bg-slate-950 text-white shadow-card">
+        <div className="p-card">
+          <div className="flex items-start gap-4">
+            <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-btn bg-white/10">
+              {typeof window !== 'undefined' && isMobileOrTablet() ? <Smartphone size={28} /> : <Monitor size={28} />}
             </div>
-            <button
-              type="button"
-              onClick={openMonoxer}
-              className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-white px-5 py-4 text-sm font-black text-slate-950 transition active:scale-[0.99]"
-            >
-              <ExternalLink size={18} /> Monoxerを開く
-            </button>
-          </div>
-        </section>
-
-        <div className="mb-4 flex items-center justify-between gap-3">
-          <div>
-            <h2 className="text-sm font-black text-slate-700">画像提出が必要な宿題</h2>
-            <p className="text-xs font-bold text-slate-400">
-              {studentInfo ? `${studentInfo.grade}の受講科目のみ表示中` : '全ての課題を表示中'}
-            </p>
-          </div>
-        </div>
-
-        {/* リスト表示 */}
-        {assignments.length === 0 ? (
-          <div className="py-16 px-6 text-center bg-white rounded-[32px] border-4 border-dashed border-indigo-100 text-gray-400 flex flex-col items-center">
-            <div className="bg-indigo-50 p-6 rounded-full mb-4">
-              <FileText size={48} className="text-indigo-200"/>
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-bold tracking-wide text-amber-200">宿題</p>
+              <h2 className="mt-1 text-xl font-bold">Monoxerで宿題を進める</h2>
+              <p className="mt-2 text-sm leading-relaxed text-slate-300">
+                スマホ・タブレットではMonoxerアプリ、PCではブラウザ版を開きます。
+              </p>
             </div>
-            <p className="font-bold text-lg">現在、取り組むべき宿題はありません</p>
-            <p className="text-sm mt-2 opacity-70">
-              授業が終わるとここに追加されます。<br/>
-              今はゆっくり休みましょう！
-            </p>
           </div>
-        ) : (
-          <div className="space-y-4">
-            {assignments.map((assign) => {
-              const isSubmitted = submissionStatus[assign.id];
-              const deadlineDate = new Date(assign.deadline);
-              const today = new Date();
-              // 期限切れ判定（当日中はOKとする場合などロジック調整可）
-              const isLate = today > deadlineDate && !isSubmitted;
-              
-              // 科目による色分け
-              const subj = assign.subject || '';
-              const isScience = subj.includes('理科') || ['物理','化学','生物','地学'].some(s => subj.includes(s));
-              const isSociety = subj.includes('社会') || ['地理','歴史','公民'].some(s => subj.includes(s));
-              const isEnglish = subj.includes('英語');
-              const isMath = subj.includes('数学');
-              
-              let subjectColor = 'bg-gray-100 text-gray-600';
-              if (isScience) subjectColor = 'bg-green-100 text-green-700';
-              else if (isSociety) subjectColor = 'bg-yellow-100 text-yellow-700';
-              else if (isEnglish) subjectColor = 'bg-orange-100 text-orange-700';
-              else if (isMath) subjectColor = 'bg-blue-100 text-blue-700';
+          <button
+            type="button"
+            onClick={openMonoxer}
+            className="mt-5 flex min-h-12 w-full items-center justify-center gap-2 rounded-btn bg-white px-5 py-3 text-sm font-bold text-slate-950 transition active:scale-[0.99]"
+          >
+            <ExternalLink size={18} aria-hidden /> Monoxerを開く
+          </button>
+        </div>
+      </section>
 
-              return (
-                <Link 
-                  key={assign.id} 
-                  href={`/student/homework/${assign.id}`} 
-                  className="block group"
-                >
-                  <div className={`bg-white p-5 sm:p-6 rounded-[32px] shadow-sm border transition-all duration-300 relative overflow-hidden ${
-                    isSubmitted 
-                      ? 'border-green-100 opacity-80 hover:opacity-100 hover:shadow-green-100' 
-                      : 'border-indigo-50 hover:border-indigo-300 hover:shadow-xl hover:shadow-indigo-100 hover:-translate-y-1'
-                  }`}>
-                    
-                    {/* ステータスバッジ */}
-                    <div className="absolute top-0 right-0 p-5">
-                      {isSubmitted ? (
-                        <span className="flex items-center gap-1.5 text-[10px] font-black bg-green-500 text-white px-3 py-1 rounded-full shadow-md shadow-green-200">
-                          <CheckCircle size={12} strokeWidth={4}/> COMPLETE
-                        </span>
-                      ) : isLate ? (
-                        <span className="flex items-center gap-1.5 text-[10px] font-black bg-red-500 text-white px-3 py-1 rounded-full shadow-md shadow-red-200 animate-pulse">
-                          <AlertCircle size={12} strokeWidth={4}/> OVERDUE
-                        </span>
-                      ) : (
-                        <span className="flex items-center gap-1.5 text-[10px] font-black bg-blue-500 text-white px-3 py-1 rounded-full shadow-md shadow-blue-200">
-                          <Clock size={12} strokeWidth={4}/> OPEN
+      <SectionTitle
+        title="画像提出が必要な宿題"
+        description={studentInfo ? `${studentInfo.grade}の受講科目のみ表示中` : '全ての宿題を表示中'}
+      />
+
+      {/* リスト表示 */}
+      {loadError ? (
+        <ErrorState title="宿題を読み込めませんでした" message={loadError} onRetry={() => setReloadKey(key => key + 1)} />
+      ) : assignments.length === 0 ? (
+        <EmptyState
+          icon={FileText}
+          title="現在、取り組むべき宿題はありません"
+          description={<>授業が終わるとここに追加されます。<br />今はゆっくり休みましょう！</>}
+        />
+      ) : (
+        <div className="space-y-3">
+          {assignments.map((assign) => {
+            const isSubmitted = submissionStatus[assign.id];
+            // 期限切れ判定（日本時間。日付だけの期限は期限日の終わりまで期限内）
+            const deadline = parseHomeworkDeadline(assign.deadline);
+            const isLate = isHomeworkOverdue(assign.deadline) && !isSubmitted;
+            const classDateLabel = formatDateKeyMonthDay(jstDateKeyOf(assign.class_date));
+
+            // 科目による色分け
+            const subj = assign.subject || '';
+            const isScience = subj.includes('理科') || ['物理','化学','生物','地学'].some(s => subj.includes(s));
+            const isSociety = subj.includes('社会') || ['地理','歴史','公民'].some(s => subj.includes(s));
+            const isEnglish = subj.includes('英語');
+            const isMath = subj.includes('数学');
+
+            let subjectColor = 'bg-slate-100 text-slate-600';
+            if (isScience) subjectColor = 'bg-emerald-100 text-emerald-700';
+            else if (isSociety) subjectColor = 'bg-amber-100 text-amber-700';
+            else if (isEnglish) subjectColor = 'bg-rose-100 text-rose-700';
+            else if (isMath) subjectColor = 'bg-sky-100 text-sky-700';
+
+            return (
+              <Link
+                key={assign.id}
+                href={`/student/homework/${assign.id}`}
+                className="group block"
+              >
+                <div className={`cb-card p-card relative overflow-hidden transition-all duration-300 ${
+                  isSubmitted
+                    ? 'opacity-80 hover:opacity-100'
+                    : 'hover:-translate-y-0.5 hover:!ring-2 hover:ring-accent/30'
+                }`}>
+
+                  {/* ステータスバッジ */}
+                  <div className="absolute right-4 top-4">
+                    {isSubmitted ? (
+                      <StatusPill tone="success" icon={<CheckCircle size={12} aria-hidden />}>完了</StatusPill>
+                    ) : isLate ? (
+                      <StatusPill tone="danger" icon={<AlertCircle size={12} aria-hidden />}>期限切れ</StatusPill>
+                    ) : (
+                      <StatusPill tone="accent" icon={<Clock size={12} aria-hidden />}>受付中</StatusPill>
+                    )}
+                  </div>
+
+                  <div className="pr-24">
+                    {/* 科目ラベル & 授業日 */}
+                    <div className="mb-3 flex items-center gap-2">
+                      <span className={`inline-block rounded-input px-2.5 py-1 text-xs font-bold ${subjectColor}`}>
+                        {assign.subject || '一般'}
+                      </span>
+                      {classDateLabel && (
+                        <span className="text-xs font-medium text-fg-muted">
+                          {classDateLabel} 授業分
                         </span>
                       )}
                     </div>
 
-                    <div className="pr-24">
-                      {/* 科目ラベル & 自動作成のヒント */}
-                      <div className="flex items-center gap-2 mb-3">
-                        <span className={`inline-block px-3 py-1 rounded-lg text-[10px] font-black ${subjectColor}`}>
-                          {assign.subject || '一般'}
-                        </span>
-                        {assign.class_date && (
-                          <span className="text-[10px] text-gray-400 font-bold">
-                            {new Date(assign.class_date).getMonth()+1}/{new Date(assign.class_date).getDate()} 授業分
-                          </span>
-                        )}
-                      </div>
-                      
-                      <h3 className="text-lg sm:text-lg font-black text-gray-800 line-clamp-2 mb-3 leading-tight group-hover:text-indigo-600 transition-colors">
-                        {assign.title}
-                      </h3>
-                      
-                      <div className="flex items-center gap-2 text-xs font-bold text-gray-500 bg-gray-50 inline-flex px-3 py-1.5 rounded-xl">
-                        <Calendar size={14} className={isLate ? "text-red-500" : "text-indigo-400"}/>
-                        <span className={isLate ? "text-red-500" : ""}>
-                          期限: {new Date(assign.deadline).toLocaleDateString()} まで
-                        </span>
-                      </div>
-                    </div>
-                    
-                    {/* 矢印アイコン */}
-                    <div className="absolute bottom-5 right-5 text-gray-300 group-hover:text-indigo-500 transition-colors">
-                        <ChevronRight size={24} strokeWidth={3}/>
+                    <h3 className="mb-3 line-clamp-2 text-lg font-bold leading-tight text-fg transition-colors group-hover:text-accent">
+                      {assign.title}
+                    </h3>
+
+                    <div className="inline-flex items-center gap-2 rounded-input bg-slate-50 px-3 py-1.5 text-xs font-bold text-fg-muted">
+                      <Calendar size={14} className={isLate ? 'text-danger' : 'text-accent'} aria-hidden />
+                      <span className={isLate ? 'text-danger' : ''}>
+                        期限: {formatDateKeySlash(deadline.dateKey) || '未設定'}{deadline.time ? ` ${deadline.time}` : ''} まで
+                      </span>
                     </div>
                   </div>
-                </Link>
-              );
-            })}
-          </div>
-        )}
-      </div>
+
+                  {/* 矢印アイコン */}
+                  <div className="absolute bottom-4 right-4 text-slate-300 transition-colors group-hover:text-accent">
+                    <ChevronRight size={24} strokeWidth={3} aria-hidden />
+                  </div>
+                </div>
+              </Link>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

@@ -7,12 +7,133 @@ import { writeLearningEvent } from '@/lib/events';
 import { formatClassDays, parseClassDays } from '@/lib/class-days';
 import { normalizeCourseGrade } from '@/lib/course-registration-rules';
 import { verifyCourseRegistrationToken, type CourseRegistrationGrant } from '@/lib/server/course-registration-token';
+import { linkedParentIds, loadParentIdsListingStudent } from '@/lib/server/linked-parents';
+import { queuePushToUsers } from '@/lib/server/web-push';
 
 export const runtime = 'nodejs';
 
 const clean = (value: unknown, max = 300) => String(value || '').normalize('NFKC').trim().slice(0, max);
 
 const registrationId = (parts: string[]) => `registration_${crypto.createHash('sha256').update(parts.join('\u0000')).digest('hex').slice(0, 40)}`;
+
+const NOTIFICATION_SUMMARY_MAX = 140;
+
+/** 「火 2時間目 理科（物理）」の形にする。単元は週ごとに変わるので入れない。 */
+const grantLabel = (grant: CourseRegistrationGrant) => {
+  const words = Array.from(new Set(String(grant.course_text || '').split(/\s+/).map(word => word.trim()).filter(Boolean)));
+  const course = words.length >= 2 ? `${words[0]}（${words[1]}）` : words[0] || '講座';
+  return [grant.day, grant.slot, course].filter(Boolean).join(' ');
+};
+
+/** 選んだ講座の一覧を通知の本文用に短くまとめる。 */
+function summarizeCourseSelection(labels: string[]) {
+  const unique = Array.from(new Set(labels.filter(Boolean)));
+  const shown: string[] = [];
+  for (const label of unique) {
+    const next = [...shown, label].join('、');
+    if (shown.length > 0 && next.length > NOTIFICATION_SUMMARY_MAX) break;
+    shown.push(label.length > NOTIFICATION_SUMMARY_MAX ? `${label.slice(0, NOTIFICATION_SUMMARY_MAX - 1)}…` : label);
+  }
+  const rest = unique.length - shown.length;
+  return `${shown.join('、')}${rest > 0 ? ` ほか${rest}件` : ''}`;
+}
+
+const timestampKey = (value: any) => {
+  if (!value) return '';
+  if (typeof value.toMillis === 'function') return String(value.toMillis());
+  if (typeof value === 'object' && (value._seconds ?? value.seconds) !== undefined) return `${value._seconds ?? value.seconds}.${value._nanoseconds ?? value.nanoseconds ?? 0}`;
+  return String(value);
+};
+
+const selectionSignature = (type: string, year: unknown, term: unknown, ids: unknown) => [
+  type,
+  String(year || ''),
+  String(term || ''),
+  ...(Array.isArray(ids) ? ids.map(String).filter(Boolean).sort() : []),
+].join('\u0000');
+
+type ChangeNotice = {
+  user: Awaited<ReturnType<typeof getServerUser>>;
+  studentId: string;
+  /** 保存前の生徒プロフィール（変更前の状態と保護者の紐づけを読む）。 */
+  before: FirebaseFirestore.DocumentData;
+  registrationType: 'regular' | 'test_prep';
+  year: number;
+  term: string;
+  selectedCourseIds: string[];
+  labels: string[];
+};
+
+/**
+ * 受講講座の変更を、変更した本人以外の家族（生徒本人・つながっている保護者）へ知らせる。
+ * 通知IDは「変更前の更新時刻＋変更後の内容」から決めるので、同じ変更の再送では重複しない。
+ * 通知の失敗で保存を失敗扱いにしない。
+ */
+async function notifyCourseRegistrationChange(db: FirebaseFirestore.Firestore, notice: ChangeNotice) {
+  const { user, studentId, before, registrationType } = notice;
+  const testPrep = registrationType === 'test_prep';
+  const previous = testPrep
+    ? selectionSignature(registrationType, before.test_prep_course_registration_year, before.test_prep_course_registration_term, before.selected_test_prep_course_ids)
+    : selectionSignature(registrationType, before.course_registration_year, before.course_registration_term, before.selected_course_ids);
+  const next = selectionSignature(registrationType, notice.year, notice.term, notice.selectedCourseIds);
+  // 内容が変わっていない保存（保存後の再送など）は知らせない。
+  if (previous === next) return;
+
+  const extraParentIds = await loadParentIdsListingStudent(db, studentId).catch(() => [] as string[]);
+  const parentIds = linkedParentIds(before, extraParentIds).filter(id => id !== user.uid && id !== studentId);
+  const recipients: { id: string; role: 'student' | 'parent' }[] = [
+    ...(user.role === 'parent' ? [{ id: studentId, role: 'student' as const }] : []),
+    ...parentIds.map(id => ({ id, role: 'parent' as const })),
+  ];
+  if (recipients.length === 0) return;
+
+  const studentName = clean(before.student_name || before.name, 60) || 'お子さま';
+  const courseWord = testPrep ? '対策講座' : '受講講座';
+  const summary = notice.selectedCourseIds.length === 0
+    ? `${courseWord}の登録がすべて解除されました。`
+    : `変更後の${courseWord}：${summarizeCourseSelection(notice.labels)}`;
+  const version = timestampKey(testPrep ? before.test_prep_course_registration_updated_at : before.course_registration_updated_at);
+  const changeKey = crypto.createHash('sha256').update([studentId, user.uid, version, next].join('\u0000')).digest('hex').slice(0, 32);
+
+  const results = await Promise.allSettled(recipients.map(recipient => {
+    const title = recipient.role === 'student'
+      ? `保護者の方が${courseWord}を変更しました`
+      : user.role === 'parent'
+        ? `保護者の方が${studentName}さんの${courseWord}を変更しました`
+        : `${studentName}さんが${courseWord}を変更しました`;
+    return db.collection('user_notifications').doc(`course_change_${changeKey}_${recipient.id}`).create({
+      user_id: recipient.id,
+      role: recipient.role,
+      title,
+      message: summary,
+      kind: 'course_registration_changed',
+      link: recipient.role === 'student' ? '/student/timetable' : '/parent/courses',
+      student_id: studentId,
+      student_name: studentName,
+      changed_by: user.uid,
+      changed_by_role: user.role,
+      registration_type: registrationType,
+      read: false,
+      created_at: FieldValue.serverTimestamp(),
+    });
+  }));
+  results.forEach(result => {
+    if (result.status === 'rejected') {
+      const code = (result.reason as any)?.code;
+      // 同じ変更の再送で、すでに作られている通知は成功とみなす。
+      if (code === 6 || code === 'already-exists') return;
+      console.error('course registration notification failed', result.reason);
+    }
+  });  // 新しく通知を作れた相手だけ端末にも知らせる（同じ変更の再送では送らない）。
+  const created = recipients.filter((_, index) => results[index].status === 'fulfilled');
+  const createdStudents = created.filter(item => item.role === 'student').map(item => item.id);
+  const createdParents = created.filter(item => item.role === 'parent').map(item => item.id);
+  queuePushToUsers(createdStudents, { title: `保護者の方が${courseWord}を変更しました`, body: 'アプリで確認してください。', link: '/student/timetable' }, { kind: 'registration' });
+  queuePushToUsers(createdParents, { title: `${courseWord}が変更されました`, body: 'アプリで確認してください。', link: '/parent/courses' }, { kind: 'registration' });
+}
+
+const notifySafely = (db: FirebaseFirestore.Firestore, notice: ChangeNotice) => notifyCourseRegistrationChange(db, notice)
+  .catch(error => console.error('course registration notification failed', error));
 
 export async function POST(request: NextRequest) {
   try {
@@ -104,6 +225,9 @@ export async function POST(request: NextRequest) {
         course_registration_updated_at: FieldValue.serverTimestamp(),
       }, { merge: true });
       await batch.commit();
+      await notifySafely(db, {
+        user, studentId, before: initialStudent, registrationType, year, term, selectedCourseIds: [], labels: [],
+      });
       return Response.json({ ok: true, registration_id: ref.id, selected_course_ids: [], cleared: true });
     }
     let grants: CourseRegistrationGrant[];
@@ -256,6 +380,17 @@ export async function POST(request: NextRequest) {
     }).catch(error => {
       console.error('course registration event write failed', error);
       return null;
+    });
+
+    await notifySafely(db, {
+      user,
+      studentId,
+      before: initialStudent,
+      registrationType: first.registration_type === 'test_prep' ? 'test_prep' : 'regular',
+      year: first.year,
+      term: first.term,
+      selectedCourseIds,
+      labels: grants.map(grantLabel),
     });
 
     return Response.json({ ok: true, registration_id: ref.id, event_id: eventId });

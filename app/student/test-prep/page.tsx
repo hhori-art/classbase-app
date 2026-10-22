@@ -3,19 +3,20 @@
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import {
-  AlertCircle,
-  ArrowLeft,
   BookOpenCheck,
   CalendarDays,
   CheckCircle2,
   ChevronRight,
+  ClipboardList,
   Clock3,
-  Loader2,
-  RefreshCw,
 } from 'lucide-react';
+import { jstDateKey } from '@/lib/format';
+import { EmptyState, ErrorState, ListSkeleton, PageHeader, StatusPill, type StatusTone } from '@/app/components/ui';
 import { useAuth } from '@/app/context/AuthContext';
 import { loadCourseRegistrationOptions } from '@/lib/client-course-options';
 import { getCourseDay, getCourseSlot } from '@/app/components/CourseRegistrationCalendar';
+import { normalizeGrade } from '@/lib/test-prep-registration';
+import ReviewPeriodEntryCard from '@/app/components/ReviewPeriodEntryCard';
 
 type TestPrepDefinition = {
   id: string;
@@ -42,14 +43,29 @@ type TestPeriodSummary = {
   definitionCount: number;
 };
 
-const todayInJapan = () => new Intl.DateTimeFormat('sv-SE', {
-  timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit',
-}).format(new Date());
-
 const formatDate = (value: string) => {
   const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
   return match ? `${Number(match[2])}/${Number(match[3])}` : value || '未設定';
 };
+
+type ReviewItem = { subject: string; grade: string };
+type ReviewRange = { start_date: string; end_date: string; items: ReviewItem[] };
+
+/**
+ * 塾が設定したテスト対策（復習期間）の期間と重なり、その期間に同じ科目・学年の実施単元がある対策講座だけを表示する。
+ * 期間の実施単元は、APIで生徒の学年（または全学年）に絞り込み済み。
+ */
+const withinReviewPeriods = (definition: TestPrepDefinition, ranges: ReviewRange[], studentGrade: string) => ranges.some(range => (
+  Boolean(definition.start_date && definition.end_date) &&
+  definition.start_date <= range.end_date && definition.end_date >= range.start_date &&
+  range.items.some(item => {
+    const itemGrade = String(item.grade || '').trim();
+    const gradeOk = !itemGrade || itemGrade === '全学年' ||
+      normalizeGrade(itemGrade) === normalizeGrade(definition.grade) ||
+      normalizeGrade(itemGrade) === normalizeGrade(studentGrade);
+    return item.subject === definition.subject && gradeOk;
+  })
+));
 
 const definitionKey = (option: any) => String(option.test_prep_definition_id || '');
 
@@ -60,19 +76,43 @@ export default function StudentTestPrepPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [reloadKey, setReloadKey] = useState(0);
+  // プロフィールは読み込めたが学年が未登録のとき（読み込み中のスピナーのまま止まらないようにする）。
+  const profileLoaded = Boolean(profile);
+  const studentGrade = String(profile?.grade || '');
+  const gradeMissing = Boolean(user && profileLoaded && !studentGrade);
 
   useEffect(() => {
-    if (!user || !profile?.grade) return;
+    if (!user || !profileLoaded) return;
+    if (!studentGrade) {
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
     setLoading(true);
     setError('');
-    loadCourseRegistrationOptions({
-      grade: String(profile.grade),
-      getToken: forceRefresh => user.getIdToken(forceRefresh),
-      force: reloadKey > 0,
-    }).then(payload => {
+    const loadReviewRanges = async (): Promise<ReviewRange[]> => {
+      const response = await fetch('/api/review-periods', { headers: { Authorization: `Bearer ${await user.getIdToken()}` }, cache: 'no-store' });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || 'review-periods-failed');
+      return (Array.isArray(data.periods) ? data.periods : [])
+        .map((period: any) => ({
+          start_date: String(period.start_date || ''),
+          end_date: String(period.end_date || ''),
+          items: (Array.isArray(period.items) ? period.items : []).map((item: any) => ({ subject: String(item?.subject || ''), grade: String(item?.grade || '') })),
+        }))
+        .filter((range: ReviewRange) => range.start_date && range.end_date);
+    };
+    Promise.all([
+      loadCourseRegistrationOptions({
+        grade: studentGrade,
+        getToken: forceRefresh => user.getIdToken(forceRefresh),
+        force: reloadKey > 0,
+      }),
+      loadReviewRanges(),
+    ]).then(([payload, reviewRanges]) => {
       if (cancelled) return;
-      setDefinitions(Array.isArray(payload.test_prep_definitions) ? payload.test_prep_definitions : []);
+      const allDefinitions: TestPrepDefinition[] = Array.isArray(payload.test_prep_definitions) ? payload.test_prep_definitions : [];
+      setDefinitions(allDefinitions.filter(definition => withinReviewPeriods(definition, reviewRanges, studentGrade)));
       setOptions((Array.isArray(payload.options) ? payload.options : []).filter((option: any) => option.registration_type === 'test_prep'));
     }).catch(fetchError => {
       console.error('test prep list fetch failed:', fetchError);
@@ -81,7 +121,7 @@ export default function StudentTestPrepPage() {
       if (!cancelled) setLoading(false);
     });
     return () => { cancelled = true; };
-  }, [profile?.grade, reloadKey, user]);
+  }, [profileLoaded, studentGrade, reloadKey, user]);
 
   const selectedIds = useMemo(() => new Set([
     ...(Array.isArray(profile?.selected_test_prep_course_ids) ? profile.selected_test_prep_course_ids : []),
@@ -149,132 +189,115 @@ export default function StudentTestPrepPage() {
     })).sort((a, b) => `${a.startDate}_${a.title}`.localeCompare(`${b.startDate}_${b.title}`, 'ja', { numeric: true }));
   }, [definitions]);
 
-  const today = todayInJapan();
+  const today = jstDateKey();
 
   return (
-    <main className="min-h-screen bg-slate-50 px-4 pb-32 pt-5 sm:px-6">
-      <div className="mx-auto max-w-3xl">
-        <header className="mb-6 flex items-center gap-4">
-          <Link href="/student" aria-label="ホームへ戻る" className="rounded-2xl border border-slate-200 bg-white p-3 text-slate-500 shadow-sm transition hover:text-amber-600">
-            <ArrowLeft size={22} />
-          </Link>
-          <div>
-            <p className="text-xs font-black text-amber-600">TEST PREP</p>
-            <h1 className="text-2xl font-black text-slate-900">テスト期間一覧</h1>
-            <p className="mt-1 text-xs font-bold text-slate-500">自分の学年のテスト期間と対策講座を確認できます</p>
-          </div>
-        </header>
+    <main className="mx-auto max-w-3xl space-y-5 px-4 py-6">
+      <PageHeader tone="hero" eyebrow="テスト対策" title="テスト期間一覧" description="自分の学年のテスト期間と対策講座を確認できます" icon={ClipboardList} backHref="/student" />
 
-        <div className="mb-6 rounded-3xl bg-gradient-to-br from-amber-500 to-orange-500 p-5 text-white shadow-lg shadow-amber-100">
-          <div className="flex items-start gap-3">
-            <BookOpenCheck className="mt-0.5 shrink-0" size={25} />
-            <div><p className="font-black">ここで分かること</p><p className="mt-1 text-sm font-bold leading-relaxed text-white/90">実施期間、受付期間、科目・単元、受講できる曜日と時間、登録済みかどうかをまとめて確認できます。</p></div>
-          </div>
+      <div className="flex items-start gap-3 rounded-card border border-amber-100 bg-amber-50 p-card">
+        <BookOpenCheck className="mt-0.5 shrink-0 text-amber-600" size={25} aria-hidden />
+        <div><p className="font-bold text-amber-900">ここで分かること</p><p className="mt-1 text-sm leading-relaxed text-amber-800">実施期間、受付期間、科目・単元、受講できる曜日と時間、登録済みかどうかをまとめて確認できます。</p></div>
+      </div>
+
+      {/* 復習期間の受付中だけ、受講設定への入口を出す */}
+      <ReviewPeriodEntryCard />
+
+      {gradeMissing && (
+        <div className="rounded-card border border-amber-200 bg-warning-soft p-8 text-center">
+          <h2 className="font-bold text-amber-900">学年未登録</h2>
+          <p className="mt-2 text-sm text-amber-800">学年が登録されていないため、テスト対策を表示できません。所属校舎の先生に学年の登録を依頼してください。</p>
         </div>
+      )}
 
-        {loading && <div className="flex min-h-64 items-center justify-center"><Loader2 className="animate-spin text-amber-500" size={38} /></div>}
+      {!gradeMissing && loading && <ListSkeleton rows={4} />}
 
-        {!loading && error && (
-          <div className="rounded-3xl border border-rose-100 bg-white p-8 text-center shadow-sm">
-            <AlertCircle className="mx-auto text-rose-500" size={36} />
-            <p className="mt-3 font-black text-slate-800">{error}</p>
-            <button type="button" onClick={() => setReloadKey(value => value + 1)} className="mt-5 inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-5 py-3 text-sm font-black text-white"><RefreshCw size={16} />もう一度読み込む</button>
+      {!gradeMissing && !loading && error && (
+        <ErrorState title={error} onRetry={() => setReloadKey(value => value + 1)} />
+      )}
+
+      {!gradeMissing && !loading && !error && cards.length === 0 && (
+        <EmptyState icon={CalendarDays} title="現在予定されているテスト期間はありません" description="塾がテスト対策の期間を設定すると、この画面に表示されます。" className="bg-surface py-14" />
+      )}
+
+      {!loading && !error && periods.length > 0 && (
+        <section aria-labelledby="test-period-list-heading">
+          <div className="mb-3 flex items-end justify-between gap-3">
+            <div>
+              <p className="text-xs font-bold text-accent">期間</p>
+              <h2 id="test-period-list-heading" className="text-lg font-bold text-fg">テスト期間一覧</h2>
+            </div>
+            <StatusPill tone="accent">{periods.length}期間</StatusPill>
           </div>
-        )}
-
-        {!loading && !error && cards.length === 0 && (
-          <div className="rounded-3xl border-2 border-dashed border-slate-200 bg-white px-6 py-14 text-center">
-            <CalendarDays className="mx-auto text-slate-300" size={42} />
-            <h2 className="mt-4 font-black text-slate-700">現在公開中のテスト対策はありません</h2>
-            <p className="mt-2 text-sm font-bold text-slate-400">対策が追加されると、この画面に表示されます。</p>
-          </div>
-        )}
-
-        {!loading && !error && periods.length > 0 && (
-          <section className="mb-7" aria-labelledby="test-period-list-heading">
-            <div className="mb-3 flex items-end justify-between gap-3">
-              <div>
-                <p className="text-xs font-black text-amber-600">PERIODS</p>
-                <h2 id="test-period-list-heading" className="text-lg font-black text-slate-900">テスト期間一覧</h2>
-              </div>
-              <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-black text-amber-800">{periods.length}期間</span>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2">
-              {periods.map(period => {
-                const accepting = period.registrationOpenDate <= today && today <= period.registrationCloseDate;
-                const ongoing = period.startDate <= today && today <= period.endDate;
-                const upcoming = today < period.startDate;
-                const status = accepting ? '受付中' : ongoing ? '実施中' : upcoming ? '今後実施' : '終了';
-                const statusStyle = accepting
-                  ? 'bg-blue-100 text-blue-700'
-                  : ongoing
-                    ? 'bg-orange-100 text-orange-700'
-                    : upcoming
-                      ? 'bg-violet-100 text-violet-700'
-                      : 'bg-slate-100 text-slate-500';
-                return (
-                  <article key={period.key} className="rounded-3xl border border-amber-100 bg-white p-5 shadow-sm">
-                    <div className="flex items-start justify-between gap-3">
-                      <h3 className="font-black leading-snug text-slate-900">{period.title}</h3>
-                      <span className={`shrink-0 rounded-full px-3 py-1 text-[11px] font-black ${statusStyle}`}>{status}</span>
-                    </div>
-                    <p className="mt-3 flex items-center gap-2 text-sm font-black text-slate-700"><CalendarDays size={16} className="text-amber-500" />{formatDate(period.startDate)}〜{formatDate(period.endDate)}</p>
-                    <p className="mt-2 flex items-center gap-2 text-xs font-bold text-slate-500"><Clock3 size={15} className="text-blue-500" />受付 {formatDate(period.registrationOpenDate)}〜{formatDate(period.registrationCloseDate)}</p>
-                    <div className="mt-4 flex flex-wrap gap-2">
-                      {period.subjects.map(subject => <span key={subject} className="rounded-lg bg-amber-50 px-2.5 py-1 text-[11px] font-black text-amber-800">{subject}</span>)}
-                      <span className="rounded-lg bg-slate-100 px-2.5 py-1 text-[11px] font-black text-slate-600">{period.courses.length}講座</span>
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
-          </section>
-        )}
-
-        {!loading && !error && cards.length > 0 && (
-          <section aria-labelledby="test-prep-detail-heading">
-            <div className="mb-3">
-              <p className="text-xs font-black text-slate-400">COURSES</p>
-              <h2 id="test-prep-detail-heading" className="text-lg font-black text-slate-900">講座別の詳細</h2>
-            </div>
-            <div className="space-y-4">
-            {cards.map(({ definition, schedules, registered }) => {
-              const ongoing = definition.start_date <= today && today <= definition.end_date;
-              const accepting = definition.registration_open_date <= today && today <= definition.registration_close_date;
+          <div className="grid gap-3 sm:grid-cols-2">
+            {periods.map(period => {
+              const accepting = period.registrationOpenDate <= today && today <= period.registrationCloseDate;
+              const ongoing = period.startDate <= today && today <= period.endDate;
+              const upcoming = today < period.startDate;
+              const status = accepting ? '受付中' : ongoing ? '実施中' : upcoming ? '今後実施' : '終了';
+              const statusTone: StatusTone = accepting ? 'accent' : ongoing ? 'warning' : upcoming ? 'info' : 'neutral';
               return (
-                <article key={definition.id} className="overflow-hidden rounded-3xl border border-amber-100 bg-white shadow-sm">
-                  <div className="border-b border-amber-100 bg-amber-50/70 p-5">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="rounded-full bg-amber-500 px-3 py-1 text-[11px] font-black text-white">{definition.grade} {definition.subject}</span>
-                          {registered && <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-3 py-1 text-[11px] font-black text-emerald-700"><CheckCircle2 size={13} />登録済み</span>}
-                          {!registered && accepting && <span className="rounded-full bg-blue-100 px-3 py-1 text-[11px] font-black text-blue-700">受付中</span>}
-                          {ongoing && <span className="rounded-full bg-orange-100 px-3 py-1 text-[11px] font-black text-orange-700">実施中</span>}
-                        </div>
-                        <h2 className="mt-3 text-lg font-black text-slate-900">{definition.title}</h2>
-                        <p className="mt-1 text-sm font-black text-amber-800">{definition.course_name}</p>
-                      </div>
-                    </div>
-                    <div className="mt-4 grid gap-2 text-xs font-bold text-slate-600 sm:grid-cols-2">
-                      <p className="flex items-center gap-2 rounded-xl bg-white px-3 py-2"><CalendarDays size={15} className="text-amber-500" />実施 {formatDate(definition.start_date)}〜{formatDate(definition.end_date)}</p>
-                      <p className="flex items-center gap-2 rounded-xl bg-white px-3 py-2"><Clock3 size={15} className="text-blue-500" />受付 {formatDate(definition.registration_open_date)}〜{formatDate(definition.registration_close_date)}</p>
-                    </div>
+                <article key={period.key} className="cb-card p-card">
+                  <div className="flex items-start justify-between gap-3">
+                    <h3 className="font-bold leading-snug text-fg">{period.title}</h3>
+                    <StatusPill tone={statusTone} className="shrink-0">{status}</StatusPill>
                   </div>
-                  <div className="space-y-4 p-5">
-                    <section><h3 className="text-xs font-black text-slate-400">対策する単元</h3><div className="mt-2 flex flex-wrap gap-2">{definition.units.length > 0 ? definition.units.map(unit => <span key={unit} className="rounded-xl bg-slate-100 px-3 py-2 text-xs font-bold text-slate-700">{unit}</span>) : <span className="text-xs font-bold text-slate-400">単元は後日案内されます</span>}</div></section>
-                    <section><h3 className="text-xs font-black text-slate-400">受講できる曜日・時間</h3><div className="mt-2 flex flex-wrap gap-2">{schedules.length > 0 ? schedules.map(schedule => <span key={schedule} className="rounded-xl bg-blue-50 px-3 py-2 text-xs font-black text-blue-700">{schedule}</span>) : <span className="text-xs font-bold text-slate-400">日時は後日案内されます</span>}</div></section>
-                    <Link href="/student/change-request" className="flex items-center justify-between rounded-2xl bg-slate-900 px-4 py-3 text-sm font-black text-white transition hover:bg-slate-800">
-                      <span>{registered ? '登録内容を確認・変更' : accepting ? 'この対策を登録' : '受講講座の登録画面を確認'}</span><ChevronRight size={18} />
-                    </Link>
+                  <p className="mt-3 flex items-center gap-2 text-sm font-bold text-fg"><CalendarDays size={16} className="text-accent" aria-hidden />{formatDate(period.startDate)}〜{formatDate(period.endDate)}</p>
+                  <p className="mt-2 flex items-center gap-2 text-xs font-medium text-fg-muted"><Clock3 size={15} className="text-info" aria-hidden />受付 {formatDate(period.registrationOpenDate)}〜{formatDate(period.registrationCloseDate)}</p>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {period.subjects.map(subject => <span key={subject} className="rounded-btn bg-accent-soft px-2.5 py-1 text-xs font-bold text-accent">{subject}</span>)}
+                    <span className="rounded-btn bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-600">{period.courses.length}講座</span>
                   </div>
                 </article>
               );
             })}
-            </div>
-          </section>
-        )}
-      </div>
+          </div>
+        </section>
+      )}
+
+      {!loading && !error && cards.length > 0 && (
+        <section aria-labelledby="test-prep-detail-heading">
+          <div className="mb-3">
+            <p className="text-xs font-bold text-fg-muted">講座</p>
+            <h2 id="test-prep-detail-heading" className="text-lg font-bold text-fg">講座別の詳細</h2>
+          </div>
+          <div className="space-y-4">
+          {cards.map(({ definition, schedules, registered }) => {
+            const ongoing = definition.start_date <= today && today <= definition.end_date;
+            const accepting = definition.registration_open_date <= today && today <= definition.registration_close_date;
+            return (
+              <article key={definition.id} className="cb-card overflow-hidden">
+                <div className="border-b border-line bg-accent-soft/60 p-5">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="rounded-full bg-accent px-3 py-0.5 text-xs font-bold text-accent-ink">{definition.grade} {definition.subject}</span>
+                        {registered && <StatusPill tone="success" icon={<CheckCircle2 size={13} aria-hidden />}>登録済み</StatusPill>}
+                        {!registered && accepting && <StatusPill tone="accent">受付中</StatusPill>}
+                        {ongoing && <StatusPill tone="warning">実施中</StatusPill>}
+                      </div>
+                      <h2 className="mt-3 text-lg font-bold text-fg">{definition.title}</h2>
+                      <p className="mt-1 text-sm font-bold text-accent">{definition.course_name}</p>
+                    </div>
+                  </div>
+                  <div className="mt-4 grid gap-2 text-xs font-medium text-fg-muted sm:grid-cols-2">
+                    <p className="flex items-center gap-2 rounded-btn bg-surface px-3 py-2"><CalendarDays size={15} className="text-accent" aria-hidden />実施 {formatDate(definition.start_date)}〜{formatDate(definition.end_date)}</p>
+                    <p className="flex items-center gap-2 rounded-btn bg-surface px-3 py-2"><Clock3 size={15} className="text-info" aria-hidden />受付 {formatDate(definition.registration_open_date)}〜{formatDate(definition.registration_close_date)}</p>
+                  </div>
+                </div>
+                <div className="space-y-4 p-5">
+                  <section><h3 className="text-xs font-bold text-fg-muted">対策する単元</h3><div className="mt-2 flex flex-wrap gap-2">{definition.units.length > 0 ? definition.units.map(unit => <span key={unit} className="rounded-btn bg-slate-100 px-3 py-2 text-xs font-medium text-fg">{unit}</span>) : <span className="text-xs text-fg-muted">単元は後日案内されます</span>}</div></section>
+                  <section><h3 className="text-xs font-bold text-fg-muted">受講できる曜日・時間</h3><div className="mt-2 flex flex-wrap gap-2">{schedules.length > 0 ? schedules.map(schedule => <span key={schedule} className="rounded-btn bg-info-soft px-3 py-2 text-xs font-bold text-info">{schedule}</span>) : <span className="text-xs text-fg-muted">日時は後日案内されます</span>}</div></section>
+                  <Link href="/student/change-request" className="flex min-h-11 items-center justify-between rounded-btn bg-accent px-4 py-3 text-sm font-bold text-accent-ink transition hover:bg-accent-hover">
+                    <span>{registered ? '登録内容を確認・変更' : accepting ? 'この対策を登録' : '受講講座の登録画面を確認'}</span><ChevronRight size={18} aria-hidden />
+                  </Link>
+                </div>
+              </article>
+            );
+          })}
+          </div>
+        </section>
+      )}
     </main>
   );
 }

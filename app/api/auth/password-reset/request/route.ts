@@ -16,13 +16,19 @@ import {
   requestFingerprint,
   userDisplayNames,
 } from '@/lib/server/password-recovery';
+import { notifyPasswordRecoveryRequest, recoveryTargetSchool } from '@/lib/server/password-recovery-notify';
 
 export const runtime = 'nodejs';
 
+// アカウントの有無・メール登録の有無が分からないよう、どの場合も同じ文面を返す。
 const GENERIC_MESSAGE =
-  '入力内容が登録情報と一致する場合、本人または紐づく保護者の確認済みメールアドレスへ再設定用メールを送信します。';
+  '確認済みメールを登録している場合だけ届きます。届かない場合は「メールが使えない」から申し込むか、教室へ連絡してください。';
 const SUPPORT_MESSAGE =
-  '受付が完了しました。再設定用メールを利用できない場合は、受付番号を添えてサポートセンターへご連絡ください。';
+  '受付が完了しました。教室が確認して連絡します。問い合わせるときは受付番号を伝えてください。';
+// 管理者が後から確認できるよう、入力そのもの（一致しなかった場合も）を短く切って残す。
+const SUBMITTED_MAX_LENGTH = 64;
+const submittedText = (value: unknown) =>
+  String(value ?? '').normalize('NFKC').replace(/\s+/g, ' ').replace(/\p{Cc}/gu, '').trim().slice(0, SUBMITTED_MAX_LENGTH);
 const ADMIN_ROLES = [
   'master', 'admin', 'master_admin', 'super_admin', 'school_admin',
   'branch_admin', 'campus_admin', 'classroom_admin', 'test_admin',
@@ -94,7 +100,8 @@ async function createSupportRequest(
   loginId: string,
   name: string,
   submittedPhoneLast4: string,
-  userDoc: FirebaseFirestore.QueryDocumentSnapshot | null
+  userDoc: FirebaseFirestore.QueryDocumentSnapshot | null,
+  submitted: { loginId: string; name: string },
 ) {
   const requestCode = `PR-${newSecretToken().slice(0, 8).toUpperCase()}`;
   const profile = userDoc?.data() || {};
@@ -118,22 +125,43 @@ async function createSupportRequest(
     }
   }
 
-  await adminDb().collection('password_recovery_requests').add({
+  const fingerprint = requestFingerprint(['support-request', loginId, name]);
+  const targetSchool = validTarget ? await recoveryTargetSchool(role, profile).catch(() => '') : '';
+  const ref = await adminDb().collection('password_recovery_requests').add({
     request_code: requestCode,
     status: 'pending',
     source: 'no_email',
+    submitted_login_id: submitted.loginId,
+    submitted_name: submitted.name,
     target_user_id: validTarget ? userDoc!.id : null,
     target_role: validTarget ? role : null,
     target_name: validTarget ? profileDisplayName(profile) : null,
     target_login_id: validTarget ? loginId : null,
+    target_school_id: validTarget ? (targetSchool || null) : null,
     phone_last4_provided: Boolean(submittedPhoneLast4),
     phone_last4_matched: Boolean(
       submittedPhoneLast4 && registeredPhoneLast4 && submittedPhoneLast4 === registeredPhoneLast4
     ),
-    request_fingerprint: requestFingerprint(['support-request', loginId, name]),
+    request_fingerprint: fingerprint,
     created_at: FieldValue.serverTimestamp(),
     updated_at: FieldValue.serverTimestamp(),
   });
+
+  try {
+    await notifyPasswordRecoveryRequest({
+      requestId: ref.id,
+      requestCode,
+      fingerprint,
+      submittedLoginId: submitted.loginId,
+      submittedName: submitted.name,
+      target: validTarget
+        ? { role, name: profileDisplayName(profile), loginId, school: targetSchool }
+        : null,
+    });
+  } catch (notifyError) {
+    // 通知に失敗しても依頼は残っている（管理画面の件数・一覧には出る）。
+    console.error('Password recovery staff notification failed:', notifyError);
+  }
   return requestCode;
 }
 
@@ -173,7 +201,10 @@ export async function POST(request: NextRequest) {
     const nameMatches = userDisplayNames(profile).includes(name);
 
     if (mode === 'support') {
-      const requestCode = await createSupportRequest(loginId, name, phoneLast4(body.phone_last4), userDoc);
+      const requestCode = await createSupportRequest(loginId, name, phoneLast4(body.phone_last4), userDoc, {
+        loginId: submittedText(body.login_id),
+        name: submittedText(body.name),
+      });
       const remainingDelay = 700 - (Date.now() - startedAt);
       if (remainingDelay > 0) await new Promise(resolve => setTimeout(resolve, remainingDelay));
       return Response.json({ ok: true, message: SUPPORT_MESSAGE, request_code: requestCode });

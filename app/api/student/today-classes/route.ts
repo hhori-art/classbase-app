@@ -2,37 +2,22 @@ import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, jsonError, requireRole } from '@/lib/server-auth';
-import { canonicalPeriodForGradeSubject, enrichCourseOptionsWithShifts, fixedPeriodForGradeCourse } from '@/lib/course-registration-match';
-import { courseOptionMatchesSelection, currentCourseTermIds, resolveSelectedCourseOptionIds, selectEffectiveCourseRegistration } from '@/lib/course-registration-selection';
-import { canStudentRegisterCourseOption } from '@/lib/course-registration-rules';
-import { getCourseSubjectGroup, normalizeCourseText, toAsciiDigits } from '@/lib/course-text';
-import { buildZoomJoinUrl, hasZoomPasswordToken, looksLikeZoomUrl, normalizeZoomMeetingId } from '@/lib/zoom-url';
+import { buildZoomJoinUrl, hasZoomPasswordToken } from '@/lib/zoom-url';
 import { fetchOfficialZoomJoinUrl } from '@/lib/zoom-meeting';
 import { weekdayFromDateKey } from '@/lib/date-key';
+import { normalizeCourseText } from '@/lib/course-text';
 import {
-  canStudentSeeTestPrepGrade,
-  isTestPrepShift,
-  normalizeClassButtonSettings,
-} from '@/lib/class-button-settings';
-import {
-  buildTestPrepRegistrationOptions,
-  normalizeTestPrepDefinition,
-  shouldUseTestPrepVisibilityFallback,
-} from '@/lib/test-prep-registration';
-import { loadStudentClassMasters } from '@/lib/server/student-class-masters';
+  getShiftJoinUrl,
+  getShiftMeetingId,
+  isStudentVisibleShift,
+  normalizeGrade,
+  periodFromShift,
+  preferSheetSyncedShifts,
+} from '@/lib/student-course-schedule';
+import { loadTodayLessonSources, resolveTodayEligibility } from '@/lib/server/student-today-lessons';
 import { issueClassParticipationToken } from '@/lib/server/class-participation-token';
 
 export const runtime = 'nodejs';
-
-const todayKeyInJapan = () => {
-  const formatter = new Intl.DateTimeFormat('sv-SE', {
-    timeZone: 'Asia/Tokyo',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  });
-  return formatter.format(new Date());
-};
 
 const addDaysToDateKey = (dateKey: string, days: number) => {
   const date = new Date(`${dateKey}T12:00:00+09:00`);
@@ -43,73 +28,6 @@ const addDaysToDateKey = (dateKey: string, days: number) => {
 };
 
 const normalize = normalizeCourseText;
-
-const normalizeGrade = (value: unknown) => {
-  const raw = toAsciiDigits(String(value || ''));
-  if (raw.includes('3')) return '中3';
-  if (raw.includes('2')) return '中2';
-  if (raw.includes('1')) return '中1';
-  return raw.trim();
-};
-
-const periodFromShift = (shift: any) => {
-  const explicitValues = [
-    shift.period, shift.target_period, shift.time_period, shift.class_period,
-    shift.period_number, shift.lesson_period, shift.slot, shift.time_slot, shift.note,
-  ];
-  for (const value of explicitValues) {
-    const raw = toAsciiDigits(String(value || '').normalize('NFKC').trim());
-    if (/^1$/.test(raw) || raw.includes('1限') || raw.includes('1時間目') || raw.includes('1時限') || raw.includes('1コマ')) return 1;
-    if (/^2$/.test(raw) || raw.includes('2限') || raw.includes('2時間目') || raw.includes('2時限') || raw.includes('2コマ')) return 2;
-  }
-  const fixed = fixedPeriodForGradeCourse(
-    shift.target_grade || shift.grade,
-    shift.target_detail_subject || shift.detail_subject,
-  );
-  if (fixed) return fixed;
-  const canonical = canonicalPeriodForGradeSubject(
-    shift.target_grade || shift.grade,
-    shift.target_subject || shift.subject,
-    shift.target_detail_subject || shift.detail_subject,
-  );
-  if (canonical) return canonical;
-  const raw = toAsciiDigits(`${shift.note || ''} ${shift.time_slot || ''} ${shift.slot || ''} ${shift.target_detail_subject || ''}`);
-  if (raw.includes('1限') || raw.includes('1時間目') || raw.includes('①')) return 1;
-  if (raw.includes('2限') || raw.includes('2時間目') || raw.includes('②')) return 2;
-  return 0;
-};
-
-const getShiftMeetingId = (shift: any) => normalizeZoomMeetingId(
-  shift.target_meeting_id ||
-  shift.meeting_id ||
-  shift.zoom_meeting_id ||
-  shift.meetingId ||
-  shift.target_url ||
-  shift.zoom_url ||
-  shift.join_url ||
-  shift.meeting_url ||
-  shift.url ||
-  ''
-);
-
-const getShiftJoinUrl = (shift: any) => {
-  const meetingId = getShiftMeetingId(shift);
-  const candidates = [
-    shift.target_join_url,
-    shift.zoom_join_url,
-    shift.target_url,
-    shift.zoom_url,
-    shift.join_url,
-    shift.meeting_url,
-    shift.url,
-    looksLikeZoomUrl(shift.target_meeting_id) ? shift.target_meeting_id : '',
-  ]
-    .map(value => String(value || '').trim())
-    .filter(value => looksLikeZoomUrl(value));
-
-  // 講師配置の会議IDが変わった場合、以前取得した参加URLを誤って使わない。
-  return candidates.find(url => !meetingId || normalizeZoomMeetingId(url) === meetingId) || '';
-};
 
 const buildZoomUrl = (shift: any) => {
   return buildZoomJoinUrl({
@@ -144,12 +62,6 @@ const resolveStudentZoomUrl = async (shift: any) => {
     return existingUrl;
   }
 };
-
-const isStudentVisibleShift = (shift: any) => (
-  String(shift.role_type || 'main') === 'main' &&
-  !String(shift.teacher_name || '').includes('サポート') &&
-  Boolean(getShiftMeetingId(shift) || getShiftJoinUrl(shift))
-);
 
 const uniqueValues = (values: unknown[]) => Array.from(new Set(
   values.map(value => String(value || '').trim()).filter(Boolean)
@@ -187,41 +99,6 @@ const mergeClassCandidates = (classes: any[]) => {
   });
 };
 
-const hasSheetSource = (shift: any) => Boolean(
-  String(shift.source_spreadsheet_id || '').trim() ||
-  String(shift.sync_source || '').trim() ||
-  String(shift.sync_key || '').trim()
-);
-
-const preferSheetSyncedShifts = (shifts: any[]) => {
-  const sheetSynced = shifts.filter(hasSheetSource);
-  if (sheetSynced.length === 0) return shifts;
-
-  // 通常講座はこれまでどおり同期元を正とする。対策講座はGASが一部科目だけ
-  // 同期される日があるため、講座単位で同期済みを優先し、未同期科目を補完する。
-  const regularShifts = sheetSynced.filter(shift => !isTestPrepShift(shift));
-  const testPrepGroups = new Map<string, any[]>();
-  shifts.filter(isTestPrepShift).forEach(shift => {
-    const course = normalize(shift.target_detail_subject || shift.detail_subject || shift.target_subject || shift.subject)
-      .replace(/定期テスト対策|テスト対策|対策/g, '')
-      .replace(/(?:[1-9①-⑩Ⅰ-Ⅹ]+|[a-d])$/gi, '');
-    const key = [
-      shift.target_date || '',
-      normalizeGrade(shift.target_grade || shift.grade),
-      periodFromShift(shift),
-      getCourseSubjectGroup(course),
-      course,
-    ].join('__');
-    if (!testPrepGroups.has(key)) testPrepGroups.set(key, []);
-    testPrepGroups.get(key)!.push(shift);
-  });
-  const testPrepShifts = Array.from(testPrepGroups.values()).flatMap(group => {
-    const synced = group.filter(hasSheetSource);
-    return synced.length > 0 ? synced : group;
-  });
-  return [...regularShifts, ...testPrepShifts];
-};
-
 const pickStudentFacingTransferShifts = (shifts: any[]) => {
   const groups = new Map<string, any[]>();
   shifts.forEach(shift => {
@@ -238,56 +115,6 @@ const pickStudentFacingTransferShifts = (shifts: any[]) => {
     return preferSheetSyncedShifts(group);
   });
 };
-
-const timestampValue = (value: any) => {
-  if (!value) return 0;
-  if (typeof value.seconds === 'number') return value.seconds;
-  const date = value.toDate ? value.toDate() : new Date(value);
-  return Number.isNaN(date.getTime()) ? 0 : Math.floor(date.getTime() / 1000);
-};
-
-const isActiveRegistration = (item: any) => {
-  const status = String(item.status || 'active').toLowerCase();
-  return !['cancelled', 'canceled', 'rejected', 'withdrawn', 'inactive', 'archived'].includes(status);
-};
-
-const getSelectedCourseIds = (registration: any) => {
-  const ids = new Set<string>();
-  const addId = (value: unknown) => {
-    if (!value) return;
-    if (typeof value === 'object') {
-      [
-        (value as any).id,
-        (value as any).course_id,
-        (value as any).course_option_id,
-        (value as any).parent_course_option_id,
-        (value as any).fallback_curriculum_option_id,
-      ].forEach(addId);
-      return;
-    }
-    ids.add(String(value));
-  };
-  [
-    registration.selected_course_ids,
-    registration.selected_courses,
-    registration.course_ids,
-    registration.course_option_ids,
-  ].forEach(value => {
-    if (Array.isArray(value)) value.forEach(addId);
-  });
-  [
-    registration.selected_course_id,
-    registration.course_id,
-    registration.course_option_id,
-  ].forEach(addId);
-  return ids;
-};
-
-const getSelectedCourseKeys = (registration: any) => new Set<string>(
-  Array.isArray(registration?.selected_course_keys)
-    ? registration.selected_course_keys.map((key: unknown) => String(key).trim()).filter(Boolean)
-    : [],
-);
 
 const recurringShiftFallback = async (targetDate: string, period: number) => {
   const snapshot = await adminDb().collection('shift_assignments')
@@ -323,35 +150,6 @@ const recurringShiftFallback = async (targetDate: string, period: number) => {
   return Array.from(unique.values());
 };
 
-const optionMatchesShift = (option: any, shift: any) => {
-  const gradeOk = !option.grade || !shift.target_grade || normalizeGrade(option.grade) === normalizeGrade(shift.target_grade);
-  const optionSubject = normalize(option.subject);
-  const shiftSubject = normalize([shift.target_subject, shift.target_detail_subject, shift.subject].filter(Boolean).join(' '));
-  const optionSubjectGroup = getCourseSubjectGroup(option.subject);
-  const shiftSubjectGroup = getCourseSubjectGroup([shift.target_subject, shift.target_detail_subject, shift.subject].filter(Boolean).join(' '));
-  const subjectOk = !optionSubject || !shiftSubject ||
-    (optionSubjectGroup && shiftSubjectGroup ? optionSubjectGroup === shiftSubjectGroup : (
-      optionSubject === shiftSubject ||
-      optionSubject.includes(shiftSubject) ||
-      shiftSubject.includes(optionSubject)
-    ));
-  const optionDay = String(option.resolved_day || option.day || option.day_of_week || '').replace('曜日', '').trim();
-  const shiftDay = weekdayFromDateKey(shift.target_date);
-  const dayOk = !optionDay || !shiftDay || optionDay === shiftDay;
-  const optionPeriod = Number(String(option.resolved_slot || option.slot || option.time_slot || '').match(/[12]/)?.[0] || 0);
-  const shiftPeriod = periodFromShift(shift);
-  const periodOk = !optionPeriod || !shiftPeriod || optionPeriod === shiftPeriod;
-  const course = normalize(option.course_name || option.title);
-  const detail = normalize(shift.target_detail_subject || shift.target_subject);
-  const unit = normalize(option.resolved_unit || option.unit || option.matched_units?.[0]);
-  const shiftUnit = normalize(shift.unit);
-  const courseOk = Boolean(course && detail && (course === detail || course.includes(detail) || detail.includes(course)));
-  const unitOk = Boolean(unit && shiftUnit && (unit === shiftUnit || unit.includes(shiftUnit) || shiftUnit.includes(unit)));
-  return gradeOk && subjectOk && dayOk && periodOk && (courseOk || unitOk);
-};
-
-const selectedIdMatchesOption = (selectedIds: Set<string>, option: any) => courseOptionMatchesSelection(option, selectedIds);
-
 const attachParticipationTokens = (classes: any[], studentId: string, targetDate: string) => classes.map(item => ({
   ...item,
   participation_token: issueClassParticipationToken({
@@ -378,25 +176,12 @@ export async function GET(request: NextRequest) {
       return Response.json({ ok: false, error: 'transfer registration is required' }, { status: 400 });
     }
 
-    const targetDate = todayKeyInJapan();
     const period = Number(params.get('period') || 0);
     const db = adminDb();
 
-    const [shiftSnap, registrationSnap, requestSnap, sharedMasters] = await Promise.all([
-      db.collection('shift_assignments').where('target_date', '==', targetDate).limit(80).get(),
-      previewMode
-        ? Promise.resolve({ docs: [] as any[] })
-        : db.collection('course_registrations').where('student_id', '==', user.uid).limit(50).get(),
-      previewMode
-        ? Promise.resolve({ docs: [] as any[] })
-        : db.collection('requests').where('student_id', '==', user.uid).limit(100).get(),
-      loadStudentClassMasters(),
-    ]);
-
-    let rawShifts = shiftSnap.docs
-      .map(doc => ({ id: doc.id, ...doc.data() }))
-      .filter(isStudentVisibleShift)
-      .filter((shift: any) => !period || periodFromShift(shift) === period);
+    const sources = await loadTodayLessonSources(db, { studentId: previewMode ? null : user.uid, period });
+    const { targetDate, transferRequests } = sources;
+    let rawShifts = sources.rawShifts;
     let scheduleFallbackUsed = false;
     if (rawShifts.length === 0 && previewMode) {
       rawShifts = await recurringShiftFallback(targetDate, period);
@@ -409,125 +194,13 @@ export async function GET(request: NextRequest) {
     }
     const shifts = preferSheetSyncedShifts(rawShifts);
 
-    const optionDocs = sharedMasters.optionDocs
-      .map(doc => ({ id: doc.id, ...doc.data }))
-      .filter((option: any) => option.is_active !== false)
-      .filter((option: any) => canStudentRegisterCourseOption(user.profile.grade, option));
-    const curriculumDocs = sharedMasters.curriculumDocs.map(doc => ({ id: doc.id, ...doc.data }));
-    const regularOptions = enrichCourseOptionsWithShifts(optionDocs, curriculumDocs, shifts.filter((shift: any) => !isTestPrepShift(shift)));
-    const testPrepDefinitions = sharedMasters.testPrepOptionDocs.map(doc => normalizeTestPrepDefinition(doc.id, doc.data));
-    const testPrepOptions = buildTestPrepRegistrationOptions(testPrepDefinitions, shifts, user.profile.grade);
-    const classButtonSettings = normalizeClassButtonSettings(sharedMasters.classButtonSettingsData);
-    const enrichedOptions = [...regularOptions, ...testPrepOptions];
-
-    const registrations = registrationSnap.docs
-      .map(doc => ({ id: doc.id, ...doc.data() }))
-      .filter(isActiveRegistration)
-      .sort((a: any, b: any) => timestampValue(b.updated_at || b.created_at) - timestampValue(a.updated_at || a.created_at));
-
-    const selectedIds = new Set<string>();
-    const courseYear = Number(targetDate.slice(5, 7)) >= 4 ? Number(targetDate.slice(0, 4)) : Number(targetDate.slice(0, 4)) - 1;
-    const currentTerms = currentCourseTermIds(sharedMasters.optionDocs.map(doc => doc.data), courseYear, targetDate);
-    const regularRegistrations = registrations.filter((registration: any) => String(registration.registration_type || 'regular') === 'regular');
-    const testPrepRegistrations = registrations.filter((registration: any) => registration.registration_type === 'test_prep');
-    const currentRegistration = selectEffectiveCourseRegistration(regularRegistrations, courseYear, currentTerms, user.profile)
-      || regularRegistrations.find((registration: any) => registration.is_current === true || registration.current === true)
-      || regularRegistrations.find((registration: any) => String(registration.status || '').toLowerCase() === 'active')
-      || regularRegistrations[0];
-    if (currentRegistration) {
-      getSelectedCourseIds(currentRegistration).forEach(id => selectedIds.add(id));
-      getSelectedCourseKeys(currentRegistration).forEach(key => selectedIds.add(key));
-    } else {
-      (Array.isArray(user.profile.selected_course_ids) ? user.profile.selected_course_ids : [])
-        .forEach((id: unknown) => selectedIds.add(String(id)));
-      (Array.isArray(user.profile.selected_course_keys) ? user.profile.selected_course_keys : [])
-        .forEach((key: unknown) => selectedIds.add(String(key)));
-    }
-    const activeTestPrepRegistrationId = String(user.profile.active_test_prep_course_registration_id || '');
-    const currentTestPrepRegistration = testPrepRegistrations.find((registration: any) => activeTestPrepRegistrationId && registration.id === activeTestPrepRegistrationId)
-      || testPrepRegistrations.find((registration: any) => registration.is_current === true || registration.current === true)
-      || testPrepRegistrations[0];
-    if (currentTestPrepRegistration) {
-      getSelectedCourseIds(currentTestPrepRegistration).forEach(id => selectedIds.add(id));
-      getSelectedCourseKeys(currentTestPrepRegistration).forEach(key => selectedIds.add(key));
-    } else {
-      (Array.isArray(user.profile.selected_test_prep_course_ids) ? user.profile.selected_test_prep_course_ids : []).forEach((id: unknown) => selectedIds.add(String(id)));
-      (Array.isArray(user.profile.selected_test_prep_course_keys) ? user.profile.selected_test_prep_course_keys : []).forEach((key: unknown) => selectedIds.add(String(key)));
-    }
-
-    // 旧元講座IDは、曜日・時限を一意に特定できる場合だけ現在の候補IDへ移行する。
-    // 複数時限へ分岐した元IDから全候補を復元すると、1限の重複や2限の欠落になる。
-    resolveSelectedCourseOptionIds(enrichedOptions, selectedIds).forEach(id => selectedIds.add(id));
-
-    const eligibleShiftIds = new Set<string>();
-    const eligibleReasons = new Map<string, string>();
-    const testPrepShiftIds = new Set<string>();
-    shifts.forEach((shift: any) => {
-      if (selectedIds.has(String(shift.id))) {
-        eligibleShiftIds.add(String(shift.id));
-        eligibleReasons.set(String(shift.id), '講師配置に直接登録されています');
-      }
-    });
-    enrichedOptions
-      .filter((option: any) => selectedIdMatchesOption(selectedIds, option))
-      .forEach((option: any) => {
-        const reason = [
-          option.resolved_day ? `${option.resolved_day}曜` : option.day || option.day_of_week ? `${option.day || option.day_of_week}曜` : '',
-          option.resolved_slot || option.slot || option.period || '',
-          option.resolved_unit || option.unit || '',
-        ].filter(Boolean).join(' / ') || '受講登録と講師配置が一致';
-        let matchedByExplicitShift = false;
-        if (Array.isArray(option.matched_shift_ids)) {
-          option.matched_shift_ids.forEach((id: unknown) => {
-            const shiftId = String(id);
-            if (shifts.some((shift: any) => String(shift.id) === shiftId)) {
-              matchedByExplicitShift = true;
-              eligibleShiftIds.add(shiftId);
-              eligibleReasons.set(shiftId, reason);
-            }
-          });
-        }
-        if (!matchedByExplicitShift) {
-          shifts.filter((shift: any) => optionMatchesShift(option, shift)).forEach((shift: any) => {
-            eligibleShiftIds.add(shift.id);
-            eligibleReasons.set(String(shift.id), reason);
-          });
-        }
-      });
-
-    testPrepOptions
-      .filter((option: any) => selectedIdMatchesOption(selectedIds, option))
-      .flatMap((option: any) => Array.isArray(option.matched_shift_ids) ? option.matched_shift_ids : [])
-      .forEach((id: unknown) => testPrepShiftIds.add(String(id)));
-
-    // 対策専用設定が未作成の講座は、従来の管理画面の学年公開設定を使う。
-    // 専用設定済みの講座だけ登録必須にすることで、段階移行中に社会だけ消えるのを防ぐ。
-    shifts
-      .filter((shift: any) => shouldUseTestPrepVisibilityFallback(testPrepDefinitions, shift, user.profile.grade))
-      .filter((shift: any) => canStudentSeeTestPrepGrade(
-        normalizeGrade(user.profile.grade),
-        normalizeGrade(shift.target_grade || shift.grade),
-        classButtonSettings,
-      ))
-      .forEach((shift: any) => {
-        const shiftId = String(shift.id);
-        eligibleShiftIds.add(shiftId);
-        testPrepShiftIds.add(shiftId);
-        eligibleReasons.set(shiftId, '対策講座の公開学年設定により表示');
-      });
-
-    const transferRequests = requestSnap.docs
-      .map(doc => ({ id: doc.id, ...doc.data() }))
-      .filter((item: any) => item.type === 'transfer')
-      .filter((item: any) => item.target_date === targetDate)
-      .filter((item: any) => item.status !== 'rejected' && item.status !== 'cancelled');
-
-    transferRequests.forEach((item: any) => {
-      const shiftId = item.transfer_shift_id || item.target_shift_id || item.shift_assignment_id;
-      if (shiftId) {
-        eligibleShiftIds.add(String(shiftId));
-        eligibleReasons.set(String(shiftId), '振替登録済み');
-      }
+    const { eligibleShiftIds, eligibleReasons, testPrepShiftIds } = resolveTodayEligibility({
+      shifts,
+      registrationDocs: sources.registrationDocs,
+      transferRequests,
+      masters: sources.masters,
+      profile: user.profile,
+      targetDate,
     });
 
     if (previewMode) {

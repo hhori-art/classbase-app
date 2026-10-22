@@ -23,7 +23,7 @@ export default function FiveMinuteTimePicker({ value, onChange, className, label
         <option value="">時</option>
         {HOURS.map(item => <option key={item} value={item}>{item}時</option>)}
       </select>
-      <span aria-hidden="true" className="font-black text-slate-400">:</span>
+      <span aria-hidden="true" className="font-bold text-fg-muted">:</span>
       <select
         aria-label={`${label}の分（5分単位）`}
         value={minute}

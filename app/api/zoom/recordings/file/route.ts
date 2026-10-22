@@ -1,4 +1,4 @@
-import { resolveZoomRecordingPlayback } from '@/lib/server/zoom-recording-fetch';
+import { resolveZoomRecordingPlayback, trustedZoomRecordingUrl } from '@/lib/server/zoom-recording-fetch';
 import { NextRequest } from 'next/server';
 import { adminAuth, adminDb } from '@/lib/firebase-admin';
 import { isAdminLike, jsonError, normalizeRole, type ServerUser } from '@/lib/server-auth';
@@ -6,6 +6,7 @@ import { appendZoomRecordingPasscode, isZoomRecordingShareUrl } from '@/lib/reco
 import { createHash, randomUUID } from 'node:crypto';
 import { canAccessClassRecording } from '@/lib/server/recording-access';
 import { normalizeMeetingId } from '@/lib/zoom-recording-match';
+import { locateZoomRecordingFile, ZOOM_FILE_START_TOLERANCE_MS } from '@/lib/zoom-recording-locate';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -207,7 +208,11 @@ const variantsFromMeetings = (meetings: any[], range: { startMillis: number }) =
         };
       });
     if (candidates.length === 0) return [];
-    return [candidates.sort((a: any, b: any) => a.typeRank - b.typeRank)[0]];
+    // 1つの会議に1限・2限など複数の区間があるときは、指定時刻に最も近い区間の中で種類を選ぶ。
+    const nearest = Math.min(...candidates.map((candidate: any) => candidate.difference));
+    return [candidates
+      .filter((candidate: any) => candidate.difference <= nearest + 30 * 1000)
+      .sort((a: any, b: any) => a.typeRank - b.typeRank)[0]];
   })
   .sort((a: any, b: any) => a.difference - b.difference || a.typeRank - b.typeRank)
   .map((candidate, index) => ({
@@ -239,10 +244,13 @@ async function resolveZoomVariantsByRegisteredShareUrl(data: FirebaseFirestore.D
   const range = recordingSearchRange(data);
   if (!range) throw new Error('recording-date-required');
   const meetings = await listRecordingMeetings(accessToken, range.from, range.to);
-  return variantsFromMeetings(
-    meetings.filter(meeting => zoomShareIdentity(meeting.share_url) === sourceIdentity),
-    range,
-  );
+  const byShareUrl = meetings.filter(meeting => zoomShareIdentity(meeting.share_url) === sourceIdentity);
+  if (byShareUrl.length > 0) return variantsFromMeetings(byShareUrl, range);
+  // 録画一覧の共有リンクはAPIの share_url と文字列が違うことがあるため、アカウントと開始時刻で探す。
+  const startMillis = recordingStartMillisFromShareUrl(data);
+  const located = startMillis ? locateZoomRecordingFile(meetings, startMillis, String(data.recording_host_email || '')) : null;
+  if (!located || located.differenceMs > ZOOM_FILE_START_TOLERANCE_MS) return [];
+  return variantsFromMeetings([located.meeting], range);
 }
 
 async function resolveZoomFileFromShareUrl(
@@ -384,7 +392,76 @@ async function resolveZoomShareRedirect(request: NextRequest, data: FirebaseFire
     }, { merge: false });
   }
 
-  return appendZoomRecordingPasscode(shareUrl, passcode);
+  return withRecordingStartTime(appendZoomRecordingPasscode(shareUrl, passcode), sourceUrl);
+}
+
+/** Zoomの共有リンクを開くとき、登録URLの startTime（2限など途中の区間）を引き継ぐ。 */
+function withRecordingStartTime(target: string, sourceUrl: string) {
+  try {
+    const url = new URL(target);
+    const startTime = new URL(sourceUrl).searchParams.get('startTime');
+    if (startTime && !url.searchParams.has('startTime')) url.searchParams.set('startTime', startTime);
+    return url.toString();
+  } catch {
+    return target;
+  }
+}
+
+const downloadTokenCache = new Map<string, { token: string; expiresAt: number }>();
+
+/** 選んだ録画ファイルの会議UUID（定期的に使うミーティングIDでも、その回の録画を指す）。 */
+function meetingUuidForDownload(data: FirebaseFirestore.DocumentData, downloadUrl: string) {
+  const file = filesOf(data).find((item: any) => String(item.download_url || '').trim() === downloadUrl);
+  return String(file?.meeting_id || data.zoom_meeting_uuid || data.recording_meeting_uuid || '').trim();
+}
+
+async function downloadAccessToken(accessToken: string, meetingUuid: string) {
+  const cached = downloadTokenCache.get(meetingUuid);
+  if (cached && cached.expiresAt > Date.now()) return cached.token;
+  // UUIDが「/」で始まる・「//」を含む場合に備えて二重にエンコードする（Zoom APIの仕様）。
+  const encoded = encodeURIComponent(encodeURIComponent(meetingUuid));
+  const response = await fetch(`https://api.zoom.us/v2/meetings/${encoded}/recordings?include_fields=download_access_token&ttl=21600`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    cache: 'no-store',
+    signal: AbortSignal.timeout(10_000),
+  });
+  const body = await response.json().catch(() => ({}));
+  const token = response.ok ? String(body.download_access_token || '') : '';
+  if (token) downloadTokenCache.set(meetingUuid, { token, expiresAt: Date.now() + 5 * 60 * 60 * 1000 });
+  return token;
+}
+
+/**
+ * 差し替え候補（講師配置に届いたZoom録画）の確認用。管理者だけが講師配置から開ける。
+ * 候補の会議UUIDから録画ファイルと再生用トークンを取り、そのファイルだけを再生する。
+ */
+async function candidatePlayback(request: NextRequest, shift: FirebaseFirestore.DocumentData, fileId: string) {
+  if (!request.nextUrl.searchParams.get('shift_id')) throw new Error('shift_id-required');
+  const candidates = Array.isArray(shift.zoom_recording_candidates) ? shift.zoom_recording_candidates : [];
+  const candidate = candidates.find((item: any) => String(item.file_id || '') === fileId);
+  if (!candidate?.meeting_uuid) throw new Error('recording-candidate-not-found');
+  return playbackByMeetingUuid(String(candidate.meeting_uuid), fileId);
+}
+
+/** 会議UUIDと録画ファイルIDから、そのファイルだけを再生用トークン付きで開く。 */
+async function playbackByMeetingUuid(meetingUuid: string, fileId: string) {
+  const accessToken = await zoomAccessToken();
+  const encoded = encodeURIComponent(encodeURIComponent(meetingUuid));
+  const response = await fetch(`https://api.zoom.us/v2/meetings/${encoded}/recordings?include_fields=download_access_token&ttl=21600`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    cache: 'no-store',
+    signal: AbortSignal.timeout(10_000),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`zoom-recording-get-failed:${body.message || response.status}`);
+  const file = (Array.isArray(body.recording_files) ? body.recording_files : []).find((item: any) => String(item.id || '') === fileId);
+  if (!file?.download_url || !body.download_access_token) throw new Error('zoom-download-url-not-found');
+  const target = trustedZoomRecordingUrl(String(file.download_url));
+  target.searchParams.set('access_token', String(body.download_access_token));
+  return new Response(null, {
+    status: 307,
+    headers: { Location: target.toString(), 'Cache-Control': 'private, no-store', 'Referrer-Policy': 'no-referrer' },
+  });
 }
 
 async function getUserFromRequest(request: NextRequest): Promise<ServerUser> {
@@ -514,6 +591,13 @@ export async function POST(request: NextRequest) {
 export async function GET(request: NextRequest) {
   try {
     const { data, expectedMeetingId } = await resolveRecordingData(request);
+    const candidateFileId = request.nextUrl.searchParams.get('candidate_file_id') || '';
+    if (candidateFileId) return await candidatePlayback(request, data, candidateFileId);
+    // 差し替えで選んだZoom録画など、ファイル一覧を持たず会議UUIDとファイルIDだけ分かっている録画。
+    if (!selectedDownloadUrl(data) && fileIdOf(data) && String(data.zoom_meeting_uuid || '').trim()
+      && request.nextUrl.searchParams.get('mode') !== 'share') {
+      return await playbackByMeetingUuid(String(data.zoom_meeting_uuid).trim(), fileIdOf(data));
+    }
     const sourceUrl = zoomShareUrlOf(data);
     if (sourceUrl && !isZoomRecordingShareUrl(sourceUrl) && !selectedDownloadUrl(data)) {
       let externalUrl: URL | null = null;
@@ -568,13 +652,29 @@ export async function GET(request: NextRequest) {
           }, { merge: true });
         }
       }
-    } else if (selectedDownloadUrl(data)) {
+    } else if (!expectedMeetingId && selectedDownloadUrl(data)) {
+      // 会議IDが分からない録画ファイルは、別の会議のものを再生しないよう拒否する。
       throw new Error('recording-meeting-id-required');
     }
 
     if (!downloadUrl) throw new Error('zoom-download-url-not-found');
 
     const accessToken = await zoomAccessToken();
+
+    // Zoomのダウンロード用サーバーはVercelから応答が返らないことがあるため、
+    // その会議の録画だけに使える再生用トークンを付けたURLへ、ブラウザを直接案内する（パスコード不要）。
+    const meetingUuid = meetingUuidForDownload(data, downloadUrl);
+    if (meetingUuid) {
+      const downloadToken = await downloadAccessToken(accessToken, meetingUuid).catch(() => '');
+      if (downloadToken) {
+        const target = trustedZoomRecordingUrl(downloadUrl);
+        target.searchParams.set('access_token', downloadToken);
+        return new Response(null, {
+          status: 307,
+          headers: { Location: target.toString(), 'Cache-Control': 'private, no-store', 'Referrer-Policy': 'no-referrer' },
+        });
+      }
+    }
 
     const headers: Record<string, string> = {
       Authorization: `Bearer ${accessToken}`,

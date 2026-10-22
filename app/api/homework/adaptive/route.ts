@@ -38,6 +38,7 @@ export async function POST(req: NextRequest) {
   try {
     const user = await getServerUser(req);
     requireRole(user, ['student', 'admin', 'master']);
+    if (user.role === 'admin' && !isAdminLike(user)) throw new Error('forbidden');
     const contentLength = Number(req.headers.get('content-length') || 0);
     if (Number.isFinite(contentLength) && contentLength > MAX_REQUEST_BYTES) {
       return NextResponse.json({ error: 'リクエストが大きすぎます' }, { status: 413 });

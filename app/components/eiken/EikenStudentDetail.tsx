@@ -16,11 +16,14 @@ import {
   Video,
 } from 'lucide-react';
 import { useEikenApi } from '@/app/eiken/useEikenApi';
+import AdminPageHeader from '@/app/components/master/AdminPageHeader';
 
 type EikenStudentDetailProps = {
   studentId: string;
   courseId?: string;
   backHref: string;
+  /** 管理画面レイアウト内で表示する（共通見出しを使い、外側の余白を付けない）。 */
+  embedded?: boolean;
 };
 
 const dateTimeLabel = (value: unknown) => {
@@ -51,6 +54,7 @@ export default function EikenStudentDetail({
   studentId,
   courseId,
   backHref,
+  embedded = false,
 }: EikenStudentDetailProps) {
   const api = useEikenApi();
   const [detail, setDetail] = useState<any>(null);
@@ -118,9 +122,9 @@ export default function EikenStudentDetail({
 
   if (!detail) {
     return (
-      <div className="mx-auto max-w-5xl px-4 py-10">
-        <Link href={backHref} className="inline-flex items-center gap-2 text-sm font-bold text-slate-600"><ArrowLeft size={17} />一覧へ戻る</Link>
-        <div className="mt-6 border border-red-200 bg-red-50 p-5 text-sm font-bold text-red-700">{error || '受講生情報がありません。'}</div>
+      <div className={embedded ? undefined : 'mx-auto max-w-5xl px-4 py-10'}>
+        <Link href={backHref} className="inline-flex items-center gap-2 text-sm font-bold text-slate-600"><ArrowLeft size={17} />戻る</Link>
+        <div className="mt-6 border border-rose-200 bg-rose-50 p-5 text-sm font-bold text-rose-700">{error || '受講生情報がありません。'}</div>
       </div>
     );
   }
@@ -137,7 +141,7 @@ export default function EikenStudentDetail({
             task.progress?.status === 'completed'
               ? 'bg-emerald-100 text-emerald-700'
               : task.progress?.status === 'in_progress'
-                ? 'bg-indigo-100 text-indigo-700'
+                ? 'bg-sky-100 text-sky-700'
                 : 'bg-slate-100 text-slate-500'
           }`}>
             {task.progress?.status === 'completed' ? '完了' : task.progress?.status === 'in_progress' ? '取組中' : '未着手'}
@@ -152,25 +156,36 @@ export default function EikenStudentDetail({
   );
 
   return (
-    <div className="mx-auto max-w-6xl px-4 py-8">
+    <div className={embedded ? undefined : 'mx-auto max-w-6xl px-4 py-8'}>
+      {embedded ? (
+        <AdminPageHeader
+          kicker="Booster 管理"
+          icon={UserRound}
+          title={detail.student.name}
+          description={`${detail.student.grade || '学年未登録'} ・ ${detail.student.school || '校舎未登録'} ・ ${detail.course.name}`}
+          backHref={backHref}
+          backLabel="戻る"
+        />
+      ) : <>
       <Link href={backHref} className="inline-flex items-center gap-2 text-sm font-bold text-slate-600 hover:text-emerald-700">
         <ArrowLeft size={17} />
-        受講生一覧へ戻る
+        戻る
       </Link>
 
       <header className="mt-5 border-b border-slate-200 pb-6">
         <div className="flex items-start gap-3">
           <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-emerald-600 text-white"><UserRound size={24} /></div>
           <div>
-            <p className="text-xs font-black text-emerald-700">Booster受講生</p>
+            <p className="text-xs font-bold text-emerald-700">Booster受講生</p>
             <h1 className="text-2xl font-black">{detail.student.name}</h1>
             <p className="mt-1 text-sm text-slate-500">{detail.student.grade || '学年未登録'} ・ {detail.student.school || '校舎未登録'} ・ {detail.course.name}</p>
           </div>
         </div>
       </header>
+      </>}
 
       {message && <div className="mt-5 border border-emerald-200 bg-emerald-50 p-4 text-sm font-bold text-emerald-800">{message}</div>}
-      {error && <div className="mt-5 border border-red-200 bg-red-50 p-4 text-sm font-bold text-red-700">{error}</div>}
+      {error && <div className="mt-5 border border-rose-200 bg-rose-50 p-4 text-sm font-bold text-rose-700">{error}</div>}
 
       <section className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <div className="border-t-4 border-emerald-500 bg-white p-5 shadow-sm">
@@ -192,12 +207,12 @@ export default function EikenStudentDetail({
         <div className="border-t-4 border-slate-500 bg-white p-5 shadow-sm">
           <BookOpenCheck className="text-slate-600" size={21} />
           <p className="mt-3 text-xs font-bold text-slate-500">最終学習</p>
-          <p className="mt-2 text-sm font-black">{dateTimeLabel(detail.summary.last_learning_at)}</p>
+          <p className="mt-2 text-sm font-bold">{dateTimeLabel(detail.summary.last_learning_at)}</p>
         </div>
       </section>
 
       <section className="mt-8 border-l-4 border-amber-500 bg-amber-50 p-5">
-        <div className="flex items-center gap-2 text-amber-800"><AlertCircle size={20} /><h2 className="font-black">確認ポイント</h2></div>
+        <div className="flex items-center gap-2 text-amber-800"><AlertCircle size={20} /><h2 className="font-bold">確認ポイント</h2></div>
         <div className="mt-3 flex flex-wrap gap-2">
           {(detail.summary.follow_up_reasons || []).map((reason: string) => <span key={reason} className="rounded-full bg-white px-3 py-1.5 text-xs font-bold text-amber-800">{reason}</span>)}
           {!detail.summary.follow_up_reasons?.length && <span className="text-sm font-bold text-emerald-700">現在は順調です。</span>}
@@ -207,20 +222,20 @@ export default function EikenStudentDetail({
       <div className="mt-9 grid gap-8 xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,0.7fr)]">
         <div className="space-y-8">
           <section className="border-y border-slate-200 bg-white">
-            <div className="flex items-center gap-2 border-b border-slate-200 px-4 py-3"><Video className="text-emerald-600" size={19} /><h2 className="font-black">映像授業</h2></div>
+            <div className="flex items-center gap-2 border-b border-slate-200 px-4 py-3"><Video className="text-accent" size={19} aria-hidden /><h2 className="font-bold">映像授業</h2></div>
             {renderTaskRows(taskGroups.video)}
           </section>
           <section className="border-y border-slate-200 bg-white">
-            <div className="flex items-center gap-2 border-b border-slate-200 px-4 py-3"><BookOpenCheck className="text-emerald-600" size={19} /><h2 className="font-black">テキスト課題</h2></div>
+            <div className="flex items-center gap-2 border-b border-slate-200 px-4 py-3"><BookOpenCheck className="text-accent" size={19} aria-hidden /><h2 className="font-bold">テキスト課題</h2></div>
             {renderTaskRows(taskGroups.textbook)}
           </section>
           <section className="border-y border-slate-200 bg-white">
-            <div className="flex items-center gap-2 border-b border-slate-200 px-4 py-3"><ClipboardCheck className="text-emerald-600" size={19} /><h2 className="font-black">その他の学習</h2></div>
+            <div className="flex items-center gap-2 border-b border-slate-200 px-4 py-3"><ClipboardCheck className="text-accent" size={19} aria-hidden /><h2 className="font-bold">その他の学習</h2></div>
             {renderTaskRows(taskGroups.other)}
           </section>
 
           <section>
-            <h2 className="font-black">確認テスト履歴・技能別スコア</h2>
+            <h2 className="font-bold">確認テスト履歴・技能別スコア</h2>
             <div className="mt-3 overflow-x-auto border-y border-slate-200 bg-white">
               <table className="w-full min-w-[620px] text-left text-sm">
                 <thead className="bg-slate-50 text-xs text-slate-500"><tr><th className="px-4 py-3">受験日</th><th className="px-4 py-3">結果</th><th className="px-4 py-3">技能別</th></tr></thead>
@@ -228,7 +243,7 @@ export default function EikenStudentDetail({
                   {(detail.quiz_results || []).map((result: any) => (
                     <tr key={result.id}>
                       <td className="px-4 py-3">{dateTimeLabel(result.submitted_at)}</td>
-                      <td className="px-4 py-3 font-black">{result.percentage}%</td>
+                      <td className="px-4 py-3 font-bold">{result.percentage}%</td>
                       <td className="px-4 py-3 text-xs">{Object.entries(result.skill_scores || {}).map(([skill, score]) => `${skill}: ${score}%`).join(' / ') || '-'}</td>
                     </tr>
                   ))}
@@ -239,17 +254,17 @@ export default function EikenStudentDetail({
           </section>
 
           <section>
-            <h2 className="font-black">AI添削履歴</h2>
+            <h2 className="font-bold">AI添削履歴</h2>
             <div className="mt-3 divide-y divide-slate-200 border-y border-slate-200 bg-white">
               {(detail.writing_submissions || []).map((submission: any) => (
                 <div key={submission.id} className="px-4 py-4">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <p className="font-bold">{submission.assignment_type === 'summary' ? '要約課題' : '意見論述'}</p>
-                    <span className={`rounded-full px-2.5 py-1 text-xs font-black ${submission.evaluation_status === 'completed' ? 'bg-emerald-100 text-emerald-700' : submission.evaluation_status === 'failed' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-600'}`}>{submission.evaluation_status}</span>
+                    <span className={`rounded-full px-2.5 py-1 text-xs font-bold ${submission.evaluation_status === 'completed' ? 'bg-emerald-100 text-emerald-700' : submission.evaluation_status === 'failed' ? 'bg-rose-100 text-rose-700' : 'bg-slate-100 text-slate-600'}`}>{submission.evaluation_status}</span>
                   </div>
                   <p className="mt-1 text-xs text-slate-500">{dateTimeLabel(submission.submitted_at)}</p>
                   {submission.scores && <p className="mt-2 text-sm">{Object.entries(submission.scores).map(([key, score]) => `${key}: ${score}/4`).join(' / ')}</p>}
-                  {submission.error_message && <p className="mt-2 text-xs font-bold text-red-700">{submission.error_message}</p>}
+                  {submission.error_message && <p className="mt-2 text-xs font-bold text-rose-700">{submission.error_message}</p>}
                 </div>
               ))}
               {!detail.writing_submissions?.length && <p className="px-4 py-6 text-center text-sm text-slate-500">AI添削の提出履歴はありません。</p>}
@@ -259,19 +274,19 @@ export default function EikenStudentDetail({
 
         <aside className="space-y-7">
           <section className="bg-white p-5 shadow-sm">
-            <div className="flex items-center gap-2"><MessageSquareText className="text-emerald-600" size={20} /><h2 className="font-black">フォローを記録</h2></div>
+            <div className="flex items-center gap-2"><MessageSquareText className="text-accent" size={20} aria-hidden /><h2 className="font-bold">フォローを記録</h2></div>
             <form onSubmit={saveFollowUp} className="mt-4 space-y-3">
-              <label className="block text-xs font-black text-slate-600">対応状況
+              <label className="block text-xs font-bold text-slate-600">対応状況
                 <select name="status" className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm">
                   <option value="noted">確認メモ</option>
                   <option value="contacted">本人・保護者へ連絡済み</option>
                   <option value="resolved">対応完了</option>
                 </select>
               </label>
-              <label className="block text-xs font-black text-slate-600">内容
+              <label className="block text-xs font-bold text-slate-600">内容
                 <textarea name="note" rows={5} required className="mt-1 w-full rounded-lg border border-slate-300 p-3 text-sm outline-none focus:border-emerald-600" />
               </label>
-              <button disabled={saving} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-3 text-sm font-black text-white disabled:opacity-50">
+              <button disabled={saving} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-3 text-sm font-bold text-white disabled:opacity-50">
                 {saving ? <Loader2 className="animate-spin" size={17} /> : <Send size={17} />}
                 記録する
               </button>
@@ -279,12 +294,12 @@ export default function EikenStudentDetail({
           </section>
 
           <section>
-            <h2 className="font-black">フォロー履歴</h2>
+            <h2 className="font-bold">フォロー履歴</h2>
             <div className="mt-3 divide-y divide-slate-200 border-y border-slate-200 bg-white">
               {(detail.follow_up_records || []).map((record: any) => (
                 <div key={record.id} className="px-4 py-4">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs font-black text-emerald-700">{record.status}</span>
+                    <span className="text-xs font-bold text-emerald-700">{record.status}</span>
                     <span className="text-xs text-slate-400">{dateTimeLabel(record.created_at)}</span>
                   </div>
                   <p className="mt-2 whitespace-pre-wrap text-sm leading-6">{record.note}</p>
@@ -295,12 +310,12 @@ export default function EikenStudentDetail({
           </section>
 
           <section>
-            <h2 className="font-black">LIVE授業出席</h2>
+            <h2 className="font-bold">LIVE授業出席</h2>
             <div className="mt-3 divide-y divide-slate-200 border-y border-slate-200 bg-white">
               {(detail.attendance || []).map((item: any) => (
                 <div key={item.id} className="flex items-center justify-between gap-3 px-4 py-3 text-sm">
                   <span>{dateTimeLabel(item.lesson_date || item.joined_at || item.created_at)}</span>
-                  <span className="font-black">{item.status || (item.attended ? '出席' : '欠席')}</span>
+                  <span className="font-bold">{item.status || (item.attended ? '出席' : '欠席')}</span>
                 </div>
               ))}
               {!detail.attendance?.length && <p className="px-4 py-6 text-center text-sm text-slate-500">出席記録はありません。</p>}

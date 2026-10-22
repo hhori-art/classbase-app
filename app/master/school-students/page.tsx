@@ -9,12 +9,12 @@ import {
   CameraOff,
   FileUp,
   Download,
-  GraduationCap,
   History,
   CalendarDays,
   LayoutList,
   Loader2,
   MessageSquareText,
+  KeyRound,
   LockKeyhole,
   PauseCircle,
   PhoneOff,
@@ -24,7 +24,6 @@ import {
   RefreshCw,
   Search,
   UserPlus,
-  X,
   XCircle,
 } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
@@ -32,13 +31,21 @@ import CsvSampleDownload from '@/app/components/CsvSampleDownload';
 import CourseRegistrationCalendar, { getCourseDay, getCourseSlot, getCourseSubject } from '@/app/components/CourseRegistrationCalendar';
 import LastLoginCell from '@/app/components/LastLoginCell';
 import AccountGuidePrintView from '@/app/components/account-guides/AccountGuidePrintView';
+import AccountPasswordModal from '@/app/components/master/AccountPasswordModal';
 import { toGuideAccount } from '@/app/components/account-guides/guide-model';
 import { attendanceSchoolName } from '@/lib/attendance-schools';
 import { describeSyncErrors, syncPrintedPasswords, type PrintedPasswordSkip } from '@/lib/client-printed-password-sync';
 import { loadCourseRegistrationOptions } from '@/lib/client-course-options';
+import { readCsvFileText, type CsvEncoding } from '@/lib/csv-file-text';
+import { chunkStudentCsv } from '@/lib/csv-chunks';
 import { courseOptionMatchesSelection, getCourseOptionCourseKey, getCourseOptionScheduleKey, getCourseOptionStableKey, hasCourseOptionSelection, removeCourseOptionSelections, resolveSelectedCourseOptionIds, summarizeSelectedCourseLabels } from '@/lib/course-registration-selection';
 import { buildSchoolCourseRegistrationCsv } from '@/lib/school-course-registration-export';
 import { hasAdminAppPermission, isConfigurableAdminRole } from '@/lib/admin-app-permissions';
+import AdminPageHeader from '@/app/components/master/AdminPageHeader';
+import AdminTabs from '@/app/components/master/AdminTabs';
+import { Button, EmptyState, ErrorState, ListSkeleton, Modal, Spinner, useToast, useConfirm, usePrompt } from '@/app/components/ui';
+import { formatDateTime } from '@/lib/format';
+import { jstDateKey } from '@/lib/date-key';
 
 const STATUSES = [
   { id: 'active', label: '有効', icon: CheckCircle2, className: 'bg-emerald-50 text-emerald-700 border-emerald-100' },
@@ -101,6 +108,11 @@ const WITHDRAWAL_REASONS = [
   { id: 'other', label: 'その他' },
 ];
 const CHANGE_REASONS = ['コベカツ', 'クラブチーム', '習い事', '経済的理由', '進路変更', 'その他'];
+const VIEW_TABS = [
+  { id: 'students' as const, label: '受講者リスト', icon: LayoutList },
+  { id: 'attendance' as const, label: '出席状況（週1回）', icon: CalendarDays },
+  { id: 'courses' as const, label: '受講登録状況', icon: BookOpen },
+];
 const SESSION_EXPIRED_MESSAGE = 'ログイン情報が失効しています。再度ログインしてください。';
 const isExpiredSessionError = (error: unknown) => {
   const code = String((error as any)?.code || '');
@@ -183,6 +195,9 @@ const formatCourseGroupLabel = (group: any) => {
 
 export default function SchoolStudentsPage() {
   const { profile, logout } = useAuth();
+  const toast = useToast();
+  const confirm = useConfirm();
+  const ask = usePrompt();
   const sessionRecoveryStartedRef = useRef(false);
   const [students, setStudents] = useState<any[]>([]);
   const [school, setSchool] = useState('');
@@ -191,18 +206,21 @@ export default function SchoolStudentsPage() {
   const [activeView, setActiveView] = useState<'students' | 'attendance' | 'courses'>('students');
   const [showAllAttendance, setShowAllAttendance] = useState(false);
   const attendanceHistoryRef = useRef(false);
+  // 生徒一覧の表（横に長い）の横スクロール用。
+  const studentTableScrollRef = useRef<HTMLDivElement | null>(null);
   const studentRequestIdRef = useRef(0);
   const [search, setSearch] = useState('');
   const [middleSchoolFilter, setMiddleSchoolFilter] = useState('');
-  const [bulkAbsenceDate, setBulkAbsenceDate] = useState(new Date().toISOString().slice(0, 10));
+  const [bulkAbsenceDate, setBulkAbsenceDate] = useState(() => jstDateKey());
   const [betaMode, setBetaMode] = useState(false);
   const [testPrepForm, setTestPrepForm] = useState({
     title: '',
     middle_school: '',
-    event_date: new Date().toISOString().slice(0, 10),
+    event_date: jstDateKey(),
     description: '',
   });
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [savingId, setSavingId] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -214,14 +232,17 @@ export default function SchoolStudentsPage() {
   const [isMounted, setIsMounted] = useState(false);
   const [qrBaseUrl, setQrBaseUrl] = useState('');
   const [printRequest, setPrintRequest] = useState<{ targets: any[]; skipped: PrintedPasswordSkip[] } | null>(null);
+  const [passwordStudent, setPasswordStudent] = useState<any | null>(null);
   const [printSyncProgress, setPrintSyncProgress] = useState<{ done: number; total: number } | null>(null);
-  const [csvEncoding, setCsvEncoding] = useState('Shift_JIS');
+  const [csvEncoding, setCsvEncoding] = useState<CsvEncoding>('auto');
   const [csvDefaultStartMonth, setCsvDefaultStartMonth] = useState(currentMonthValue());
   const [csvImporting, setCsvImporting] = useState(false);
+  const [csvImportProgress, setCsvImportProgress] = useState<{ done: number; total: number } | null>(null);
   const [csvLog, setCsvLog] = useState<string[]>([]);
   const [csvImportBatches, setCsvImportBatches] = useState<SchoolAccountImportBatch[]>([]);
   const [selectedCsvImportBatchId, setSelectedCsvImportBatchId] = useState('');
   const [csvHistoryLoading, setCsvHistoryLoading] = useState(false);
+  const [csvHistoryError, setCsvHistoryError] = useState(false);
   const [courseModalStudent, setCourseModalStudent] = useState<any | null>(null);
   const [courseOptions, setCourseOptions] = useState<any[]>([]);
   const [courseLoading, setCourseLoading] = useState(false);
@@ -368,20 +389,24 @@ export default function SchoolStudentsPage() {
       setSchool(data.school || mySchool || '');
       setSchoolOptions(Array.isArray(data.schools) ? data.schools.map(String).filter(Boolean) : []);
       setStudents(data.students || []);
+      setLoadError('');
     } catch (e: any) {
       if (isExpiredSessionError(e)) {
         if (!sessionRecoveryStartedRef.current) {
           sessionRecoveryStartedRef.current = true;
-          alert(SESSION_EXPIRED_MESSAGE);
+          toast.error(SESSION_EXPIRED_MESSAGE);
           await logout();
         }
         return;
       }
-      if (requestId === studentRequestIdRef.current) alert(`生徒一覧の取得に失敗しました: ${e.message || e}`);
+      if (requestId === studentRequestIdRef.current) {
+        console.error('School students fetch failed:', e);
+        setLoadError(`生徒一覧の取得に失敗しました: ${e.message || e}`);
+      }
     } finally {
       if (requestId === studentRequestIdRef.current) setLoading(false);
     }
-  }, [logout, mySchool]);
+  }, [logout, mySchool, toast]);
 
   const loadCsvImportBatches = useCallback(async (targetSchool: string) => {
     if (!targetSchool) {
@@ -389,6 +414,7 @@ export default function SchoolStudentsPage() {
       return;
     }
     setCsvHistoryLoading(true);
+    setCsvHistoryError(false);
     try {
       const token = await auth.currentUser?.getIdToken();
       if (!token) throw new Error('ログイン情報を確認できません');
@@ -403,6 +429,7 @@ export default function SchoolStudentsPage() {
     } catch (error) {
       console.error('School account import history fetch failed:', error);
       setCsvImportBatches([]);
+      setCsvHistoryError(true);
     } finally {
       setCsvHistoryLoading(false);
     }
@@ -503,7 +530,7 @@ export default function SchoolStudentsPage() {
       setCourseYear(nextYear);
       setCourseTerm(nextTerm);
     } catch (e: any) {
-      alert(`受講講座の読み込みに失敗しました: ${e.message || e}`);
+      toast.error(`受講講座の読み込みに失敗しました: ${e.message || e}`);
     } finally {
       setCourseLoading(false);
     }
@@ -553,7 +580,12 @@ export default function SchoolStudentsPage() {
 
   const saveCourseRegistration = async () => {
     if (!courseModalStudent) return;
-    if (visibleSelectedIds.length === 0 && !confirm('登録済みの講座をすべて解除します。よろしいですか？')) return;
+    if (visibleSelectedIds.length === 0 && !(await confirm({
+      title: `「${courseModalStudent.student_name || courseModalStudent.id}」の受講講座をすべて解除しますか？`,
+      message: '登録済みの講座をすべて解除します。',
+      confirmLabel: 'すべて解除する',
+      tone: 'danger',
+    }))) return;
     setCourseSaving(true);
     try {
       const selectedCourseLabels = selectedVisibleGroups.map(formatCourseGroupLabel);
@@ -594,16 +626,22 @@ export default function SchoolStudentsPage() {
         course_registration_updated_at: new Date().toISOString(),
       } : student));
       setCourseModalStudent(null);
-      alert('受講講座を登録しました');
+      toast.success('受講講座を登録しました');
     } catch (e: any) {
-      alert(`受講講座の登録に失敗しました: ${e.message || e}`);
+      toast.error(`受講講座の登録に失敗しました: ${e.message || e}`);
     } finally {
       setCourseSaving(false);
     }
   };
 
   const updateStatus = async (target: any, nextStatus: string) => {
-    if (!confirm(`${target.student_name || target.id} を「${STATUSES.find(s => s.id === nextStatus)?.label}」に変更しますか？`)) return;
+    const nextLabel = STATUSES.find(s => s.id === nextStatus)?.label;
+    const destructiveStatus = nextStatus !== 'active';
+    if (!(await confirm({
+      title: `「${target.student_name || target.id}」を「${nextLabel}」に変更しますか？`,
+      confirmLabel: `${nextLabel}に変更する`,
+      tone: destructiveStatus ? 'danger' : 'default',
+    }))) return;
     setSavingId(target.id);
     try {
       const token = await auth.currentUser?.getIdToken();
@@ -616,17 +654,17 @@ export default function SchoolStudentsPage() {
       if (!res.ok || !data.ok) throw new Error(data.error || 'failed');
       setStudents(prev => prev.map(student => student.id === target.id ? { ...student, account_status: nextStatus } : student));
     } catch (e: any) {
-      alert(`状態変更に失敗しました: ${e.message || e}`);
+      toast.error(`状態変更に失敗しました: ${e.message || e}`);
     } finally {
       setSavingId('');
     }
   };
 
   const createStudent = async () => {
-    if (!form.display_name.trim()) return alert('氏名は必須です');
-    if (!form.login_id.trim()) return alert('初期IDは必須です');
-    if (!form.course_start_month) return alert('利用開始月を選択してください');
-    if (!school) return alert('校舎が設定されていません。管理者アカウントの school_ids を確認してください。');
+    if (!form.display_name.trim()) return toast.error('氏名は必須です');
+    if (!form.login_id.trim()) return toast.error('初期IDは必須です');
+    if (!form.course_start_month) return toast.error('利用開始月を選択してください');
+    if (!school) return toast.error('校舎が設定されていません。管理者アカウントの school_ids を確認してください。');
     setSaving(true);
     try {
       const token = await auth.currentUser?.getIdToken();
@@ -684,9 +722,9 @@ export default function SchoolStudentsPage() {
       setPrintStudent(createdStudent);
       setPrintStudents([createdStudent]);
       setIsPrintModalOpen(true);
-      alert(data.updated ? '生徒アカウントを更新し、案内書面を作成しました' : '生徒アカウントを作成し、案内書面を作成しました');
+      toast.success(data.updated ? '生徒アカウントを更新し、案内書面を作成しました' : '生徒アカウントを作成し、案内書面を作成しました');
     } catch (e: any) {
-      alert(`作成に失敗しました: ${e.message || e}`);
+      toast.error(`作成に失敗しました: ${e.message || e}`);
     } finally {
       setSaving(false);
     }
@@ -709,7 +747,7 @@ export default function SchoolStudentsPage() {
       if (!res.ok || !data.ok) throw new Error(data.error || 'failed');
     } catch (e: any) {
       setStudents(prev => prev.map(item => item.id === student.id ? { ...item, [key]: !value } : item));
-      alert(`設定変更に失敗しました: ${e.message || e}`);
+      toast.error(`設定変更に失敗しました: ${e.message || e}`);
     }
   };
 
@@ -732,12 +770,17 @@ export default function SchoolStudentsPage() {
       if (betaMode) await writeBetaLog('student_option_updated', { student_id: student.id, keys: Object.keys(patch) });
     } catch (e: any) {
       await loadStudents(school);
-      alert(`更新に失敗しました: ${e.message || e}`);
+      toast.error(`更新に失敗しました: ${e.message || e}`);
     }
   };
 
   const transferStudent = async (student: any) => {
-    const nextSchool = prompt('移籍先の校舎IDを入力してください', student.school_id || school || '');
+    const nextSchool = await ask({
+      title: `「${student.student_name || student.id}」を移籍`,
+      label: schoolOptions.length > 0 ? `移籍先の校舎ID（例：${schoolOptions.slice(0, 8).join('、')}${schoolOptions.length > 8 ? ' ほか' : ''}）` : '移籍先の校舎ID',
+      defaultValue: student.school_id || school || '',
+      confirmLabel: '移籍する',
+    });
     if (!nextSchool) return;
     try {
       const token = await auth.currentUser?.getIdToken();
@@ -750,7 +793,7 @@ export default function SchoolStudentsPage() {
       if (!res.ok || !data.ok) throw new Error(data.error || 'failed');
       await loadStudents(school);
     } catch (e: any) {
-      alert(`移籍処理に失敗しました: ${e.message || e}`);
+      toast.error(`移籍処理に失敗しました: ${e.message || e}`);
     }
   };
 
@@ -763,7 +806,7 @@ export default function SchoolStudentsPage() {
     if (!withdrawalStudent) return;
     const reasonLabel = WITHDRAWAL_REASONS.find(item => item.id === withdrawalForm.reasonCode)?.label || 'その他';
     if (['individual_transfer', 'dekitas_transfer', 'course_reduction'].includes(withdrawalForm.reasonCode) && withdrawalForm.changeReasons.length === 0) {
-      return alert('変更理由を1つ以上選択してください');
+      return toast.error('変更理由を1つ以上選択してください');
     }
     try {
       const token = await auth.currentUser?.getIdToken();
@@ -784,12 +827,12 @@ export default function SchoolStudentsPage() {
       setWithdrawalStudent(null);
       await loadStudents(school);
     } catch (e: any) {
-      alert(`受講解除に失敗しました: ${e.message || e}`);
+      toast.error(`受講解除に失敗しました: ${e.message || e}`);
     }
   };
 
   const restoreStudent = async (student: any) => {
-    if (!confirm(`${student.student_name || student.id} を受講中へ復帰しますか？`)) return;
+    if (!(await confirm({ title: `「${student.student_name || student.id}」を受講中へ復帰しますか？`, confirmLabel: '復帰する' }))) return;
     try {
       const token = await auth.currentUser?.getIdToken();
       const res = await fetch('/api/admin/school-students/lifecycle', {
@@ -800,7 +843,7 @@ export default function SchoolStudentsPage() {
       if (!res.ok || !data.ok) throw new Error(data.error || 'failed');
       await loadStudents(school);
     } catch (e: any) {
-      alert(`復帰処理に失敗しました: ${e.message || e}`);
+      toast.error(`復帰処理に失敗しました: ${e.message || e}`);
     }
   };
 
@@ -820,7 +863,7 @@ export default function SchoolStudentsPage() {
   };
 
   const saveStudentProfile = async () => {
-    if (!editStudent || !editForm.display_name.trim()) return alert('氏名は必須です');
+    if (!editStudent || !editForm.display_name.trim()) return toast.error('氏名は必須です');
     setSavingId(editStudent.id);
     try {
       const patch = {
@@ -844,16 +887,26 @@ export default function SchoolStudentsPage() {
       setEditStudent(null);
       await loadStudents(school);
     } catch (e: any) {
-      alert(`生徒情報の更新に失敗しました: ${e.message || e}`);
+      toast.error(`生徒情報の更新に失敗しました: ${e.message || e}`);
     } finally {
       setSavingId('');
     }
   };
 
   const editRelations = async (student: any) => {
-    const siblingIds = prompt('兄弟姉妹の生徒UIDをカンマ区切りで入力してください', (student.sibling_ids || []).join(','));
+    const siblingIds = await ask({
+      title: `「${student.student_name || student.id}」の兄弟姉妹`,
+      label: '兄弟姉妹の生徒UID（カンマ区切り）',
+      defaultValue: (student.sibling_ids || []).join(','),
+      confirmLabel: '次へ',
+    });
     if (siblingIds === null) return;
-    const twinIds = prompt('双子として連動する生徒UIDをカンマ区切りで入力してください', (student.twin_sibling_ids || []).join(','));
+    const twinIds = await ask({
+      title: `「${student.student_name || student.id}」の双子連動`,
+      label: '双子として連動する生徒UID（カンマ区切り）',
+      defaultValue: (student.twin_sibling_ids || []).join(','),
+      confirmLabel: '保存する',
+    });
     if (twinIds === null) return;
     try {
       const token = await auth.currentUser?.getIdToken();
@@ -872,7 +925,7 @@ export default function SchoolStudentsPage() {
       await loadStudents(school);
       if (betaMode) await writeBetaLog('student_relations_updated', { student_id: student.id });
     } catch (e: any) {
-      alert(`兄弟姉妹連携の更新に失敗しました: ${e.message || e}`);
+      toast.error(`兄弟姉妹連携の更新に失敗しました: ${e.message || e}`);
     }
   };
 
@@ -887,7 +940,7 @@ export default function SchoolStudentsPage() {
 
   const toggleBetaMode = async () => {
     if (!isMaster) {
-      alert('βテストモードはマスター管理者のみ変更できます。');
+      toast.error('βテストモードはマスター管理者のみ変更できます。');
       return;
     }
     const next = !betaMode;
@@ -901,8 +954,13 @@ export default function SchoolStudentsPage() {
   };
 
   const registerBulkAbsence = async () => {
-    if (!middleSchoolFilter) return alert('中学校名で絞り込んでから実行してください');
-    if (!confirm(`${middleSchoolFilter} の表示対象生徒を ${bulkAbsenceDate} に一括欠席登録しますか？`)) return;
+    if (!middleSchoolFilter) return toast.error('中学校名で絞り込んでから実行してください');
+    if (!(await confirm({
+      title: `「${middleSchoolFilter}」の生徒を一括欠席登録しますか？`,
+      message: `${middleSchoolFilter} の表示対象生徒を ${bulkAbsenceDate} に一括欠席登録します。`,
+      confirmLabel: '一括欠席登録する',
+      tone: 'danger',
+    }))) return;
     try {
       const token = await auth.currentUser?.getIdToken();
       const res = await fetch('/api/admin/school-students/bulk-absence', {
@@ -912,16 +970,16 @@ export default function SchoolStudentsPage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || 'failed');
-      alert(`${data.count || 0}名を一括欠席登録しました`);
+      toast.success(`${data.count || 0}名を一括欠席登録しました`);
       if (betaMode) await writeBetaLog('bulk_absence_registered', { middle_school: middleSchoolFilter, target_date: bulkAbsenceDate, count: data.count || 0 });
     } catch (e: any) {
-      alert(`一括欠席登録に失敗しました: ${e.message || e}`);
+      toast.error(`一括欠席登録に失敗しました: ${e.message || e}`);
     }
   };
 
   const createTestPrepEvent = async () => {
-    if (!testPrepForm.title.trim()) return alert('テスト対策名を入力してください');
-    if (!testPrepForm.middle_school.trim()) return alert('対象中学校を選択してください');
+    if (!testPrepForm.title.trim()) return toast.error('テスト対策名を入力してください');
+    if (!testPrepForm.middle_school.trim()) return toast.error('対象中学校を選択してください');
     try {
       const token = await auth.currentUser?.getIdToken();
       const res = await fetch('/api/admin/test-prep-events', {
@@ -931,11 +989,11 @@ export default function SchoolStudentsPage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || 'failed');
-      alert(`${data.target_count || 0}名へテスト対策通知を作成しました`);
+      toast.success(`${data.target_count || 0}名へテスト対策通知を作成しました`);
       setTestPrepForm(prev => ({ ...prev, title: '', description: '' }));
       if (betaMode) await writeBetaLog('test_prep_event_created', { id: data.id, middle_school: testPrepForm.middle_school });
     } catch (e: any) {
-      alert(`テスト対策登録に失敗しました: ${e.message || e}`);
+      toast.error(`テスト対策登録に失敗しました: ${e.message || e}`);
     }
   };
 
@@ -944,7 +1002,7 @@ export default function SchoolStudentsPage() {
    * パスワードを変えずに除外する（mode=reissue のときだけ再発行する）。
    */
   const preparePrintStudents = async (targets: any[], busyKey: string, mode: 'issue' | 'reissue' = 'issue') => {
-    if (targets.length === 0) return alert('印刷する生徒がいません');
+    if (targets.length === 0) return toast.error('印刷する生徒がいません');
     setPrintingId(busyKey);
     try {
       const userIds = targets.flatMap(student => [student.id, student.parent_uid].filter(Boolean));
@@ -978,7 +1036,12 @@ export default function SchoolStudentsPage() {
       const printable = prepared.filter(item => !item.print_skipped);
       setPrintRequest({ targets: prepared, skipped: summary.skipped });
       if (printable.length === 0) {
-        if (confirm(`選んだ${targets.length}名は全員すでにログイン済みです。\n新しい初期パスワードを発行して書面を作成しますか？（本人が設定したパスワードは使えなくなります）`)) {
+        if (await confirm({
+          title: `選んだ${targets.length}名の初期パスワードを再発行しますか？`,
+          message: `選んだ${targets.length}名は全員すでにログイン済みです。新しい初期パスワードを発行して書面を作成します。本人が設定したパスワードは使えなくなります。`,
+          confirmLabel: '再発行する',
+          tone: 'danger',
+        })) {
           await preparePrintStudents(prepared, busyKey, 'reissue');
         }
         return;
@@ -987,7 +1050,7 @@ export default function SchoolStudentsPage() {
       setPrintStudents(printable);
       setIsPrintModalOpen(true);
     } catch (error: any) {
-      alert(`案内書面を作成できませんでした。\n${error?.message || error}`);
+      toast.error(`案内書面を作成できませんでした。 ${String(error?.message || error).replace(/\n/g, ' ')}`);
     } finally {
       setPrintingId('');
       setPrintSyncProgress(null);
@@ -997,8 +1060,8 @@ export default function SchoolStudentsPage() {
   const printGuide = (student: any) => preparePrintStudents([student], student.id);
 
   const printSelectedCsvImportBatch = async () => {
-    if (!selectedCsvImportBatch) return alert('CSV取込履歴を選択してください');
-    if (filtered.length === 0) return alert('現在の絞り込みに該当する生徒がいません');
+    if (!selectedCsvImportBatch) return toast.error('CSV取込履歴を選択してください');
+    if (filtered.length === 0) return toast.error('現在の絞り込みに該当する生徒がいません');
     await preparePrintStudents(filtered, 'csv-batch');
   };
 
@@ -1010,78 +1073,124 @@ export default function SchoolStudentsPage() {
     const file = event.target.files?.[0];
     if (!file) return;
     if (!school) {
-      alert('校舎が設定されていません。管理者アカウントの school_ids を確認してください。');
+      toast.error('校舎が設定されていません。管理者アカウントの school_ids を確認してください。');
       event.target.value = '';
       return;
     }
-    if (!confirm(`生徒CSVを「${school}」の生徒として取り込みますか？\n保護者アカウントも自動作成します。`)) {
+    if (!(await confirm({
+      title: `生徒CSVを「${school}」の生徒として取り込みますか？`,
+      message: '保護者アカウントも自動作成します。',
+      confirmLabel: '取り込む',
+    }))) {
       event.target.value = '';
       return;
     }
     setCsvImporting(true);
     setCsvLog([]);
-    addCsvLog(`読み込み開始: ${file.name} (${csvEncoding})`);
-    const reader = new FileReader();
-    reader.onload = async e => {
+    addCsvLog(`読み込み開始: ${file.name} (${csvEncoding === 'auto' ? '文字コード自動判定' : csvEncoding})`);
+    void (async () => {
       try {
-        const csvText = String(e.target?.result || '');
-        const token = await auth.currentUser?.getIdToken();
-        const res = await fetch('/api/admin/school-students/import', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({
-            csv_text: csvText,
-            file_name: file.name,
-            school_id: school,
-            default_course_start_month: csvDefaultStartMonth,
-          }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok || !data.ok) throw new Error(data.error || 'failed');
+        let csvText = '';
+        try {
+          csvText = await readCsvFileText(file, csvEncoding);
+        } catch {
+          throw new Error('ファイルを読み込めませんでした');
+        }
+        // 大人数でもサーバーの実行時間（60秒）に収まるよう、20名ずつに分けて順番に送る。
+        const { chunks, total } = chunkStudentCsv(csvText, 20);
+        const importKey = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+        if (total > 0) addCsvLog(`${total}名分を${chunks.length}回に分けて登録します`);
+        const data: { count: number; students: any[]; errors: any[]; preserved: any[]; import_batch_id: string } = { count: 0, students: [], errors: [], preserved: [], import_batch_id: '' };
+        for (let index = 0; index < chunks.length; index++) {
+          const chunk = chunks[index];
+          setCsvImportProgress({ done: data.count + data.errors.length, total });
+          const token = await auth.currentUser?.getIdToken();
+          let res: Response;
+          try {
+            res = await fetch('/api/admin/school-students/import', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+              body: JSON.stringify({
+                csv_text: chunk.text,
+                file_name: file.name,
+                school_id: school,
+                default_course_start_month: csvDefaultStartMonth,
+                import_key: chunks.length > 1 ? importKey : '',
+                row_offset: chunk.rowOffset,
+              }),
+            });
+          } catch {
+            throw new Error(`通信が切れました（${index + 1}/${chunks.length}回目）。ここまでに${data.count}名を登録済みです。同じCSVをもう一度取り込むと、残りを登録できます。`);
+          }
+          const part = await res.json().catch(() => ({}));
+          if (!res.ok || !part.ok) {
+            const reason = part.error || (res.status === 504 ? '処理時間の上限を超えました' : `サーバーエラー（${res.status}）`);
+            throw new Error(data.count > 0
+              ? `${reason}（${index + 1}/${chunks.length}回目）。ここまでに${data.count}名を登録済みです。同じCSVをもう一度取り込むと、残りを登録できます。`
+              : reason);
+          }
+          data.count += Number(part.count || 0);
+          data.students.push(...(Array.isArray(part.students) ? part.students : []));
+          data.errors.push(...(Array.isArray(part.errors) ? part.errors : []));
+          data.preserved.push(...(Array.isArray(part.preserved) ? part.preserved : []));
+          data.import_batch_id = String(part.import_batch_id || data.import_batch_id);
+          if (chunks.length > 1) addCsvLog(`登録中: ${data.count}/${total}名`);
+        }
+        setCsvImportProgress(null);
         addCsvLog(`完了: ${data.count || 0}件を登録しました`);
         if (Array.isArray(data.errors) && data.errors.length > 0) {
           addCsvLog(`注意: ${data.errors.length}件は登録できませんでした`);
-          data.errors.slice(0, 3).forEach((item: any) => addCsvLog(`行${item.row}: ${item.error}`));
+          data.errors.slice(0, 5).forEach((item: any) => addCsvLog(typeof item === 'string' ? item : `行${item.row}${item.login_id ? `（${item.login_id}）` : ''}: ${item.error}`));
         }
-        await loadStudents(school);
+        if (data.preserved.length > 0) {
+          addCsvLog(`ログイン済みの${data.preserved.length}名はパスワードを変更していません（${data.preserved.slice(0, 5).map((item: any) => item.login_id).join('、')}${data.preserved.length > 5 ? ' ほか' : ''}）`);
+        }
         await loadCsvImportBatches(school);
         if (data.import_batch_id) setSelectedCsvImportBatchId(String(data.import_batch_id));
-        if (Array.isArray(data.students) && data.students.length > 0) {
-          setPrintStudent(data.students[0]);
-          setPrintStudents(data.students);
+        // ログイン済みでパスワードを変えなかった生徒は、初期パスワードが無いので書面から外す。
+        const printable = data.students.filter(student => student.isFirstLogin !== false);
+        if (printable.length > 0) {
+          setPrintStudent(printable[0]);
+          setPrintStudents(printable);
           setIsPrintModalOpen(true);
-          addCsvLog(`案内書面: ${data.students.length}名分を作成しました`);
+          addCsvLog(`案内書面: ${printable.length}名分を作成しました`);
         }
       } catch (e: any) {
         addCsvLog(`エラー: ${e.message || e}`);
-        alert(`CSV取り込みに失敗しました: ${e.message || e}`);
+        toast.error(`CSV取り込みに失敗しました: ${e.message || e}`);
       } finally {
         setCsvImporting(false);
+        setCsvImportProgress(null);
         event.target.value = '';
+        // 途中で止まった場合も、登録できた分を一覧に反映する。
+        void loadStudents(school);
       }
-    };
-    reader.onerror = () => {
-      setCsvImporting(false);
-      addCsvLog('ファイル読み込みに失敗しました');
-      event.target.value = '';
-    };
-    reader.readAsText(file, csvEncoding);
+    })();
   };
 
   const printSkipped = printRequest?.skipped || [];
   const printNotice = printSkipped.length > 0 ? (
-    <div className="flex flex-col gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs font-bold text-amber-900 sm:flex-row sm:items-center sm:justify-between">
+    <div className="flex flex-col gap-2 rounded-btn border border-amber-200 bg-amber-50 p-3 text-xs font-bold text-amber-900 sm:flex-row sm:items-center sm:justify-between">
       <p>
         初回ログイン済みのため、パスワードを変えずに書面から外しました：生徒 {printSkipped.filter(item => item.role === 'student').length}名・保護者 {printSkipped.filter(item => item.role !== 'student').length}名
         <span className="ml-1 text-amber-700">（{printSkipped.slice(0, 4).map(item => item.display_name).join('、')}{printSkipped.length > 4 ? ' ほか' : ''}）</span>
       </p>
       <button
         onClick={() => {
-          if (!printRequest || !confirm('ログイン済みの人に新しい初期パスワードを発行して、書面に含めますか？\n本人が設定したパスワードは使えなくなります。')) return;
-          setIsPrintModalOpen(false);
-          void preparePrintStudents(printRequest.targets, 'reissue', 'reissue');
+          if (!printRequest) return;
+          const request = printRequest;
+          void (async () => {
+            if (!(await confirm({
+              title: `ログイン済みの${printSkipped.length}名の初期パスワードを再発行しますか？`,
+              message: '新しい初期パスワードを発行して、書面に含めます。本人が設定したパスワードは使えなくなります。',
+              confirmLabel: '再発行する',
+              tone: 'danger',
+            }))) return;
+            setIsPrintModalOpen(false);
+            void preparePrintStudents(request.targets, 'reissue', 'reissue');
+          })();
         }}
-        className="shrink-0 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-black text-white hover:bg-amber-700"
+        className="shrink-0 rounded-btn bg-amber-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-amber-700"
       >
         パスワードを再発行して含める
       </button>
@@ -1090,6 +1199,9 @@ export default function SchoolStudentsPage() {
 
   return (
     <>
+    {canManageStudents && passwordStudent && (
+      <AccountPasswordModal student={passwordStudent} onClose={() => setPasswordStudent(null)} onChanged={() => void loadStudents(school)} />
+    )}
     {canManageStudents && isPrintModalOpen && isMounted && printStudents.length > 0 && (
       <AccountGuidePrintView
         accounts={printStudents.map(student => toGuideAccount(student, attendanceSchoolName(student.school_id || school || mySchool) || student.school_id || school || mySchool))}
@@ -1100,121 +1212,111 @@ export default function SchoolStudentsPage() {
       />
     )}
     <div className="space-y-6 print:hidden">
-      <section className="rounded-[28px] bg-slate-950 p-6 text-white shadow-xl">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center gap-4">
-            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white text-slate-950">
-              <GraduationCap size={24} />
-            </div>
-            <div>
-              <p className="text-xs font-black uppercase tracking-[0.25em] text-slate-400">School Students</p>
-              <h1 className="text-2xl font-black">校舎別 生徒管理</h1>
-              <div className="mt-2 inline-flex rounded-2xl bg-white/10 px-4 py-2 text-sm font-black text-indigo-100 ring-1 ring-white/10">
-                現在表示中: {school || mySchool || '校舎未設定'}
-              </div>
-            </div>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <button onClick={() => void loadStudents(school)} className="flex items-center gap-2 rounded-2xl bg-slate-800 px-4 py-3 text-sm font-black hover:bg-slate-700">
-              <RefreshCw size={18} /> 更新
-            </button>
-            {isMaster && (
-              <button onClick={toggleBetaMode} className={`flex items-center gap-2 rounded-2xl px-4 py-3 text-sm font-black ${betaMode ? 'bg-amber-300 text-slate-950' : 'bg-slate-800 text-white hover:bg-slate-700'}`}>
-                βテスト {betaMode ? 'ON' : 'OFF'}
-              </button>
-            )}
-          </div>
-        </div>
-      </section>
+      <AdminPageHeader
+        description={<span className="inline-flex rounded-btn bg-accent-soft px-4 py-2 text-sm font-bold text-accent">
+          現在表示中: {school || mySchool || '校舎未設定'}
+        </span>}
+        actions={<>
+          <Button variant="secondary" icon={<RefreshCw size={16} aria-hidden />} onClick={() => void loadStudents(school)} loading={loading}>
+            再読み込み
+          </Button>
+          {isMaster && (
+            <Button variant="secondary" onClick={toggleBetaMode} aria-pressed={betaMode} className={betaMode ? 'border-amber-300 bg-amber-100 text-amber-900 hover:bg-amber-200' : undefined}>
+              βテスト {betaMode ? 'ON' : 'OFF'}
+            </Button>
+          )}
+        </>}
+      />
 
-      {!canManageStudents ? <div className="rounded-2xl border border-sky-200 bg-sky-50 px-5 py-4 text-sm font-bold text-sky-900">この画面は閲覧専用です。</div> : null}
+      {!canManageStudents ? <div className="rounded-card border border-sky-200 bg-sky-50 px-5 py-4 text-sm font-bold text-sky-900">この画面は閲覧専用です。</div> : null}
 
       {canManageStudents && (
         <section className="grid gap-4 xl:grid-cols-[0.8fr_1.35fr_1fr]">
-          <div className="rounded-[28px] border border-indigo-100 bg-indigo-50 p-5">
-            <p className="text-[11px] font-black uppercase tracking-[0.18em] text-indigo-500">STEP 1</p>
-            <h2 className="mt-1 text-lg font-black text-slate-900">対象校舎</h2>
+          <div className="rounded-card border border-accent/20 bg-accent-soft p-5">
+            <p className="text-xs font-bold uppercase tracking-[0.18em] text-accent">STEP 1</p>
+            <h2 className="mt-1 text-lg font-bold text-slate-900">対象校舎</h2>
             {schoolOptions.length > 1 ? (
               <label className="mt-4 block">
-                <span className="mb-2 block text-xs font-black text-slate-500">表示・登録する校舎</span>
+                <span className="mb-2 block text-xs font-bold text-slate-500">表示・登録する校舎</span>
                 <select
                   value={school}
                   onChange={event => void loadStudents(event.target.value)}
                   disabled={loading}
-                  className="w-full rounded-2xl border border-indigo-200 bg-white px-4 py-3 text-sm font-black text-slate-800 outline-none focus:ring-2 focus:ring-indigo-200 disabled:opacity-60"
+                  className="w-full rounded-input border border-accent/30 bg-white px-4 py-3 text-sm font-bold text-slate-800 outline-none focus:ring-2 focus:ring-accent/30 disabled:opacity-60"
                 >
                   {schoolOptions.map(option => <option key={option} value={option}>{option}</option>)}
                 </select>
               </label>
             ) : (
-              <div className="mt-4 rounded-2xl bg-white px-4 py-4 ring-1 ring-indigo-100">
+              <div className="mt-4 rounded-card bg-white px-4 py-4 ring-1 ring-accent/20">
                 <p className="text-xs font-bold text-slate-400">表示校舎</p>
-                <p className="mt-1 text-lg font-black text-indigo-700">{school || mySchool || '未設定'}</p>
+                <p className="mt-1 text-lg font-bold text-accent">{school || mySchool || '未設定'}</p>
               </div>
             )}
             <p className="mt-3 text-xs font-bold leading-5 text-slate-500">一覧表示・新規登録・CSV取込は、この校舎だけが対象です。</p>
           </div>
 
-          <div className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="rounded-card border border-slate-200 bg-white p-5 shadow-sm">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="text-[11px] font-black uppercase tracking-[0.18em] text-indigo-500">STEP 2</p>
-                <h2 className="mt-1 text-lg font-black text-slate-900">生徒を簡単追加</h2>
+                <p className="text-xs font-bold uppercase tracking-[0.18em] text-accent">STEP 2</p>
+                <h2 className="mt-1 text-lg font-bold text-slate-900">生徒を簡単追加</h2>
                 <p className="mt-1 text-xs font-bold text-slate-400">開始月まで選んで登録します。パスワードと保護者IDは自動発行し、案内書面も作成します。</p>
               </div>
-              <UserPlus className="shrink-0 text-indigo-500" size={24} />
+              <UserPlus className="shrink-0 text-accent" size={24} />
             </div>
             <div className="mt-4 grid gap-3 sm:grid-cols-2">
-              <input value={form.display_name} onChange={event => setForm(prev => ({ ...prev, display_name: event.target.value }))} placeholder="生徒氏名（必須）" className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100" />
-              <input value={form.login_id} onChange={event => setForm(prev => ({ ...prev, login_id: event.target.value }))} placeholder="生涯番号／ログインID（必須）" className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 font-mono text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100" />
-              <select value={form.grade} onChange={event => setForm(prev => ({ ...prev, grade: event.target.value }))} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100">
+              <input value={form.display_name} onChange={event => setForm(prev => ({ ...prev, display_name: event.target.value }))} placeholder="生徒氏名（必須）" className="rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-accent/30" />
+              <input value={form.login_id} onChange={event => setForm(prev => ({ ...prev, login_id: event.target.value }))} placeholder="生涯番号／ログインID（必須）" className="rounded-input border border-line bg-slate-50 px-4 py-3 font-mono text-sm font-bold outline-none focus:ring-2 focus:ring-accent/30" />
+              <select value={form.grade} onChange={event => setForm(prev => ({ ...prev, grade: event.target.value }))} className="rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-accent/30">
                 {['中1', '中2', '中3'].map(option => <option key={option} value={option}>{option}</option>)}
               </select>
-              <input value={form.middle_school} onChange={event => setForm(prev => ({ ...prev, middle_school: event.target.value }))} placeholder="中学校名" className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100" />
+              <input value={form.middle_school} onChange={event => setForm(prev => ({ ...prev, middle_school: event.target.value }))} placeholder="中学校名" className="rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-accent/30" />
               <label className="sm:col-span-2">
-                <span className="mb-2 block text-xs font-black text-slate-500">何月スタート（利用開始月）</span>
-                <input type="month" value={form.course_start_month} onChange={event => setForm(prev => ({ ...prev, course_start_month: event.target.value }))} className="w-full rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm font-black text-indigo-800 outline-none focus:ring-2 focus:ring-indigo-100" />
+                <span className="mb-2 block text-xs font-bold text-slate-500">何月スタート（利用開始月）</span>
+                <input type="month" value={form.course_start_month} onChange={event => setForm(prev => ({ ...prev, course_start_month: event.target.value }))} className="w-full rounded-input border border-accent/30 bg-accent-soft px-4 py-3 text-sm font-bold text-accent outline-none focus:ring-2 focus:ring-accent/30" />
               </label>
             </div>
             <div className="mt-4 flex flex-wrap gap-2">
-              <button onClick={createStudent} disabled={saving || !school} className="flex min-h-[44px] flex-1 items-center justify-center gap-2 rounded-2xl bg-slate-900 px-5 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-50">
-                {saving ? <Loader2 className="animate-spin" size={17} /> : <Plus size={17} />} この内容で登録
-              </button>
-              <button onClick={() => setModalOpen(true)} className="min-h-[44px] rounded-2xl border border-slate-200 px-4 text-xs font-black text-slate-600 hover:bg-slate-50">詳細も入力</button>
+              <Button onClick={createStudent} disabled={!school} loading={saving} icon={<Plus size={17} aria-hidden />} className="flex-1">
+                この内容で登録
+              </Button>
+              <Button variant="secondary" onClick={() => setModalOpen(true)}>詳細も入力</Button>
             </div>
           </div>
 
-          <div className="rounded-[28px] border border-emerald-100 bg-emerald-50 p-5">
+          <div className="rounded-card border border-emerald-100 bg-emerald-50 p-5">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="text-[11px] font-black uppercase tracking-[0.18em] text-emerald-600">STEP 3</p>
-                <h2 className="mt-1 text-lg font-black text-slate-900">CSVで一括追加</h2>
+                <p className="text-xs font-bold uppercase tracking-[0.18em] text-emerald-600">STEP 3</p>
+                <h2 className="mt-1 text-lg font-bold text-slate-900">CSVで一括追加</h2>
               </div>
               <FileUp className="shrink-0 text-emerald-600" size={24} />
             </div>
             <p className="mt-2 text-xs font-bold leading-5 text-slate-500">見本をダウンロードして入力し、そのままアップロードしてください。</p>
             <div className="mt-4 flex flex-col gap-2">
-              <label className="rounded-2xl bg-white px-4 py-3 ring-1 ring-emerald-100">
-                <span className="mb-2 block text-xs font-black text-slate-500">CSVの既定開始月</span>
-                <input type="month" value={csvDefaultStartMonth} onChange={event => setCsvDefaultStartMonth(event.target.value)} className="w-full bg-transparent text-sm font-black text-emerald-700 outline-none" />
-                <span className="mt-1 block text-[10px] font-bold text-slate-400">CSVの「受講開始月」が空欄の行に適用します。</span>
+              <label className="rounded-card bg-white px-4 py-3 ring-1 ring-emerald-100">
+                <span className="mb-2 block text-xs font-bold text-slate-500">CSVの既定開始月</span>
+                <input type="month" value={csvDefaultStartMonth} onChange={event => setCsvDefaultStartMonth(event.target.value)} className="w-full bg-transparent text-sm font-bold text-emerald-700 outline-none" />
+                <span className="mt-1 block text-xs font-bold text-slate-400">CSVの「受講開始月」が空欄の行に適用します。</span>
               </label>
               <CsvSampleDownload filename="校舎別_生徒CSV追加例.csv" headers={STUDENT_CSV_HEADERS} rows={STUDENT_CSV_SAMPLE_ROWS} label="CSV見本をダウンロード" className="justify-center border-emerald-200 bg-white text-emerald-700 hover:bg-emerald-100" />
-              <label className="relative flex min-h-[44px] cursor-pointer items-center justify-center gap-2 overflow-hidden rounded-2xl bg-emerald-600 px-4 text-sm font-black text-white hover:bg-emerald-700">
-                {csvImporting ? <Loader2 className="animate-spin" size={18} /> : <FileUp size={18} />} CSVを選んで追加
+              <label className="relative flex min-h-[44px] cursor-pointer items-center justify-center gap-2 overflow-hidden rounded-btn bg-emerald-600 px-4 text-sm font-bold text-white hover:bg-emerald-700">
+                {csvImporting ? <Loader2 className="animate-spin" size={18} /> : <FileUp size={18} />} {csvImporting ? (csvImportProgress ? `登録中 ${csvImportProgress.done}/${csvImportProgress.total}名` : '読み込み中...') : 'CSVを選んで追加'}
                 <input type="file" accept=".csv,text/csv" onChange={handleCsvImport} disabled={csvImporting || !school} className="absolute inset-0 cursor-pointer opacity-0" />
               </label>
-              <label className="flex items-center justify-between rounded-2xl bg-white px-4 py-3 text-xs font-black text-slate-500 ring-1 ring-emerald-100">
+              <label className="flex items-center justify-between rounded-card bg-white px-4 py-3 text-xs font-bold text-slate-500 ring-1 ring-emerald-100">
                 文字コード
-                <select value={csvEncoding} onChange={event => setCsvEncoding(event.target.value)} className="bg-transparent text-sm font-black text-emerald-700 outline-none">
+                <select value={csvEncoding} onChange={event => setCsvEncoding(event.target.value as CsvEncoding)} className="bg-transparent text-sm font-bold text-emerald-700 outline-none">
+                  <option value="auto">自動判定</option>
                   <option value="Shift_JIS">Shift_JIS</option>
                   <option value="UTF-8">UTF-8</option>
                 </select>
               </label>
-              <div className="mt-2 rounded-2xl border border-emerald-200 bg-white p-3">
+              <div className="mt-2 rounded-card border border-emerald-200 bg-white p-3">
                 <div className="flex items-center justify-between gap-2">
-                  <p className="flex items-center gap-2 text-xs font-black text-emerald-800"><History size={15} /> CSV取込履歴から再印刷</p>
-                  <button type="button" onClick={() => void loadCsvImportBatches(school)} disabled={csvHistoryLoading} className="text-[10px] font-black text-emerald-700 disabled:opacity-50">{csvHistoryLoading ? '更新中' : '更新'}</button>
+                  <p className="flex items-center gap-2 text-xs font-bold text-emerald-800"><History size={15} /> CSV取込履歴から再印刷</p>
+                  <button type="button" onClick={() => void loadCsvImportBatches(school)} disabled={csvHistoryLoading} className="text-xs font-bold text-emerald-700 disabled:opacity-50">{csvHistoryLoading ? '更新中' : '更新'}</button>
                 </div>
                 <select
                   value={selectedCsvImportBatchId}
@@ -1224,24 +1326,25 @@ export default function SchoolStudentsPage() {
                     setStatus('all');
                     setMiddleSchoolFilter('');
                   }}
-                  className="mt-2 w-full rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-black text-slate-700 outline-none"
+                  className="mt-2 w-full rounded-input border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-bold text-slate-700 outline-none"
                 >
                   <option value="">取込履歴を選択</option>
                   {csvImportBatches.map(batch => (
                     <option key={batch.id} value={batch.id}>
-                      {batch.imported_at ? new Date(batch.imported_at).toLocaleString('ja-JP') : '日時不明'} ｜ {batch.file_name} ｜ {batch.success_count}名
+                      {batch.imported_at ? formatDateTime(batch.imported_at, { withYear: true }) : '日時不明'} ｜ {batch.file_name} ｜ {batch.success_count}名
                     </option>
                   ))}
                 </select>
                 {selectedCsvImportBatch && (
                   <div className="mt-2">
-                    <p className="mb-2 text-[10px] font-bold text-slate-500">{filtered.length}名を表示中{selectedCsvImportBatch.error_count > 0 ? ` ／ ${selectedCsvImportBatch.error_count}件は取込失敗` : ''}</p>
-                    <button type="button" onClick={() => void printSelectedCsvImportBatch()} disabled={printingId === 'csv-batch' || filtered.length === 0} className="flex min-h-[40px] w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-3 text-xs font-black text-white hover:bg-indigo-700 disabled:opacity-50">
-                      {printingId === 'csv-batch' ? <Loader2 size={15} className="animate-spin" /> : <Printer size={15} />} {printingId === 'csv-batch' && printSyncProgress ? `パスワード確認中 ${printSyncProgress.done}/${printSyncProgress.total}` : `この履歴の${filtered.length}名を一括印刷`}
-                    </button>
+                    <p className="mb-2 text-xs font-bold text-slate-500">{filtered.length}名を表示中{selectedCsvImportBatch.error_count > 0 ? ` ／ ${selectedCsvImportBatch.error_count}件は取込失敗` : ''}</p>
+                    <Button size="sm" fullWidth onClick={() => void printSelectedCsvImportBatch()} disabled={filtered.length === 0} loading={printingId === 'csv-batch'} icon={<Printer size={15} aria-hidden />}>
+                      {printingId === 'csv-batch' && printSyncProgress ? `パスワード確認中 ${printSyncProgress.done}/${printSyncProgress.total}` : `この履歴の${filtered.length}名を一括印刷`}
+                    </Button>
                   </div>
                 )}
-                {csvImportBatches.length === 0 && !csvHistoryLoading && <p className="mt-2 text-[10px] font-bold leading-4 text-slate-400">履歴保存機能の追加後に取り込んだCSVが表示されます。</p>}
+                {csvHistoryError && !csvHistoryLoading && <p className="mt-2 text-xs font-bold leading-4 text-rose-600">取込履歴を読み込めませんでした。「更新」を押してもう一度お試しください。</p>}
+                {csvImportBatches.length === 0 && !csvHistoryLoading && !csvHistoryError && <p className="mt-2 text-xs font-bold leading-4 text-slate-400">履歴保存機能の追加後に取り込んだCSVが表示されます。</p>}
               </div>
             </div>
           </div>
@@ -1249,49 +1352,49 @@ export default function SchoolStudentsPage() {
       )}
 
       {canManageStudents && <section className="grid gap-4 lg:grid-cols-2">
-        <div className="rounded-[28px] bg-white p-5 shadow-sm">
-          <h2 className="text-lg font-black text-slate-900">中学校絞り込み / 一括欠席</h2>
+        <div className="rounded-card bg-white p-5 shadow-sm">
+          <h2 className="text-lg font-bold text-slate-900">中学校絞り込み / 一括欠席</h2>
           <div className="mt-4 grid gap-3 md:grid-cols-[1fr_auto_auto]">
-            <select value={middleSchoolFilter} onChange={e => setMiddleSchoolFilter(e.target.value)} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none">
+            <select value={middleSchoolFilter} onChange={e => setMiddleSchoolFilter(e.target.value)} className="rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none">
               <option value="">中学校を選択</option>
               {middleSchools.map(name => <option key={name} value={name}>{name}</option>)}
             </select>
-            <input type="date" value={bulkAbsenceDate} onChange={e => setBulkAbsenceDate(e.target.value)} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none" />
-            <button onClick={registerBulkAbsence} disabled={!middleSchoolFilter} className="rounded-2xl bg-rose-600 px-4 py-3 text-sm font-black text-white hover:bg-rose-700 disabled:bg-slate-300">
+            <input type="date" value={bulkAbsenceDate} onChange={e => setBulkAbsenceDate(e.target.value)} className="rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none" />
+            <Button variant="danger" onClick={registerBulkAbsence} disabled={!middleSchoolFilter}>
               一括欠席登録
-            </button>
+            </Button>
           </div>
           <p className="mt-3 text-xs font-bold text-slate-400">現在の絞り込み対象: {middleSchoolFilter || '未選択'} / {filtered.length}名</p>
         </div>
 
-        {isMaster && <div className="rounded-[28px] bg-white p-5 shadow-sm">
-          <h2 className="text-lg font-black text-slate-900">テスト対策登録＆連絡</h2>
+        {isMaster && <div className="rounded-card bg-white p-5 shadow-sm">
+          <h2 className="text-lg font-bold text-slate-900">テスト対策登録＆連絡</h2>
           <div className="mt-4 grid gap-3 md:grid-cols-2">
-            <input value={testPrepForm.title} onChange={e => setTestPrepForm(prev => ({ ...prev, title: e.target.value }))} placeholder="例: 期末テスト対策" className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none" />
-            <select value={testPrepForm.middle_school} onChange={e => setTestPrepForm(prev => ({ ...prev, middle_school: e.target.value }))} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none">
+            <input value={testPrepForm.title} onChange={e => setTestPrepForm(prev => ({ ...prev, title: e.target.value }))} placeholder="例: 期末テスト対策" className="rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none" />
+            <select value={testPrepForm.middle_school} onChange={e => setTestPrepForm(prev => ({ ...prev, middle_school: e.target.value }))} className="rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none">
               <option value="">対象中学校</option>
               {middleSchools.map(name => <option key={name} value={name}>{name}</option>)}
             </select>
-            <input type="date" value={testPrepForm.event_date} onChange={e => setTestPrepForm(prev => ({ ...prev, event_date: e.target.value }))} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none" />
-            <button onClick={createTestPrepEvent} className="rounded-2xl bg-indigo-600 px-4 py-3 text-sm font-black text-white hover:bg-indigo-700">登録して通知</button>
+            <input type="date" value={testPrepForm.event_date} onChange={e => setTestPrepForm(prev => ({ ...prev, event_date: e.target.value }))} className="rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none" />
+            <Button onClick={createTestPrepEvent}>登録して通知</Button>
           </div>
-          <textarea value={testPrepForm.description} onChange={e => setTestPrepForm(prev => ({ ...prev, description: e.target.value }))} placeholder="補足内容" className="mt-3 min-h-[72px] w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none" />
+          <textarea value={testPrepForm.description} onChange={e => setTestPrepForm(prev => ({ ...prev, description: e.target.value }))} placeholder="補足内容" className="mt-3 min-h-[72px] w-full rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none" />
         </div>}
       </section>}
 
-      {canManageStudents && <section className="rounded-[28px] bg-white p-5 shadow-sm">
+      {canManageStudents && <section className="rounded-card bg-white p-5 shadow-sm">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <h2 className="text-lg font-black text-slate-900">CSV取込結果</h2>
+            <h2 className="text-lg font-bold text-slate-900">CSV取込結果</h2>
             <p className="mt-1 text-xs font-bold text-slate-400">登録結果と、修正が必要な行をここに表示します。</p>
           </div>
         </div>
-        <div className="mt-4 rounded-2xl bg-slate-950 p-4 font-mono text-xs text-emerald-300">
+        <div className="mt-4 rounded-card bg-slate-950 p-4 font-mono text-xs text-emerald-300">
           {csvLog.length === 0 ? '> CSV追加の結果がここに表示されます' : csvLog.map((line, index) => <div key={index}>{line}</div>)}
         </div>
         {printStudent && (
           <div className="mt-3 flex justify-end">
-            <button onClick={() => void printGuide(printStudent)} disabled={printingId === printStudent.id} className="rounded-2xl border border-indigo-100 px-4 py-3 text-xs font-black text-indigo-600 hover:bg-indigo-50 disabled:opacity-50">
+            <button onClick={() => void printGuide(printStudent)} disabled={printingId === printStudent.id} className="rounded-btn border border-accent/20 px-4 py-3 text-xs font-bold text-accent hover:bg-accent-soft disabled:opacity-50">
               {printingId === printStudent.id ? <Loader2 size={14} className="inline animate-spin" /> : <Printer size={14} className="inline" />} 最後に作成した案内書面を再表示
             </button>
           </div>
@@ -1299,52 +1402,48 @@ export default function SchoolStudentsPage() {
       </section>}
 
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <button onClick={() => setStatus('all')} className={`rounded-2xl border bg-white p-4 text-left shadow-sm ${status === 'all' ? 'border-indigo-300 ring-2 ring-indigo-100' : 'border-white'}`}>
-          <p className="text-xs font-black text-slate-400">全件</p>
+        <button onClick={() => setStatus('all')} className={`rounded-card border bg-white p-4 text-left shadow-sm ${status === 'all' ? 'border-accent/50 ring-2 ring-accent/20' : 'border-white'}`}>
+          <p className="text-xs font-bold text-slate-400">全件</p>
           <p className="mt-1 text-3xl font-black text-slate-900">{students.length}</p>
         </button>
         {STATUSES.map(item => {
           const Icon = item.icon;
           return (
-            <button key={item.id} onClick={() => setStatus(item.id)} className={`rounded-2xl border p-4 text-left shadow-sm ${item.className} ${status === item.id ? 'ring-2 ring-indigo-100' : ''}`}>
+            <button key={item.id} onClick={() => setStatus(item.id)} className={`rounded-card border p-4 text-left shadow-sm ${item.className} ${status === item.id ? 'ring-2 ring-accent/20' : ''}`}>
               <Icon className="mb-2" size={20} />
-              <p className="text-xs font-black">{item.label}</p>
+              <p className="text-xs font-bold">{item.label}</p>
               <p className="mt-1 text-2xl font-black">{counts[item.id] || 0}</p>
             </button>
           );
         })}
       </section>
 
-      <section className="rounded-[28px] bg-white p-5 shadow-sm">
-        <div className="mb-4 flex flex-wrap gap-2 rounded-2xl bg-slate-100 p-1.5">
-          {[
-            { id: 'students', label: '受講者リスト', icon: LayoutList },
-            { id: 'attendance', label: '出席状況（週1回）', icon: CalendarDays },
-            { id: 'courses', label: '受講登録状況', icon: BookOpen },
-          ].map(item => {
-            const Icon = item.icon;
-            return (
-              <button key={item.id} onClick={() => setActiveView(item.id as typeof activeView)} className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-black transition ${activeView === item.id ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>
-                <Icon size={15} /> {item.label}
-              </button>
-            );
-          })}
-        </div>
+      <section className="rounded-card bg-white p-5 shadow-sm">
+        <AdminTabs
+          tabs={VIEW_TABS}
+          value={activeView}
+          onChange={setActiveView}
+          urlParam="tab"
+          ariaLabel="表示の切り替え"
+          className="mb-4"
+        />
         <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div className="relative w-full md:max-w-sm">
             <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
-            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="名前・フリガナ・学年・IDで検索" className="w-full rounded-2xl border border-slate-200 bg-slate-50 py-3 pl-11 pr-4 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100" />
+            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="名前・フリガナ・学年・IDで検索" className="w-full rounded-input border border-line bg-slate-50 py-3 pl-11 pr-4 text-sm font-bold outline-none focus:ring-2 focus:ring-accent/30" />
           </div>
           <div className="flex flex-wrap items-center gap-3">
-            <p className="text-xs font-black text-slate-400">{filtered.length}件表示</p>
-            {activeView === 'courses' && <button onClick={exportCourseStatusCsv} disabled={loading || filtered.length === 0} className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-black text-white hover:bg-indigo-500 disabled:opacity-50"><Download size={16} /> 表示中の受講登録状況をCSV出力</button>}
+            <p className="text-xs font-bold text-slate-400">{filtered.length}件表示</p>
+            {activeView === 'courses' && <Button size="sm" onClick={exportCourseStatusCsv} disabled={loading || filtered.length === 0} icon={<Download size={16} aria-hidden />}>表示中の受講登録状況をCSV出力</Button>}
           </div>
         </div>
 
         {loading ? (
-          <div className="flex justify-center py-12"><Loader2 className="animate-spin text-indigo-500" /></div>
+          <ListSkeleton rows={5} />
+        ) : loadError ? (
+          <ErrorState message={loadError} onRetry={() => void loadStudents(school)} />
         ) : filtered.length === 0 ? (
-          <div className="rounded-2xl border-2 border-dashed border-slate-100 py-12 text-center text-sm font-bold text-slate-400">表示できる生徒がいません</div>
+          <EmptyState title="表示できる生徒がいません" description={students.length > 0 ? '検索・絞り込みの条件を変えてください。' : undefined} />
         ) : activeView === 'attendance' ? (
           <AttendanceOverview students={filtered} showAll={showAllAttendance} onHistoryChange={all => {
             attendanceHistoryRef.current = all;
@@ -1354,11 +1453,21 @@ export default function SchoolStudentsPage() {
         ) : activeView === 'courses' ? (
           <CourseRegistrationOverview students={filtered} />
         ) : (
-          <div className="overflow-x-auto [scrollbar-gutter:stable]">
+          // 横に長い表なので、高さを画面内に収めて横スクロールバーを常に見えるようにし、
+          // 見出し行と生徒の列は固定する。ボタンでも左右に送れる。
+          <div className="rounded-card border border-line">
+            <div className="flex items-center justify-between gap-3 border-b border-line bg-slate-50 px-3 py-2 text-xs font-bold text-slate-500">
+              <span>表は横に動かせます（トラックパッドの横スワイプ・Shift＋ホイールでも動きます）</span>
+              <div className="flex shrink-0 items-center gap-1">
+                <button type="button" aria-label="生徒一覧を左へスクロール" onClick={() => studentTableScrollRef.current?.scrollBy({ left: -600, behavior: 'smooth' })} className="rounded-btn bg-white px-2.5 py-1.5 font-bold text-accent ring-1 ring-slate-200 hover:bg-accent-soft">← 前へ</button>
+                <button type="button" aria-label="生徒一覧を右へスクロール" onClick={() => studentTableScrollRef.current?.scrollBy({ left: 600, behavior: 'smooth' })} className="rounded-btn bg-white px-2.5 py-1.5 font-bold text-accent ring-1 ring-slate-200 hover:bg-accent-soft">次へ →</button>
+              </div>
+            </div>
+          <div ref={studentTableScrollRef} className="max-h-[72vh] overflow-auto overscroll-contain [scrollbar-gutter:stable]">
             <table className={`w-full ${canManageStudents ? 'min-w-[1720px]' : 'min-w-[1100px]'} whitespace-nowrap text-left text-sm`}>
-              <thead>
-                <tr className="border-b border-slate-100 text-xs font-black text-slate-400">
-                  <th className="px-4 py-3">生徒</th>
+              <thead className="sticky top-0 z-20 bg-white shadow-sm">
+                <tr className="border-b border-slate-100 text-xs font-bold text-slate-400">
+                  <th className="sticky left-0 z-30 bg-white px-4 py-3">生徒</th>
                   <th className="px-4 py-3">初期ID</th>
                   <th className="px-4 py-3">学年</th>
                   <th className="px-4 py-3">所属</th>
@@ -1375,15 +1484,15 @@ export default function SchoolStudentsPage() {
               </thead>
               <tbody className="divide-y divide-slate-50">
                 {filtered.map(student => (
-                  <tr key={student.id} className="hover:bg-slate-50">
-                    <td className="px-4 py-4">
-                      <p className="font-black text-slate-800">{student.student_name || '名称未設定'}</p>
-                      {student.student_name_kana && <p className="text-[11px] font-bold text-slate-400">{student.student_name_kana}</p>}
+                  <tr key={student.id} className="group hover:bg-slate-50">
+                    <td className="sticky left-0 z-10 bg-white px-4 py-4 shadow-[1px_0_0_rgb(var(--cb-line))] group-hover:bg-slate-50">
+                      <p className="font-bold text-slate-800">{student.student_name || '名称未設定'}</p>
+                      {student.student_name_kana && <p className="text-xs font-bold text-slate-400">{student.student_name_kana}</p>}
                       <p className="text-xs font-bold text-slate-400">{student.school_id || school}</p>
                       <div className="mt-1 flex gap-1">
-                        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-black text-slate-500">{student.member_type === 'general' ? '一般' : '在籍'}</span>
-                        {student.summer_course_status === 'attending' && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-black text-amber-700">夏期受講</span>}
-                        {student.summer_only && <span className="rounded-full bg-sky-50 px-2 py-0.5 text-[10px] font-black text-sky-700">夏期のみ</span>}
+                        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-bold text-slate-500">{student.member_type === 'general' ? '一般' : '在籍'}</span>
+                        {student.summer_course_status === 'attending' && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-xs font-bold text-amber-700">夏期受講</span>}
+                        {student.summer_only && <span className="rounded-full bg-sky-50 px-2 py-0.5 text-xs font-bold text-sky-700">夏期のみ</span>}
                       </div>
                     </td>
                     <td className="px-4 py-4 font-mono text-xs font-bold text-slate-500">{student.lifetime_id || '-'}</td>
@@ -1410,59 +1519,62 @@ export default function SchoolStudentsPage() {
                     </td>
                     {canManageStudents && <td className="px-4 py-4">
                       <div className="flex flex-col gap-2">
-                        <label className="flex items-center gap-2 text-[11px] font-black text-slate-500">
+                        <label className="flex items-center gap-2 text-xs font-bold text-slate-500">
                           <input type="checkbox" checked={Boolean(student.camera_off_requested)} onChange={e => updateStudentOptions(student, 'camera_off_requested', e.target.checked)} className="h-4 w-4 accent-indigo-600" />
                           <CameraOff size={13} /> カメラオフ希望
                         </label>
-                        <label className="flex items-center gap-2 text-[11px] font-black text-slate-500">
+                        <label className="flex items-center gap-2 text-xs font-bold text-slate-500">
                           <input type="checkbox" checked={Boolean(student.absence_call_not_required)} onChange={e => updateStudentOptions(student, 'absence_call_not_required', e.target.checked)} className="h-4 w-4 accent-rose-600" />
                           <PhoneOff size={13} /> 欠席電話不要
                         </label>
                       </div>
                     </td>}
                     {canManageStudents && <td className="px-4 py-4">
-                      <div className="flex flex-col gap-2 text-[11px] font-black text-slate-500">
+                      <div className="flex flex-col gap-2 text-xs font-bold text-slate-500">
                         <label className="flex items-center gap-2">
                           <input type="checkbox" checked={Boolean(student.trial_continued)} onChange={e => updateStudentPatch(student, { trial_continued: e.target.checked })} className="h-4 w-4 accent-emerald-600" />
                           継続通塾
                         </label>
                         <p>体験: {Array.isArray(student.trial_event_ids) && student.trial_event_ids.length > 0 ? student.trial_event_ids.join(' / ') : '-'}</p>
-                        {isMaster && <button onClick={() => editRelations(student)} className="w-fit rounded-xl border border-slate-200 px-3 py-2 text-[11px] font-black text-slate-600 hover:bg-slate-50">
+                        {isMaster && <button onClick={() => editRelations(student)} className="w-fit rounded-btn border border-slate-200 px-3 py-2 text-xs font-bold text-slate-600 hover:bg-slate-50">
                           兄弟姉妹編集
                         </button>}
                       </div>
                     </td>}
                     <td className="px-4 py-4">
-                      <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-500">{STATUSES.find(s => s.id === student.account_status)?.label || student.account_status}</span>
+                      <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-500">{STATUSES.find(s => s.id === student.account_status)?.label || student.account_status}</span>
                       {student.account_status === 'withdrawn' && student.enrollment_cancel_month && (
-                        <p className="mt-2 text-[11px] font-bold text-rose-500">{student.enrollment_cancel_month}解除</p>
+                        <p className="mt-2 text-xs font-bold text-rose-500">{student.enrollment_cancel_month}解除</p>
                       )}
                     </td>
                     {canManageStudents && <td className="px-4 py-4">
                       <div className="flex items-center justify-end gap-2">
-                        <button onClick={() => openEditStudent(student)} className="shrink-0 rounded-xl border border-slate-200 px-3 py-2 text-[11px] font-black text-slate-600 hover:bg-slate-50">
+                        <button onClick={() => openEditStudent(student)} className="shrink-0 rounded-btn border border-slate-200 px-3 py-2 text-xs font-bold text-slate-600 hover:bg-slate-50">
                           <Pencil size={13} className="inline" /> 編集
                         </button>
-                        <button onClick={() => void printGuide(student)} disabled={printingId === student.id} className="shrink-0 rounded-xl border border-indigo-100 px-3 py-2 text-[11px] font-black text-indigo-600 hover:bg-indigo-50 disabled:opacity-50">
+                        <button onClick={() => void printGuide(student)} disabled={printingId === student.id} className="shrink-0 rounded-btn border border-accent/20 px-3 py-2 text-xs font-bold text-accent hover:bg-accent-soft disabled:opacity-50">
                           {printingId === student.id ? <Loader2 size={13} className="inline animate-spin" /> : <Printer size={13} className="inline" />} 案内書面
                         </button>
-                        <button onClick={() => openCourseRegistrationModal(student)} className="shrink-0 rounded-xl border border-emerald-100 px-3 py-2 text-[11px] font-black text-emerald-600 hover:bg-emerald-50">
+                        <button onClick={() => setPasswordStudent(student)} className="shrink-0 rounded-btn border border-amber-100 px-3 py-2 text-xs font-bold text-amber-700 hover:bg-amber-50">
+                          <KeyRound size={13} className="inline" /> PW変更
+                        </button>
+                        <button onClick={() => openCourseRegistrationModal(student)} className="shrink-0 rounded-btn border border-emerald-100 px-3 py-2 text-xs font-bold text-emerald-600 hover:bg-emerald-50">
                           <BookOpen size={13} className="inline" /> 講座登録
                         </button>
-                        {isMaster && <button onClick={() => transferStudent(student)} className="shrink-0 rounded-xl border border-sky-100 px-3 py-2 text-[11px] font-black text-sky-600 hover:bg-sky-50">
+                        {isMaster && <button onClick={() => transferStudent(student)} className="shrink-0 rounded-btn border border-sky-100 px-3 py-2 text-xs font-bold text-sky-600 hover:bg-sky-50">
                           移籍
                         </button>}
                         {student.account_status === 'withdrawn' ? (
-                          <button onClick={() => restoreStudent(student)} className="shrink-0 rounded-xl border border-emerald-100 px-3 py-2 text-[11px] font-black text-emerald-600 hover:bg-emerald-50">受講中へ復帰</button>
+                          <button onClick={() => restoreStudent(student)} className="shrink-0 rounded-btn border border-emerald-100 px-3 py-2 text-xs font-bold text-emerald-600 hover:bg-emerald-50">受講中へ復帰</button>
                         ) : (
-                          <button onClick={() => withdrawStudent(student)} className="shrink-0 rounded-xl border border-rose-100 px-3 py-2 text-[11px] font-black text-rose-600 hover:bg-rose-50">受講解除</button>
+                          <button onClick={() => withdrawStudent(student)} className="shrink-0 rounded-btn border border-rose-100 px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50">受講解除</button>
                         )}
                         <select
                           aria-label={`${student.student_name || '生徒'}のアカウント状態`}
                           value={student.account_status || 'active'}
                           onChange={e => updateStatus(student, e.target.value)}
                           disabled={savingId === student.id}
-                          className="min-w-[104px] rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px] font-black text-slate-600 outline-none disabled:cursor-wait disabled:opacity-50"
+                          className="min-w-[104px] rounded-input border border-line bg-white px-3 py-2 text-xs font-bold text-slate-600 outline-none disabled:cursor-wait disabled:opacity-50"
                         >
                           {STATUSES.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
                         </select>
@@ -1473,17 +1585,23 @@ export default function SchoolStudentsPage() {
               </tbody>
             </table>
           </div>
+          </div>
         )}
       </section>
 
-      {editStudent && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
-          <div className="max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-[28px] bg-white shadow-xl">
-            <div className="flex items-center justify-between border-b border-slate-100 p-5">
-              <div><p className="text-xs font-black text-indigo-500">STUDENT PROFILE</p><h2 className="text-lg font-black text-slate-900">生徒情報を編集</h2></div>
-              <button onClick={() => setEditStudent(null)} className="rounded-xl bg-slate-100 p-2 text-slate-400"><X size={18} /></button>
-            </div>
-            <div className="grid gap-4 p-5 md:grid-cols-2">
+      <Modal closeOnBackdrop={false}
+        open={Boolean(editStudent)}
+        onClose={() => setEditStudent(null)}
+        size="lg"
+        title="生徒情報を編集"
+        footer={editStudent ? (
+          <>
+            <Button variant="ghost" onClick={() => setEditStudent(null)}>キャンセル</Button>
+            <Button onClick={saveStudentProfile} loading={savingId === editStudent.id}>保存する</Button>
+          </>
+        ) : undefined}
+      >
+            <div className="grid gap-4 md:grid-cols-2">
               <Field label="氏名" value={editForm.display_name} onChange={value => setEditForm(prev => ({ ...prev, display_name: value }))} />
               <Field label="フリガナ" value={editForm.student_name_kana} onChange={value => setEditForm(prev => ({ ...prev, student_name_kana: value }))} />
               <SelectField label="学年" value={editForm.grade} options={['中1', '中2', '中3']} onChange={value => setEditForm(prev => ({ ...prev, grade: value }))} />
@@ -1498,103 +1616,106 @@ export default function SchoolStudentsPage() {
               <Field label="双子UID（カンマ区切り）" value={editForm.twin_sibling_ids} onChange={value => setEditForm(prev => ({ ...prev, twin_sibling_ids: value }))} />
               <div className="grid gap-2 md:col-span-2 md:grid-cols-2">
                 {[['camera_off_requested', 'カメラオフ希望'], ['absence_call_not_required', '欠席電話不要'], ['trial_continued', '残留特典体験生'], ['summer_only', '夏期講習のみ受講生']].map(([key, label]) => (
-                  <label key={key} className="flex items-center gap-3 rounded-2xl bg-slate-50 px-4 py-3 text-sm font-black text-slate-600">
+                  <label key={key} className="flex items-center gap-3 rounded-card bg-slate-50 px-4 py-3 text-sm font-bold text-slate-600">
                     <input type="checkbox" checked={Boolean((editForm as any)[key])} onChange={event => setEditForm(prev => ({ ...prev, [key]: event.target.checked }))} className="h-5 w-5 accent-indigo-600" /> {label}
                   </label>
                 ))}
               </div>
             </div>
-            <div className="flex justify-end gap-3 border-t border-slate-100 bg-slate-50 p-5">
-              <button onClick={() => setEditStudent(null)} className="rounded-2xl px-5 py-3 text-sm font-black text-slate-500">キャンセル</button>
-              <button onClick={saveStudentProfile} disabled={savingId === editStudent.id} className="rounded-2xl bg-indigo-600 px-5 py-3 text-sm font-black text-white disabled:opacity-50">保存する</button>
-            </div>
-          </div>
-        </div>
-      )}
+      </Modal>
 
-      {withdrawalStudent && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
-          <div className="w-full max-w-xl rounded-[28px] bg-white shadow-xl">
-            <div className="flex items-center justify-between border-b border-slate-100 p-5">
-              <div><p className="text-xs font-black text-rose-500">RELEASE</p><h2 className="text-lg font-black text-slate-900">{withdrawalStudent.student_name} の受講解除</h2></div>
-              <button onClick={() => setWithdrawalStudent(null)} className="rounded-xl bg-slate-100 p-2 text-slate-400"><X size={18} /></button>
-            </div>
-            <div className="space-y-4 p-5">
+      <Modal closeOnBackdrop={false}
+        open={Boolean(withdrawalStudent)}
+        onClose={() => setWithdrawalStudent(null)}
+        title={`${withdrawalStudent?.student_name || ''} の受講解除`}
+        footer={<><Button variant="ghost" onClick={() => setWithdrawalStudent(null)}>キャンセル</Button><Button variant="danger" onClick={saveWithdrawal}>解除を確定</Button></>}
+      >
+            <div className="space-y-4">
               <MonthField label="解除月" value={withdrawalForm.month} onChange={value => setWithdrawalForm(prev => ({ ...prev, month: value }))} />
               <SelectField label="解除理由" value={withdrawalForm.reasonCode} options={WITHDRAWAL_REASONS.map(item => item.id)} optionLabels={Object.fromEntries(WITHDRAWAL_REASONS.map(item => [item.id, item.label]))} onChange={value => setWithdrawalForm(prev => ({ ...prev, reasonCode: value, changeReasons: [] }))} />
               {['individual_transfer', 'dekitas_transfer', 'course_reduction'].includes(withdrawalForm.reasonCode) && (
-                <div><p className="mb-2 text-xs font-black text-slate-500">変更理由（1つ以上）</p><div className="grid gap-2 sm:grid-cols-2">{CHANGE_REASONS.map(reason => (
-                  <label key={reason} className="flex items-center gap-2 rounded-xl bg-slate-50 px-3 py-2 text-xs font-black text-slate-600"><input type="checkbox" checked={withdrawalForm.changeReasons.includes(reason)} onChange={event => setWithdrawalForm(prev => ({ ...prev, changeReasons: event.target.checked ? [...prev.changeReasons, reason] : prev.changeReasons.filter(item => item !== reason) }))} />{reason}</label>
+                <div><p className="mb-2 text-xs font-bold text-slate-500">変更理由（1つ以上）</p><div className="grid gap-2 sm:grid-cols-2">{CHANGE_REASONS.map(reason => (
+                  <label key={reason} className="flex items-center gap-2 rounded-input bg-slate-50 px-3 py-2 text-xs font-bold text-slate-600"><input type="checkbox" checked={withdrawalForm.changeReasons.includes(reason)} onChange={event => setWithdrawalForm(prev => ({ ...prev, changeReasons: event.target.checked ? [...prev.changeReasons, reason] : prev.changeReasons.filter(item => item !== reason) }))} />{reason}</label>
                 ))}</div></div>
               )}
-              <label><span className="mb-2 block text-xs font-black text-slate-500">備考</span><textarea value={withdrawalForm.note} onChange={event => setWithdrawalForm(prev => ({ ...prev, note: event.target.value }))} className="min-h-[90px] w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none" /></label>
+              <label><span className="mb-2 block text-xs font-bold text-slate-500">備考</span><textarea value={withdrawalForm.note} onChange={event => setWithdrawalForm(prev => ({ ...prev, note: event.target.value }))} className="min-h-[90px] w-full rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none" /></label>
             </div>
-            <div className="flex justify-end gap-3 border-t border-slate-100 bg-slate-50 p-5"><button onClick={() => setWithdrawalStudent(null)} className="rounded-2xl px-5 py-3 text-sm font-black text-slate-500">キャンセル</button><button onClick={saveWithdrawal} className="rounded-2xl bg-rose-600 px-5 py-3 text-sm font-black text-white">解除を確定</button></div>
-          </div>
-        </div>
-      )}
+      </Modal>
 
-      {courseModalStudent && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
-          <div className="flex max-h-[92vh] w-full max-w-6xl flex-col rounded-[28px] bg-white shadow-xl">
-            <div className="flex items-start justify-between gap-4 border-b border-slate-100 p-5">
-              <div>
-                <p className="text-xs font-black uppercase tracking-[0.2em] text-emerald-500">Course Registration</p>
-                <h2 className="mt-1 text-xl font-black text-slate-900">受講講座の手動登録</h2>
-                <p className="mt-2 text-sm font-bold text-slate-500">
-                  {courseModalStudent.student_name || '名称未設定'} / {courseModalStudent.grade || '学年未設定'}
-                  <span className="ml-2 text-slate-300">複数曜日・1科目のみの登録にも対応しています</span>
-                </p>
-              </div>
-              <button onClick={() => setCourseModalStudent(null)} className="rounded-xl bg-slate-100 p-2 text-slate-400 hover:text-slate-700">
-                <X size={18} />
-              </button>
+      <Modal closeOnBackdrop={false}
+        open={Boolean(courseModalStudent)}
+        onClose={() => setCourseModalStudent(null)}
+        size="xl"
+        title="受講講座の手動登録"
+        description={courseModalStudent ? (
+          <>
+            <span className="font-bold">{courseModalStudent.student_name || '名称未設定'} / {courseModalStudent.grade || '学年未設定'}</span>
+            <span className="ml-2 text-xs">複数曜日・1科目のみの登録にも対応しています</span>
+          </>
+        ) : undefined}
+        footer={(
+          <>
+            <p className="text-xs font-bold text-slate-400 sm:mr-auto sm:self-center">
+              保存するとこの生徒の現在の受講講座として即時反映されます。過去の登録履歴は残ります。
+            </p>
+            <div className="flex flex-wrap justify-end gap-3">
+              <Button variant="ghost" onClick={() => setCourseModalStudent(null)}>
+                キャンセル
+              </Button>
+              <Button onClick={saveCourseRegistration} disabled={courseLoading || visibleSelectedIds.length === 0} loading={courseSaving} icon={<CheckCircle2 size={18} aria-hidden />}>
+                登録する
+              </Button>
+              <Button variant="secondary" onClick={saveCourseRegistration} disabled={courseSaving || courseLoading || visibleSelectedIds.length > 0} className="border-rose-200 text-rose-600 hover:bg-rose-50">
+                すべて解除する
+              </Button>
             </div>
-
-            <div className="grid gap-4 border-b border-slate-100 bg-slate-50 p-5 lg:grid-cols-[160px_1fr_auto] lg:items-end">
+          </>
+        )}
+      >
+            <div className="-mx-5 -mt-4 mb-4 grid gap-4 border-b border-slate-100 bg-slate-50 px-5 py-4 lg:grid-cols-[160px_1fr_auto] lg:items-end">
               <label>
-                <span className="mb-2 block text-xs font-black text-slate-500">年度</span>
-                <select value={courseYear} onChange={e => setCourseYear(Number(e.target.value))} className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-black text-slate-700 outline-none">
+                <span className="mb-2 block text-xs font-bold text-slate-500">年度</span>
+                <select value={courseYear} onChange={e => setCourseYear(Number(e.target.value))} className="w-full rounded-input border border-line bg-white px-4 py-3 text-sm font-bold text-slate-700 outline-none">
                   {courseYearChoices.map(year => <option key={year} value={year}>{year}年度</option>)}
                 </select>
               </label>
               <label>
-                <span className="mb-2 block text-xs font-black text-slate-500">期</span>
-                <select value={courseTerm} onChange={e => setCourseTerm(e.target.value)} className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-black text-slate-700 outline-none">
+                <span className="mb-2 block text-xs font-bold text-slate-500">期</span>
+                <select value={courseTerm} onChange={e => setCourseTerm(e.target.value)} className="w-full rounded-input border border-line bg-white px-4 py-3 text-sm font-bold text-slate-700 outline-none">
                   {courseTermChoices.length === 0 && <option value="">期未設定</option>}
                   {courseTerm && !courseTermChoices.includes(courseTerm) && <option value={courseTerm}>{optionTermLabel(courseTerm, courseOptions)}</option>}
                   {courseTermChoices.map(term => <option key={term} value={term}>{optionTermLabel(term, courseOptions)}</option>)}
                 </select>
               </label>
-              <div className="rounded-2xl bg-white px-4 py-3 text-sm font-black text-indigo-700 ring-1 ring-indigo-100">
+              <div className="rounded-card bg-white px-4 py-3 text-sm font-bold text-accent ring-1 ring-accent/20">
                 選択中 {visibleSelectedIds.length}件
               </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-5">
+            <div>
               {courseLoading ? (
                 <div className="flex justify-center py-16">
-                  <Loader2 className="animate-spin text-emerald-500" />
+                  <Spinner label="講座を読み込み中" />
                 </div>
               ) : (
                 <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_300px]">
                   <div className="space-y-5">
-                    <section className="rounded-3xl border border-emerald-100 bg-emerald-50/70 p-4">
+                    <section className="rounded-card border border-emerald-100 bg-emerald-50/70 p-4">
                       <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                         <div>
-                          <p className="text-xs font-black text-emerald-600">Step 1</p>
-                          <h3 className="text-base font-black text-slate-900">受講したい単元・科目を選択</h3>
+                          <p className="text-xs font-bold text-emerald-600">Step 1</p>
+                          <h3 className="text-base font-bold text-slate-900">受講したい単元・科目を選択</h3>
                           <p className="mt-1 text-xs font-bold text-slate-500">
                             選んだ単元・科目に対応する開講曜日だけを次に表示します。
                           </p>
                         </div>
-                        <span className="w-fit rounded-full bg-white px-3 py-1 text-[11px] font-black text-emerald-700 ring-1 ring-emerald-100">
+                        <span className="w-fit rounded-full bg-white px-3 py-1 text-xs font-bold text-emerald-700 ring-1 ring-emerald-100">
                           {courseSelectedKeys.length}件選択中
                         </span>
                       </div>
 
                       {courseChoices.length === 0 ? (
-                        <div className="rounded-2xl border-2 border-dashed border-emerald-100 bg-white/80 p-6 text-center text-sm font-black text-slate-400">
+                        <div className="rounded-card border-2 border-dashed border-emerald-100 bg-white/80 p-6 text-center text-sm font-bold text-slate-400">
                           この学年・期で登録できる講座がありません
                         </div>
                       ) : (
@@ -1609,7 +1730,7 @@ export default function SchoolStudentsPage() {
                                 key={choice.key}
                                 type="button"
                                 onClick={() => toggleCourseKey(choice.key)}
-                                className={`rounded-2xl border-2 p-4 text-left transition ${
+                                className={`rounded-card border-2 p-4 text-left transition ${
                                   active
                                     ? 'border-emerald-500 bg-white text-emerald-800 shadow-sm'
                                     : 'border-white bg-white/85 text-slate-700 hover:border-emerald-200'
@@ -1617,13 +1738,13 @@ export default function SchoolStudentsPage() {
                               >
                                 <div className="flex items-start justify-between gap-3">
                                   <div className="min-w-0">
-                                    <p className="text-sm font-black">{courseFullDisplayName(option)}</p>
-                                    <p className="mt-1 text-[11px] font-bold text-slate-400">
+                                    <p className="text-sm font-bold">{courseFullDisplayName(option)}</p>
+                                    <p className="mt-1 text-xs font-bold text-slate-400">
                                       {daySlots.slice(0, 4).join(' / ') || '曜日・時間未設定'}
                                       {daySlots.length > 4 ? ` ほか${daySlots.length - 4}件` : ''}
                                     </p>
                                     {units.length > 0 && (
-                                      <p className="mt-1 line-clamp-2 text-[11px] font-bold text-emerald-600">
+                                      <p className="mt-1 line-clamp-2 text-xs font-bold text-emerald-600">
                                         単元: {units.slice(0, 3).join(' / ')}{units.length > 3 ? ` ほか${units.length - 3}件` : ''}
                                       </p>
                                     )}
@@ -1637,21 +1758,21 @@ export default function SchoolStudentsPage() {
                       )}
                     </section>
 
-                    <section className="rounded-3xl border border-slate-100 bg-white p-4">
+                    <section className="rounded-card border border-slate-100 bg-white p-4">
                       <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                         <div>
-                          <p className="text-xs font-black text-slate-500">Step 2</p>
-                          <h3 className="text-base font-black text-slate-900">開講曜日・時間を選択</h3>
+                          <p className="text-xs font-bold text-slate-500">Step 2</p>
+                          <h3 className="text-base font-bold text-slate-900">開講曜日・時間を選択</h3>
                           <p className="mt-1 text-xs font-bold text-slate-400">
                             同じ曜日・時限は1講座のみ、同じ講座は曜日・時限を問わず1つだけ登録できます。
                           </p>
                         </div>
-                        <span className="w-fit rounded-2xl bg-indigo-50 px-4 py-2 text-xs font-black text-indigo-700">
+                        <span className="w-fit rounded-card bg-accent-soft px-4 py-2 text-xs font-bold text-accent">
                           {stepSelectedIds.length}件選択中
                         </span>
                       </div>
                       {courseSelectedKeys.length === 0 ? (
-                        <div className="rounded-2xl border-2 border-dashed border-slate-200 p-6 text-center text-sm font-black text-slate-400">
+                        <div className="rounded-card border-2 border-dashed border-slate-200 p-6 text-center text-sm font-bold text-slate-400">
                           先に受講したい単元・科目を選択してください
                         </div>
                       ) : (
@@ -1668,34 +1789,34 @@ export default function SchoolStudentsPage() {
                     </section>
                   </div>
 
-                  <aside className="rounded-3xl border border-indigo-100 bg-indigo-50 p-4 lg:sticky lg:top-4 lg:self-start">
+                  <aside className="rounded-card border border-accent/20 bg-accent-soft p-4 lg:sticky lg:top-4 lg:self-start">
                     <div className="flex items-start justify-between gap-3">
                       <div>
-                        <p className="text-sm font-black text-indigo-900">保存される講座</p>
-                        <p className="mt-1 text-xs font-bold text-indigo-500">{optionTermLabel(courseTerm, courseOptions)}の選択内容</p>
+                        <p className="text-sm font-bold text-fg">保存される講座</p>
+                        <p className="mt-1 text-xs font-bold text-accent">{optionTermLabel(courseTerm, courseOptions)}の選択内容</p>
                       </div>
-                      <span className="rounded-full bg-white px-3 py-1 text-[11px] font-black text-indigo-700">{visibleSelectedIds.length}件</span>
+                      <span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-accent">{visibleSelectedIds.length}件</span>
                     </div>
                     <div className="mt-4 max-h-[48vh] space-y-2 overflow-y-auto pr-1">
                       {selectedVisibleGroups.length > 0 ? selectedVisibleGroups.map((group: any) => {
                         const option = group.option;
                         return (
-                          <div key={`${option.id}_${getCourseDay(option)}_${getCourseSlot(option)}`} className="rounded-2xl bg-white px-4 py-3 shadow-sm ring-1 ring-indigo-100">
-                            <p className="text-sm font-black text-indigo-800">
+                          <div key={`${option.id}_${getCourseDay(option)}_${getCourseSlot(option)}`} className="rounded-card bg-white px-4 py-3 shadow-sm ring-1 ring-accent/20">
+                            <p className="text-sm font-bold text-accent">
                               {courseDisplayName(option)}
                             </p>
-                            <p className="mt-1 text-xs font-bold text-indigo-500">
+                            <p className="mt-1 text-xs font-bold text-accent">
                               {[getCourseDay(option) && `${getCourseDay(option)}曜`, getCourseSlot(option), group.units.length ? `${group.units.length}単元` : ''].filter(Boolean).join(' / ')}
                             </p>
                             {group.units.length > 0 && (
-                              <p className="mt-1 line-clamp-2 text-[11px] font-bold text-indigo-400">
+                              <p className="mt-1 line-clamp-2 text-xs font-bold text-accent/70">
                                 {group.units.slice(0, 4).join(' / ')}{group.units.length > 4 ? ` ほか${group.units.length - 4}件` : ''}
                               </p>
                             )}
                           </div>
                         );
                       }) : (
-                        <div className="rounded-2xl border-2 border-dashed border-indigo-100 bg-white/70 px-4 py-6 text-center text-xs font-black text-indigo-300">
+                        <div className="rounded-card border-2 border-dashed border-accent/20 bg-white/70 px-4 py-6 text-center text-xs font-bold text-accent/60">
                           まだ講座が選択されていません
                         </div>
                       )}
@@ -1704,36 +1825,23 @@ export default function SchoolStudentsPage() {
                 </div>
               )}
             </div>
+      </Modal>
 
-            <div className="flex flex-col gap-3 border-t border-slate-100 bg-slate-50 p-5 sm:flex-row sm:items-center sm:justify-between">
-              <p className="text-xs font-bold text-slate-400">
-                保存するとこの生徒の現在の受講講座として即時反映されます。過去の登録履歴は残ります。
-              </p>
-              <div className="flex justify-end gap-3">
-                <button onClick={() => setCourseModalStudent(null)} className="rounded-2xl px-5 py-3 text-sm font-black text-slate-500 hover:bg-slate-200">
-                  キャンセル
-                </button>
-                <button onClick={saveCourseRegistration} disabled={courseSaving || courseLoading || visibleSelectedIds.length === 0} className="flex items-center gap-2 rounded-2xl bg-emerald-600 px-5 py-3 text-sm font-black text-white hover:bg-emerald-700 disabled:bg-slate-300">
-                  {courseSaving ? <Loader2 className="animate-spin" size={18} /> : <CheckCircle2 size={18} />}
-                  登録する
-                </button>
-                <button onClick={saveCourseRegistration} disabled={courseSaving || courseLoading || visibleSelectedIds.length > 0} className="rounded-2xl border-2 border-rose-200 bg-white px-5 py-3 text-sm font-black text-rose-600 hover:bg-rose-50 disabled:opacity-30">
-                  すべて解除する
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {modalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
-          <div className="w-full max-w-2xl rounded-[28px] bg-white shadow-xl">
-            <div className="flex items-center justify-between border-b border-slate-100 p-5">
-              <h2 className="text-lg font-black text-slate-900">新規生徒登録</h2>
-              <button onClick={() => setModalOpen(false)} className="rounded-xl bg-slate-100 p-2 text-slate-400 hover:text-slate-700"><X size={18} /></button>
-            </div>
-            <div className="grid gap-4 p-5 md:grid-cols-2">
+      <Modal closeOnBackdrop={false}
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        size="lg"
+        title="新規生徒登録"
+        footer={(
+          <>
+            <Button variant="ghost" onClick={() => setModalOpen(false)}>キャンセル</Button>
+            <Button onClick={createStudent} loading={saving} icon={<Plus size={18} aria-hidden />}>
+              登録する
+            </Button>
+          </>
+        )}
+      >
+            <div className="grid gap-4 md:grid-cols-2">
               <Field label="氏名" value={form.display_name} onChange={value => setForm(prev => ({ ...prev, display_name: value }))} />
               <Field label="フリガナ" value={form.student_name_kana} onChange={value => setForm(prev => ({ ...prev, student_name_kana: value }))} />
               <Field label="初期ID" value={form.login_id} onChange={value => setForm(prev => ({ ...prev, login_id: value }))} />
@@ -1750,11 +1858,11 @@ export default function SchoolStudentsPage() {
               <SelectField label="社会" value={form.subject_social} options={['', '地理', '歴史', '公民']} onChange={value => setForm(prev => ({ ...prev, subject_social: value }))} />
               <Field label="兄弟姉妹UID（カンマ区切り）" value={form.sibling_ids} onChange={value => setForm(prev => ({ ...prev, sibling_ids: value }))} />
               <Field label="双子UID（カンマ区切り）" value={form.twin_sibling_ids} onChange={value => setForm(prev => ({ ...prev, twin_sibling_ids: value }))} />
-              <div className="rounded-2xl bg-slate-50 px-4 py-3 md:col-span-2">
-                <p className="mb-3 text-xs font-black text-slate-500">体験授業/イベント</p>
+              <div className="rounded-card bg-slate-50 px-4 py-3 md:col-span-2">
+                <p className="mb-3 text-xs font-bold text-slate-500">体験授業/イベント</p>
                 <div className="grid gap-2 md:grid-cols-2">
                   {TRIAL_EVENT_OPTIONS.map(option => (
-                    <label key={option} className="flex items-center gap-3 text-sm font-black text-slate-600">
+                    <label key={option} className="flex items-center gap-3 text-sm font-bold text-slate-600">
                       <input
                         type="checkbox"
                         checked={form.trial_event_ids.includes(option)}
@@ -1771,32 +1879,24 @@ export default function SchoolStudentsPage() {
                   ))}
                 </div>
               </div>
-              <label className="flex items-center gap-3 rounded-2xl bg-slate-50 px-4 py-3 text-sm font-black text-slate-600">
+              <label className="flex items-center gap-3 rounded-card bg-slate-50 px-4 py-3 text-sm font-bold text-slate-600">
                 <input type="checkbox" checked={form.trial_continued} onChange={e => setForm(prev => ({ ...prev, trial_continued: e.target.checked }))} className="h-5 w-5 accent-emerald-600" />
                 継続通塾
               </label>
-              <label className="flex items-center gap-3 rounded-2xl bg-slate-50 px-4 py-3 text-sm font-black text-slate-600">
+              <label className="flex items-center gap-3 rounded-card bg-slate-50 px-4 py-3 text-sm font-bold text-slate-600">
                 <input type="checkbox" checked={form.camera_off_requested} onChange={e => setForm(prev => ({ ...prev, camera_off_requested: e.target.checked }))} className="h-5 w-5 accent-indigo-600" />
                 カメラオフ希望
               </label>
-              <label className="flex items-center gap-3 rounded-2xl bg-slate-50 px-4 py-3 text-sm font-black text-slate-600">
+              <label className="flex items-center gap-3 rounded-card bg-slate-50 px-4 py-3 text-sm font-bold text-slate-600">
                 <input type="checkbox" checked={form.absence_call_not_required} onChange={e => setForm(prev => ({ ...prev, absence_call_not_required: e.target.checked }))} className="h-5 w-5 accent-rose-600" />
                 欠席電話不要
               </label>
-              <label className="flex items-center gap-3 rounded-2xl bg-slate-50 px-4 py-3 text-sm font-black text-slate-600">
+              <label className="flex items-center gap-3 rounded-card bg-slate-50 px-4 py-3 text-sm font-bold text-slate-600">
                 <input type="checkbox" checked={form.summer_only} onChange={e => setForm(prev => ({ ...prev, summer_only: e.target.checked }))} className="h-5 w-5 accent-sky-600" />
                 夏期講習のみ受講生
               </label>
             </div>
-            <div className="flex justify-end gap-3 border-t border-slate-100 bg-slate-50 p-5">
-              <button onClick={() => setModalOpen(false)} className="rounded-2xl px-5 py-3 text-sm font-black text-slate-500 hover:bg-slate-200">キャンセル</button>
-              <button onClick={createStudent} disabled={saving} className="flex items-center gap-2 rounded-2xl bg-slate-900 px-5 py-3 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-60">
-                {saving ? <Loader2 className="animate-spin" size={18} /> : <Plus size={18} />} 登録する
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      </Modal>
     </div>
     </>
   );
@@ -1805,8 +1905,8 @@ export default function SchoolStudentsPage() {
 function Field({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
   return (
     <label>
-      <span className="mb-2 block text-xs font-black text-slate-500">{label}</span>
-      <input value={value} onChange={e => onChange(e.target.value)} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100" />
+      <span className="mb-2 block text-xs font-bold text-slate-500">{label}</span>
+      <input value={value} onChange={e => onChange(e.target.value)} className="w-full rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-accent/30" />
     </label>
   );
 }
@@ -1814,8 +1914,8 @@ function Field({ label, value, onChange }: { label: string; value: string; onCha
 function MonthField({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
   return (
     <label>
-      <span className="mb-2 block text-xs font-black text-slate-500">{label}</span>
-      <input type="month" value={value} onChange={e => onChange(e.target.value)} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100" />
+      <span className="mb-2 block text-xs font-bold text-slate-500">{label}</span>
+      <input type="month" value={value} onChange={e => onChange(e.target.value)} className="w-full rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-accent/30" />
     </label>
   );
 }
@@ -1823,8 +1923,8 @@ function MonthField({ label, value, onChange }: { label: string; value: string; 
 function SelectField({ label, value, options, optionLabels, onChange }: { label: string; value: string; options: string[]; optionLabels?: Record<string, string>; onChange: (value: string) => void }) {
   return (
     <label>
-      <span className="mb-2 block text-xs font-black text-slate-500">{label}</span>
-      <select value={value} onChange={e => onChange(e.target.value)} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100">
+      <span className="mb-2 block text-xs font-bold text-slate-500">{label}</span>
+      <select value={value} onChange={e => onChange(e.target.value)} className="w-full rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-accent/30">
         {options.map(option => <option key={option || 'none'} value={option}>{optionLabels?.[option] || option || '未設定'}</option>)}
       </select>
     </label>
@@ -1836,6 +1936,7 @@ function AttendanceOverview({ students, showAll, onHistoryChange, onSaved }: { s
   const [followUpStatus, setFollowUpStatus] = useState('contacted');
   const [followUpNote, setFollowUpNote] = useState('');
   const [followUpSaving, setFollowUpSaving] = useState(false);
+  const toast = useToast();
   const attendanceScrollRef = useRef<HTMLDivElement | null>(null);
   const weeks = useMemo(() => (
     [...(students.find(student => Array.isArray(student.weekly_participation))?.weekly_participation || [])].reverse()
@@ -1854,7 +1955,7 @@ function AttendanceOverview({ students, showAll, onHistoryChange, onSaved }: { s
   }).join('・');
   const followUpLabel = (status: string) => status === 'resolved' ? '対応完了' : status === 'monitoring' ? '継続確認中' : '声掛け済み';
   const saveFollowUp = async () => {
-    if (!target || !followUpNote.trim()) return alert('対応内容を入力してください');
+    if (!target || !followUpNote.trim()) return toast.error('対応内容を入力してください');
     setFollowUpSaving(true);
     try {
       const token = await auth.currentUser?.getIdToken();
@@ -1877,7 +1978,7 @@ function AttendanceOverview({ students, showAll, onHistoryChange, onSaved }: { s
       setTarget(null);
       setFollowUpNote('');
     } catch (error: any) {
-      alert(`対応記録の保存に失敗しました: ${error.message || error}`);
+      toast.error(`対応記録の保存に失敗しました: ${error.message || error}`);
     } finally {
       setFollowUpSaving(false);
     }
@@ -1885,42 +1986,48 @@ function AttendanceOverview({ students, showAll, onHistoryChange, onSaved }: { s
   return (
     <div className="space-y-4">
       <div className="grid gap-3 md:grid-cols-3">
-        <div className="rounded-2xl border-2 border-indigo-200 bg-indigo-50 p-4"><p className="text-xs font-black text-indigo-600">今週の出席 {currentWeek?.label || ''}</p><p className="mt-1 text-2xl font-black text-indigo-900">{attendedThisWeek} / {students.length}名</p><p className="mt-1 text-[11px] font-bold text-indigo-600">月〜日の間に1回以上。2回以上の参加も表示します</p></div>
-        <div className={`rounded-2xl p-4 ${warningCount ? 'bg-rose-50' : 'bg-emerald-50'}`}><p className={`text-xs font-black ${warningCount ? 'text-rose-500' : 'text-emerald-500'}`}>2週以上連続未参加</p><p className={`mt-1 text-2xl font-black ${warningCount ? 'text-rose-800' : 'text-emerald-800'}`}>{warningCount}名</p></div>
-        <div className="rounded-2xl bg-slate-100 p-4"><p className="text-xs font-black text-slate-500">表示期間</p><p className="mt-1 font-black text-slate-800">{weeks.length ? `${weeks[weeks.length - 1].label} 〜 ${weeks[0].label}` : '-'}</p><button type="button" onClick={() => onHistoryChange(!showAll)} className="mt-3 rounded-xl bg-white px-3 py-2 text-xs font-black text-indigo-700 ring-1 ring-slate-200 hover:bg-indigo-50">{showAll ? '直近9週間に戻す' : '全期間の出席を見る'}</button></div>
+        <div className="rounded-card border-2 border-accent/30 bg-accent-soft p-4"><p className="text-xs font-bold text-accent">今週の出席 {currentWeek?.label || ''}</p><p className="mt-1 text-2xl font-black text-fg">{attendedThisWeek} / {students.length}名</p><p className="mt-1 text-xs font-bold text-accent">月〜日の間に1回以上。2回以上の参加も表示します</p></div>
+        <div className={`rounded-card p-4 ${warningCount ? 'bg-rose-50' : 'bg-emerald-50'}`}><p className={`text-xs font-bold ${warningCount ? 'text-rose-500' : 'text-emerald-500'}`}>2週以上連続未参加</p><p className={`mt-1 text-2xl font-black ${warningCount ? 'text-rose-800' : 'text-emerald-800'}`}>{warningCount}名</p></div>
+        <div className="rounded-card bg-slate-100 p-4"><p className="text-xs font-bold text-slate-500">表示期間</p><p className="mt-1 font-bold text-slate-800">{weeks.length ? `${weeks[weeks.length - 1].label} 〜 ${weeks[0].label}` : '-'}</p><button type="button" onClick={() => onHistoryChange(!showAll)} className="mt-3 rounded-btn bg-white px-3 py-2 text-xs font-bold text-accent ring-1 ring-slate-200 hover:bg-accent-soft">{showAll ? '直近9週間に戻す' : '全期間の出席を見る'}</button></div>
       </div>
-      <div className="rounded-2xl border border-slate-200 bg-slate-50/50">
-        <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-3 py-2 text-[11px] font-bold text-slate-500">
+      <div className="rounded-card border border-slate-200 bg-slate-50/50">
+        <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-3 py-2 text-xs font-bold text-slate-500">
           <span>科目数が多い場合は「科目別の詳細」を押すと確認できます</span>
           <div className="flex shrink-0 items-center gap-1">
-            <span className="hidden text-indigo-600 sm:inline">横にスライド</span>
-            <button type="button" aria-label="出席表を左へスクロール" onClick={() => attendanceScrollRef.current?.scrollBy({ left: -570, behavior: 'smooth' })} className="rounded-lg bg-white px-2.5 py-1.5 font-black text-indigo-700 ring-1 ring-slate-200 hover:bg-indigo-50">← 前へ</button>
-            <button type="button" aria-label="出席表を右へスクロール" onClick={() => attendanceScrollRef.current?.scrollBy({ left: 570, behavior: 'smooth' })} className="rounded-lg bg-white px-2.5 py-1.5 font-black text-indigo-700 ring-1 ring-slate-200 hover:bg-indigo-50">次へ →</button>
+            <span className="hidden text-accent sm:inline">横にスライド</span>
+            <button type="button" aria-label="出席表を左へスクロール" onClick={() => attendanceScrollRef.current?.scrollBy({ left: -570, behavior: 'smooth' })} className="rounded-btn bg-white px-2.5 py-1.5 font-bold text-accent ring-1 ring-slate-200 hover:bg-accent-soft">← 前へ</button>
+            <button type="button" aria-label="出席表を右へスクロール" onClick={() => attendanceScrollRef.current?.scrollBy({ left: 570, behavior: 'smooth' })} className="rounded-btn bg-white px-2.5 py-1.5 font-bold text-accent ring-1 ring-slate-200 hover:bg-accent-soft">次へ →</button>
           </div>
         </div>
         <div ref={attendanceScrollRef} className="max-h-[72vh] overflow-auto overscroll-contain [scrollbar-gutter:stable_both-edges] [touch-action:pan-x_pan-y]">
         <table className="table-fixed text-left text-xs" style={{ width: `max(100%, ${attendanceTableWidth}px)` }}>
           <colgroup><col className="w-[210px]" /><col className="w-[190px]" />{weeks.map(week => <col key={week.key} className="w-[190px]" />)}</colgroup>
-          <thead className="sticky top-0 z-20 bg-white shadow-sm"><tr className="border-b border-slate-100 font-black text-slate-400"><th className="sticky left-0 z-30 w-[210px] bg-white px-4 py-3">生徒</th><th className="w-[190px] px-3 py-3">警告・対応</th>{weeks.map(week => <th key={week.key} className={`w-[190px] px-3 py-3 ${week.is_current ? 'bg-indigo-50 text-indigo-600' : ''}`}><span className="block">{week.label}</span>{week.is_current && <span className="text-[10px]">今週</span>}</th>)}</tr></thead>
+          <thead className="sticky top-0 z-20 bg-white shadow-sm"><tr className="border-b border-slate-100 font-bold text-slate-400"><th className="sticky left-0 z-30 w-[210px] bg-white px-4 py-3">生徒</th><th className="w-[190px] px-3 py-3">警告・対応</th>{weeks.map(week => <th key={week.key} className={`w-[190px] px-3 py-3 ${week.is_current ? 'bg-accent-soft text-accent' : ''}`}><span className="block">{week.label}</span>{week.is_current && <span className="text-xs">今週</span>}</th>)}</tr></thead>
           <tbody className="divide-y divide-slate-50">{sortedStudents.map(student => {
             const latestFollowUp = student.attendance_follow_ups?.[0];
             return <tr key={student.id} className={student.attendance_warning ? 'bg-rose-50/40' : 'hover:bg-slate-50'}>
-              <td className={`sticky left-0 z-10 w-[210px] max-w-[210px] overflow-hidden px-4 py-3 align-top ${student.attendance_warning ? 'bg-rose-50' : 'bg-white'}`}><p className="truncate font-black text-slate-800" title={student.student_name}>{student.student_name}</p><p className="truncate text-[10px] font-bold text-slate-400" title={`${student.grade || '-'} / ${student.current_course_label || '今期未登録'}`}>{student.grade || '-'} / {student.current_course_label || '今期未登録'}</p></td>
-              <td className="w-[190px] max-w-[190px] overflow-hidden px-3 py-3 align-top">{student.attendance_warning ? <div className="space-y-2"><span className="inline-flex items-center gap-1 rounded-full bg-rose-600 px-2 py-1 font-black text-white"><AlertTriangle size={12} />{student.consecutive_missed_weeks}週連続</span><button onClick={() => { setTarget(student); setFollowUpStatus('contacted'); setFollowUpNote(''); }} className="block rounded-lg bg-slate-900 px-2.5 py-1.5 font-black text-white"><MessageSquareText size={12} className="mr-1 inline" />対応を記録</button></div> : <span className="font-black text-emerald-600">正常</span>}{latestFollowUp && <div className="mt-2 max-w-[166px] rounded-lg bg-white p-2 ring-1 ring-slate-200"><p className="font-black text-slate-700">{followUpLabel(latestFollowUp.status)}</p><p className="mt-1 line-clamp-2 text-[10px] font-bold text-slate-500">{latestFollowUp.note}</p></div>}</td>
-              {[...(student.weekly_participation || [])].reverse().map((week: any) => <td key={week.key} className={`w-[190px] max-w-[190px] overflow-hidden px-3 py-3 align-top ${week.attended ? 'bg-emerald-50/60' : week.is_current ? 'bg-indigo-50/50' : week.expected ? 'bg-rose-50/50' : 'bg-slate-50'}`}><AttendanceWeekSummary week={week} formatDates={formatDates} /></td>)}
+              <td className={`sticky left-0 z-10 w-[210px] max-w-[210px] overflow-hidden px-4 py-3 align-top ${student.attendance_warning ? 'bg-rose-50' : 'bg-white'}`}><p className="truncate font-bold text-slate-800" title={student.student_name}>{student.student_name}</p><p className="truncate text-xs font-bold text-slate-400" title={`${student.grade || '-'} / ${student.current_course_label || '今期未登録'}`}>{student.grade || '-'} / {student.current_course_label || '今期未登録'}</p></td>
+              <td className="w-[190px] max-w-[190px] overflow-hidden px-3 py-3 align-top">{student.attendance_warning ? <div className="space-y-2"><span className="inline-flex items-center gap-1 rounded-full bg-rose-600 px-2 py-1 font-bold text-white"><AlertTriangle size={12} />{student.consecutive_missed_weeks}週連続</span><button onClick={() => { setTarget(student); setFollowUpStatus('contacted'); setFollowUpNote(''); }} className="block rounded-btn bg-accent px-2.5 py-1.5 font-bold text-accent-ink hover:bg-accent-hover"><MessageSquareText size={12} className="mr-1 inline" />対応を記録</button></div> : <span className="font-bold text-emerald-600">正常</span>}{latestFollowUp && <div className="mt-2 max-w-[166px] rounded-btn bg-white p-2 ring-1 ring-slate-200"><p className="font-bold text-slate-700">{followUpLabel(latestFollowUp.status)}</p><p className="mt-1 line-clamp-2 text-xs font-bold text-slate-500">{latestFollowUp.note}</p></div>}</td>
+              {[...(student.weekly_participation || [])].reverse().map((week: any) => <td key={week.key} className={`w-[190px] max-w-[190px] overflow-hidden px-3 py-3 align-top ${week.attended ? 'bg-emerald-50/60' : week.is_current ? 'bg-accent-soft/50' : week.expected ? 'bg-rose-50/50' : 'bg-slate-50'}`}><AttendanceWeekSummary week={week} formatDates={formatDates} /></td>)}
             </tr>;
           })}</tbody>
         </table>
         </div>
       </div>
-      {target && <div className="fixed inset-0 z-[250] flex items-center justify-center bg-slate-950/60 p-4" onMouseDown={event => { if (event.currentTarget === event.target) setTarget(null); }}><div role="dialog" aria-modal="true" aria-labelledby="attendance-follow-up-title" className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl"><div className="flex items-start justify-between gap-4"><div><p className="text-xs font-black text-rose-500">未参加フォロー</p><h3 id="attendance-follow-up-title" className="mt-1 text-xl font-black text-slate-900">{target.student_name}</h3><p className="mt-1 text-xs font-bold text-slate-500">{target.consecutive_missed_weeks}週連続で未参加</p></div><button type="button" aria-label="閉じる" onClick={() => setTarget(null)} className="rounded-full bg-slate-100 p-2 text-slate-500"><X size={18} /></button></div><label className="mt-5 block text-xs font-black text-slate-500">対応状況<select value={followUpStatus} onChange={event => setFollowUpStatus(event.target.value)} className="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-black"><option value="contacted">声掛け済み</option><option value="monitoring">継続確認中</option><option value="resolved">対応完了</option></select></label><label className="mt-4 block text-xs font-black text-slate-500">対応内容<textarea value={followUpNote} onChange={event => setFollowUpNote(event.target.value)} placeholder="例：保護者へ電話。次週から参加予定と確認。" className="mt-2 min-h-[120px] w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100" /></label><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => setTarget(null)} className="rounded-xl px-4 py-2.5 text-sm font-black text-slate-500">キャンセル</button><button type="button" onClick={saveFollowUp} disabled={followUpSaving} className="rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-black text-white disabled:opacity-50">{followUpSaving ? '保存中...' : '対応を記録'}</button></div></div></div>}
+      <Modal closeOnBackdrop={false}
+        open={Boolean(target)}
+        onClose={() => setTarget(null)}
+        title={`未参加フォロー：${target?.student_name || ''}`}
+        description={target ? `${target.consecutive_missed_weeks}週連続で未参加` : undefined}
+        footer={<><Button variant="ghost" onClick={() => setTarget(null)}>キャンセル</Button><Button onClick={saveFollowUp} loading={followUpSaving}>{followUpSaving ? '保存中...' : '対応を記録'}</Button></>}
+      ><label className="block text-xs font-bold text-slate-500">対応状況<select value={followUpStatus} onChange={event => setFollowUpStatus(event.target.value)} className="mt-2 w-full rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold"><option value="contacted">声掛け済み</option><option value="monitoring">継続確認中</option><option value="resolved">対応完了</option></select></label><label className="mt-4 block text-xs font-bold text-slate-500">対応内容<textarea value={followUpNote} onChange={event => setFollowUpNote(event.target.value)} placeholder="例：保護者へ電話。次週から参加予定と確認。" className="mt-2 min-h-[120px] w-full rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-accent/30" /></label></Modal>
     </div>
   );
 }
 
 function AttendanceWeekSummary({ week, formatDates }: { week: any; formatDates: (dates: string[]) => string }) {
   if (!week.attended) {
-    return <span className={`font-black ${week.is_current ? 'text-indigo-400' : week.expected ? 'text-rose-400' : 'text-slate-300'}`}>{week.is_current ? '今週未参加' : week.expected ? '未参加' : '対象外'}</span>;
+    return <span className={`font-bold ${week.is_current ? 'text-accent/70' : week.expected ? 'text-rose-400' : 'text-slate-300'}`}>{week.is_current ? '今週未参加' : week.expected ? '未参加' : '対象外'}</span>;
   }
 
   const subjects = Array.isArray(week.subjects) ? week.subjects : [];
@@ -1929,16 +2036,16 @@ function AttendanceWeekSummary({ week, formatDates }: { week: any; formatDates: 
 
   return (
     <div className="w-[166px]">
-      <span className="inline-flex max-w-full items-center gap-1 rounded-md bg-emerald-600 px-2 py-1 font-black text-white" title={subjects.map((item: any) => item.subject).join(' / ')}>
+      <span className="inline-flex max-w-full items-center gap-1 rounded-md bg-emerald-600 px-2 py-1 font-bold text-white" title={subjects.map((item: any) => item.subject).join(' / ')}>
         <CheckCircle2 size={12} className="shrink-0" />
         <span className="truncate">{subjectLabel}</span>
       </span>
       {dates.length > 0 && <p className="mt-1 truncate font-bold text-emerald-700" title={formatDates(dates)}>{formatDates(dates)}</p>}
       {subjects.length > 1 && (
         <details className="group mt-1.5">
-          <summary className="cursor-pointer select-none text-[10px] font-black text-emerald-700 hover:text-emerald-900">科目別の詳細</summary>
-          <div className="mt-2 space-y-1.5 rounded-lg bg-white p-2 ring-1 ring-emerald-100">
-            {subjects.map((item: any, index: number) => <div key={`${item.subject || 'subject'}-${index}`}><p className="break-words font-black text-slate-700">{item.subject || '科目未設定'}</p><p className="font-bold text-emerald-700">{formatDates(Array.isArray(item.dates) ? item.dates : [])}</p></div>)}
+          <summary className="cursor-pointer select-none text-xs font-bold text-emerald-700 hover:text-emerald-900">科目別の詳細</summary>
+          <div className="mt-2 space-y-1.5 rounded-btn bg-white p-2 ring-1 ring-emerald-100">
+            {subjects.map((item: any, index: number) => <div key={`${item.subject || 'subject'}-${index}`}><p className="break-words font-bold text-slate-700">{item.subject || '科目未設定'}</p><p className="font-bold text-emerald-700">{formatDates(Array.isArray(item.dates) ? item.dates : [])}</p></div>)}
           </div>
         </details>
       )}
@@ -1950,8 +2057,8 @@ function CourseRegistrationOverview({ students }: { students: any[] }) {
   return (
     <div className="overflow-x-auto [scrollbar-gutter:stable]">
       <table className="w-full min-w-[1080px] text-left text-xs">
-        <thead><tr className="border-b border-slate-100 font-black text-slate-400"><th className="px-4 py-3">生徒</th><th className="min-w-[300px] px-4 py-3">通常講座</th><th className="px-4 py-3">通常登録期</th><th className="min-w-[300px] px-4 py-3">対策講座</th><th className="px-4 py-3">対策受付期</th><th className="px-4 py-3">更新日</th></tr></thead>
-        <tbody className="divide-y divide-slate-50">{students.map(student => { const prepLabels = student.selected_test_prep_course_labels?.length ? student.selected_test_prep_course_labels : student.selected_test_prep_course_ids || []; return <tr key={student.id} className="align-top hover:bg-slate-50"><td className="px-4 py-4"><p className="font-black text-slate-800">{student.student_name}</p><p className="text-[10px] font-bold text-slate-400">{student.grade || '-'}</p></td><td className="px-4 py-4">{student.selected_course_labels?.length ? <div className="flex flex-wrap gap-1.5">{student.selected_course_labels.map((label: string) => <span key={label} className="inline-block rounded-xl bg-emerald-50 px-3 py-2 font-black text-emerald-700 ring-1 ring-emerald-100">{label}</span>)}</div> : <span className="font-bold text-slate-300">今期未登録</span>}</td><td className="px-4 py-4 font-black text-slate-600">{[student.course_registration_year ? `${student.course_registration_year}年度` : '', student.course_registration_term_label || student.course_registration_term || ''].filter(Boolean).join(' / ') || '-'}</td><td className="px-4 py-4">{prepLabels.length ? <div className="flex flex-wrap gap-1.5">{prepLabels.map((label: string) => <span key={label} className="inline-block rounded-xl bg-amber-50 px-3 py-2 font-black text-amber-800 ring-1 ring-amber-100">{label}</span>)}</div> : <span className="font-bold text-slate-300">未登録</span>}</td><td className="px-4 py-4 font-black text-slate-600">{[student.test_prep_course_registration_year ? `${student.test_prep_course_registration_year}年度` : '', student.test_prep_course_registration_term || ''].filter(Boolean).join(' / ') || '-'}</td><td className="px-4 py-4 font-bold text-slate-400"><p>通常 {String(student.course_registration_updated_at || '').slice(0, 10) || '-'}</p><p className="mt-1 text-amber-700">対策 {String(student.test_prep_course_registration_updated_at || '').slice(0, 10) || '-'}</p></td></tr>; })}</tbody>
+        <thead><tr className="border-b border-slate-100 font-bold text-slate-400"><th className="px-4 py-3">生徒</th><th className="min-w-[300px] px-4 py-3">通常講座</th><th className="px-4 py-3">通常登録期</th><th className="min-w-[300px] px-4 py-3">対策講座</th><th className="px-4 py-3">対策受付期</th><th className="px-4 py-3">更新日</th></tr></thead>
+        <tbody className="divide-y divide-slate-50">{students.map(student => { const prepLabels = student.selected_test_prep_course_labels?.length ? student.selected_test_prep_course_labels : student.selected_test_prep_course_ids || []; return <tr key={student.id} className="align-top hover:bg-slate-50"><td className="px-4 py-4"><p className="font-bold text-slate-800">{student.student_name}</p><p className="text-xs font-bold text-slate-400">{student.grade || '-'}</p></td><td className="px-4 py-4">{student.selected_course_labels?.length ? <div className="flex flex-wrap gap-1.5">{student.selected_course_labels.map((label: string) => <span key={label} className="inline-block rounded-btn bg-emerald-50 px-3 py-2 font-bold text-emerald-700 ring-1 ring-emerald-100">{label}</span>)}</div> : <span className="font-bold text-slate-300">今期未登録</span>}</td><td className="px-4 py-4 font-bold text-slate-600">{[student.course_registration_year ? `${student.course_registration_year}年度` : '', student.course_registration_term_label || student.course_registration_term || ''].filter(Boolean).join(' / ') || '-'}</td><td className="px-4 py-4">{prepLabels.length ? <div className="flex flex-wrap gap-1.5">{prepLabels.map((label: string) => <span key={label} className="inline-block rounded-btn bg-amber-50 px-3 py-2 font-bold text-amber-800 ring-1 ring-amber-100">{label}</span>)}</div> : <span className="font-bold text-slate-300">未登録</span>}</td><td className="px-4 py-4 font-bold text-slate-600">{[student.test_prep_course_registration_year ? `${student.test_prep_course_registration_year}年度` : '', student.test_prep_course_registration_term || ''].filter(Boolean).join(' / ') || '-'}</td><td className="px-4 py-4 font-bold text-slate-400"><p>通常 {String(student.course_registration_updated_at || '').slice(0, 10) || '-'}</p><p className="mt-1 text-amber-700">対策 {String(student.test_prep_course_registration_updated_at || '').slice(0, 10) || '-'}</p></td></tr>; })}</tbody>
       </table>
     </div>
   );
@@ -1960,7 +2067,7 @@ function CourseRegistrationOverview({ students }: { students: any[] }) {
 function FirstLoginBadge({ label, value }: { label: string; value: unknown }) {
   const completed = value === false;
   return (
-    <span className={`w-fit rounded-full px-2.5 py-1 text-[10px] font-black ${completed ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
+    <span className={`w-fit rounded-full px-2.5 py-1 text-xs font-bold ${completed ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
       {label}: {completed ? '済' : '未'}
     </span>
   );
@@ -1979,7 +2086,7 @@ function CourseSummaryCell({ student }: { student: any }) {
 
   if (labels.length === 0 && ids.length === 0) {
     return (
-      <div className="w-[260px] rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-3 py-2 text-xs font-black text-slate-400">
+      <div className="w-[260px] rounded-card border border-dashed border-slate-200 bg-slate-50 px-3 py-2 text-xs font-bold text-slate-400">
         未登録
       </div>
     );
@@ -1990,16 +2097,16 @@ function CourseSummaryCell({ student }: { student: any }) {
       <div className="flex items-center gap-1.5">
         {visibleLabels.length > 0 ? (
           <>
-            <div className="flex flex-wrap gap-1" title={labels.join(' / ')}>{visibleLabels.map(label => <span key={label} className="max-w-[260px] truncate rounded-xl bg-emerald-50 px-2.5 py-1 text-[11px] font-black text-emerald-700 ring-1 ring-emerald-100">{label}</span>)}</div>
+            <div className="flex flex-wrap gap-1" title={labels.join(' / ')}>{visibleLabels.map(label => <span key={label} className="max-w-[260px] truncate rounded-btn bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-700 ring-1 ring-emerald-100">{label}</span>)}</div>
           </>
         ) : (
-          <span className="rounded-xl bg-indigo-50 px-2.5 py-1 text-[11px] font-black text-indigo-700 ring-1 ring-indigo-100" title={ids[0]}>
+          <span className="rounded-btn bg-accent-soft px-2.5 py-1 text-xs font-bold text-accent ring-1 ring-accent/20" title={ids[0]}>
             登録済み
           </span>
         )}
       </div>
       {(year || term) && (
-        <p className="text-[10px] font-black text-slate-400">{[year, term].filter(Boolean).join(' / ')}</p>
+        <p className="text-xs font-bold text-slate-400">{[year, term].filter(Boolean).join(' / ')}</p>
       )}
     </div>
   );

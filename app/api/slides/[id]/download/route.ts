@@ -1,6 +1,6 @@
 import { NextRequest } from 'next/server';
 import { adminBucket, adminDb } from '@/lib/firebase-admin';
-import { getServerUser, jsonError } from '@/lib/server-auth';
+import { getServerUser, jsonError, requireScienceSocialStaff } from '@/lib/server-auth';
 
 export const runtime = 'nodejs';
 
@@ -8,7 +8,7 @@ export async function GET(request: NextRequest, context: { params: Promise<{ id:
   try {
     const { id } = await context.params;
     const user = await getServerUser(request);
-    if (!['teacher', 'admin', 'master'].includes(user.role)) throw new Error('forbidden');
+    requireScienceSocialStaff(user);
     if (!id || id.length > 200 || id.includes('/')) {
       return Response.json({ ok: false, error: 'invalid-id' }, { status: 400 });
     }

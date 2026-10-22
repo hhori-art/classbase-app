@@ -3,7 +3,9 @@
 import { useState, useEffect } from 'react';
 import { db } from '@/lib/firebase';
 import { collection, query, where, getDocs, orderBy } from 'firebase/firestore';
-import { X, Calendar as CalendarIcon, MapPin, Loader2, ChevronLeft, ChevronRight, Plus, BookOpen, Download, User } from 'lucide-react';
+import { MapPin, ChevronLeft, ChevronRight, Plus, BookOpen, Download, User } from 'lucide-react';
+import { Button, EmptyState, ErrorState, IconButton, ListSkeleton, Modal, useToast } from '@/app/components/ui';
+import { formatDate } from '@/lib/format';
 
 type Props = {
   isOpen: boolean;
@@ -56,6 +58,8 @@ export default function FutureClassesModal({ isOpen, onClose, profile }: Props) 
   const [viewDate, setViewDate] = useState(new Date()); 
   const [selectedDateStr, setSelectedDateStr] = useState<string | null>(null); 
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const toast = useToast();
 
   useEffect(() => {
     if (isOpen && profile) {
@@ -75,6 +79,7 @@ export default function FutureClassesModal({ isOpen, onClose, profile }: Props) 
 
   const fetchMonthClasses = async () => {
     setLoading(true);
+    setLoadError(false);
     try {
       const userId = profile.id || profile.uid;
       const userName = profile.student_name || profile.name || '';
@@ -136,6 +141,7 @@ export default function FutureClassesModal({ isOpen, onClose, profile }: Props) 
       setAllEvents(events);
     } catch (e) {
       console.error(e);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -155,7 +161,7 @@ export default function FutureClassesModal({ isOpen, onClose, profile }: Props) 
 
   const handleExportMonth = () => {
     // 省略せずに記述
-    if (allEvents.length === 0) return alert('この月の予定はありません');
+    if (allEvents.length === 0) { toast.info('この月の予定はありません'); return; }
 
     let icsContent = "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//Class Schedule//EN\nCALSCALE:GREGORIAN\nMETHOD:PUBLISH\n";
     allEvents.forEach(evt => {
@@ -208,41 +214,35 @@ export default function FutureClassesModal({ isOpen, onClose, profile }: Props) 
   const selectedDayEvents = allEvents.filter(e => e.dateStr === selectedDateStr);
   const todayJstStr = getJSTDateString(); // レンダリング中の今日判定用
 
-  if (!isOpen) return null;
-
   return (
-    <div className="fixed inset-0 z-[300] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-200">
-      <div className="bg-white w-full max-w-4xl h-[90vh] rounded-3xl shadow-2xl overflow-hidden flex flex-col md:flex-row">
-        
+    <Modal open={isOpen} onClose={onClose} title="授業スケジュール" size="lg">
+      <div className="flex flex-col gap-4 md:flex-row">
         {/* 左側: カレンダーエリア */}
-        <div className="flex-1 bg-slate-50 p-4 flex flex-col border-r border-slate-200">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-xl font-black text-slate-700 flex items-center gap-2">
-              <CalendarIcon className="text-indigo-600" /> 授業スケジュール
-            </h2>
-            <div className="flex gap-2">
-              <button 
-                onClick={handleExportMonth}
-                className="p-2 bg-white text-indigo-600 border border-indigo-100 hover:bg-indigo-50 rounded-lg transition-colors shadow-sm text-xs font-bold flex items-center gap-1"
-                title="表示月をまとめて書き出し"
-              >
-                <Download size={16}/> <span className="hidden sm:inline">一括出力</span>
-              </button>
-              <div className="flex items-center bg-white rounded-lg shadow-sm border border-slate-200 p-1">
-                <button onClick={() => changeMonth(-1)} className="p-1 hover:bg-slate-100 rounded-md transition"><ChevronLeft size={20} className="text-slate-500"/></button>
-                <span className="px-3 font-bold text-slate-700 text-sm">{viewDate.getFullYear()}年 {viewDate.getMonth() + 1}月</span>
-                <button onClick={() => changeMonth(1)} className="p-1 hover:bg-slate-100 rounded-md transition"><ChevronRight size={20} className="text-slate-500"/></button>
-              </div>
+        <div className="flex flex-1 flex-col">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center rounded-btn border border-line bg-surface">
+              <IconButton label="前の月" size="sm" onClick={() => changeMonth(-1)}><ChevronLeft size={20} aria-hidden /></IconButton>
+              <span className="px-2 text-sm font-bold text-fg">{viewDate.getFullYear()}年 {viewDate.getMonth() + 1}月</span>
+              <IconButton label="次の月" size="sm" onClick={() => changeMonth(1)}><ChevronRight size={20} aria-hidden /></IconButton>
             </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleExportMonth}
+              icon={<Download size={16} aria-hidden />}
+              title="表示月をまとめて書き出し"
+            >
+              一括出力
+            </Button>
           </div>
 
-          <div className="grid grid-cols-7 mb-2 text-center">
+          <div className="mb-1 grid grid-cols-7 text-center">
             {['日', '月', '火', '水', '木', '金', '土'].map((d, i) => (
-              <div key={i} className={`text-xs font-bold ${i === 0 ? 'text-red-400' : i === 6 ? 'text-blue-400' : 'text-slate-400'}`}>{d}</div>
+              <div key={i} className={`text-xs font-bold ${i === 0 ? 'text-rose-500' : i === 6 ? 'text-sky-500' : 'text-fg-muted'}`}>{d}</div>
             ))}
           </div>
 
-          <div className="grid grid-cols-7 gap-1 md:gap-2 flex-1 auto-rows-fr">
+          <div className="grid grid-cols-7 gap-1">
             {calendarDays.map((d, i) => {
               if (!d.isCurrentMonth) return <div key={i} className="bg-transparent" />;
               
@@ -253,16 +253,18 @@ export default function FutureClassesModal({ isOpen, onClose, profile }: Props) 
               return (
                 <button
                   key={i}
+                  type="button"
                   onClick={() => setSelectedDateStr(d.dateStr)}
-                  className={`relative rounded-xl p-1 flex flex-col items-center justify-start transition-all border min-h-[50px]
-                    ${isSelected ? 'bg-indigo-600 text-white border-indigo-600 shadow-md transform scale-105 z-10' : 
-                      isToday ? 'bg-white border-indigo-200 shadow-inner' : 'bg-white border-transparent hover:border-indigo-100 hover:bg-white'}
+                  aria-pressed={isSelected}
+                  className={`relative flex min-h-[52px] flex-col items-center justify-start rounded-input border p-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent
+                    ${isSelected ? 'border-accent bg-accent text-accent-ink shadow-sm' : 
+                      isToday ? 'border-accent/40 bg-accent-soft' : 'border-transparent bg-canvas hover:border-accent/30'}
                   `}
                 >
-                  <span className={`text-sm font-bold ${isSelected ? 'text-white' : isToday ? 'text-indigo-600' : 'text-slate-600'}`}>{d.day}</span>
-                  <div className="flex flex-col gap-0.5 mt-1 w-full px-1">
+                  <span className={`text-sm font-bold ${isSelected ? 'text-accent-ink' : isToday ? 'text-accent' : 'text-fg'}`}>{d.day}</span>
+                  <div className="mt-1 flex w-full flex-col gap-0.5 px-1">
                     {dayEvents.map((ev, idx) => (
-                      <div key={idx} className={`h-1.5 rounded-full w-full ${isSelected ? 'bg-white/80' : ev.timeSlot === '1限' ? 'bg-blue-400' : 'bg-orange-400'}`} />
+                      <div key={idx} className={`h-1.5 w-full rounded-full ${isSelected ? 'bg-white/80' : ev.timeSlot === '1限' ? 'bg-sky-400' : 'bg-amber-400'}`} />
                     ))}
                   </div>
                 </button>
@@ -272,31 +274,28 @@ export default function FutureClassesModal({ isOpen, onClose, profile }: Props) 
         </div>
 
         {/* 右側: 詳細エリア */}
-        <div className="w-full md:w-80 bg-white flex flex-col h-1/2 md:h-full border-t md:border-t-0 md:border-l border-slate-200">
-          <div className="p-4 border-b border-slate-100 flex justify-between items-start shrink-0">
-            <div>
-              <div className="text-xs font-bold text-slate-400">SELECTED DATE</div>
-              <div className="text-2xl font-black text-slate-800">{selectedDateStr ? selectedDateStr.replace(/-/g, '/') : '---'}</div>
-            </div>
-            <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-full transition"><X size={20} className="text-slate-400"/></button>
+        <div className="flex w-full flex-col border-t border-line pt-4 md:w-64 md:border-l md:border-t-0 md:pl-4 md:pt-0">
+          <div className="mb-3 shrink-0">
+            <div className="text-xs font-bold text-fg-muted">選択した日</div>
+            <div className="text-xl font-black text-fg">{selectedDateStr ? formatDate(selectedDateStr, { withWeekday: true }) : '---'}</div>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar bg-slate-50/50">
+          <div className="space-y-3">
             {loading ? (
-              <div className="py-10 flex justify-center"><Loader2 className="animate-spin text-indigo-300"/></div>
+              <ListSkeleton rows={2} />
+            ) : loadError ? (
+              <ErrorState title="予定を読み込めませんでした" onRetry={fetchMonthClasses} />
             ) : !selectedDateStr ? (
-              <div className="py-10 text-center text-slate-400 text-sm">日付を選択してください</div>
+              <EmptyState title="日付を選択してください" />
             ) : selectedDayEvents.length === 0 ? (
-              <div className="py-10 text-center text-slate-400 text-sm font-bold bg-white rounded-xl border border-dashed border-slate-200">
-                予定はありません
-              </div>
+              <EmptyState title="予定はありません" />
             ) : (
               selectedDayEvents.map(evt => (
-                <div key={evt.id} className="bg-white p-4 rounded-xl border border-slate-100 shadow-sm hover:shadow-md transition-all group relative overflow-hidden">
-                  <div className={`absolute top-0 left-0 w-1 h-full ${evt.timeSlot === '1限' ? 'bg-blue-500' : 'bg-orange-500'}`} />
+                <div key={evt.id} className="relative overflow-hidden rounded-card border border-line bg-surface p-4 shadow-sm">
+                  <div className={`absolute left-0 top-0 h-full w-1 ${evt.timeSlot === '1限' ? 'bg-sky-500' : 'bg-amber-500'}`} />
                   
-                  <div className="flex justify-between items-start mb-2 pl-2">
-                    <span className={`text-xs font-bold px-2 py-0.5 rounded-md ${evt.timeSlot === '1限' ? 'bg-blue-50 text-blue-600' : 'bg-orange-50 text-orange-600'}`}>
+                  <div className="mb-2 flex items-start justify-between pl-2">
+                    <span className={`rounded-input px-2 py-0.5 text-xs font-bold ${evt.timeSlot === '1限' ? 'bg-sky-50 text-sky-700' : 'bg-amber-50 text-amber-700'}`}>
                       {evt.timeSlot || '時間未定'}
                     </span>
                     
@@ -304,22 +303,22 @@ export default function FutureClassesModal({ isOpen, onClose, profile }: Props) 
                       href={getGoogleCalendarUrl(evt)}
                       target="_blank"
                       rel="noreferrer"
-                      className="flex items-center gap-1 text-[10px] font-bold bg-slate-100 hover:bg-indigo-50 text-slate-500 hover:text-indigo-600 px-2 py-1 rounded-full transition-colors border border-slate-200"
+                      className="flex min-h-9 items-center gap-1 rounded-btn border border-line bg-canvas px-3 text-xs font-bold text-fg-muted transition-colors hover:bg-accent-soft hover:text-accent"
                       title="Googleカレンダーに追加"
                     >
-                      <Plus size={10} /> 追加
+                      <Plus size={14} aria-hidden /> 追加
                     </a>
                   </div>
 
                   <div className="pl-2">
-                    <h3 className="font-bold text-slate-800 text-sm mb-1">{evt.title}</h3>
-                    <div className="text-xs text-slate-500 space-y-1">
-                      <div className="flex items-center gap-1.5"><MapPin size={12} className="opacity-70"/> {evt.location}</div>
-                      <div className="flex items-center gap-1.5"><BookOpen size={12} className="opacity-70"/> {evt.unit || '単元設定なし'}</div>
-                      <div className="flex items-center gap-1.5 text-indigo-500"><User size={12} className="opacity-70"/> {evt.teacherName}</div>
+                    <h3 className="mb-1 text-sm font-bold text-fg">{evt.title}</h3>
+                    <div className="space-y-1 text-xs text-fg-muted">
+                      <div className="flex items-center gap-1.5"><MapPin size={12} className="opacity-70" aria-hidden /> {evt.location}</div>
+                      <div className="flex items-center gap-1.5"><BookOpen size={12} className="opacity-70" aria-hidden /> {evt.unit || '単元設定なし'}</div>
+                      <div className="flex items-center gap-1.5 text-accent"><User size={12} className="opacity-70" aria-hidden /> {evt.teacherName}</div>
                     </div>
                     {evt.description && (
-                      <div className="mt-2 pt-2 border-t border-slate-50 text-[10px] text-slate-400 whitespace-pre-wrap">
+                      <div className="mt-2 whitespace-pre-wrap border-t border-line pt-2 text-xs text-fg-muted">
                         {evt.description}
                       </div>
                     )}
@@ -330,6 +329,6 @@ export default function FutureClassesModal({ isOpen, onClose, profile }: Props) 
           </div>
         </div>
       </div>
-    </div>
+    </Modal>
   );
 }

@@ -10,15 +10,14 @@ import { buildTestPrepRegistrationOptions, canStudentUseTestPrepDefinition, norm
 import { getCourseOptionCourseKey, getCourseOptionStableKey } from '@/lib/course-registration-selection';
 import { issueCourseRegistrationToken } from '@/lib/server/course-registration-token';
 import { canIssueCourseRegistrationGrantForContext } from '@/lib/course-registration-window';
+import { jstSchoolYear } from '@/lib/date-key';
 
 export const runtime = 'nodejs';
 
 const toAsciiDigits = (value: string) => value.replace(/[０-９]/g, char => String.fromCharCode(char.charCodeAt(0) - 0xfee0));
 
-const currentCourseYear = () => {
-  const now = new Date();
-  return now.getMonth() + 1 >= 4 ? now.getFullYear() : now.getFullYear() - 1;
-};
+// 年度は4月はじまり。サーバーのタイムゾーン（UTC）ではなく日本時間で判定する。
+const currentCourseYear = () => jstSchoolYear();
 
 const courseYearDateRange = (year: number) => ({
   start: `${year}-04-01`,
@@ -245,7 +244,14 @@ export async function GET(request: NextRequest) {
       if (user.role === 'student' && requestedStudentId !== user.uid) throw new Error('forbidden');
       if (user.role === 'parent') {
         const linkedStudentIds = Array.isArray(user.profile.student_ids) ? user.profile.student_ids.map(String) : [];
-        if (!linkedStudentIds.includes(requestedStudentId)) throw new Error('forbidden');
+        if (!linkedStudentIds.includes(requestedStudentId)) {
+          // 生徒側の parent_uid だけで紐づいている家庭も、保存API（/api/parent/course-registrations）と同じく許可する。
+          const studentSnap = await adminDb().collection('users').doc(requestedStudentId).get();
+          const linkedStudent = studentSnap.data() || {};
+          if (!studentSnap.exists || String(linkedStudent.role || '') !== 'student' || String(linkedStudent.parent_uid || '').trim() !== user.uid) {
+            throw new Error('forbidden');
+          }
+        }
         registrationStudentId = requestedStudentId;
       }
     }

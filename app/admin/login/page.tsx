@@ -3,10 +3,11 @@
 import { useState } from 'react';
 import { User as FirebaseUser } from 'firebase/auth';
 import { auth } from '@/lib/firebase';
-import { Lock, Loader2, Wrench, ArrowLeft } from 'lucide-react';
+import { Lock, Wrench, ArrowLeft } from 'lucide-react';
 import Link from 'next/link';
 import { loadAuthenticatedProfile } from '@/lib/client-auth-profile';
 import { signInWithNetworkRetry } from '@/lib/client-auth-login';
+import { Button } from '@/app/components/ui';
 
 const normalizeLoginInput = (value: string) =>
   value.trim().normalize('NFKC').replace(/\s+/g, '').toLowerCase();
@@ -119,74 +120,74 @@ export default function AutoFixLoginPage() {
       console.error('Login Error:', error);
       
       if (error.code === 'auth/invalid-credential' || error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password') {
-        setStatus(`❌ ${LOGIN_CREDENTIAL_ERROR_MESSAGE}`);
+        setStatus(`${LOGIN_CREDENTIAL_ERROR_MESSAGE}`);
       } else if (error.code === 'auth/user-disabled') {
-        setStatus('❌ このアカウントは停止中です。管理者に確認してください');
+        setStatus('このアカウントは停止中です。管理者に確認してください');
       } else if (error.code === 'auth/network-request-failed') {
-        setStatus('❌ 認証サーバーへ接続できませんでした。通信環境を確認して、もう一度お試しください。改善しない場合は、校舎名・端末・発生時刻をお知らせください。');
+        setStatus('認証サーバーへ接続できませんでした。通信環境を確認して、もう一度お試しください。改善しない場合は、校舎名・端末・発生時刻をお知らせください。');
       } else if (error.message === 'profile-service-unavailable' || error.name === 'AbortError') {
-        setStatus('❌ 認証は完了しましたが、ユーザー情報の取得に失敗しました。少し待ってから、もう一度お試しください。');
+        setStatus('認証は完了しましたが、ユーザー情報の取得に失敗しました。少し待ってから、もう一度お試しください。');
       } else {
-        setStatus(`❌ エラー: ${error.message || '不明なエラーが発生しました'}`);
+        setStatus(`エラー: ${error.message || '不明なエラーが発生しました'}`);
       }
       setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-100 px-4">
-      <div className="bg-white w-full max-w-md p-8 rounded-2xl shadow-lg border-t-4 border-blue-600">
+    <div data-portal="admin" className="flex min-h-screen items-center justify-center bg-canvas px-4">
+      <div className="w-full max-w-md rounded-card border-t-4 border-accent bg-white p-8 shadow-lg">
         <div className="text-center mb-8">
-          <div className="bg-blue-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
-            <Lock className="text-blue-600" size={32} />
+          <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-accent-soft">
+            <Lock className="text-accent" size={32} aria-hidden />
           </div>
-          <h1 className="text-2xl font-bold text-gray-800">管理者ログイン</h1>
-          <p className="text-xs text-blue-600 font-bold mt-2 bg-blue-50 py-1 px-2 rounded inline-block">
-            <Wrench className="inline w-3 h-3 mr-1"/>
+          <h1 className="text-2xl font-black text-slate-800">管理者ログイン</h1>
+          <p className="mt-2 inline-block rounded-btn bg-accent-soft px-2 py-1 text-xs font-bold text-accent">
+            <Wrench className="mr-1 inline h-3 w-3" aria-hidden />
             校舎管理者・マスター管理者
           </p>
         </div>
 
         <form onSubmit={handleLogin} className="space-y-6">
           <div>
-            <label className="block text-sm font-bold text-gray-700 mb-2">メールアドレス または 初期ID</label>
+            <label htmlFor="admin-login-id" className="mb-2 block text-sm font-bold text-slate-700">メールアドレス または 初期ID</label>
             <input 
+              id="admin-login-id"
               type="text" 
               required
-              className="w-full p-3 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+              autoComplete="username"
+              className="min-h-11 w-full rounded-input border border-line px-3 outline-none focus:border-accent focus:ring-2 focus:ring-accent/30"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
             />
           </div>
           <div>
-            <label className="block text-sm font-bold text-gray-700 mb-2">パスワード</label>
+            <label htmlFor="admin-login-password" className="mb-2 block text-sm font-bold text-slate-700">パスワード</label>
             <input 
+              id="admin-login-password"
               type="password" 
               required
-              className="w-full p-3 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+              autoComplete="current-password"
+              className="min-h-11 w-full rounded-input border border-line px-3 outline-none focus:border-accent focus:ring-2 focus:ring-accent/30"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
             />
           </div>
 
           {status && (
-            <div className="whitespace-pre-line break-words rounded-lg bg-red-100 p-3 text-center text-sm font-bold text-red-700" role="alert">
+            <div className="whitespace-pre-line break-words rounded-btn border border-rose-200 bg-rose-50 p-3 text-center text-sm font-bold text-rose-700" role="alert">
               {status}
             </div>
           )}
 
-          <button 
-            type="submit" 
-            disabled={loading}
-            className="w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 transition-colors shadow-lg shadow-blue-200 flex items-center justify-center gap-2 disabled:opacity-50"
-          >
-            {loading ? <Loader2 className="animate-spin" /> : 'ログイン'}
-          </button>
+          <Button type="submit" size="lg" fullWidth loading={loading}>
+            ログイン
+          </Button>
         </form>
 
-        <div className="mt-6 text-center pt-6 border-t border-gray-100">
-          <Link href="/" className="text-sm text-gray-400 hover:text-gray-600 flex items-center justify-center gap-1 font-bold">
-            <ArrowLeft size={16}/> ログイン画面へ戻る
+        <div className="mt-6 border-t border-slate-100 pt-6 text-center">
+          <Link href="/" className="flex items-center justify-center gap-1 text-sm font-bold text-slate-500 hover:text-slate-700">
+            <ArrowLeft size={16} aria-hidden /> ログイン画面へ戻る
           </Link>
         </div>
       </div>

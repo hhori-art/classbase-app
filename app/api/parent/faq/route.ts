@@ -3,6 +3,7 @@ import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, jsonError } from '@/lib/server-auth';
+import { loadSchoolStaffRecipients, notifyStaff } from '@/lib/server/staff-recipients';
 
 export const runtime = 'nodejs';
 
@@ -46,15 +47,36 @@ const linkedStudents = async (user: any) => {
   }));
 };
 
+/** 保護者からの新規連絡・返信を、マスターと担当校舎の理社講座管理者へアプリ内通知する。失敗しても送信自体は成功扱い。 */
+const notifyStaffOfInquiry = async (inquiryId: string, inquiry: { subject?: string | null; student_name?: string | null; school_id?: string | null; parent_name?: string | null }, text: string, isReply: boolean) => {
+  try {
+    const recipients = await loadSchoolStaffRecipients(inquiry.school_id || null);
+    const who = [inquiry.parent_name || '保護者', inquiry.student_name ? `（${inquiry.student_name}さん）` : ''].join('');
+    await notifyStaff(recipients, {
+      idPrefix: `parent_inquiry_staff_${inquiryId}`,
+      title: isReply ? '保護者から追加の連絡が届きました' : '保護者から新しい連絡が届きました',
+      message: `${who}「${clean(inquiry.subject, 120) || 'お問い合わせ'}」: ${text.slice(0, 120)}`,
+      kind: 'parent_inquiry',
+      masterLink: '/master/parent-inquiries',
+      extra: { inquiry_id: inquiryId },
+    });
+  } catch (error) {
+    console.error('保護者連絡の管理者通知に失敗しました', error);
+  }
+};
+
 const createInquiry = async ({ user, question, source, faq, subject, category, student }: { user: any; question: string; source: string; faq?: string; subject?: string; category?: string; student?: any }) => {
   const db = adminDb();
   const day = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Tokyo' }).format(new Date());
-  const digest = crypto.createHash('sha256').update(`${user.uid}\u0000${day}\u0000${normalize(question)}`).digest('hex');
+  // 同じ日に同じお子さま・件名・内容を二重送信した場合だけ1件にまとめる。
+  const digest = crypto.createHash('sha256').update([user.uid, day, student?.id || '', normalize(clean(subject, 120)), normalize(question)].join('\u0000')).digest('hex');
   const ref = db.collection('parent_inquiries').doc(`parent_inquiry_${digest}`);
+  let created: Record<string, any> | null = null;
   await db.runTransaction(async transaction => {
+    created = null;
     const existing = await transaction.get(ref);
     if (existing.exists) return;
-    transaction.create(ref, {
+    created = {
       parent_id: user.uid,
       parent_name: user.profile.parent_name || user.profile.name || '',
       subject: clean(subject, 120) || 'お問い合わせ',
@@ -74,8 +96,11 @@ const createInquiry = async ({ user, question, source, faq, subject, category, s
       unread_for_parent: false,
       created_at: FieldValue.serverTimestamp(),
       updated_at: FieldValue.serverTimestamp(),
-    });
+    };
+    transaction.create(ref, created);
   });
+  const createdInquiry = created as Record<string, any> | null;
+  if (createdInquiry) await notifyStaffOfInquiry(ref.id, createdInquiry, question, false);
   return ref.id;
 };
 
@@ -87,11 +112,16 @@ export async function GET(request: NextRequest) {
       const students = await linkedStudents(user);
       const snap = await adminDb().collection('parent_inquiries')
         .where('parent_id', '==', user.uid)
-        .orderBy('created_at', 'desc')
-        .limit(20)
+        .orderBy('updated_at', 'desc')
+        .limit(30)
         .get();
       const inquiries = snap.docs
-        .map(doc => ({ id: doc.id, ...doc.data() }))
+        .map(doc => {
+          const data = doc.data() || {};
+          // 教室が開いた時刻（既読表示用）。未読に戻っている（unread_for_admin）ときは出さない。
+          const readAt = data.unread_for_admin === true ? null : data.admin_read_at?.toDate?.()?.toISOString?.() || null;
+          return { id: doc.id, ...data, admin_read_at_iso: readAt };
+        })
         .filter((item: any) => item.parent_id === user.uid);
       return Response.json({ ok: true, inquiries, students });
     }
@@ -117,7 +147,9 @@ export async function POST(request: NextRequest) {
       const inquiryId = clean(body.inquiry_id, 160);
       if (!inquiryId) return Response.json({ ok: false, error: 'inquiry_id is required' }, { status: 400 });
       const ref = adminDb().collection('parent_inquiries').doc(inquiryId);
+      let repliedInquiry: Record<string, any> | null = null;
       await adminDb().runTransaction(async transaction => {
+        repliedInquiry = null;
         const snap = await transaction.get(ref);
         if (!snap.exists || clean(snap.data()?.parent_id, 128) !== user.uid) throw new Error('forbidden');
         if (action === 'mark_read') {
@@ -135,7 +167,10 @@ export async function POST(request: NextRequest) {
           unread_for_parent: false,
           updated_at: FieldValue.serverTimestamp(),
         });
+        repliedInquiry = snap.data() || {};
       });
+      const replied = repliedInquiry as Record<string, any> | null;
+      if (replied) await notifyStaffOfInquiry(inquiryId, replied, question, true);
       return Response.json({ ok: true });
     }
 
@@ -144,19 +179,27 @@ export async function POST(request: NextRequest) {
       const requestedStudentId = clean(body.student_id, 128);
       const student = requestedStudentId ? students.find(item => item.id === requestedStudentId) : students[0];
       if (requestedStudentId && !student) throw new Error('forbidden');
-      const inquiryId = await createInquiry({ user, question, source: 'parent_school_contact', subject: clean(body.subject, 120), category: clean(body.category, 40), student });
-      return Response.json({ ok: true, sent: true, inquiry_id: inquiryId, message: 'サポートセンターへ問い合わせを送信しました。' });
+      // FAQで解決しなかった質問は、保護者が「教室に質問として送る」を押した場合だけ送信される。
+      const fromFaq = body.from_faq === true;
+      const inquiryId = await createInquiry({
+        user,
+        question,
+        source: fromFaq ? 'faq_unanswered' : 'parent_school_contact',
+        subject: clean(body.subject, 120) || (fromFaq ? 'FAQで解決しなかった質問' : ''),
+        category: clean(body.category, 40) || 'other',
+        student,
+      });
+      return Response.json({ ok: true, sent: true, inquiry_id: inquiryId, message: '教室へ連絡を送信しました。' });
     }
 
     const faq = findAnswer(question);
     if (!faq) {
-      const inquiryId = await createInquiry({ user, question, source: 'faq_unanswered', subject: 'FAQで解決しなかった問い合わせ', category: 'other' });
+      // 本人の確認なしに問い合わせを作らない。画面の「教室に質問として送る」で action: 'send' を呼ぶ。
       return Response.json({
         ok: true,
         answered: false,
         needs_support: true,
-        inquiry_id: inquiryId,
-        answer: 'よくある質問から回答を見つけられませんでした。サポートセンターに確認依頼を送信しました。回答をお待ちください。',
+        answer: 'よくある質問から回答を見つけられませんでした。教室に確認したい場合は「教室に質問として送る」を押してください。',
       });
     }
 

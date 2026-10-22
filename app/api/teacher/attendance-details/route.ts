@@ -9,6 +9,8 @@ import {
   validateAttendanceSegment,
   validateAttendanceSegmentCoverage,
   type AttendanceWorkSegment,
+  individualLevelNeedsRatio,
+  normalizeIndividualLevel,
 } from '@/lib/attendance-work-detail';
 import {
   ATTENDANCE_SCHOOL_DIRECTORY,
@@ -59,8 +61,8 @@ function normalizeSegments(value: unknown): AttendanceWorkSegment[] {
       program: segmentProgram(source),
       grade: cleanText(source.grade, 20) || undefined,
       lesson_format: source.lesson_format === 'individual' ? 'individual' : source.lesson_format === 'group' ? 'group' : undefined,
-      individual_level: source.individual_level === 'advanced' ? 'advanced' : source.individual_level === 'standard' ? 'standard' : undefined,
-      individual_ratio: ['1:1', '1:2', '1:3'].includes(String(source.individual_ratio || '')) ? source.individual_ratio as '1:1' | '1:2' | '1:3' : undefined,
+      individual_level: normalizeIndividualLevel(source.individual_level),
+      individual_ratio: individualLevelNeedsRatio(source.individual_level) && ['1:1', '1:2', '1:3'].includes(String(source.individual_ratio || '')) ? source.individual_ratio as '1:1' | '1:2' | '1:3' : undefined,
       office_task: cleanText(source.office_task, 60) || undefined,
       school_id: resolveAttendanceSchoolCode(source.school_id) || undefined,
       approval_status: 'pending',

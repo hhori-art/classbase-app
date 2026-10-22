@@ -47,5 +47,5 @@ export type AdminGacha = {
   recent_stats: { draws: number; wins: number; byReward: Record<string, number> };
 };
 
-export const inputClass = 'w-full rounded-xl border-2 border-slate-100 bg-slate-50 px-3 py-2.5 text-sm font-bold outline-none transition-colors focus:border-amber-400 focus:bg-white';
-export const labelClass = 'mb-1.5 block text-xs font-black text-slate-500';
+export const inputClass = 'min-h-10 w-full rounded-input border border-line bg-surface px-3 py-2 text-sm font-medium text-fg outline-none transition-colors focus:border-accent focus:ring-2 focus:ring-accent/20';
+export const labelClass = 'mb-1.5 block text-xs font-bold text-slate-500';

@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminAuth, adminDb } from '@/lib/firebase-admin';
 import { canManageSchool, getServerUser, jsonError, requireRole } from '@/lib/server-auth';
+import { writeAuditLogs } from '@/lib/server/audit-log';
 
 const STATUSES = ['active', 'suspended', 'withdrawn', 'archived'];
 
@@ -86,6 +87,15 @@ export async function POST(request: NextRequest) {
       await batch.commit();
 
       await Promise.allSettled(targets.map(target => auth.revokeRefreshTokens(target.id)));
+      await writeAuditLogs(targets.map(target => ({
+        actor: user,
+        action: 'account_status_change' as const,
+        target_type: 'user',
+        target_id: target.id,
+        target_label: String(target.data.name || target.data.student_name || target.data.teacher_name || target.data.lifetime_id || ''),
+        school_id: String(target.data.school_id || target.data.school || ''),
+        details: { status, previous_status: String(target.data.account_status || target.data.status || 'active'), target_role: String(target.data.role || ''), bulk: userIds.length > 1 },
+      })));
       return Response.json({ ok: true, count: targets.length, event_id: eventIds[0], event_ids: eventIds });
     } catch (error) {
       await Promise.allSettled(changedAuthIds.map(uid =>

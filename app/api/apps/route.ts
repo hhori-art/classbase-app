@@ -12,7 +12,8 @@ export async function GET(request: NextRequest) {
     const user = await getServerUser(request);
     const eiken = await canAccessEiken(user);
     const adminPermissions = normalizeAdminAppPermissions(user.role, user.profile);
-    const isManagementAccount = user.role === 'admin' || user.role === 'master';
+    // 勤怠専用の管理者（attendance_admin）も管理アカウントとして、権限設定どおりにアプリを開く。
+    const isManagementAccount = user.role === 'admin' || user.role === 'master' || user.role === 'attendance_admin';
     const isLinkedParent = user.role === 'parent' && Array.isArray(user.profile.student_ids) &&
       user.profile.student_ids.some((studentId: unknown) => String(studentId || '').trim());
     const attendance = isManagementAccount ? adminPermissions.attendance : user.role === 'teacher';
@@ -27,7 +28,7 @@ export async function GET(request: NextRequest) {
         science_social: scienceSocial,
         eiken,
         attendance,
-        online_school: user.role === 'student' && hasOnlineSchoolProgram(user.profile),
+        online_school: isManagementAccount ? adminPermissions.online_school : user.role === 'student' && hasOnlineSchoolProgram(user.profile),
       },
       admin_permissions: isManagementAccount ? adminPermissions : null,
     });

@@ -3,11 +3,14 @@
 import { useState, useEffect } from 'react';
 import { db } from '@/lib/firebase';
 import { collection, getDocs, doc, addDoc, updateDoc, deleteDoc, serverTimestamp, getDoc, setDoc } from 'firebase/firestore';
+import { reportAuditLog } from '@/app/components/master/audit-log-client';
 import { 
-  Plus, Trash2, Save, Loader2, ArrowLeft, GripVertical, Copy, 
-  Star, AlignLeft, ToggleLeft, ToggleRight, ListOrdered, Calendar, Users, Clock, Edit3, Check, BookOpen, AlertCircle
+  Plus, Trash2, Save, ArrowLeft, GripVertical, Copy, 
+  Star, AlignLeft, ToggleLeft, ToggleRight, ListOrdered, Calendar, Users, Clock, Edit3, BookOpen, AlertCircle
 } from 'lucide-react';
-import Link from 'next/link';
+import AdminPageHeader from '@/app/components/master/AdminPageHeader';
+import { Button, IconButton, ListSkeleton, EmptyState, ErrorState, StatusPill, type StatusTone, useConfirm, useToast } from '@/app/components/ui';
+import { formatDateTime } from '@/lib/format';
 
 // --- 型定義 ---
 
@@ -41,6 +44,9 @@ export default function SurveySettingsPage() {
   const [defaultSurvey, setDefaultSurvey] = useState<SurveyConfig | null>(null); // 通常授業用
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const toast = useToast();
+  const confirm = useConfirm();
 
   // 編集中のデータ
   const [currentSurvey, setCurrentSurvey] = useState<SurveyConfig | null>(null);
@@ -49,6 +55,7 @@ export default function SurveySettingsPage() {
   // --- データ取得 ---
   const fetchSurveys = async () => {
     setLoading(true);
+    setLoadError(false);
     try {
       // 1. 通常授業用設定の取得
       const defaultDocRef = doc(db, 'survey_templates', DEFAULT_SURVEY_ID);
@@ -84,6 +91,7 @@ export default function SurveySettingsPage() {
       setSurveys(list);
     } catch (e) {
       console.error(e);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -138,12 +146,12 @@ export default function SurveySettingsPage() {
   // --- 保存処理 ---
   const handleSave = async () => {
     if (!currentSurvey) return;
-    if (!currentSurvey.title.trim()) return alert('タイトルを入力してください');
-    if (currentSurvey.questions.length === 0) return alert('質問を1つ以上設定してください');
+    if (!currentSurvey.title.trim()) return toast.error('タイトルを入力してください');
+    if (currentSurvey.questions.length === 0) return toast.error('質問を1つ以上設定してください');
     
     // カスタムの場合のみ期間チェック
     if (currentSurvey.type === 'custom') {
-      if (currentSurvey.startAt >= currentSurvey.endAt) return alert('終了日時は開始日時より後に設定してください');
+      if (currentSurvey.startAt >= currentSurvey.endAt) return toast.error('終了日時は開始日時より後に設定してください');
     }
 
     setSaving(true);
@@ -166,10 +174,10 @@ export default function SurveySettingsPage() {
       
       await fetchSurveys();
       setMode('list');
-      alert('保存しました');
+      toast.success('保存しました');
     } catch (e) {
       console.error(e);
-      alert('保存エラー');
+      toast.error('保存できませんでした。もう一度お試しください。');
     } finally {
       setSaving(false);
     }
@@ -177,12 +185,16 @@ export default function SurveySettingsPage() {
 
   // --- 削除 ---
   const handleDeleteSurvey = async (id: string) => {
-    if (!confirm('本当に削除しますか？')) return;
+    const name = surveys.find(s => s.id === id)?.title || 'このアンケート';
+    if (!(await confirm({ title: `「${name}」を削除しますか？`, message: 'この操作は取り消せません。', confirmLabel: '削除する', tone: 'danger' }))) return;
     try {
       await deleteDoc(doc(db, 'survey_templates', id));
       setSurveys(prev => prev.filter(s => s.id !== id));
+      void reportAuditLog({ action: 'survey_setting_delete', target_type: 'survey_template', target_id: id, target_label: name });
+      toast.success('削除しました');
     } catch (e) {
-      alert('削除エラー');
+      console.error(e);
+      toast.error('削除できませんでした。もう一度お試しください。');
     }
   };
 
@@ -238,45 +250,38 @@ export default function SurveySettingsPage() {
     setActiveQId(newId);
   };
 
-  if (loading) return <div className="flex justify-center items-center h-screen"><Loader2 className="animate-spin text-purple-600" /></div>;
+  if (loading) return <ListSkeleton rows={4} />;
 
   // --- 表示切り替え ---
 
   if (mode === 'list') {
     return (
-      <div className="min-h-screen bg-[#F0F3FF] p-6 font-sans text-slate-800">
-        <div className="max-w-5xl mx-auto">
-          <div className="flex items-center justify-between mb-8">
-            <div className="flex items-center gap-4">
-              <Link href="/master" className="bg-white p-3 rounded-full shadow-sm hover:shadow-md transition-all text-slate-600">
-                <ArrowLeft size={20} />
-              </Link>
-              <div>
-                <h1 className="text-xl font-black text-slate-800">アンケート設定</h1>
-                <p className="text-xs font-bold text-slate-400">授業後の振り返りや特別アンケートの管理</p>
-              </div>
-            </div>
-          </div>
+      <div className="font-sans text-slate-800">
+        <div>
+          <AdminPageHeader description="授業後の振り返りや特別アンケートの管理" />
 
+          {loadError ? (
+            <ErrorState onRetry={fetchSurveys} />
+          ) : (
           <div className="space-y-8">
             {/* 1. 通常授業用 (固定) */}
             <div className="space-y-4">
-              <h2 className="text-sm font-black text-slate-500 flex items-center gap-2">
-                <BookOpen size={18} className="text-purple-500"/>
+              <h2 className="text-sm font-bold text-slate-500 flex items-center gap-2">
+                <BookOpen size={18} className="text-accent"/>
                 通常の授業アンケート
               </h2>
               {defaultSurvey && (
-                <div className="bg-white p-6 rounded-2xl shadow-md border-l-8 border-purple-500 flex items-center justify-between group">
+                <div className="bg-white p-6 rounded-card shadow-md border-l-8 border-accent flex items-center justify-between group">
                   <div>
-                    <h3 className="text-lg font-black text-slate-700 mb-1">{defaultSurvey.title}</h3>
+                    <h3 className="text-lg font-bold text-slate-700 mb-1">{defaultSurvey.title}</h3>
                     <p className="text-xs text-slate-400 font-bold leading-relaxed">
-                      このアンケートは<span className="text-purple-600">すべての授業終了後</span>に自動的に生徒へ表示されます。<br/>
-                      回答結果は受講科目の<span className="text-purple-600">担当講師に自動集計</span>されます。
+                      このアンケートは<span className="text-accent">すべての授業終了後</span>に自動的に生徒へ表示されます。<br/>
+                      回答結果は受講科目の<span className="text-accent">担当講師に自動集計</span>されます。
                     </p>
                   </div>
-                  <button onClick={() => handleEdit(defaultSurvey)} className="px-6 py-3 bg-purple-50 text-purple-700 rounded-xl hover:bg-purple-100 transition-colors font-bold flex items-center gap-2">
-                    <Edit3 size={18}/> 内容を編集
-                  </button>
+                  <Button variant="secondary" onClick={() => handleEdit(defaultSurvey)} icon={<Edit3 size={18} aria-hidden />}>
+                    内容を編集
+                  </Button>
                 </div>
               )}
             </div>
@@ -284,19 +289,21 @@ export default function SurveySettingsPage() {
             {/* 2. カスタムアンケート */}
             <div className="space-y-4">
               <div className="flex items-center justify-between">
-                <h2 className="text-sm font-black text-slate-500 flex items-center gap-2">
-                  <Calendar size={18} className="text-blue-500"/>
+                <h2 className="text-sm font-bold text-slate-500 flex items-center gap-2">
+                  <Calendar size={18} className="text-accent"/>
                   期間・対象指定アンケート (イベント等)
                 </h2>
-                <button onClick={handleCreateCustom} className="bg-blue-600 text-white px-4 py-2 rounded-lg font-bold shadow-sm hover:bg-blue-700 transition-all flex items-center gap-2 text-xs">
-                  <Plus size={16}/> 新規追加
-                </button>
+                <Button size="sm" onClick={handleCreateCustom} icon={<Plus size={16} aria-hidden />}>
+                  新規追加
+                </Button>
               </div>
 
               {surveys.length === 0 ? (
-                <div className="text-center py-10 text-slate-400 font-bold border-2 border-dashed border-slate-200 rounded-2xl text-sm">
-                  カスタムアンケートはありません
-                </div>
+                <EmptyState
+                  className="border-2 border-dashed border-slate-200"
+                  title="カスタムアンケートはありません"
+                  description="「新規追加」から、期間や学年を指定したアンケートを作れます。"
+                />
               ) : (
                 <div className="grid gap-4">
                   {surveys.map(survey => {
@@ -304,39 +311,39 @@ export default function SurveySettingsPage() {
                     const start = new Date(survey.startAt).getTime();
                     const end = new Date(survey.endAt).getTime();
                     let status = '待機中';
-                    let statusColor = 'bg-gray-100 text-gray-500';
+                    let statusTone: StatusTone = 'neutral';
                     
                     if (!survey.isActive) {
                       status = '無効';
                     } else if (now > end) {
                       status = '終了';
-                      statusColor = 'bg-red-100 text-red-600';
+                      statusTone = 'danger';
                     } else if (now >= start) {
                       status = '実施中';
-                      statusColor = 'bg-green-100 text-green-600 animate-pulse';
+                      statusTone = 'success';
                     } else {
-                      statusColor = 'bg-blue-100 text-blue-600';
+                      statusTone = 'info';
                     }
 
                     return (
-                      <div key={survey.id} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 hover:shadow-md transition-all flex items-center justify-between">
+                      <div key={survey.id} className="bg-white p-5 rounded-card shadow-sm border border-slate-100 hover:shadow-md transition-all flex items-center justify-between">
                         <div>
                           <div className="flex items-center gap-3 mb-1">
-                            <span className={`text-[10px] font-black px-2 py-0.5 rounded ${statusColor}`}>{status}</span>
+                            <StatusPill tone={statusTone}>{status}</StatusPill>
                             <h3 className="font-bold text-slate-700">{survey.title}</h3>
                           </div>
-                          <div className="flex items-center gap-3 text-[10px] font-bold text-slate-400">
+                          <div className="flex items-center gap-3 text-xs font-bold text-slate-400">
                             <span className="flex items-center gap-1"><Users size={12}/> {survey.targetType === 'all' ? '全員' : (survey.targetGrades?.join(', ') || '指定なし')}</span>
-                            <span className="flex items-center gap-1"><Clock size={12}/> {new Date(survey.startAt).toLocaleString()} 〜 {new Date(survey.endAt).toLocaleString()}</span>
+                            <span className="flex items-center gap-1"><Clock size={12}/> {formatDateTime(survey.startAt, { withYear: true })} 〜 {formatDateTime(survey.endAt, { withYear: true })}</span>
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
-                          <button onClick={() => handleEdit(survey)} className="p-2 bg-slate-50 text-slate-500 rounded-lg hover:bg-slate-100 transition-colors">
-                            <Edit3 size={16}/>
-                          </button>
-                          <button onClick={() => handleDeleteSurvey(survey.id!)} className="p-2 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors">
-                            <Trash2 size={16}/>
-                          </button>
+                          <IconButton label={`「${survey.title}」を編集`} variant="secondary" onClick={() => handleEdit(survey)}>
+                            <Edit3 size={16} aria-hidden />
+                          </IconButton>
+                          <IconButton label={`「${survey.title}」を削除`} onClick={() => handleDeleteSurvey(survey.id!)} className="hover:bg-rose-50 hover:text-rose-600">
+                            <Trash2 size={16} aria-hidden />
+                          </IconButton>
                         </div>
                       </div>
                     );
@@ -345,6 +352,7 @@ export default function SurveySettingsPage() {
               )}
             </div>
           </div>
+          )}
         </div>
       </div>
     );
@@ -352,41 +360,41 @@ export default function SurveySettingsPage() {
 
   // --- 編集モード ---
   return (
-    <div className="min-h-screen bg-[#F0F3FF] p-6 font-sans text-slate-800">
+    <div className="font-sans text-slate-800">
       <div className="max-w-4xl mx-auto pb-40">
         
         {/* ヘッダー */}
-        <div className="flex items-center justify-between mb-6 sticky top-4 z-30 bg-[#F0F3FF]/90 backdrop-blur-sm p-2 rounded-2xl">
+        <div className="flex items-center justify-between mb-6 sticky top-4 z-30 bg-canvas/90 backdrop-blur-sm p-2 rounded-card">
           <div className="flex items-center gap-4">
-            <button onClick={() => setMode('list')} className="bg-white p-3 rounded-full shadow-sm hover:shadow-md transition-all text-slate-600">
-              <ArrowLeft size={20} />
-            </button>
+            <IconButton label="戻る" variant="secondary" onClick={() => setMode('list')}>
+              <ArrowLeft size={20} aria-hidden />
+            </IconButton>
             <div>
               <h1 className="text-xl font-black text-slate-800">
                 {currentSurvey?.type === 'default' ? '通常授業アンケートの編集' : '特別アンケートの編集'}
               </h1>
             </div>
           </div>
-          <button onClick={handleSave} disabled={saving} className="bg-purple-600 hover:bg-purple-700 text-white px-8 py-3 rounded-xl font-bold shadow-lg shadow-purple-200 transition-all active:scale-95 disabled:opacity-50 flex items-center gap-2">
-            {saving ? <Loader2 className="animate-spin" size={20}/> : <Save size={20}/>} 保存する
-          </button>
+          <Button onClick={handleSave} loading={saving} icon={<Save size={20} aria-hidden />}>
+            保存する
+          </Button>
         </div>
 
         {currentSurvey && (
           <div className="space-y-8">
             
             {/* 1. 基本設定エリア */}
-            <div className={`bg-white p-8 rounded-[32px] shadow-sm border relative overflow-hidden ${currentSurvey.type === 'default' ? 'border-purple-100' : 'border-blue-100'}`}>
-              <div className={`absolute top-0 left-0 w-2 h-full ${currentSurvey.type === 'default' ? 'bg-purple-500' : 'bg-blue-500'}`}></div>
+            <div className={`bg-white p-8 rounded-card shadow-sm border border-line relative overflow-hidden`}>
+              <div className="absolute top-0 left-0 w-2 h-full bg-accent"></div>
               
-              <h2 className="text-lg font-black text-slate-700 mb-6 flex items-center gap-2">
-                <Edit3 size={20} className={currentSurvey.type === 'default' ? 'text-purple-500' : 'text-blue-500'}/> 基本設定
+              <h2 className="text-lg font-bold text-slate-700 mb-6 flex items-center gap-2">
+                <Edit3 size={20} className="text-accent" aria-hidden /> 基本設定
               </h2>
 
               <div className="grid gap-6">
                 {/* デフォルト設定の場合の案内表示 */}
                 {currentSurvey.type === 'default' && (
-                  <div className="bg-purple-50 p-4 rounded-xl border border-purple-100 text-sm text-purple-800 font-bold flex items-start gap-2">
+                  <div className="bg-accent-soft p-4 rounded-btn border border-line text-sm text-accent font-bold flex items-start gap-2">
                     <AlertCircle size={20} className="shrink-0 mt-0.5"/>
                     <div>
                       <p className="mb-1">これは「通常の授業」に対するアンケート設定です。</p>
@@ -407,7 +415,7 @@ export default function SurveySettingsPage() {
                       type="text" 
                       value={currentSurvey.title} 
                       onChange={e => updateSurveyField('title', e.target.value)}
-                      className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                      className="w-full p-3 bg-slate-50 border border-slate-200 rounded-input font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-accent"
                       placeholder="アンケートのタイトル"
                     />
                   </div>
@@ -415,7 +423,7 @@ export default function SurveySettingsPage() {
                     <label className="block text-xs font-bold text-slate-400 mb-1">状態</label>
                     <button 
                       onClick={() => updateSurveyField('isActive', !currentSurvey.isActive)}
-                      className={`flex items-center gap-2 px-4 py-3 rounded-xl font-bold border-2 transition-all ${currentSurvey.isActive ? 'border-green-500 bg-green-50 text-green-700' : 'border-slate-200 bg-slate-50 text-slate-400'}`}
+                      className={`flex items-center gap-2 px-4 py-3 rounded-btn font-bold border-2 transition-all ${currentSurvey.isActive ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-slate-50 text-slate-400'}`}
                     >
                       {currentSurvey.isActive ? <ToggleRight size={24}/> : <ToggleLeft size={24}/>}
                       {currentSurvey.isActive ? '有効' : '無効'}
@@ -430,23 +438,23 @@ export default function SurveySettingsPage() {
                     <div>
                       <label className="block text-xs font-bold text-slate-400 mb-2">対象生徒</label>
                       <div className="flex gap-4 mb-3">
-                        <label className={`flex-1 p-3 rounded-xl border-2 cursor-pointer font-bold text-sm flex items-center justify-center gap-2 ${currentSurvey.targetType === 'all' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-500'}`}>
+                        <label className={`flex-1 p-3 rounded-btn border-2 cursor-pointer font-bold text-sm flex items-center justify-center gap-2 ${currentSurvey.targetType === 'all' ? 'border-accent bg-accent-soft text-accent' : 'border-slate-200 text-slate-500'}`}>
                           <input type="radio" className="hidden" checked={currentSurvey.targetType === 'all'} onChange={() => updateSurveyField('targetType', 'all')}/>
                           全員
                         </label>
-                        <label className={`flex-1 p-3 rounded-xl border-2 cursor-pointer font-bold text-sm flex items-center justify-center gap-2 ${currentSurvey.targetType === 'grade' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-500'}`}>
+                        <label className={`flex-1 p-3 rounded-btn border-2 cursor-pointer font-bold text-sm flex items-center justify-center gap-2 ${currentSurvey.targetType === 'grade' ? 'border-accent bg-accent-soft text-accent' : 'border-slate-200 text-slate-500'}`}>
                           <input type="radio" className="hidden" checked={currentSurvey.targetType === 'grade'} onChange={() => updateSurveyField('targetType', 'grade')}/>
                           学年指定
                         </label>
                       </div>
                       
                       {currentSurvey.targetType === 'grade' && (
-                        <div className="flex flex-wrap gap-2 bg-slate-50 p-4 rounded-xl border border-slate-200">
+                        <div className="flex flex-wrap gap-2 bg-slate-50 p-4 rounded-btn border border-slate-200">
                           {GRADE_OPTIONS.map(g => (
                             <button 
                               key={g} 
                               onClick={() => toggleGrade(g)}
-                              className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-all ${currentSurvey.targetGrades.includes(g) ? 'bg-blue-500 text-white border-blue-500' : 'bg-white text-slate-500 border-slate-200'}`}
+                              className={`px-3 py-1.5 rounded-btn text-xs font-bold border transition-all ${currentSurvey.targetGrades.includes(g) ? 'bg-accent text-accent-ink border-accent' : 'bg-white text-slate-500 border-slate-200'}`}
                             >
                               {g}
                             </button>
@@ -463,7 +471,7 @@ export default function SurveySettingsPage() {
                           type="datetime-local" 
                           value={currentSurvey.startAt}
                           onChange={e => updateSurveyField('startAt', e.target.value)}
-                          className="w-full p-3 bg-white border border-slate-200 rounded-xl font-bold text-slate-700 focus:outline-none focus:border-blue-500"
+                          className="w-full p-3 bg-white border border-slate-200 rounded-input font-bold text-slate-700 focus:outline-none focus:border-accent"
                         />
                       </div>
                       <div>
@@ -472,7 +480,7 @@ export default function SurveySettingsPage() {
                           type="datetime-local" 
                           value={currentSurvey.endAt}
                           onChange={e => updateSurveyField('endAt', e.target.value)}
-                          className="w-full p-3 bg-white border border-slate-200 rounded-xl font-bold text-slate-700 focus:outline-none focus:border-blue-500"
+                          className="w-full p-3 bg-white border border-slate-200 rounded-input font-bold text-slate-700 focus:outline-none focus:border-accent"
                         />
                       </div>
                     </div>
@@ -485,7 +493,7 @@ export default function SurveySettingsPage() {
             <div className="space-y-6">
               <div className="flex items-center gap-2 px-2">
                 <div className="h-px bg-slate-300 flex-1"></div>
-                <span className="text-sm font-black text-slate-400">質問フォームの内容</span>
+                <span className="text-sm font-bold text-slate-400">質問フォームの内容</span>
                 <div className="h-px bg-slate-300 flex-1"></div>
               </div>
 
@@ -495,7 +503,7 @@ export default function SurveySettingsPage() {
                   <div 
                     key={q.id} 
                     onClick={() => setActiveQId(q.id)}
-                    className={`bg-white rounded-2xl shadow-sm transition-all duration-300 relative group border-l-[6px] ${isActive ? 'border-purple-500 ring-2 ring-purple-100 scale-[1.01] shadow-md z-10' : 'border-transparent hover:border-slate-200'}`}
+                    className={`bg-white rounded-card shadow-sm transition-all duration-300 relative group border-l-[6px] ${isActive ? 'border-accent ring-2 ring-accent-soft scale-[1.01] shadow-md z-10' : 'border-transparent hover:border-slate-200'}`}
                   >
                     <div className="absolute top-2 left-1/2 -translate-x-1/2 text-slate-300 opacity-0 group-hover:opacity-100 cursor-grab active:cursor-grabbing p-2">
                       <GripVertical size={16}/>
@@ -510,7 +518,7 @@ export default function SurveySettingsPage() {
                               value={q.text} 
                               onChange={(e) => updateQuestion(q.id, 'text', e.target.value)}
                               placeholder="質問タイトル"
-                              className={`w-full p-4 bg-slate-50 border-b-2 rounded-t-lg font-bold text-lg outline-none transition-colors ${isActive ? 'border-purple-500 bg-purple-50/10' : 'border-slate-300 focus:border-purple-500'}`}
+                              className={`w-full p-4 bg-slate-50 border-b-2 rounded-t-lg font-bold text-lg outline-none transition-colors ${isActive ? 'border-accent bg-accent-soft/40' : 'border-slate-300 focus:border-accent'}`}
                             />
                           </div>
                           
@@ -518,7 +526,7 @@ export default function SurveySettingsPage() {
                             <select 
                               value={q.type} 
                               onChange={(e) => updateQuestion(q.id, 'type', e.target.value)}
-                              className="w-full p-3 pl-10 bg-white border border-slate-200 rounded-lg text-sm font-bold text-slate-600 outline-none focus:border-purple-500 appearance-none cursor-pointer hover:bg-slate-50"
+                              className="w-full p-3 pl-10 bg-white border border-slate-200 rounded-input text-sm font-bold text-slate-600 outline-none focus:border-accent appearance-none cursor-pointer hover:bg-slate-50"
                             >
                               <option value="rating">5段階評価</option>
                               <option value="text">記述式 (短文)</option>
@@ -530,18 +538,18 @@ export default function SurveySettingsPage() {
                         </div>
 
                         {q.type === 'rating' && (
-                          <div className="bg-slate-50 p-5 rounded-xl border border-slate-100">
+                          <div className="bg-slate-50 p-5 rounded-btn border border-slate-100">
                             <p className="text-xs font-bold text-slate-400 mb-3 flex items-center gap-1"><Star size={12}/> 評価ラベルの設定</p>
                             <div className="space-y-3">
                               {[1, 2, 3, 4, 5].map((level) => (
                                 <div key={level} className="flex items-center gap-3">
-                                  <span className={`w-6 h-6 flex items-center justify-center rounded-full text-xs font-bold shrink-0 ${level === 1 || level === 5 ? 'bg-purple-100 text-purple-600' : 'bg-white text-slate-400 border border-slate-200'}`}>{level}</span>
+                                  <span className={`w-6 h-6 flex items-center justify-center rounded-full text-xs font-bold shrink-0 ${level === 1 || level === 5 ? 'bg-accent-soft text-accent' : 'bg-white text-slate-400 border border-slate-200'}`}>{level}</span>
                                   <input 
                                     type="text" 
                                     value={q.ratingLabels?.[level] || ''} 
                                     onChange={(e) => updateRatingLabel(q.id, level, e.target.value)}
                                     placeholder="ラベル (任意)"
-                                    className="flex-1 p-2 bg-white border border-slate-200 rounded-lg text-sm outline-none focus:border-purple-400 focus:ring-2 focus:ring-purple-50 transition-all"
+                                    className="flex-1 p-2 bg-white border border-slate-200 rounded-input text-sm outline-none focus:border-accent focus:ring-2 focus:ring-accent-soft transition-all"
                                   />
                                 </div>
                               ))}
@@ -550,12 +558,12 @@ export default function SurveySettingsPage() {
                         )}
 
                         <div className="flex items-center justify-end gap-4 pt-4 border-t border-slate-100">
-                          <button onClick={() => updateQuestion(q.id, 'required', !q.required)} className="flex items-center gap-2 text-sm font-bold text-slate-600 hover:text-purple-600 transition-colors mr-auto">
-                            {q.required ? <ToggleRight size={24} className="text-purple-600"/> : <ToggleLeft size={24} className="text-slate-300"/>}<span>必須</span>
+                          <button onClick={() => updateQuestion(q.id, 'required', !q.required)} className="flex items-center gap-2 text-sm font-bold text-slate-600 hover:text-accent transition-colors mr-auto">
+                            {q.required ? <ToggleRight size={24} className="text-accent"/> : <ToggleLeft size={24} className="text-slate-300"/>}<span>必須</span>
                           </button>
                           <div className="h-6 w-px bg-slate-200 mx-2"></div>
-                          <button onClick={() => duplicateQuestion(q)} className="p-2 text-slate-400 hover:text-purple-600 hover:bg-purple-50 rounded-full transition-colors"><Copy size={18}/></button>
-                          <button onClick={() => deleteQuestion(q.id)} className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-full transition-colors"><Trash2 size={18}/></button>
+                          <IconButton label="質問を複製" onClick={() => duplicateQuestion(q)}><Copy size={18} aria-hidden /></IconButton>
+                          <IconButton label="質問を削除" onClick={() => deleteQuestion(q.id)} className="hover:bg-rose-50 hover:text-rose-600"><Trash2 size={18} aria-hidden /></IconButton>
                         </div>
                       </div>
                     </div>
@@ -563,7 +571,7 @@ export default function SurveySettingsPage() {
                 );
               })}
 
-              <button onClick={addQuestion} className="w-full py-4 bg-white border-2 border-dashed border-slate-300 rounded-2xl text-slate-400 font-bold hover:border-purple-400 hover:text-purple-600 hover:bg-purple-50 transition-all flex items-center justify-center gap-2 shadow-sm">
+              <button onClick={addQuestion} className="w-full py-4 bg-white border-2 border-dashed border-slate-300 rounded-card text-slate-400 font-bold hover:border-accent hover:text-accent hover:bg-accent-soft transition-all flex items-center justify-center gap-2 shadow-sm">
                 <Plus size={24}/> 質問を追加
               </button>
             </div>

@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { auth, db } from '@/lib/firebase';
 import { collection, query, where, getDocs } from 'firebase/firestore';
 import { Grid, Loader2 } from 'lucide-react';
+import { useConfirm, useToast } from '@/app/components/ui';
 
 // 親から渡されるProps（assignmentsは使いませんが、型定義エラー防止のため残しています）
 type Props = {
@@ -24,6 +25,8 @@ type ShiftData = {
 };
 
 export default function ShiftMonitorButton({ currentDate }: Props) {
+  const toast = useToast();
+  const confirm = useConfirm();
   const [loading, setLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
 
@@ -67,12 +70,16 @@ export default function ShiftMonitorButton({ currentDate }: Props) {
       const targetShifts = Array.from(uniqueMeetings.values());
 
       if (targetShifts.length === 0) {
-        alert(`指定日(${todayStr})の有効な授業がDBに見つかりませんでした。`);
+        toast.info(`${todayStr} の有効な授業（ミーティングIDあり）が見つかりませんでした。`);
         setLoading(false);
         return;
       }
 
-      if (!confirm(`【CCTVモード】\n日付: ${todayStr}\n対象: ${targetShifts.length}件\n\n最新データに基づき、全授業をAPI認証(ZAK)でホスト起動します。\n\n※「ポップアップ許可」が必要です。\n開始しますか？`)) {
+      if (!(await confirm({
+        title: `${todayStr} の授業${targetShifts.length}件を一斉監視で開きますか？`,
+        message: '最新データに基づき、全授業をAPI認証(ZAK)でホスト起動します。ブラウザでポップアップの許可が必要です。',
+        confirmLabel: '開始する',
+      }))) {
         setLoading(false);
         return;
       }
@@ -146,7 +153,7 @@ export default function ShiftMonitorButton({ currentDate }: Props) {
         );
 
         if (!win) {
-          alert("ポップアップがブロックされました。\nブラウザの設定で許可してください。");
+          toast.error('ポップアップがブロックされました。ブラウザの設定で許可してください。');
           break;
         }
 
@@ -157,7 +164,7 @@ export default function ShiftMonitorButton({ currentDate }: Props) {
 
     } catch (e) {
       console.error(e);
-      alert("エラーが発生しました。");
+      toast.error('一斉監視を開始できませんでした。通信状態を確認して、もう一度お試しください。');
     } finally {
       setLoading(false);
       setStatusMessage("");
@@ -165,14 +172,15 @@ export default function ShiftMonitorButton({ currentDate }: Props) {
   };
 
   return (
-    <button 
-      onClick={handleStartCCTV} 
+    <button
+      type="button"
+      onClick={handleStartCCTV}
       disabled={loading}
-      className="bg-indigo-700 hover:bg-indigo-600 text-white p-1.5 rounded-md transition-all shadow-sm active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5 ml-2 border border-indigo-600"
+      className="bg-accent hover:bg-accent-hover text-accent-ink px-2 py-1.5 rounded-btn transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5 ml-2"
       title="CCTVモード: 最新シフトを取得して一斉監視"
     >
-      {loading ? <Loader2 size={14} className="animate-spin text-indigo-200" /> : <Grid size={14} />}
-      <span className="text-[10px] font-bold">
+      {loading ? <Loader2 size={14} className="animate-spin opacity-80" /> : <Grid size={14} />}
+      <span className="text-xs font-bold">
         {loading ? `処理中 ${statusMessage}` : "一斉監視(API)"}
       </span>
     </button>

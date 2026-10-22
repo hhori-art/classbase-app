@@ -4,12 +4,16 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/app/context/AuthContext'; // 認証コンテキスト（作成者ID用）
 
-import { ArrowLeft, Plus, Calendar, BookOpen, Loader2 } from 'lucide-react';
-import Link from 'next/link';
+import { Plus, Calendar, BookOpen } from 'lucide-react';
+import { Button, Card, PageHeader, useToast } from '@/app/components/ui';
+
+const FIELD = 'w-full min-h-11 rounded-input border border-line bg-surface py-3 font-bold text-fg outline-none transition-colors focus:border-accent focus:ring-2 focus:ring-accent/30';
+const LABEL = 'mb-2 block text-xs font-bold text-fg-muted';
 
 export default function CreateAssignmentPage() {
   const router = useRouter();
-  const { user } = useAuth(); // 現在ログインしている先生の情報を取得
+  const toast = useToast();
+  const { user } = useAuth(); // 現在ログインしている講師の情報を取得
   const [loading, setLoading] = useState(false);
 
   // 入力フォームの状態
@@ -28,10 +32,10 @@ export default function CreateAssignmentPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user) {
-      alert('ログインが必要です');
+      toast.error('ログインが必要です');
       return;
     }
-    
+
     setLoading(true);
 
     try {
@@ -44,138 +48,126 @@ export default function CreateAssignmentPage() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || 'homework-create-failed');
 
-      alert('宿題を作成しました！');
+      toast.success('宿題を作成しました');
       router.push('/teacher/homework'); // 一覧に戻る
       router.refresh();
 
     } catch (error) {
       console.error('Error adding document: ', error);
-      alert('作成に失敗しました');
+      toast.error('作成に失敗しました');
     } finally {
       setLoading(false);
     }
   };
 
+  const subjectOption = (value: string, label: string) => (
+    <label className="flex-1 cursor-pointer">
+      <input
+        type="radio"
+        name="subject"
+        value={value}
+        checked={formData.subject === value}
+        onChange={handleChange}
+        className="peer sr-only"
+      />
+      <div className="flex min-h-11 items-center justify-center rounded-btn border-2 border-line px-4 py-3 text-center font-bold text-fg-muted transition-colors hover:bg-canvas peer-checked:border-accent peer-checked:bg-accent-soft peer-checked:text-accent peer-focus-visible:ring-2 peer-focus-visible:ring-accent">
+        {label}
+      </div>
+    </label>
+  );
+
   return (
-    <div className="min-h-screen bg-gray-100 p-4 font-sans">
-      <div className="max-w-lg mx-auto bg-white p-8 rounded-2xl shadow-sm border border-gray-100">
-        <div className="flex items-center gap-2 mb-6 text-gray-500">
-          <Link href="/teacher/homework" className="hover:text-gray-800 flex items-center text-sm font-bold transition-colors">
-            <ArrowLeft size={18} className="mr-1" /> キャンセルして戻る
-          </Link>
-        </div>
+    <div className="px-4 py-5 sm:px-6">
+      <div className="mx-auto max-w-lg space-y-6">
+        <PageHeader tone="plain" title="新しい宿題を作成" icon={Plus} backHref="/teacher/homework" />
 
-        <h1 className="text-2xl font-black text-gray-800 mb-8 flex items-center gap-3">
-          <span className="bg-indigo-100 text-indigo-600 rounded-full p-2">
-            <Plus size={24} strokeWidth={3} />
-          </span>
-          新しい宿題を作成
-        </h1>
+        <Card>
+          <form onSubmit={handleSubmit} className="space-y-6">
+            {/* 科目選択 */}
+            <fieldset>
+              <legend className={LABEL}>対象科目</legend>
+              <div className="flex gap-4">
+                {subjectOption('理科', '🧪 理科')}
+                {subjectOption('社会', '🌏 社会')}
+              </div>
+            </fieldset>
 
-        <form onSubmit={handleSubmit} className="space-y-6">
-          {/* 科目選択 */}
-          <div>
-            <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">対象科目</label>
-            <div className="flex gap-4">
-              <label className="cursor-pointer flex-1">
+            {/* タイトル */}
+            <div>
+              <label htmlFor="hw-title" className={LABEL}>宿題のタイトル</label>
+              <div className="group relative">
+                <BookOpen className="absolute left-3 top-3.5 text-slate-400 transition-colors group-focus-within:text-accent" size={20} aria-hidden />
                 <input
-                  type="radio"
-                  name="subject"
-                  value="理科"
-                  checked={formData.subject === '理科'}
+                  id="hw-title"
+                  type="text"
+                  name="title"
+                  required
+                  value={formData.title}
                   onChange={handleChange}
-                  className="peer sr-only"
+                  placeholder="例：電流の性質 ワークp20-22"
+                  className={`${FIELD} pl-10 pr-4`}
                 />
-                <div className="text-center px-4 py-3 rounded-xl border-2 border-gray-100 peer-checked:border-emerald-500 peer-checked:bg-emerald-50 peer-checked:text-emerald-700 transition-all font-bold text-gray-500 hover:bg-gray-50">
-                  🧪 理科
-                </div>
-              </label>
-              <label className="cursor-pointer flex-1">
-                <input
-                  type="radio"
-                  name="subject"
-                  value="社会"
-                  checked={formData.subject === '社会'}
-                  onChange={handleChange}
-                  className="peer sr-only"
-                />
-                <div className="text-center px-4 py-3 rounded-xl border-2 border-gray-100 peer-checked:border-orange-500 peer-checked:bg-orange-50 peer-checked:text-orange-700 transition-all font-bold text-gray-500 hover:bg-gray-50">
-                  🌏 社会
-                </div>
-              </label>
+              </div>
             </div>
-          </div>
 
-          {/* タイトル */}
-          <div>
-            <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">宿題のタイトル</label>
-            <div className="relative group">
-              <BookOpen className="absolute left-3 top-3.5 text-gray-400 group-focus-within:text-indigo-500 transition-colors" size={20} />
-              <input
-                type="text"
-                name="title"
-                required
-                value={formData.title}
+            {/* 学年 */}
+            <div>
+              <label htmlFor="hw-grade" className={LABEL}>対象学年</label>
+              <select
+                id="hw-grade"
+                name="target_grade"
+                value={formData.target_grade}
                 onChange={handleChange}
-                placeholder="例：電流の性質 ワークp20-22"
-                className="w-full pl-10 pr-4 py-3 bg-gray-50 border-2 border-gray-100 rounded-xl focus:border-indigo-500 focus:bg-white outline-none text-gray-900 font-bold transition-all"
+                className={`${FIELD} px-4`}
+              >
+                <option>中1</option>
+                <option>中2</option>
+                <option>中3</option>
+              </select>
+            </div>
+
+            {/* 期限 */}
+            <div>
+              <label htmlFor="hw-deadline" className={LABEL}>提出期限</label>
+              <div className="group relative">
+                <Calendar className="absolute left-3 top-3.5 text-slate-400 transition-colors group-focus-within:text-accent" size={20} aria-hidden />
+                <input
+                  id="hw-deadline"
+                  type="date"
+                  name="deadline"
+                  required
+                  value={formData.deadline}
+                  onChange={handleChange}
+                  className={`${FIELD} pl-10 pr-4`}
+                />
+              </div>
+            </div>
+
+            {/* 詳細 */}
+            <div>
+              <label htmlFor="hw-description" className={LABEL}>詳細・メモ (任意)</label>
+              <textarea
+                id="hw-description"
+                name="description"
+                rows={4}
+                value={formData.description}
+                onChange={handleChange}
+                placeholder="生徒への指示や補足があればここに入力..."
+                className={`${FIELD} resize-none px-4 font-medium`}
               />
             </div>
-          </div>
 
-          {/* 期限 */}
-          <div>
-            <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">対象学年</label>
-            <select
-              name="target_grade"
-              value={formData.target_grade}
-              onChange={handleChange}
-              className="w-full px-4 py-3 bg-gray-50 border-2 border-gray-100 rounded-xl focus:border-indigo-500 focus:bg-white outline-none text-gray-900 font-bold transition-all"
+            <Button
+              type="submit"
+              size="lg"
+              fullWidth
+              loading={loading}
+              icon={<Plus strokeWidth={3} size={20} aria-hidden />}
             >
-              <option>中1</option>
-              <option>中2</option>
-              <option>中3</option>
-            </select>
-          </div>
-
-          {/* 期限 */}
-          <div>
-            <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">提出期限</label>
-            <div className="relative group">
-              <Calendar className="absolute left-3 top-3.5 text-gray-400 group-focus-within:text-indigo-500 transition-colors" size={20} />
-              <input
-                type="date"
-                name="deadline"
-                required
-                value={formData.deadline}
-                onChange={handleChange}
-                className="w-full pl-10 pr-4 py-3 bg-gray-50 border-2 border-gray-100 rounded-xl focus:border-indigo-500 focus:bg-white outline-none text-gray-900 font-bold transition-all"
-              />
-            </div>
-          </div>
-
-          {/* 詳細 */}
-          <div>
-            <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">詳細・メモ (任意)</label>
-            <textarea
-              name="description"
-              rows={4}
-              value={formData.description}
-              onChange={handleChange}
-              placeholder="生徒への指示や補足があればここに入力..."
-              className="w-full p-4 bg-gray-50 border-2 border-gray-100 rounded-xl focus:border-indigo-500 focus:bg-white outline-none text-gray-900 font-medium resize-none transition-all"
-            />
-          </div>
-
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full bg-indigo-600 text-white py-4 rounded-xl font-bold shadow-lg shadow-indigo-200 hover:bg-indigo-700 hover:shadow-xl transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-          >
-            {loading ? <Loader2 className="animate-spin" /> : <Plus strokeWidth={3} size={20}/>}
-            {loading ? '作成中...' : 'この内容で宿題を出す'}
-          </button>
-        </form>
+              {loading ? '作成中...' : 'この内容で宿題を出す'}
+            </Button>
+          </form>
+        </Card>
       </div>
     </div>
   );

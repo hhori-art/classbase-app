@@ -1,7 +1,8 @@
 import { NextRequest } from 'next/server';
 import { Timestamp } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
-import { canManageAttendanceSchool, getServerUser, jsonError, requireRole } from '@/lib/server-auth';
+import { canManageAttendance, canManageAttendanceSchool, getServerUser, jsonError, requireRole } from '@/lib/server-auth';
+import { getAllQueryDocuments } from '@/lib/server/firestore-pagination';
 import { cleanFareLabel, normalizeTransportType } from '@/lib/transport-fares';
 import { createEkispertCommuterPass } from '@/lib/transport-fare-providers';
 
@@ -33,10 +34,48 @@ async function requireTargetAccess(user: Awaited<ReturnType<typeof getServerUser
   if (!target.exists || !canManageAttendanceSchool(user, target.data()?.school_id || target.data()?.school)) throw new Error('forbidden');
 }
 
+function passView(id: string, data: FirebaseFirestore.DocumentData) {
+  const active = isActivePass(data);
+  const endDate = toDateKey(data.end_date);
+  return {
+    id,
+    ...data,
+    active,
+    expired: Boolean(endDate) && endDate < todayKey(),
+    needs_confirmation: active && endDate <= addDaysKey(14),
+  };
+}
+
+/** 勤怠管理者：担当校舎の講師の定期をまとめて確認する。 */
+async function listManagedPasses(user: Awaited<ReturnType<typeof getServerUser>>) {
+  if (!canManageAttendance(user)) throw new Error('forbidden');
+  const db = adminDb();
+  const docs = await getAllQueryDocuments(db.collection('teacher_commuter_passes'));
+  const teacherIds = Array.from(new Set(docs.map(doc => String(doc.data()?.teacher_id || '')).filter(Boolean)));
+  const teachers = new Map<string, FirebaseFirestore.DocumentData>();
+  for (let index = 0; index < teacherIds.length; index += 100) {
+    const snaps = await db.getAll(...teacherIds.slice(index, index + 100).map(id => db.collection('users').doc(id)));
+    snaps.forEach(snap => { if (snap.exists) teachers.set(snap.id, snap.data() || {}); });
+  }
+  return docs
+    .map(doc => {
+      const data = doc.data() || {};
+      const teacher = teachers.get(String(data.teacher_id || '')) || {};
+      const school = String(teacher.school_id || teacher.school || '');
+      return { ...passView(doc.id, data), teacher_name: teacher.name || teacher.teacher_name || data.teacher_name || '', teacher_school: school };
+    })
+    .filter(pass => canManageAttendanceSchool(user, pass.teacher_school))
+    .sort((a: any, b: any) => String(a.end_date || '').localeCompare(String(b.end_date || '')));
+}
+
 export async function GET(request: NextRequest) {
   try {
     const user = await getServerUser(request);
     requireRole(user, ['teacher', 'attendance_admin', 'admin', 'master']);
+
+    if (request.nextUrl.searchParams.get('scope') === 'managed') {
+      return Response.json({ ok: true, passes: await listManagedPasses(user) });
+    }
 
     const teacherId = request.nextUrl.searchParams.get('teacher_id') || user.uid;
     await requireTargetAccess(user, teacherId);
@@ -48,15 +87,7 @@ export async function GET(request: NextRequest) {
       .get();
 
     const passes = snap.docs
-      .map(doc => {
-        const data = doc.data() || {};
-        return {
-          id: doc.id,
-          ...data,
-          active: isActivePass(data),
-          needs_confirmation: isActivePass(data) && toDateKey(data.end_date) <= addDaysKey(14),
-        };
-      })
+      .map(doc => passView(doc.id, doc.data() || {}))
       .sort((a: any, b: any) => String(b.end_date || '').localeCompare(String(a.end_date || '')));
 
     return Response.json({ ok: true, passes });
@@ -157,10 +188,36 @@ export async function PATCH(request: NextRequest) {
       update.status = 'inactive';
     } else {
       update.status = 'active';
-      if (body.end_date) update.end_date = toDateKey(body.end_date);
+      if (body.end_date) {
+        const endDate = toDateKey(body.end_date);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+          return Response.json({ ok: false, error: '新しい有効期限を正しい日付で入力してください。' }, { status: 400 });
+        }
+        update.end_date = endDate;
+      }
     }
 
     await ref.set(update, { merge: true });
+    return Response.json({ ok: true });
+  } catch (error) {
+    return jsonError(error);
+  }
+}
+
+/** 勤怠管理者だけが、誤登録や不要になった定期を削除できる（交通費の定期控除にも使われなくなる）。 */
+export async function DELETE(request: NextRequest) {
+  try {
+    const user = await getServerUser(request);
+    requireRole(user, ['attendance_admin', 'admin', 'master']);
+    if (!canManageAttendance(user)) throw new Error('forbidden');
+    const id = String(request.nextUrl.searchParams.get('id') || '').trim();
+    if (!id) return Response.json({ ok: false, error: 'id-required' }, { status: 400 });
+    const ref = adminDb().collection('teacher_commuter_passes').doc(id);
+    const snap = await ref.get();
+    if (!snap.exists) throw new Error('not-found');
+    const teacherId = String(snap.data()?.teacher_id || '');
+    await requireTargetAccess(user, teacherId);
+    await ref.delete();
     return Response.json({ ok: true });
   } catch (error) {
     return jsonError(error);

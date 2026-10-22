@@ -82,69 +82,6 @@ function isTeacherAssignedToShift(user: any, shift: Record<string, any>) {
   return Boolean(shiftTeacherName && teacherNames.some(name => shiftTeacherName === name));
 }
 
-function getShiftPeriod(shift: Record<string, any>) {
-  const note = String(shift.note || '').normalize('NFKC');
-  const match = note.match(/【([^】]+)】/);
-  return String(match?.[1] || '').replace(/[\s　]+/g, '').toLowerCase();
-}
-
-async function teacherAssignedToSamePeriod(user: any, shift: Record<string, any>) {
-  const targetDate = String(shift.target_date || '').trim();
-  const targetPeriod = getShiftPeriod(shift);
-  if (!targetDate || !targetPeriod) return false;
-
-  const sameDay = await adminDb().collection('shift_assignments')
-    .where('target_date', '==', targetDate)
-    .limit(250)
-    .get()
-    .catch(() => null);
-
-  return Boolean(sameDay?.docs.some(doc => {
-    const assignment = { id: doc.id, ...(doc.data() || {}) };
-    return getShiftPeriod(assignment) === targetPeriod && isTeacherAssignedToShift(user, assignment);
-  }));
-}
-
-function isSameClassSlot(mainShift: Record<string, any>, relatedShift: Record<string, any>) {
-  if (String(relatedShift.parent_id || '') === String(mainShift.id || '')) return true;
-  if (relatedShift.role_type !== 'sub') return false;
-  if (String(mainShift.target_date || '') !== String(relatedShift.target_date || '')) return false;
-  if (String(mainShift.target_subject || '') !== String(relatedShift.target_subject || '')) return false;
-  if (String(mainShift.target_grade || '') !== String(relatedShift.target_grade || '')) return false;
-  if (String(mainShift.target_detail_subject || '') !== String(relatedShift.target_detail_subject || '')) return false;
-
-  const mainPeriod = getShiftPeriod(mainShift);
-  const relatedPeriod = getShiftPeriod(relatedShift);
-  return !mainPeriod || !relatedPeriod || mainPeriod === relatedPeriod;
-}
-
-async function teacherAssignedToRelatedShift(user: any, shift: Record<string, any>) {
-  const parentMatches = shift.id
-    ? await adminDb().collection('shift_assignments')
-      .where('parent_id', '==', String(shift.id))
-      .limit(30)
-      .get()
-      .catch(() => null)
-    : null;
-
-  if (parentMatches?.docs.some(doc => isTeacherAssignedToShift(user, { id: doc.id, ...(doc.data() || {}) }))) {
-    return true;
-  }
-
-  if (!shift.target_date) return false;
-
-  const sameDay = await adminDb().collection('shift_assignments')
-    .where('target_date', '==', shift.target_date)
-    .limit(200)
-    .get()
-    .catch(() => null);
-
-  return Boolean(sameDay?.docs.some(doc => {
-    const data = { id: doc.id, ...(doc.data() || {}) };
-    return isSameClassSlot(shift, data) && isTeacherAssignedToShift(user, data);
-  }));
-}
-
 function shiftHasRequestedZoom(shift: Record<string, any>, targetEmail: string, targetMeetingId: string) {
   const shiftEmail = normalize(shift.target_signin_address);
   const shiftMeetingId = normalizeMeetingId(shift.target_meeting_id);
@@ -155,24 +92,20 @@ function shiftHasRequestedZoom(shift: Record<string, any>, targetEmail: string, 
   );
 }
 
-async function shiftAllowsZoomEmail(user: any, shift: Record<string, any>, targetEmail: string, targetMeetingId: string) {
+function shiftAllowsZoomEmail(shift: Record<string, any>, targetEmail: string, targetMeetingId: string) {
   // 過去・未来の配置を根拠に共有ZoomアカウントのZAKを取得させない。
-  if (!isCurrentShift(shift)) return false;
-  if (!shiftHasRequestedZoom(shift, targetEmail, targetMeetingId)) return false;
-  if (isTeacherAssignedToShift(user, shift)) return true;
-  if (await teacherAssignedToRelatedShift(user, shift)) return true;
-
-  // 理社オンライン授業では、同じ時限の講師・サポート担当が教室間を移動して
-  // ホストを引き継ぐ。日付と時限の両方が一致する勤務者にだけ許可する。
-  return teacherAssignedToSamePeriod(user, shift);
+  // 当日の授業でZoom情報が完全一致すれば、担当外の講師（代行・引き継ぎ）も許可する。
+  return isCurrentShift(shift) && shiftHasRequestedZoom(shift, targetEmail, targetMeetingId);
 }
 
-async function teacherCanUseZoomEmail(user: any, email: string, meetingId?: string, shiftId?: string) {
+type ZoomEmailAccess = { allowed: boolean; shift?: Record<string, any> };
+
+async function teacherCanUseZoomEmail(user: any, email: string, meetingId?: string, shiftId?: string): Promise<ZoomEmailAccess> {
   const targetEmail = normalize(email);
   const targetMeetingId = normalizeMeetingId(meetingId);
-  if (!targetEmail) return false;
-  if (normalize(user.email) === targetEmail) return true;
-  if (profileZoomEmails(user.profile || {}).includes(targetEmail)) return true;
+  if (!targetEmail) return { allowed: false };
+  if (normalize(user.email) === targetEmail) return { allowed: true };
+  if (profileZoomEmails(user.profile || {}).includes(targetEmail)) return { allowed: true };
 
   const shiftDoc = shiftId
     ? await adminDb().collection('shift_assignments').doc(String(shiftId)).get().catch(() => null)
@@ -180,9 +113,7 @@ async function teacherCanUseZoomEmail(user: any, email: string, meetingId?: stri
 
   if (shiftDoc?.exists) {
     const data = { id: shiftDoc.id, ...(shiftDoc.data() || {}) };
-    if (await shiftAllowsZoomEmail(user, data, targetEmail, targetMeetingId)) {
-      return true;
-    }
+    if (shiftAllowsZoomEmail(data, targetEmail, targetMeetingId)) return { allowed: true, shift: data };
   }
 
   const snapshots = await Promise.all([
@@ -194,12 +125,27 @@ async function teacherCanUseZoomEmail(user: any, email: string, meetingId?: stri
   const docs = snapshots.flatMap(snap => snap?.docs || []);
   for (const doc of docs) {
     const data = { id: doc.id, ...(doc.data() || {}) };
-    if (await shiftAllowsZoomEmail(user, data, targetEmail, targetMeetingId)) {
-      return true;
-    }
+    if (shiftAllowsZoomEmail(data, targetEmail, targetMeetingId)) return { allowed: true, shift: data };
   }
 
-  return false;
+  return { allowed: false };
+}
+
+async function recordHostStart(user: any, details: Record<string, unknown>) {
+  const entry = {
+    uid: user.uid,
+    role: user.role,
+    teacher_name: String(user.profile?.teacher_name || user.profile?.name || user.profile?.student_name || ''),
+    ...details,
+  };
+  console.log('[get-zoom-zak] host start', entry);
+  // 監査ログはベストエフォート。書き込み失敗でホスト開始自体は止めない。
+  await adminDb().collection('zoom_host_start_logs').add({
+    ...entry,
+    created_at: new Date().toISOString(),
+  }).catch((error: unknown) => {
+    console.error('[get-zoom-zak] failed to write host start log', error instanceof Error ? error.message : String(error));
+  });
 }
 
 export async function POST(request: NextRequest) {
@@ -214,24 +160,45 @@ export async function POST(request: NextRequest) {
     let fallbackStartUrl = '';
     let shiftPasscode = '';
     let authorizedByExplicitShift = false;
+    let hostStartLog: Record<string, unknown> | null = null;
 
     if (shiftId) {
       const shiftDoc = await adminDb().collection('shift_assignments').doc(String(shiftId)).get().catch(() => null);
       const shiftData: Record<string, any> = shiftDoc?.exists ? { id: shiftDoc.id, ...(shiftDoc.data() || {}) } : {};
       // 講師画面に表示された実在の授業で、保存済みのZoom情報と完全に一致する場合は、
-      // 担当者以外の講師も代理でホスト開始できる。メールやミーティングIDの差し替えは
-      // shiftHasRequestedZoom で拒否し、任意アカウントのZAK取得は許可しない。
-      authorizedByExplicitShift = shiftHasRequestedZoom(shiftData, zoomEmail, requestedMeetingId) && (adminAccess || isCurrentShift(shiftData));
+      // 担当者以外の講師（代行・引き継ぎ）もホスト開始できる。メールやミーティングIDの
+      // 差し替えは shiftHasRequestedZoom で拒否し、任意アカウントのZAK取得は許可しない。
+      // 講師は当日（日本時間）の授業に限る。
+      const zoomMatches = shiftHasRequestedZoom(shiftData, zoomEmail, requestedMeetingId);
+      const dateAllowed = adminAccess || isCurrentShift(shiftData);
+      authorizedByExplicitShift = Boolean(shiftDoc?.exists) && zoomMatches && dateAllowed;
       if (!adminAccess && !authorizedByExplicitShift) {
         console.warn('[get-zoom-zak] forbidden explicit shift', {
           uid: user.uid,
           role: user.role,
           shiftId: String(shiftId),
           shiftExists: Boolean(shiftDoc?.exists),
+          shiftDate: shiftData.target_date || null,
           requestedMeetingId,
           emailMatchesShift: normalize(shiftData.target_signin_address) === zoomEmail,
         });
-        return NextResponse.json({ success: false, error: 'forbidden' }, { status: 403 });
+        const reason = !shiftDoc?.exists
+          ? '授業が見つかりません。画面を再読み込みしてください。'
+          : !zoomMatches
+          ? '授業に登録されたZoom情報と一致しません。'
+          : '本日の授業のみホスト開始できます。';
+        return NextResponse.json({ success: false, error: reason }, { status: 403 });
+      }
+      if (shiftDoc?.exists) {
+        const assignedTeacher = isTeacherAssignedToShift(user, shiftData);
+        hostStartLog = {
+          shift_id: String(shiftId),
+          shift_date: String(shiftData.target_date || ''),
+          shift_teacher_id: shiftData.user_id ? String(shiftData.user_id) : null,
+          shift_teacher_name: String(shiftData.teacher_name || ''),
+          assigned_teacher: assignedTeacher,
+          substitute_start: !assignedTeacher,
+        };
       }
       shiftPasscode = normalizePasscode(
         shiftData.target_password || shiftData.meeting_password || shiftData.zoom_password || shiftData.passcode || shiftData.password
@@ -243,7 +210,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'Email and meeting ID are required' }, { status: 400 });
     }
 
-    if (!adminAccess && !authorizedByExplicitShift && !(await teacherCanUseZoomEmail(user, String(email), String(meetingId || ''), String(shiftId || '')))) {
+    const emailAccess = adminAccess || authorizedByExplicitShift
+      ? null
+      : await teacherCanUseZoomEmail(user, String(email), String(meetingId || ''), String(shiftId || ''));
+    if (emailAccess && !emailAccess.allowed) {
       console.warn('[get-zoom-zak] forbidden', {
         uid: user.uid,
         role: user.role,
@@ -252,8 +222,29 @@ export async function POST(request: NextRequest) {
         meetingId: normalizeMeetingId(meetingId),
         zoomEmailDomain: String(email || '').split('@')[1] || null,
       });
-      return NextResponse.json({ success: false, error: 'forbidden' }, { status: 403 });
+      return NextResponse.json({ success: false, error: '本日の授業に登録されたZoom情報が見つからないため、ホスト開始できません。' }, { status: 403 });
     }
+    if (!hostStartLog && emailAccess?.shift) {
+      const matchedShift = emailAccess.shift;
+      const assignedTeacher = isTeacherAssignedToShift(user, matchedShift);
+      hostStartLog = {
+        shift_id: String(matchedShift.id || ''),
+        shift_date: String(matchedShift.target_date || ''),
+        shift_teacher_id: matchedShift.user_id ? String(matchedShift.user_id) : null,
+        shift_teacher_name: String(matchedShift.teacher_name || ''),
+        assigned_teacher: assignedTeacher,
+        substitute_start: !assignedTeacher,
+      };
+    }
+
+    // 誰がどの授業のホスト開始を取得したか（担当者本人か代行か）を記録する。
+    await recordHostStart(user, {
+      shift_id: shiftId ? String(shiftId) : null,
+      meeting_id: requestedMeetingId,
+      zoom_email_domain: zoomEmail.split('@')[1] || null,
+      authorized_by: adminAccess ? 'admin' : authorizedByExplicitShift ? 'explicit_shift' : 'zoom_email',
+      ...(hostStartLog || {}),
+    });
 
     const accountId = process.env.ZOOM_ACCOUNT_ID;
     const clientId = process.env.ZOOM_CLIENT_ID;

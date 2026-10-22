@@ -2,45 +2,39 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Bell, Home, Users, Settings } from 'lucide-react'; // アイコン変更
+import { Bell, Home, Users, Settings } from 'lucide-react';
 import { usePortalVisibility } from '@/app/hooks/usePortalVisibility';
+import { useUnreadNotificationCount } from '@/app/components/student/useUnreadNotificationCount';
 
 export default function BottomNav() {
   const pathname = usePathname();
   const { visibility } = usePortalVisibility('student');
+  const unreadCount = useUnreadNotificationCount(visibility.notifications !== false);
 
-  // ★修正: メニューを3つに厳選
+  // 生徒の下部メニュー。選択中の項目は差し色（生徒のテーマ設定）で示す。
   const navItems = [
-    { 
-      label: 'ホーム', 
-      path: '/student', 
-      icon: <Home size={24} />, 
-      activeColor: 'text-indigo-500', 
-      bgColor: 'bg-indigo-50',
+    {
+      label: 'ホーム',
+      path: '/student',
+      icon: Home,
       visible: true,
     },
-    { 
+    {
       label: '掲示板',
-      path: '/student/community', 
-      icon: <Users size={24} />, 
-      activeColor: 'text-pink-500', 
-      bgColor: 'bg-pink-50',
+      path: '/student/community',
+      icon: Users,
       visible: visibility.community !== false,
     },
-    { 
+    {
       label: '通知',
       path: '/student/notifications',
-      icon: <Bell size={24} />,
-      activeColor: 'text-amber-500',
-      bgColor: 'bg-amber-50',
+      icon: Bell,
       visible: visibility.notifications !== false,
     },
     {
-      label: '設定', 
-      path: '/student/settings', 
-      icon: <Settings size={24} />, 
-      activeColor: 'text-gray-600', 
-      bgColor: 'bg-gray-100',
+      label: '設定',
+      path: '/student/settings',
+      icon: Settings,
       visible: visibility.settings !== false,
     },
   ].filter(item => item.visible);
@@ -51,33 +45,36 @@ export default function BottomNav() {
   };
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 bg-white/90 backdrop-blur-md border-t border-gray-200 pb-safe pt-2 px-6 flex justify-around items-end z-[100] h-[85px] shadow-[0_-5px_20px_-5px_rgba(0,0,0,0.1)] rounded-t-[20px]">
+    <nav
+      aria-label="生徒メニュー"
+      className="fixed bottom-0 left-0 right-0 z-40 flex items-stretch justify-around gap-1 rounded-t-card border-t border-line bg-surface/90 px-4 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] shadow-[0_-5px_20px_-5px_rgba(0,0,0,0.1)] backdrop-blur-md"
+    >
       {navItems.map((item) => {
         const active = isActive(item.path);
-        
-        return (
-          <Link 
-            key={item.path} 
-            href={item.path} 
-            className={`flex flex-col items-center gap-1 p-2 w-full transition-all duration-300 group ${
-              active ? '-translate-y-2' : 'hover:-translate-y-1'
-            }`}
-          >
-            {/* アイコン部分 */}
-            <div className={`
-              p-3 rounded-2xl transition-all duration-300 shadow-sm
-              ${active ? `${item.bgColor} ${item.activeColor} scale-110 shadow-md` : 'bg-transparent text-gray-400 group-hover:bg-gray-50'}
-            `}>
-              <div style={{ strokeWidth: active ? 2.5 : 2 }}>
-                {item.icon}
-              </div>
-            </div>
+        const Icon = item.icon;
+        const badge = item.path === '/student/notifications' && unreadCount > 0 ? unreadCount : 0;
 
-            {/* ラベル部分 */}
-            <span className={`
-              text-[10px] font-bold transition-all duration-300
-              ${active ? `${item.activeColor} scale-105` : 'text-gray-400'}
-            `}>
+        return (
+          <Link
+            key={item.path}
+            href={item.path}
+            aria-current={active ? 'page' : undefined}
+            aria-label={badge ? `${item.label}（未読${badge}件）` : undefined}
+            className="group flex min-h-14 w-full flex-col items-center justify-center gap-1 rounded-btn px-2 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          >
+            <span
+              className={`relative flex h-10 w-12 items-center justify-center rounded-btn transition-colors duration-200 ${
+                active ? 'bg-accent-soft text-accent' : 'text-fg-muted group-hover:bg-canvas'
+              }`}
+            >
+              <Icon size={24} strokeWidth={active ? 2.5 : 2} aria-hidden />
+              {badge > 0 && (
+                <span aria-hidden className="absolute right-0.5 top-0 flex h-5 min-w-5 items-center justify-center rounded-full border-2 border-surface bg-danger px-1 text-[11px] font-bold leading-none text-white">
+                  {badge > 9 ? '9+' : badge}
+                </span>
+              )}
+            </span>
+            <span className={`whitespace-nowrap text-xs font-bold ${active ? 'text-accent' : 'text-fg-muted'}`}>
               {item.label}
             </span>
           </Link>

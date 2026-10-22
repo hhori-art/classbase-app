@@ -19,6 +19,7 @@ import {
   type AttendanceShiftPlan,
 } from '@/lib/attendance-shift-plan';
 import { getAllQueryDocuments } from '@/lib/server/firestore-pagination';
+import { normalizeIndividualLevel } from '@/lib/attendance-work-detail';
 import { accessibleTeacherStudents } from '@/lib/server/teacher-student-access';
 
 export const runtime = 'nodejs';
@@ -92,7 +93,7 @@ const shiftPayload = (
   grade: clean(input.grade, 20),
   subject: clean(input.subject, 60),
   individual_ratio: ['1:1', '1:2', '1:3'].includes(String(input.individual_ratio || '')) ? input.individual_ratio : undefined,
-  individual_level: input.individual_level === 'advanced' ? 'advanced' : 'standard',
+  individual_level: normalizeIndividualLevel(input.individual_level) || 'standard',
   office_task: clean(input.office_task, 60),
   room: clean(input.room, 80),
   note: clean(input.note, 500),

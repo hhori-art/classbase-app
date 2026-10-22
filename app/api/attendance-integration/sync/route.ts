@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server';
 import { externalAttendanceConfigStatus, syncExternalAttendance } from '@/lib/server/external-attendance-sync';
+import { isAuthorizedCronRequest } from '@/lib/server/cron-auth';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -8,9 +9,7 @@ export const maxDuration = 60;
 const todayJst = () => new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
 export async function GET(request: NextRequest) {
-  const expected = String(process.env.CRON_SECRET || '');
-  const supplied = String(request.headers.get('authorization') || '');
-  if (!expected || supplied !== `Bearer ${expected}`) {
+  if (!isAuthorizedCronRequest(request)) {
     return Response.json({ ok: false, error: 'unauthorized' }, { status: 401 });
   }
 

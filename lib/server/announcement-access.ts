@@ -32,6 +32,24 @@ export function canReadAnnouncement(user: any, item: any) {
   return !targetGrades.length || targetGrades.some(grade => viewerGrades.has(grade));
 }
 
+const PARENT_ROLES = new Set(['parent', 'guardian']);
+const MAX_LINKED_STUDENTS = 20;
+
+/** 保護者が対象かどうかは、紐づく生徒の校舎・学年でも判定する。読み込む生徒のID（保護者以外は空）。 */
+export function announcementLinkedStudentIds(user: any) {
+  return PARENT_ROLES.has(user.role) ? cleanAnnouncementList(user.profile?.student_ids).slice(0, MAX_LINKED_STUDENTS) : [];
+}
+
+/** canReadAnnouncement に渡す閲覧者。保護者には紐づく生徒の校舎・学年を足す（お知らせの閲覧と端末への通知で共通）。 */
+export function withAnnouncementLinkedStudents(user: any, students: Array<Record<string, any> | undefined>) {
+  if (!PARENT_ROLES.has(user.role)) return user;
+  const linked = students.filter((student): student is Record<string, any> => Boolean(student));
+  return { ...user,
+    linked_schools: linked.flatMap(data => [data.school_id, data.school_code, data.school].filter(Boolean)),
+    linked_grades: linked.map(data => data.grade).filter(Boolean),
+  };
+}
+
 const asIso = (value: any) => value?.toDate ? value.toDate().toISOString() : value || '';
 export function serializeAnnouncement(doc: FirebaseFirestore.DocumentSnapshot) {
   const data = doc.data() || {};

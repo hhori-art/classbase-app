@@ -123,10 +123,10 @@ service cloud.firestore {
     function isAttendanceManager() {
       return role() == 'master' ||
         isAttendanceAdmin() ||
-        (isAdminRole() && (
-          !myUser().keys().hasAny(['admin_permissions']) ||
-          myUser().admin_permissions.attendance == true
-        ));
+        // 勤怠は理社講座とは別の権限。権限を明示的に付けた管理者だけ（未設定の古いアカウントには付けない）。
+        (isAdminRole() &&
+          myUser().keys().hasAny(['admin_permissions']) &&
+          myUser().admin_permissions.get('attendance', false) == true);
     }
 
     function canManageSchool(school) {
@@ -188,29 +188,6 @@ service cloud.firestore {
       return isParent() &&
         request.resource.data.parent_id == request.auth.uid &&
         parentLinkedTo(request.resource.data.student_id);
-    }
-
-    function teacherOwnAvailabilityCreate() {
-      return isTeacher() &&
-        (
-          request.resource.data.teacher_id == request.auth.uid ||
-          request.resource.data.user_id == request.auth.uid
-        );
-    }
-
-    function teacherOwnAvailabilityUpdate() {
-      return isTeacher() &&
-        (
-          resource.data.teacher_id == request.auth.uid ||
-          resource.data.user_id == request.auth.uid
-        ) &&
-        (
-          request.resource.data.teacher_id == request.auth.uid ||
-          request.resource.data.user_id == request.auth.uid
-        ) &&
-        !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-          'teacher_id', 'created_at', 'created_by'
-        ]);
     }
 
     function teacherWorkCreate() {
@@ -409,6 +386,12 @@ service cloud.firestore {
       }
     }
 
+    // 交流掲示板の通報。生徒はサーバーAPI（/api/student/community）経由でだけ作成し、
+    // 通報者が分からないよう、クライアントからは誰も直接読み書きできない（管理者もAdmin SDK経由）。
+    match /community_reports/{reportId} {
+      allow read, write: if false;
+    }
+
     match /teacher_community_topics/{topicId} {
       allow read: if isTeacher() || isAdmin();
       // サーバーで入力上限、投票、いいね、所有者を検証する。
@@ -424,6 +407,16 @@ service cloud.firestore {
       allow read: if isTeacher() || isAdmin();
       allow create: if isTeacher() || isAdmin();
       allow update, delete: if isMaster();
+    }
+
+    // 未連絡リストの電話済み記録。/api/teacher/contact-call-marks（Admin SDK）からのみ読み書きする。
+    match /contact_call_logs/{logId} {
+      allow read, write: if false;
+    }
+
+    // Zoomホスト開始の監査ログ（誰がどの授業を開始したか）。/api/get-zoom-zak からのみ書き込む。
+    match /zoom_host_start_logs/{logId} {
+      allow read, write: if false;
     }
 
     match /pf_records/{recordId} {
@@ -474,30 +467,15 @@ service cloud.firestore {
     }
 
     match /teacher_availability/{availabilityId} {
+      // 講師の提出・取り消しは /api/teacher/shifts で過去日・配置済みを検証してから書き込む。
       allow read: if isTeacher() || isAttendanceManager();
-      allow create: if teacherOwnAvailabilityCreate() || isAttendanceManager();
-      allow update: if teacherOwnAvailabilityUpdate() || isAttendanceManager();
-      allow delete: if isAttendanceManager() || (isTeacher() && (resource.data.teacher_id == request.auth.uid || resource.data.user_id == request.auth.uid));
+      allow create, update, delete: if isAttendanceManager();
     }
 
     match /teacher_availability_profiles/{teacherId} {
+      // 講師本人の保存は /api/teacher/availability-profile で本人・校舎・時刻を検証してから書き込む。
       allow read: if isAttendanceManager() || (isTeacher() && teacherId == request.auth.uid);
-      allow create: if isAttendanceManager() || (
-        isTeacher() &&
-        teacherId == request.auth.uid &&
-        request.resource.data.teacher_id == request.auth.uid &&
-        request.resource.data.user_id == request.auth.uid
-      );
-      allow update: if isAttendanceManager() || (
-        isTeacher() &&
-        teacherId == request.auth.uid &&
-        resource.data.teacher_id == request.auth.uid &&
-        resource.data.user_id == request.auth.uid &&
-        request.resource.data.teacher_id == request.auth.uid &&
-        request.resource.data.user_id == request.auth.uid &&
-        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['teacher_id', 'user_id', 'created_at'])
-      );
-      allow delete: if isAttendanceManager() || (isTeacher() && teacherId == request.auth.uid);
+      allow create, update, delete: if isAttendanceManager();
     }
 
     match /teacher_commuter_passes/{passId} {
@@ -513,6 +491,7 @@ service cloud.firestore {
     }
 
     match /teacher_substitution_posts/{postId} {
+      // 講師の依頼・返答・取り下げは /api/teacher/substitutions で担当授業を検証して書き込む。
       allow read: if isTeacher() || isAdmin();
       allow create: if isAdmin();
       allow update: if isAdmin();
@@ -700,10 +679,30 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
+    // 保護者との個別連絡は /api/parent/faq と /api/admin/parent-inquiries（Admin SDK）だけが書き込む。
     match /parent_inquiries/{inquiryId} {
       allow read: if signedIn() && (resource.data.parent_id == request.auth.uid || isAdmin());
-      allow create: if isParent() && request.resource.data.parent_id == request.auth.uid;
-      allow update, delete: if isAdmin();
+      allow write: if false;
+    }
+
+    // 教室への連絡の返信のひな形。マスター専用API（/api/admin/reply-templates）だけが扱う。
+    match /reply_templates/{templateId} {
+      allow read, write: if false;
+    }
+
+    // AIチャットの安全アラートは生徒の会話抜粋を含むため、サーバー(Admin SDK)だけが扱う。
+    match /safety_alerts/{alertId} {
+      allow read, write: if false;
+    }
+
+    // 管理者の操作ログ。書き込み・閲覧はサーバー（/api/admin/audit-log）だけ。ブラウザからは読めず改ざんもできない。
+    match /admin_audit_logs/{logId} {
+      allow read, write: if false;
+    }
+
+    // Web Push の購読情報（端末ごとの送信先）。/api/push/subscriptions（Admin SDK）だけが扱う。
+    match /push_subscriptions/{subscriptionId} {
+      allow read, write: if false;
     }
 
     match /course_enrollments/{enrollmentId} {
@@ -846,8 +845,11 @@ service cloud.firestore {
         'teacher_inquiries',
         'chat_logs',
         'community_topics',
+        'community_reports',
         'teacher_community_topics',
         'contact_logs',
+        'contact_call_logs',
+        'zoom_host_start_logs',
         'pf_records',
         'pf_resolutions',
         'work_records',
@@ -881,6 +883,9 @@ service cloud.firestore {
         'messages',
         'activity_logs',
         'parent_inquiries',
+        'safety_alerts',
+        'admin_audit_logs',
+        'push_subscriptions',
         'course_enrollments',
         'eiken_courses',
         'eiken_course_units',

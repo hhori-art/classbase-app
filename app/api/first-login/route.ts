@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { adminAuth, adminDb } from '@/lib/firebase-admin';
-import { consumeRateLimit, getClientIp, requestFingerprint } from '@/lib/server/password-recovery';
+import { consumeRateLimit, getClientIp, releaseRateLimit, requestFingerprint } from '@/lib/server/password-recovery';
+import { verifyExistingFirebasePassword } from '@/lib/server/firebase-password-check';
 
 export const runtime = 'nodejs';
 
@@ -83,6 +84,30 @@ async function resolveAuthUser(auth: ReturnType<typeof adminAuth>, lifetimeId: s
   return { uid: created.uid, email };
 }
 
+/** 登録データに対応する既存のAuthアカウント（uid → 登録メールの順に探す）。なければ null。 */
+async function existingAuthUserForSeed(auth: ReturnType<typeof adminAuth>, seed: FirebaseFirestore.DocumentData, seedId: string) {
+  const isNotFound = (error: any) => error?.code === 'auth/user-not-found' || String(error?.message || '').toLowerCase().includes('no user record');
+  try {
+    return await auth.getUser(String(seed.uid || seedId));
+  } catch (error: any) {
+    if (!isNotFound(error)) throw error;
+  }
+  const email = String(seed.email || '').trim().toLowerCase();
+  if (!email) return null;
+  try {
+    // 別の利用者のAuthアカウントかもしれないので、使う側で uid と登録データの一致を確かめる。
+    return await auth.getUserByEmail(email);
+  } catch (error: any) {
+    if (!isNotFound(error)) throw error;
+    return null;
+  }
+}
+
+/** ログインできた試行は回数制限に数えない。戻せなくてもログインは止めない。 */
+async function refundAttempt(...keys: string[]) {
+  await Promise.all(keys.map(key => releaseRateLimit(key).catch(error => console.warn('[first-login] rate-limit refund failed', error?.message))));
+}
+
 function pickSeedDoc(docs: FirebaseFirestore.QueryDocumentSnapshot[], password: string) {
   const normalizedPassword = normalizePassword(password);
   const withMatchingPassword = docs.find(doc => savedInitialPassword(doc.data() || {}) === normalizedPassword);
@@ -107,9 +132,13 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: 'id-invalid-format' }, { status: 400 });
     }
 
+    // 校舎・本部では多くの職員が同じ回線（同じIP）からログインするため、IPの上限は広めにし、
+    // ログインできた分は数えない（失敗だけを数える）。総当たりはアカウントごとの上限で止める。
+    const ipKey = requestFingerprint(['first-login-ip', getClientIp(req)]);
+    const accountKey = requestFingerprint(['first-login-account', lifetimeId.toLowerCase()]);
     const [ipAllowed, accountAllowed] = await Promise.all([
-      consumeRateLimit(requestFingerprint(['first-login-ip', getClientIp(req)]), 12, 15 * 60 * 1000),
-      consumeRateLimit(requestFingerprint(['first-login-account', lifetimeId.toLowerCase()]), 6, 15 * 60 * 1000),
+      consumeRateLimit(ipKey, 30, 15 * 60 * 1000),
+      consumeRateLimit(accountKey, 6, 15 * 60 * 1000),
     ]);
     if (!ipAllowed || !accountAllowed) {
       return NextResponse.json({ ok: false, error: 'too-many-attempts' }, { status: 429 });
@@ -125,9 +154,27 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: 'not-registered' }, { status: 404 });
     }
     const seed = seedDoc.data();
-    if (seed.isFirstLogin === false || ['suspended', 'withdrawn', 'archived'].some(status =>
-      seed.account_status === status || seed.status === status)) {
+    if (['suspended', 'withdrawn', 'archived'].some(status => seed.account_status === status || seed.status === status)) {
       return NextResponse.json({ ok: false, error: 'initial-login-not-allowed' }, { status: 403 });
+    }
+    // ログインIDとAuthのメールが違うアカウント（実メールで登録した職員など）は、画面がIDから作るメールでは見つからない。
+    // 今のパスワードを確かめてから実メールを返す（初回登録済みかどうかの記録に関係なく、今のパスワードを優先する）。
+    const loginEmails = new Set(idVariants(lifetimeId).flatMap(candidateId => EMAIL_DOMAINS.map(domain => `${candidateId}@${domain}`.toLowerCase())));
+    const existingAuth = await existingAuthUserForSeed(auth, seed, seedDoc.id);
+    const existingEmail = String(existingAuth?.email || '').trim().toLowerCase();
+    // 登録データがまだAuthのuidへ移っていない（初回登録前）ときは、移す処理が必要なので下の初回登録へ進む。
+    if (existingAuth && existingEmail && !loginEmails.has(existingEmail) && existingAuth.uid === seedDoc.id) {
+      if (existingAuth.disabled) return NextResponse.json({ ok: false, error: 'initial-login-not-allowed' }, { status: 403 });
+      if (await verifyExistingFirebasePassword(existingEmail, password)) {
+        await refundAttempt(ipKey, accountKey);
+        return NextResponse.json({ ok: true, uid: existingAuth.uid, email: existingEmail, existing_account: true });
+      }
+      if (seed.isFirstLogin === false) return NextResponse.json({ ok: false, error: 'wrong-password' }, { status: 401 });
+      // 初回登録前なら、このあと初期パスワードで確かめる。
+    } else if (seed.isFirstLogin === false) {
+      // IDから作るメールのアカウントは、画面のログインでパスワード違いと判定済み。
+      if (existingAuth?.disabled) return NextResponse.json({ ok: false, error: 'initial-login-not-allowed' }, { status: 403 });
+      return NextResponse.json({ ok: false, error: existingAuth ? 'wrong-password' : 'initial-login-not-allowed' }, { status: existingAuth ? 401 : 403 });
     }
 
     // 2) 初回PW検証（登録経路差異に対応して initial_password / raw_password / password を見る）
@@ -160,9 +207,12 @@ export async function POST(req: Request) {
     // 6) 旧doc削除（同一IDなら削除しない）
     if (seedDoc.id !== uid) await seedDoc.ref.delete();
 
+    await refundAttempt(ipKey, accountKey);
     return NextResponse.json({ ok: true, uid, email }, { status: 200 });
   } catch (err: any) {
     console.error('[first-login] error:', err);
+    if (err?.message === 'too-many-attempts') return NextResponse.json({ ok: false, error: 'too-many-attempts' }, { status: 429 });
+    if (err?.message === 'account-inactive') return NextResponse.json({ ok: false, error: 'initial-login-not-allowed' }, { status: 403 });
     return NextResponse.json({ ok: false, error: `server-error:${err?.message || 'unknown'}` }, { status: 500 });
   }
 }

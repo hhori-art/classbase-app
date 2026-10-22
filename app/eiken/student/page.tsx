@@ -18,6 +18,8 @@ import {
 import EikenCalendar from '@/app/components/eiken/EikenCalendar';
 import { useEikenApi } from '@/app/eiken/useEikenApi';
 import { EIKEN_LEVEL_LABELS, type EikenLevel } from '@/lib/eiken/types';
+import { formatDate, formatDateTime } from '@/lib/format';
+import { EmptyState, ErrorState, ListSkeleton, buttonClass, useToast } from '@/app/components/ui';
 
 const taskLabels: Record<string, string> = {
   video: '映像授業',
@@ -42,6 +44,7 @@ export default function EikenStudentPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [joiningId, setJoiningId] = useState('');
+  const toast = useToast();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -81,19 +84,19 @@ export default function EikenStudentPage() {
       const result = await api<any>(`/api/eiken/lessons/${lessonId}/join`, { method: 'POST', body: '{}' });
       window.location.href = result.join_url;
     } catch (joinError) {
-      alert(joinError instanceof Error ? joinError.message : '授業へ参加できませんでした。');
+      toast.error(joinError instanceof Error ? joinError.message : '授業へ参加できませんでした。');
     } finally {
       setJoiningId('');
     }
   };
 
   if (loading) {
-    return <main className="flex min-h-[60vh] items-center justify-center"><Loader2 className="animate-spin text-emerald-600" /></main>;
+    return <main className="mx-auto max-w-4xl px-4 py-8"><ListSkeleton rows={4} /></main>;
   }
   if (error) {
     return (
       <main className="mx-auto max-w-4xl px-4 py-12">
-        <div className="rounded-lg border border-red-200 bg-red-50 p-5 text-sm font-bold text-red-700">{error}</div>
+        <ErrorState title="学習情報を読み込めませんでした" message={error} onRetry={() => void load()} />
       </main>
     );
   }
@@ -101,19 +104,19 @@ export default function EikenStudentPage() {
   return (
     <main className="mx-auto max-w-4xl px-4 py-6 sm:py-8">
       <section className="mb-8">
-        <p className="text-sm font-bold text-emerald-700">今日のBooster</p>
+        <p className="text-sm font-bold text-accent">今日のBooster</p>
         <div className="mt-2 flex flex-wrap items-end justify-between gap-3">
           <div>
-            <h2 className="text-2xl font-black sm:text-3xl">{course?.name || '英検対策講座 Booster'}</h2>
-            <p className="mt-1 text-sm text-slate-500">
+            <h2 className="text-2xl font-black text-fg sm:text-3xl">{course?.name || '英検対策講座 Booster'}</h2>
+            <p className="mt-1 text-sm text-fg-muted">
               {course?.level ? EIKEN_LEVEL_LABELS[course.level as EikenLevel] || course.level : '受講級を確認中'}
               {' ・ '}
-              {new Intl.DateTimeFormat('ja-JP', { dateStyle: 'long' }).format(new Date())}
+              {formatDate(new Date(), { withYear: true })}
             </p>
           </div>
-          <div className="rounded-lg bg-white px-4 py-3 text-right shadow-sm ring-1 ring-slate-200">
-            <p className="text-[11px] font-bold text-slate-500">今日の目安</p>
-            <p className="text-lg font-black">{totalMinutes || 0}分</p>
+          <div className="cb-card px-4 py-3 text-right">
+            <p className="text-xs font-bold text-fg-muted">今日の目安</p>
+            <p className="text-lg font-bold text-fg">{totalMinutes || 0}分</p>
           </div>
         </div>
       </section>
@@ -123,23 +126,23 @@ export default function EikenStudentPage() {
           {latestWriting?.evaluation_status === 'completed' && (
             <Link
               href={`/eiken/student/tasks/${latestWriting.task_id}`}
-              className="flex items-center justify-between gap-3 border-l-4 border-emerald-500 bg-emerald-50 px-4 py-4 text-sm font-bold text-emerald-900"
+              className="flex min-h-11 items-center justify-between gap-3 rounded-btn border-l-4 border-success bg-success-soft px-4 py-4 text-sm font-bold text-emerald-900"
             >
               <span>AI添削の結果が届いています。良かった点と次のポイントを確認しましょう。</span>
-              <ArrowRight className="shrink-0" size={18} />
+              <ArrowRight className="shrink-0" size={18} aria-hidden />
             </Link>
           )}
           {latestWriting?.evaluation_status === 'failed' && (
             <Link
               href={`/eiken/student/tasks/${latestWriting.task_id}`}
-              className="flex items-center justify-between gap-3 border-l-4 border-amber-500 bg-amber-50 px-4 py-4 text-sm font-bold text-amber-900"
+              className="flex min-h-11 items-center justify-between gap-3 rounded-btn border-l-4 border-warning bg-warning-soft px-4 py-4 text-sm font-bold text-amber-900"
             >
               <span>AI添削を完了できませんでした。答案は残っているため、もう一度提出できます。</span>
               <ArrowRight className="shrink-0" size={18} />
             </Link>
           )}
           {overdueTasks.length > 0 && (
-            <div className="border-l-4 border-indigo-500 bg-indigo-50 px-4 py-4 text-sm font-bold text-indigo-900">
+            <div className="rounded-btn border-l-4 border-danger bg-danger-soft px-4 py-4 text-sm font-bold text-rose-900">
               期限を過ぎた学習が{overdueTasks.length}件あります。今日は上に表示された1つから再開しましょう。
             </div>
           )}
@@ -148,90 +151,90 @@ export default function EikenStudentPage() {
 
       <section id="today" className="mb-10" aria-labelledby="next-task-heading">
         {nextTask ? (
-          <div className="border-l-4 border-emerald-600 bg-white px-5 py-6 shadow-sm">
-            <div className="flex items-center gap-2 text-sm font-bold text-emerald-700">
-              <PlayCircle size={18} />
+          <div className="rounded-card border-l-4 border-accent bg-surface shadow-card px-5 py-6">
+            <div className="flex items-center gap-2 text-sm font-bold text-accent">
+              <PlayCircle size={18} aria-hidden />
               次にやること
             </div>
-            <h2 id="next-task-heading" className="mt-3 text-xl font-black sm:text-2xl">{nextTask.title}</h2>
-            <p className="mt-2 text-sm leading-6 text-slate-600">{nextTask.description || 'この学習から始めましょう。'}</p>
-            <div className="mt-3 flex flex-wrap gap-3 text-xs font-bold text-slate-500">
+            <h2 id="next-task-heading" className="mt-3 text-xl font-black text-fg sm:text-2xl">{nextTask.title}</h2>
+            <p className="mt-2 text-sm leading-6 text-fg-muted">{nextTask.description || 'この学習から始めましょう。'}</p>
+            <div className="mt-3 flex flex-wrap gap-3 text-xs font-bold text-fg-muted">
               <span>{taskLabels[nextTask.task_type] || '学習タスク'}</span>
               {nextTask.estimated_minutes ? <span>約{nextTask.estimated_minutes}分</span> : null}
             </div>
             <Link
               href={`/eiken/student/tasks/${nextTask.id}`}
-              className="mt-6 inline-flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-5 py-3.5 font-black text-white hover:bg-emerald-700 sm:w-auto"
+              className={buttonClass('primary', 'lg', 'mt-6 w-full sm:w-auto')}
             >
               学習を始める
-              <ArrowRight size={18} />
+              <ArrowRight size={18} aria-hidden />
             </Link>
           </div>
         ) : (
-          <div className="border-l-4 border-emerald-600 bg-white px-5 py-7 text-center shadow-sm">
-            <CheckCircle2 className="mx-auto text-emerald-600" size={34} />
-            <h2 className="mt-3 text-lg font-black">今日までの学習は完了しています</h2>
-            <p className="mt-1 text-sm text-slate-500">ここまでよく進められています。次の公開をお待ちください。</p>
+          <div className="rounded-card border-l-4 border-accent bg-surface shadow-card px-5 py-7 text-center">
+            <CheckCircle2 className="mx-auto text-success" size={34} aria-hidden />
+            <h2 className="mt-3 text-lg font-bold text-fg">今日までの学習は完了しています</h2>
+            <p className="mt-1 text-sm text-fg-muted">ここまでよく進められています。次の公開をお待ちください。</p>
           </div>
         )}
 
         <div className="mt-5">
-          <h3 className="text-sm font-black text-slate-700">今日の流れ</h3>
-          <ol className="mt-3 divide-y divide-slate-200 border-y border-slate-200 bg-white">
+          <h3 className="text-sm font-bold text-fg">今日の流れ</h3>
+          <ol className="cb-card mt-3 divide-y divide-line overflow-hidden">
             {todayTasks.map((task: any, index: number) => {
               const Icon = taskIcon(task.task_type);
               const completed = task.progress?.status === 'completed';
               return (
                 <li key={task.id} className="flex items-center gap-3 px-3 py-4">
-                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xs font-black">{index + 1}</span>
-                  <Icon className="shrink-0 text-emerald-600" size={20} />
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xs font-bold text-fg">{index + 1}</span>
+                  <Icon className="shrink-0 text-accent" size={20} aria-hidden />
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-bold">{task.title}</p>
-                    <p className="mt-0.5 text-xs text-slate-500">{taskLabels[task.task_type]}{task.estimated_minutes ? ` ・ ${task.estimated_minutes}分` : ''}</p>
+                    <p className="truncate text-sm font-bold text-fg">{task.title}</p>
+                    <p className="mt-0.5 text-xs text-fg-muted">{taskLabels[task.task_type]}{task.estimated_minutes ? ` ・ ${task.estimated_minutes}分` : ''}</p>
                   </div>
-                  {completed ? <CheckCircle2 className="text-emerald-600" size={20} /> : <Circle className="text-slate-300" size={20} />}
+                  {completed ? <CheckCircle2 className="text-success" size={20} aria-label="完了" /> : <Circle className="text-slate-300" size={20} aria-label="未完了" />}
                 </li>
               );
             })}
-            {!todayTasks.length && <li className="px-4 py-6 text-center text-sm text-slate-500">今日の学習はありません。</li>}
+            {!todayTasks.length && <li className="px-4 py-6 text-center text-sm text-fg-muted">今日の学習はありません。</li>}
           </ol>
         </div>
       </section>
 
       <section className="mb-10" aria-labelledby="lesson-heading">
         <div className="mb-3 flex items-center gap-2">
-          <CalendarClock className="text-emerald-600" size={20} />
-          <h2 id="lesson-heading" className="font-black">次回のLIVE授業</h2>
+          <CalendarClock className="text-accent" size={20} aria-hidden />
+          <h2 id="lesson-heading" className="font-bold text-fg">次回のLIVE授業</h2>
         </div>
-        <div className="divide-y divide-slate-200 border-y border-slate-200 bg-white">
+        <div className="cb-card divide-y divide-line overflow-hidden">
           {(dashboard?.upcoming_lessons || []).slice(0, 3).map((lesson: any) => (
             <div key={lesson.id} className="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center">
               <div className="min-w-0 flex-1">
-                <p className="font-bold">{lesson.title}</p>
-                <p className="mt-1 text-sm text-slate-500">
-                  {lesson.start_at ? new Intl.DateTimeFormat('ja-JP', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(lesson.start_at)) : lesson.lesson_date}
+                <p className="font-bold text-fg">{lesson.title}</p>
+                <p className="mt-1 text-sm text-fg-muted">
+                  {lesson.start_at ? formatDateTime(lesson.start_at, { withYear: true }) : lesson.lesson_date}
                 </p>
               </div>
               <button
                 type="button"
                 onClick={() => joinLesson(lesson.id)}
                 disabled={joiningId === lesson.id}
-                className={`items-center justify-center gap-2 rounded-lg border border-emerald-600 px-4 py-2.5 text-sm font-black text-emerald-700 hover:bg-emerald-50 disabled:opacity-50 ${
+                className={`min-h-11 items-center justify-center gap-2 rounded-btn border border-accent px-4 text-sm font-bold text-accent hover:bg-accent-soft disabled:opacity-50 ${
                   lesson.can_join ? 'inline-flex' : 'hidden'
                 }`}
               >
-                {joiningId === lesson.id ? <Loader2 className="animate-spin" size={17} /> : <Video size={17} />}
+                {joiningId === lesson.id ? <Loader2 className="animate-spin" size={17} aria-hidden /> : <Video size={17} aria-hidden />}
                 参加する
               </button>
               {!lesson.can_join && lesson.join_available_at && (
-                <p className="text-xs font-bold text-slate-500 sm:text-right">
-                  {new Intl.DateTimeFormat('ja-JP', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(lesson.join_available_at))}
+                <p className="text-xs font-bold text-fg-muted sm:text-right">
+                  {formatDateTime(lesson.join_available_at)}
                   から参加できます
                 </p>
               )}
             </div>
           ))}
-          {!dashboard?.upcoming_lessons?.length && <p className="px-4 py-6 text-center text-sm text-slate-500">予定されているLIVE授業はありません。</p>}
+          {!dashboard?.upcoming_lessons?.length && <EmptyState icon={CalendarClock} title="予定されているLIVE授業はありません。" className="m-3 border-0 py-6" />}
         </div>
       </section>
 
@@ -239,33 +242,33 @@ export default function EikenStudentPage() {
 
       <section id="growth" className="mt-10">
         <div>
-          <p className="text-sm font-bold text-emerald-700">今回の成長</p>
-          <h2 className="mt-1 text-xl font-black">積み重ねを確認しましょう</h2>
+          <p className="text-sm font-bold text-accent">今回の成長</p>
+          <h2 className="mt-1 text-xl font-bold text-fg">積み重ねを確認しましょう</h2>
         </div>
         <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <div className="border-t-4 border-emerald-500 bg-white p-4 shadow-sm">
-          <p className="text-xs font-bold text-slate-500">講座の進捗</p>
-          <p className="mt-2 text-3xl font-black">{dashboard?.progress_summary?.completion_rate || 0}%</p>
+        <div className="rounded-card border-t-4 border-accent bg-surface shadow-card p-4">
+          <p className="text-xs font-bold text-fg-muted">講座の進捗</p>
+          <p className="mt-2 text-3xl font-black text-fg">{dashboard?.progress_summary?.completion_rate || 0}%</p>
         </div>
-        <div className="border-t-4 border-indigo-500 bg-white p-4 shadow-sm">
-          <p className="text-xs font-bold text-slate-500">完了した学習</p>
-          <p className="mt-2 text-3xl font-black">{dashboard?.progress_summary?.completed_count || 0}<span className="ml-1 text-sm">件</span></p>
+        <div className="rounded-card border-t-4 border-sky-500 bg-surface shadow-card p-4">
+          <p className="text-xs font-bold text-fg-muted">完了した学習</p>
+          <p className="mt-2 text-3xl font-black text-fg">{dashboard?.progress_summary?.completed_count || 0}<span className="ml-1 text-sm">件</span></p>
         </div>
-        <div className="border-t-4 border-amber-500 bg-white p-4 shadow-sm">
-          <p className="text-xs font-bold text-slate-500">最新テスト</p>
-          <p className="mt-2 text-3xl font-black">{dashboard?.quiz_results?.[0]?.percentage ?? '--'}<span className="ml-1 text-sm">%</span></p>
+        <div className="rounded-card border-t-4 border-amber-500 bg-surface shadow-card p-4">
+          <p className="text-xs font-bold text-fg-muted">最新テスト</p>
+          <p className="mt-2 text-3xl font-black text-fg">{dashboard?.quiz_results?.[0]?.percentage ?? '--'}<span className="ml-1 text-sm">%</span></p>
         </div>
-        <div className="border-t-4 border-cyan-500 bg-white p-4 shadow-sm">
-          <p className="text-xs font-bold text-slate-500">今週の学習日数</p>
-          <p className="mt-2 text-3xl font-black">{growth?.this_week_study_days || 0}<span className="ml-1 text-sm">日</span></p>
-          <p className="mt-1 text-xs text-slate-500">累計 {growth?.total_study_days || 0}日</p>
+        <div className="rounded-card border-t-4 border-slate-400 bg-surface shadow-card p-4">
+          <p className="text-xs font-bold text-fg-muted">今週の学習日数</p>
+          <p className="mt-2 text-3xl font-black text-fg">{growth?.this_week_study_days || 0}<span className="ml-1 text-sm">日</span></p>
+          <p className="mt-1 text-xs text-fg-muted">累計 {growth?.total_study_days || 0}日</p>
         </div>
         </div>
 
-        <div className="mt-5 border-y border-slate-200 bg-white p-5">
-          <p className="font-black text-emerald-700">{growth?.message || '今日の1つから始めましょう。'}</p>
-          <p className="mt-2 text-sm leading-6 text-slate-600">{growth?.next_focus}</p>
-          <p className="mt-3 text-xs font-bold text-slate-500">
+        <div className="cb-card mt-5 p-card">
+          <p className="font-bold text-accent">{growth?.message || '今日の1つから始めましょう。'}</p>
+          <p className="mt-2 text-sm leading-6 text-fg-muted">{growth?.next_focus}</p>
+          <p className="mt-3 text-xs font-bold text-fg-muted">
             今週の完了 {growth?.this_week_completed || 0}件
             {' ・ '}
             前週比 {Number(growth?.week_over_week_change || 0) >= 0 ? '+' : ''}{growth?.week_over_week_change || 0}件
@@ -273,16 +276,16 @@ export default function EikenStudentPage() {
         </div>
 
         {growth?.skill_changes?.length > 0 && (
-          <div className="mt-5 overflow-x-auto border-y border-slate-200 bg-white">
+          <div className="cb-card mt-5 overflow-x-auto">
             <table className="w-full min-w-[480px] text-left text-sm">
-              <thead className="bg-slate-50 text-xs text-slate-500"><tr><th className="px-4 py-3">技能</th><th className="px-4 py-3">前回</th><th className="px-4 py-3">今回</th><th className="px-4 py-3">変化</th></tr></thead>
-              <tbody className="divide-y divide-slate-200">
+              <thead className="bg-slate-50 text-xs text-fg-muted"><tr><th className="px-4 py-3">技能</th><th className="px-4 py-3">前回</th><th className="px-4 py-3">今回</th><th className="px-4 py-3">変化</th></tr></thead>
+              <tbody className="divide-y divide-line">
                 {growth.skill_changes.map((item: any) => (
                   <tr key={item.skill}>
                     <td className="px-4 py-3 font-bold">{item.skill}</td>
                     <td className="px-4 py-3">{item.previous ?? '--'}</td>
-                    <td className="px-4 py-3 font-black">{item.current}</td>
-                    <td className={`px-4 py-3 font-black ${Number(item.change || 0) > 0 ? 'text-emerald-700' : 'text-slate-500'}`}>
+                    <td className="px-4 py-3 font-bold">{item.current}</td>
+                    <td className={`px-4 py-3 font-bold ${Number(item.change || 0) > 0 ? 'text-success' : 'text-fg-muted'}`}>
                       {item.change === null ? '--' : `${item.change > 0 ? '+' : ''}${item.change}`}
                     </td>
                   </tr>
@@ -294,33 +297,33 @@ export default function EikenStudentPage() {
       </section>
 
       <section id="history" className="mt-10">
-        <h2 className="font-black">学習履歴</h2>
-        <div className="mt-3 divide-y divide-slate-200 border-y border-slate-200 bg-white">
+        <h2 className="font-bold text-fg">学習履歴</h2>
+        <div className="cb-card mt-3 divide-y divide-line overflow-hidden">
           {(dashboard?.tasks || []).filter((task: any) => task.progress?.status === 'completed').slice(-6).reverse().map((task: any) => (
             <div key={task.id} className="flex items-center gap-3 px-4 py-3">
-              <CheckCircle2 className="text-emerald-600" size={19} />
+              <CheckCircle2 className="text-success" size={19} aria-hidden />
               <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-bold">{task.title}</p>
-                <p className="text-xs text-slate-500">{taskLabels[task.task_type]}</p>
+                <p className="truncate text-sm font-bold text-fg">{task.title}</p>
+                <p className="text-xs text-fg-muted">{taskLabels[task.task_type]}</p>
               </div>
             </div>
           ))}
           {!dashboard?.tasks?.some((task: any) => task.progress?.status === 'completed') && (
-            <p className="px-4 py-6 text-center text-sm text-slate-500">最初の学習を完了すると、ここに履歴が表示されます。</p>
+            <p className="px-4 py-6 text-center text-sm text-fg-muted">最初の学習を完了すると、ここに履歴が表示されます。</p>
           )}
         </div>
       </section>
 
       <section id="news" className="mt-10">
-        <h2 className="font-black">お知らせ</h2>
-        <div className="mt-3 divide-y divide-slate-200 border-y border-slate-200 bg-white">
+        <h2 className="font-bold text-fg">お知らせ</h2>
+        <div className="cb-card mt-3 divide-y divide-line overflow-hidden">
           {(dashboard?.announcements || []).map((item: any) => (
             <article key={item.id} className="px-4 py-4">
-              <h3 className="text-sm font-bold">{item.title}</h3>
-              <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-slate-600">{item.body}</p>
+              <h3 className="text-sm font-bold text-fg">{item.title}</h3>
+              <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-fg-muted">{item.body}</p>
             </article>
           ))}
-          {!dashboard?.announcements?.length && <p className="px-4 py-6 text-center text-sm text-slate-500">新しいお知らせはありません。</p>}
+          {!dashboard?.announcements?.length && <p className="px-4 py-6 text-center text-sm text-fg-muted">新しいお知らせはありません。</p>}
         </div>
       </section>
     </main>

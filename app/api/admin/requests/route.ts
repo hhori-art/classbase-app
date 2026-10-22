@@ -5,6 +5,7 @@ import { getServerUser, jsonError, requireRole } from '@/lib/server-auth';
 import { requireAdminApp } from '@/lib/admin-app-access';
 import { resolveAttendanceSchoolCode } from '@/lib/attendance-schools';
 import { rejectRewardRequest } from '@/lib/server/reward-store';
+import { writeAuditLog } from '@/lib/server/audit-log';
 
 const ALLOWED_DAYS = new Set(['月', '火', '水', '木', '金', '土', '日']);
 
@@ -97,12 +98,23 @@ export async function POST(request: NextRequest) {
         tx.update(userRef, { ...updates, updated_at: FieldValue.serverTimestamp() });
         tx.update(requestRef, { status: 'approved', processed_at: FieldValue.serverTimestamp(), processed_by: actor.uid });
       });
+      await writeAuditLog({
+        actor,
+        action: 'request_approve',
+        target_type: 'request',
+        target_id: requestId,
+        target_label: String(profile.student_name || profile.name || ''),
+        school_id: String(profile.school_id || profile.school || ''),
+        details: { request_type: 'change', day_of_week: requestedDay || null, science: science || null, social: social || null },
+      });
       return Response.json({ ok: true, status: 'approved' });
     }
 
+    let auditTarget: FirebaseFirestore.DocumentData = {};
     const result = await db.runTransaction(async tx => {
       const snap = await tx.get(requestRef);
       const data = snap.data() || {};
+      auditTarget = data;
       if (!snap.exists || data.status !== 'pending') throw new Error('request-already-processed');
       if (action === 'complete_exchange') {
         if (data.type !== 'exchange') throw new Error('invalid-request-type');
@@ -115,6 +127,15 @@ export async function POST(request: NextRequest) {
       }
       // 返金・在庫の戻しは発送管理と共通の処理で行う。
       return rejectRewardRequest(tx, requestRef, data, actor.uid, '');
+    });
+    await writeAuditLog({
+      actor,
+      action: action === 'complete_exchange' ? 'request_complete_exchange' : 'request_reject',
+      target_type: 'request',
+      target_id: requestId,
+      target_label: String(auditTarget.userName || auditTarget.rewardName || ''),
+      school_id: String(auditTarget.school || ''),
+      details: { request_type: String(auditTarget.type || ''), reward_name: auditTarget.rewardName || null, refunded: (result as { refunded?: number }).refunded ?? 0 },
     });
     return Response.json({ ok: true, ...result });
   } catch (error) {

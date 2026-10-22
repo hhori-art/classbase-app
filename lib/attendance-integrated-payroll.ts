@@ -58,6 +58,8 @@ export type PayrollAdjustment = {
 export type IntegratedPayrollRow = PayrollPersonSummary & {
   q141: Q141PayrollValues;
   source_amounts: { system: number; external: number; school_distribution: number; manual_adjustments: number };
+  /** 法定割増の内訳。深夜（22〜5時）と1日8時間を超えた時間。授業など割増の列がない区分の割増分は特別勤務手当4へ入れる。 */
+  premiums: { night_minutes: number; overtime_minutes: number; surcharge_amount: number };
 };
 
 export type PremiumRuleKey = 'training_2' | 'training_3' | 'office_premium_1' | 'office_premium_2' | 'incidental_premium_1' | 'incidental_premium_2';
@@ -98,11 +100,27 @@ export const DEFAULT_INDIVIDUAL_RATE_MAPPINGS: IndividualRateMapping[] = [
 
 const AUTO_PREMIUM_START = '22:00';
 const AUTO_PREMIUM_END = '05:00';
-const AUTO_PREMIUM_CATEGORIES: Partial<Record<Q141RateKey, PremiumRuleKey>> = {
-  training_1: 'training_2',
-  office: 'office_premium_1',
-  incidental: 'incidental_premium_1',
+/** 労働基準法の1日の法定労働時間。これを超えた時間は時間外として割増する。 */
+export const DAILY_STATUTORY_MINUTES = 8 * 60;
+/**
+ * 法定の最低ラインに合わせ、割増計算式の2段階を使う。
+ *  - 割増1：深夜（22〜5時）だけ、または8時間超だけの時間（初期設定 1.25倍）
+ *  - 割増2：深夜かつ8時間超の時間（初期設定 1.5倍）
+ * 区分ごとの列：[割増1の列, 割増2の列]。割増1の列（旧勤怠の深夜行など）は、割増2に当たる分だけ割増2の列へ移す。
+ */
+const PREMIUM_COLUMNS: Partial<Record<Q141RateKey, [PremiumRuleKey | null, PremiumRuleKey | null]>> = {
+  training_1: ['training_2', 'training_3'],
+  office: ['office_premium_1', 'office_premium_2'],
+  incidental: ['incidental_premium_1', 'incidental_premium_2'],
+  training_2: [null, 'training_3'],
+  office_premium_1: [null, 'office_premium_2'],
+  incidental_premium_1: [null, 'incidental_premium_2'],
 };
+const ALREADY_PREMIUM_KEYS = new Set<Q141RateKey>(['training_2', 'training_3', 'office_premium_1', 'office_premium_2', 'incidental_premium_1', 'incidental_premium_2']);
+/** 単価が1分あたりの区分（創学は分給）。 */
+const PER_MINUTE_RATE_KEYS = new Set<Q141RateKey>(['sogaku_lesson']);
+const amountForMinutes = (key: Q141RateKey, minutes: number, rate: number) =>
+  PER_MINUTE_RATE_KEYS.has(key) ? minutes * rate : minutes / 60 * rate;
 
 const RATE_KEYS: Q141RateKey[] = [
   'group_lesson', 'mentor', 'training_1', 'training_2', 'training_3',
@@ -178,6 +196,42 @@ export function automaticPremiumMinutes(startTime: string, endTime: string) {
     minutes += Math.max(0, Math.min(end, premiumEnd + offset) - Math.max(start, premiumStart + offset));
   }
   return Math.min(end - start, minutes);
+}
+
+const clockLabel = (minutes: number) => {
+  const value = ((minutes % 1440) + 1440) % 1440;
+  return `${String(Math.floor(value / 60)).padStart(2, '0')}:${String(value % 60).padStart(2, '0')}`;
+};
+/** 開始から duration 分のうち深夜帯の分。深夜帯の判定は既存の automaticPremiumMinutes を使う。 */
+const nightMinutesWithin = (start: number, duration: number) =>
+  duration > 0 ? Math.min(duration, automaticPremiumMinutes(clockLabel(start), clockLabel(start + duration))) : 0;
+
+export type StatutoryPremiumSplit = { night: number; overtime: number; tier1: number; tier2: number };
+
+/**
+ * 1人・1日の勤務を開始時刻の順に並べ、各勤務の深夜・8時間超の分と、割増1・割増2に当たる分を求める。
+ * 8時間を超えた分は勤務の後ろ側から数える。
+ */
+export function splitStatutoryPremiums(items: Array<{ start_time: string; minutes: number }>): StatutoryPremiumSplit[] {
+  const order = items.map((item, index) => ({ index, start: timeNumber(item.start_time) }))
+    .sort((a, b) => (a.start ?? 0) - (b.start ?? 0) || a.index - b.index);
+  const result = items.map(() => ({ night: 0, overtime: 0, tier1: 0, tier2: 0 }));
+  let worked = 0;
+  order.forEach(({ index, start }) => {
+    const minutes = Math.max(0, items[index].minutes);
+    const overtime = Math.min(minutes, Math.max(0, worked + minutes - DAILY_STATUTORY_MINUTES));
+    worked += minutes;
+    const regular = minutes - overtime;
+    const nightRegular = start === null ? 0 : nightMinutesWithin(start, regular);
+    const nightOvertime = start === null ? 0 : nightMinutesWithin(start + regular, overtime);
+    result[index] = {
+      night: nightRegular + nightOvertime,
+      overtime,
+      tier1: nightRegular + (overtime - nightOvertime),
+      tier2: nightOvertime,
+    };
+  });
+  return result;
 }
 
 function hasDetailedExternalCategory(item: RegularAttendanceInterval) {
@@ -312,6 +366,7 @@ export function calculateIntegratedPayroll(input: {
       },
       transportation_amount: 0, total_payment: 0, gross_payment: 0, alert_count: 0,
       q141: emptyQ141(), source_amounts: { system: 0, external: 0, school_distribution: 0, manual_adjustments: 0 },
+      premiums: { night_minutes: 0, overtime_minutes: 0, surcharge_amount: 0 },
     } satisfies IntegratedPayrollRow;
     grouped.set(key, current);
     return { current, rate };
@@ -355,14 +410,11 @@ export function calculateIntegratedPayroll(input: {
   const missingCategoryPeople = new Set<string>();
   const systemAllowanceDays = new Set<string>();
   const scienceSocialBonusDays = new Set<string>();
-  const processAttendance = (item: RegularAttendanceInterval, source: 'system' | 'external') => {
+  // 割増のうち、割増の列がない区分（授業・個別など）の分。人ごとに合計してから円未満を切り上げる。
+  const surchargeByPerson = new Map<string, { source: 'system' | 'external'; amount: number }[]>();
+  const processAttendance = (item: RegularAttendanceInterval, source: 'system' | 'external', category: Q141RateKey, minutes: number, split: StatutoryPremiumSplit) => {
     const key = personKey(item.person_code, item.person_name);
     const { current, rate } = ensure(item.person_code, item.person_name, { school_code: item.school_code || '', school_name: item.school_name || '' });
-    const category = classifyExternalAttendance(item);
-    if (!category) return;
-    const interval = intervalMinutes(item.start_time, item.end_time);
-    const minutes = Number(item.actual_minutes || interval?.duration || 0);
-    if (minutes <= 0) return;
     if (source === 'system') {
       // 理社講座の加算は、同一日に複数コマあっても「授業」と
       // 「サポート」の区分ごとに1回だけ支給する。時給には含めない。
@@ -393,12 +445,36 @@ export function calculateIntegratedPayroll(input: {
     current.school_name ||= item.school_name || '';
     current.school_code ||= item.school_code || '';
     const sourceMinutes = minutesBySource[source].get(key) || {};
-    const automaticPremiumCategory = AUTO_PREMIUM_CATEGORIES[category];
-    const premiumRuleEnabled = automaticPremiumCategory && premiumRuleFor(automaticPremiumCategory, premiumRules);
-    const premiumMinutes = premiumRuleEnabled ? Math.min(minutes, automaticPremiumMinutes(item.start_time, item.end_time)) : 0;
-    const allocations: Array<[Q141RateKey, number]> = premiumMinutes > 0 && automaticPremiumCategory
-      ? [[category, minutes - premiumMinutes], [automaticPremiumCategory, premiumMinutes]]
-      : [[category, minutes]];
+    // 法定割増（最低ライン）：深夜だけ・8時間超だけ → 割増1、深夜かつ8時間超 → 割増2。倍率は割増計算式の設定を使う。
+    current.premiums.night_minutes += split.night;
+    current.premiums.overtime_minutes += split.overtime;
+    const columns = PREMIUM_COLUMNS[category];
+    const allocations: Array<[Q141RateKey, number]> = [];
+    if (columns) {
+      const [tier1Column, tier2Column] = columns;
+      const tier1ToColumn = tier1Column && premiumRuleFor(tier1Column, premiumRules) ? split.tier1 : 0;
+      const tier2ToColumn = tier2Column && premiumRuleFor(tier2Column, premiumRules) ? split.tier2 : 0;
+      allocations.push([category, minutes - tier1ToColumn - tier2ToColumn]);
+      if (tier1Column && tier1ToColumn > 0) allocations.push([tier1Column, tier1ToColumn]);
+      if (tier2Column && tier2ToColumn > 0) allocations.push([tier2Column, tier2ToColumn]);
+    } else {
+      allocations.push([category, minutes]);
+    }
+    // 授業・個別・創学など割増の列がない区分は、全時間を通常の単価で払い、
+    // 割増事務1・2の計算式（倍率・固定加算）で求めた割増分だけを特別勤務手当4へ足す。
+    if (!columns && !ALREADY_PREMIUM_KEYS.has(category) && (split.tier1 > 0 || split.tier2 > 0)) {
+      const baseRate = calculatedRateFor(rate, category, premiumRules, individualRateMappings)
+        + (source === 'system' && item.attendance_program === 'breakthrough' && category === 'group_lesson' ? BREAKTHROUGH_LESSON_RATE_ADDITION : 0);
+      const extraRate = (ruleKey: PremiumRuleKey) => {
+        const rule = premiumRuleFor(ruleKey, premiumRules);
+        if (!rule) return 0;
+        const fixed = PER_MINUTE_RATE_KEYS.has(category) ? rule.fixed_hourly_addition / 60 : rule.fixed_hourly_addition;
+        return baseRate * (rule.multiplier - 1) + fixed;
+      };
+      const amount = amountForMinutes(category, split.tier1, extraRate('office_premium_1'))
+        + amountForMinutes(category, split.tier2, extraRate('office_premium_2'));
+      if (amount > 0) surchargeByPerson.set(key, [...(surchargeByPerson.get(key) || []), { source, amount }]);
+    }
     allocations.forEach(([allocatedCategory, allocatedMinutes]) => {
       if (allocatedMinutes <= 0) return;
       current.q141[allocatedCategory].minutes += allocatedMinutes;
@@ -418,8 +494,29 @@ export function calculateIntegratedPayroll(input: {
     }
     const dates = attendanceDates.get(key) || new Set<string>(); dates.add(item.date); attendanceDates.set(key, dates);
   };
-  if (includeSystem) (input.systemAttendance || []).filter(item => item.date.startsWith(input.month)).forEach(item => processAttendance(item, 'system'));
-  if (includeExternal) input.externalAttendance.filter(item => item.date.startsWith(input.month)).forEach(item => processAttendance(item, 'external'));
+  // 新・旧システムの勤務を合わせて、1人1日ごとに8時間を数える。
+  // 支給の対象外（旧システムだけ・新システムだけの集計）でも、8時間の数え方には両方の勤務を入れる。
+  const prepared: Array<{ item: RegularAttendanceInterval; source: 'system' | 'external'; category: Q141RateKey; minutes: number; dayKey: string; included: boolean }> = [];
+  const prepare = (item: RegularAttendanceInterval, source: 'system' | 'external', included: boolean) => {
+    const category = classifyExternalAttendance(item);
+    if (!category) return;
+    const interval = intervalMinutes(item.start_time, item.end_time);
+    const minutes = Number(item.actual_minutes || interval?.duration || 0);
+    if (minutes <= 0) return;
+    prepared.push({ item, source, category, minutes, included, dayKey: `${personKey(item.person_code, item.person_name)}\u001f${item.date}` });
+  };
+  (input.systemAttendance || []).filter(item => item.date.startsWith(input.month)).forEach(item => prepare(item, 'system', includeSystem));
+  input.externalAttendance.filter(item => item.date.startsWith(input.month)).forEach(item => prepare(item, 'external', includeExternal));
+  const byDay = new Map<string, number[]>();
+  prepared.forEach((entry, index) => byDay.set(entry.dayKey, [...(byDay.get(entry.dayKey) || []), index]));
+  const splits: StatutoryPremiumSplit[] = prepared.map(() => ({ night: 0, overtime: 0, tier1: 0, tier2: 0 }));
+  byDay.forEach(indexes => {
+    const daySplits = splitStatutoryPremiums(indexes.map(index => ({ start_time: prepared[index].item.start_time, minutes: prepared[index].minutes })));
+    indexes.forEach((index, position) => { splits[index] = daySplits[position]; });
+  });
+  prepared.forEach((entry, index) => {
+    if (entry.included) processAttendance(entry.item, entry.source, entry.category, entry.minutes, splits[index]);
+  });
   grouped.forEach((row, key) => {
     row.work_days = Math.max(row.work_days, attendanceDates.get(key)?.size || 0);
     RATE_KEYS.forEach(category => {
@@ -431,9 +528,9 @@ export function calculateIntegratedPayroll(input: {
         ? Math.min(systemMinutes, Number(breakthroughLessonMinutes.get(key) || 0))
         : 0;
       const normalSystemMinutes = systemMinutes - breakthroughMinutes;
-      const systemAmount = roundYen(normalSystemMinutes / 60 * item.rate)
-        + roundYen(breakthroughMinutes / 60 * (item.rate + BREAKTHROUGH_LESSON_RATE_ADDITION));
-      const externalAmount = roundYen(externalMinutes / 60 * item.rate);
+      const systemAmount = roundYen(amountForMinutes(category, normalSystemMinutes, item.rate))
+        + roundYen(amountForMinutes(category, breakthroughMinutes, item.rate + BREAKTHROUGH_LESSON_RATE_ADDITION));
+      const externalAmount = roundYen(amountForMinutes(category, externalMinutes, item.rate));
       if (includeSystem) {
         item.amount += systemAmount;
         row.source_amounts.system += systemAmount;
@@ -442,6 +539,14 @@ export function calculateIntegratedPayroll(input: {
         item.amount += externalAmount;
         row.source_amounts.external += externalAmount;
       }
+    });
+    const surcharges = surchargeByPerson.get(key) || [];
+    (['system', 'external'] as const).forEach(source => {
+      const amount = roundYen(surcharges.filter(entry => entry.source === source).reduce((sum, entry) => sum + entry.amount, 0));
+      if (!amount) return;
+      row.q141.special_4 += amount;
+      row.premiums.surcharge_amount += amount;
+      row.source_amounts[source] += amount;
     });
   });
 

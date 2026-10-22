@@ -4,6 +4,7 @@ import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, jsonError } from '@/lib/server-auth';
 import { SHIPMENT_STATUSES, SHIPMENT_TRANSITIONS, type ShipmentStatus } from '@/lib/rewards';
 import { canManageStudentRewards, rejectRewardRequest, requireRewardCatalogManager, studentSchoolOf } from '@/lib/server/reward-store';
+import { writeAuditLog } from '@/lib/server/audit-log';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -71,10 +72,12 @@ export async function POST(request: NextRequest) {
     }
     const db = adminDb();
     const requestRef = db.collection('requests').doc(requestId);
+    let auditTarget: FirebaseFirestore.DocumentData = {};
     const result = await db.runTransaction(async tx => {
       const snap = await tx.get(requestRef);
       const data = snap.data() || {};
       if (!snap.exists || data.type !== 'exchange') throw new Error('shipment-not-found');
+      auditTarget = data;
       const uid = String(data.userId || data.user_id || '');
       const profileSnap = await tx.get(db.collection('users').doc(uid));
       if (!canManageStudentRewards(actor, profileSnap.data() || {})) throw new Error('forbidden');
@@ -91,6 +94,15 @@ export async function POST(request: NextRequest) {
         status_history: FieldValue.arrayUnion({ status: nextStatus, at: new Date().toISOString(), by: actor.uid }),
       });
       return { status: nextStatus, refunded: 0 };
+    });
+    await writeAuditLog({
+      actor,
+      action: 'reward_shipment_update',
+      target_type: 'request',
+      target_id: requestId,
+      target_label: [auditTarget.userName, auditTarget.rewardName || auditTarget.reward_name].filter(Boolean).join('・'),
+      school_id: String(auditTarget.school || ''),
+      details: { status: nextStatus, previous_status: statusOf(auditTarget.status), refunded: (result as { refunded?: number }).refunded ?? 0 },
     });
     return Response.json({ ok: true, ...result });
   } catch (error) {

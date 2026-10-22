@@ -3,7 +3,7 @@
 import { useEffect } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import StudentDashboard from '@/app/student/page';
-import { Loader2 } from 'lucide-react';
+import { Spinner } from '@/app/components/ui';
 
 export default function TeacherStudentPreviewPage() {
   const { profile, loading } = useAuth();
@@ -16,8 +16,8 @@ export default function TeacherStudentPreviewPage() {
 
   if (loading || !profile) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-50">
-        <Loader2 className="animate-spin text-indigo-600" size={36} />
+      <div className="flex min-h-[60vh] items-center justify-center">
+        <Spinner size={36} />
       </div>
     );
   }

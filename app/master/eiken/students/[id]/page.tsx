@@ -11,6 +11,7 @@ export default function EikenAdminStudentDetailPage() {
       studentId={String(params.id || '')}
       courseId={searchParams.get('course_id') || undefined}
       backHref="/master/eiken"
+      embedded
     />
   );
 }

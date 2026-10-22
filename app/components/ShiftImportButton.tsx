@@ -2,14 +2,18 @@
 
 import { useState } from 'react';
 import { db } from '@/lib/firebase';
+import { weekdayFromDateKey } from '@/lib/date-key';
 import { collection, getDocs, query, where, writeBatch, doc } from 'firebase/firestore';
 import { FileUp, Loader2, Settings, Calendar, Copy, AlertTriangle, Trash2 } from 'lucide-react';
+import { Button, buttonClass, useConfirm, useToast } from '@/app/components/ui';
 
 interface ShiftImportButtonProps {
   onSuccess?: () => void;
 }
 
 export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps) {
+  const toast = useToast();
+  const confirm = useConfirm();
   const [uploading, setUploading] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [encoding, setEncoding] = useState('UTF-8'); 
@@ -39,10 +43,15 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
   // 一括削除
   const handleBulkDelete = async () => {
     if (!startDate || !endDate) {
-      alert('削除する期間（開始日・終了日）を指定してください。');
+      toast.error('削除する期間（開始日・終了日）を指定してください。');
       return;
     }
-    if (!confirm(`⚠️ 警告 ⚠️\n\n${startDate} ～ ${endDate} の期間に含まれる\n【すべてのシフトデータ】を削除します。\n\n本当によろしいですか？`)) {
+    if (!(await confirm({
+      title: `${startDate} ～ ${endDate} のシフトをすべて削除しますか？`,
+      message: 'この期間に含まれるすべてのシフトデータを削除します。元に戻せません。',
+      confirmLabel: '削除する',
+      tone: 'danger',
+    }))) {
       return;
     }
 
@@ -58,13 +67,18 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
       const snap = await getDocs(q);
       
       if (snap.empty) {
-        alert('指定された期間にデータは見つかりませんでした。');
+        toast.info('指定された期間にデータは見つかりませんでした。');
         setDeleting(false);
         setProgress('');
         return;
       }
 
-      if (!confirm(`対象データ: ${snap.size}件\n\nこれらをすべて削除します。実行しますか？`)) {
+      if (!(await confirm({
+        title: `${startDate} ～ ${endDate} のシフト${snap.size}件を削除しますか？`,
+        message: `対象データ: ${snap.size}件。これらをすべて削除します。`,
+        confirmLabel: '削除する',
+        tone: 'danger',
+      }))) {
         setDeleting(false);
         setProgress('');
         return;
@@ -87,12 +101,12 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
       }
       if (count > 0) await batch.commit();
 
-      alert(`${totalDeleted}件のデータを削除しました。`);
+      toast.success(`${totalDeleted}件のデータを削除しました。`);
       if (onSuccess) onSuccess();
 
     } catch (e: any) {
       console.error(e);
-      alert('削除エラー: ' + e.message);
+      toast.error(`削除できませんでした。${e?.message || ''}`);
     } finally {
       setDeleting(false);
       setProgress('');
@@ -101,17 +115,22 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
 
   // ファイル選択時
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+    const input = e.target;
+    const file = input.files?.[0];
     if (!file) return;
 
     if (importMode === 'weekly_repeat' && (!startDate || !endDate)) {
-      alert('期間指定モードの場合は、開始日と終了日を選択してください。');
-      e.target.value = '';
+      toast.error('期間指定モードの場合は、開始日と終了日を選択してください。');
+      input.value = '';
       return;
     }
 
-    if (!confirm(`「${file.name}」を取り込みますか？\n対象年度: ${targetYear}年`)) {
-      e.target.value = '';
+    if (!(await confirm({
+      title: `「${file.name}」を取り込みますか？`,
+      message: `対象年度: ${targetYear}年`,
+      confirmLabel: '取り込む',
+    }))) {
+      input.value = '';
       return;
     }
 
@@ -127,11 +146,11 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
         if (onSuccess) onSuccess();
       } catch (err: any) {
         console.error(err);
-        alert('インポート失敗:\n' + err.message);
+        toast.error(`取り込めませんでした。${err?.message || ''}`);
       } finally {
         setUploading(false);
         setProgress('');
-        e.target.value = '';
+        input.value = '';
       }
     };
   };
@@ -163,13 +182,15 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
 
   const getDatesInRange = (start: string, end: string, targetDayOfWeek: string) => {
     const dates: string[] = [];
-    const d = new Date(start);
-    const e = new Date(end);
-    const days = ['日', '月', '火', '水', '木', '金', '土'];
+    // 日付キーはUTC基準で扱い、端末のタイムゾーンで日付・曜日がずれないようにする
+    const d = new Date(`${String(start).slice(0, 10)}T00:00:00Z`);
+    const e = new Date(`${String(end).slice(0, 10)}T00:00:00Z`);
+    if (Number.isNaN(d.getTime()) || Number.isNaN(e.getTime())) return dates;
     const targetDay = targetDayOfWeek.replace('曜日', '').trim();
     while (d <= e) {
-      if (days[d.getDay()] === targetDay) dates.push(d.toISOString().split('T')[0]);
-      d.setDate(d.getDate() + 1);
+      const dateKey = d.toISOString().slice(0, 10);
+      if (weekdayFromDateKey(dateKey) === targetDay) dates.push(dateKey);
+      d.setUTCDate(d.getUTCDate() + 1);
     }
     return dates;
   };
@@ -339,8 +360,7 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
 
         let targetDates = [currentDate];
         if (importMode === 'weekly_repeat') {
-          const d = new Date(currentDate);
-          const dayOfWeek = ['日','月','火','水','木','金','土'][d.getDay()];
+          const dayOfWeek = weekdayFromDateKey(currentDate);
           targetDates = getDatesInRange(startDate, endDate, dayOfWeek);
         }
 
@@ -488,8 +508,7 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
 
           let targetDates = [currentDate];
           if (importMode === 'weekly_repeat') {
-            const d = new Date(currentDate);
-            const dayOfWeek = ['日','月','火','水','木','金','土'][d.getDay()];
+            const dayOfWeek = weekdayFromDateKey(currentDate);
             targetDates = getDatesInRange(startDate, endDate, dayOfWeek);
           }
 
@@ -655,8 +674,7 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
 
             let targetDates = [currentDate];
             if (importMode === 'weekly_repeat') {
-              const d = new Date(currentDate);
-              const dayOfWeek = ['日','月','火','水','木','金','土'][d.getDay()];
+              const dayOfWeek = weekdayFromDateKey(currentDate);
               targetDates = getDatesInRange(startDate, endDate, dayOfWeek);
             }
 
@@ -773,25 +791,25 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
 
     await commitBatch();
     
-    let msg = `完了: ${count}件 追加`;
-    if (overwriteCount > 0) msg += `\n(上書き: ${overwriteCount}件)`;
-    if (skipCount > 0) msg += `\n(スキップ: ${skipCount}件)`;
-    if (missingTeacherCount > 0) msg += `\n⚠️ 講師名不一致: ${missingTeacherCount}件`;
+    let msg = `取り込みました：${count}件 追加`;
+    if (overwriteCount > 0) msg += `／上書き ${overwriteCount}件`;
+    if (skipCount > 0) msg += `／スキップ ${skipCount}件`;
 
-    alert(msg);
+    toast.success(msg);
+    if (missingTeacherCount > 0) toast.error(`講師名が一致しない行が${missingTeacherCount}件あります。講師名を確認してください。`);
   };
 
   return (
-    <div className="flex flex-col gap-4 p-4 bg-white border border-gray-200 rounded-xl shadow-sm">
-      <div className="flex flex-col gap-2 border-b border-gray-100 pb-3">
-        <label className="text-xs font-bold text-gray-500">インポート設定</label>
+    <div className="flex flex-col gap-4 p-4 bg-white border border-slate-200 rounded-card shadow-sm">
+      <div className="flex flex-col gap-2 border-b border-slate-100 pb-3">
+        <label className="text-xs font-bold text-slate-500">インポート設定</label>
         
         <div className="flex items-center gap-2 mb-2">
-          <span className="text-xs font-bold text-gray-700">対象年度:</span>
+          <span className="text-xs font-bold text-slate-700">対象年度:</span>
           <select 
             value={targetYear} 
             onChange={(e) => setTargetYear(Number(e.target.value))}
-            className="bg-gray-50 border border-gray-200 rounded px-2 py-1 text-xs font-bold"
+            className="bg-slate-50 border border-slate-200 rounded-input px-2 py-1 text-xs font-bold"
           >
             <option value={2024}>2024年度</option>
             <option value={2025}>2025年度</option>
@@ -801,11 +819,11 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
 
         <div className="flex gap-4">
           <label className="flex items-center gap-2 cursor-pointer">
-            <input type="radio" name="mode" checked={importMode === 'date_match'} onChange={() => setImportMode('date_match')} className="text-purple-600"/>
+            <input type="radio" name="mode" checked={importMode === 'date_match'} onChange={() => setImportMode('date_match')} className="text-accent"/>
             <span className="text-xs font-bold">日付一致 (通常)</span>
           </label>
           <label className="flex items-center gap-2 cursor-pointer">
-            <input type="radio" name="mode" checked={importMode === 'weekly_repeat'} onChange={() => setImportMode('weekly_repeat')} className="text-purple-600"/>
+            <input type="radio" name="mode" checked={importMode === 'weekly_repeat'} onChange={() => setImportMode('weekly_repeat')} className="text-accent"/>
             <span className="text-xs font-bold">期間一括 (曜日展開)</span>
           </label>
         </div>
@@ -814,25 +832,27 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
       {importMode === 'weekly_repeat' && (
         <div className="space-y-3 animate-in fade-in slide-in-from-top-2">
           <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1 bg-gray-50 px-2 py-1 rounded border">
-              <Calendar size={14} className="text-gray-400"/>
+            <div className="flex items-center gap-1 bg-slate-50 px-2 py-1 rounded border">
+              <Calendar size={14} className="text-slate-400"/>
               <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className="bg-transparent text-xs font-bold outline-none"/>
             </div>
-            <span className="text-gray-400 text-xs">～</span>
-            <div className="flex items-center gap-1 bg-gray-50 px-2 py-1 rounded border">
-              <Calendar size={14} className="text-gray-400"/>
+            <span className="text-slate-400 text-xs">～</span>
+            <div className="flex items-center gap-1 bg-slate-50 px-2 py-1 rounded border">
+              <Calendar size={14} className="text-slate-400"/>
               <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} className="bg-transparent text-xs font-bold outline-none"/>
             </div>
           </div>
           <div className="flex justify-end">
-             <button 
+             <Button
+                variant="danger"
+                size="sm"
                 onClick={handleBulkDelete}
-                disabled={deleting || uploading}
-                className="text-xs font-bold text-red-500 hover:bg-red-50 px-3 py-1.5 rounded flex items-center gap-1 border border-red-100 transition-colors shadow-sm"
+                disabled={uploading}
+                loading={deleting}
+                icon={<Trash2 size={14} aria-hidden />}
               >
-                {deleting ? <Loader2 className="animate-spin" size={12}/> : <Trash2 size={12}/>}
                 指定期間のシフトを一括削除
-              </button>
+              </Button>
           </div>
         </div>
       )}
@@ -843,16 +863,16 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
           id="overwrite" 
           checked={forceOverwrite} 
           onChange={e => setForceOverwrite(e.target.checked)}
-          className="w-4 h-4 text-purple-600 rounded focus:ring-purple-500 cursor-pointer"
+          className="w-4 h-4 text-accent rounded focus:ring-accent cursor-pointer"
         />
-        <label htmlFor="overwrite" className="text-xs font-bold text-gray-600 cursor-pointer select-none flex items-center gap-1">
-          <AlertTriangle size={12} className="text-orange-500"/>
+        <label htmlFor="overwrite" className="text-xs font-bold text-slate-600 cursor-pointer select-none flex items-center gap-1">
+          <AlertTriangle size={12} className="text-amber-500"/>
           重複データを上書きする
         </label>
       </div>
 
-      <div className="flex justify-between items-center pt-2 mt-2 border-t border-gray-100">
-        <div className="flex items-center gap-2 text-xs text-gray-500">
+      <div className="flex justify-between items-center pt-2 mt-2 border-t border-slate-100">
+        <div className="flex items-center gap-2 text-xs text-slate-500">
           <Settings size={12}/>
           <select value={encoding} onChange={(e) => setEncoding(e.target.value)} className="bg-transparent font-bold cursor-pointer outline-none">
             <option value="UTF-8">UTF-8</option>
@@ -862,15 +882,15 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
         
         <div className="relative inline-block">
           <input type="file" accept=".csv" onChange={handleFileUpload} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" disabled={uploading || deleting} />
-          <button disabled={uploading || deleting} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-bold text-xs shadow-sm transition-all text-white ${importMode === 'weekly_repeat' ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-purple-600 hover:bg-purple-700'}`}>
+          <button disabled={uploading || deleting} className={buttonClass('primary', 'sm')}>
             {uploading ? <Loader2 className="animate-spin" size={14}/> : importMode === 'weekly_repeat' ? <Copy size={14}/> : <FileUp size={14}/>}
             {uploading ? progress || '処理中' : (importMode === 'weekly_repeat' ? '一括登録' : 'CSV取込')}
           </button>
         </div>
       </div>
 
-      <div className="text-[10px] text-right text-gray-400 mt-1">
-        <button onClick={downloadTemplate} className="hover:underline hover:text-blue-500">テンプレートDL</button>
+      <div className="text-xs text-right text-slate-400 mt-1">
+        <button type="button" onClick={downloadTemplate} className="hover:underline hover:text-accent">テンプレートDL</button>
       </div>
     </div>
   );

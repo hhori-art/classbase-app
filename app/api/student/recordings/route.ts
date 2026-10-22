@@ -7,11 +7,27 @@ import { getRecordingYearScope, isZoomRecordingShareUrl, normalizeRecordingType,
 
 export const runtime = 'nodejs';
 
+const hasResolvedZoomFile = (data: FirebaseFirestore.DocumentData) => Boolean(
+  String(data.recording_meeting_id || '').trim() && String(data.zoom_recording_file_id || data.target_recording_file_id || '').trim(),
+);
+
 export async function GET(request: NextRequest) {
   try {
     const user = await getServerUser(request);
     requireRole(user, ['student']);
-    const documents = await getAllQueryDocuments(adminDb().collection('class_recordings').orderBy('target_date', 'desc').limit(500), 500);
+    const db = adminDb();
+    const [documents, viewSnap] = await Promise.all([
+      getAllQueryDocuments(db.collection('class_recordings').orderBy('target_date', 'desc').limit(500), 500),
+      // 自分の視聴記録だけを1回で読む（録画の一覧と同じ上限）。コインの基準時間は画面に出さない。
+      db.collection('recording_views').where('user_id', '==', user.uid).select('recording_id', 'status', 'credited_seconds').limit(500).get(),
+    ]);
+    const watchStatus: Record<string, 'completed' | 'partial'> = {};
+    viewSnap.docs.forEach(doc => {
+      const data = doc.data() || {};
+      const recordingId = String(data.recording_id || doc.id.slice(user.uid.length + 1));
+      if (data.status === 'completed') watchStatus[recordingId] = 'completed';
+      else if (Number(data.credited_seconds || 0) > 0 && !watchStatus[recordingId]) watchStatus[recordingId] = 'partial';
+    });
     const recordings = documents.filter(snapshot => canAccessClassRecording(user, snapshot.data() || {})).map(snapshot => {
       const data = snapshot.data() || {};
       const targetDate = String(data.target_date || '');
@@ -31,7 +47,12 @@ export async function GET(request: NextRequest) {
         recording_type_label: recordingTypeLabel(recordingType),
         school_year: schoolYear,
         year_scope: getRecordingYearScope(schoolYear),
-        zoom_share: isZoomRecordingShareUrl(data.video_url || data.target_recording_url || data.recording_url || data.url),
+        // Zoom APIで録画ファイルが特定できているものは、アプリ内のプレイヤーで直接再生する（パスコード不要）。
+        // 特定できていない共有リンクだけ、Zoomの公式プレイヤーで開く。
+        zoom_share: !hasResolvedZoomFile(data) &&
+          isZoomRecordingShareUrl(data.video_url || data.target_recording_url || data.recording_url || data.url),
+        // 視聴済み（completed）／途中まで（再生した時間がある）。残り時間やコインの基準は返さない。
+        watch_status: watchStatus[snapshot.id] || null,
       };
     });
     return Response.json({ ok: true, recordings });

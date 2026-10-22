@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { auth } from '@/lib/firebase';
 import { Check, HelpCircle, Loader2, MessageCircle } from 'lucide-react';
+import { Button, useConfirm } from '@/app/components/ui';
 
 type Props = {
   role: 'teacher' | 'student' | 'parent' | 'admin' | 'master';
@@ -15,6 +16,7 @@ export default function LineLinkPanel({ role, lineUserId, description, compact =
   const [linked, setLinked] = useState(!!lineUserId);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
+  const confirm = useConfirm();
 
   useEffect(() => {
     setLinked(!!lineUserId);
@@ -64,7 +66,13 @@ export default function LineLinkPanel({ role, lineUserId, description, compact =
   };
 
   const unlink = async () => {
-    if (!confirm('LINE連携を解除しますか？\nLINE通知が届かなくなります。')) return;
+    const ok = await confirm({
+      title: 'LINE連携を解除しますか？',
+      message: 'LINE通知が届かなくなります。',
+      tone: 'danger',
+      confirmLabel: '連携を解除する',
+    });
+    if (!ok) return;
     setLoading(true);
     try {
       const token = await auth.currentUser?.getIdToken();
@@ -84,42 +92,40 @@ export default function LineLinkPanel({ role, lineUserId, description, compact =
   };
 
   return (
-    <section className={`bg-white ${compact ? 'p-4 rounded-2xl' : 'p-6 rounded-3xl'} shadow-sm border border-gray-100`}>
-      <h2 className="text-sm font-extrabold text-gray-500 uppercase tracking-wider mb-2 flex items-center gap-2">
-        <MessageCircle size={18} className="text-[#06C755]" /> LINE連携
+    <section className={`cb-card ${compact ? 'p-4' : 'p-card'}`}>
+      <h2 className="mb-2 flex items-center gap-2 text-base font-bold text-fg">
+        <MessageCircle size={18} className="text-[#06C755]" aria-hidden /> LINE連携
       </h2>
-      <p className="text-xs text-gray-500 mb-4 font-medium leading-relaxed">{description}</p>
-      <details className="mb-4 rounded-2xl border border-green-100 bg-green-50/70 px-4 py-3">
-        <summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-black text-green-900"><HelpCircle size={15} />連携方法・よくある質問</summary>
-        <ol className="mt-2 list-decimal space-y-1 pl-5 text-xs font-bold leading-6 text-green-900">
+      <p className="mb-4 text-sm font-medium leading-relaxed text-fg-muted">{description}</p>
+      <details className="mb-4 rounded-card border border-emerald-100 bg-emerald-50/70 px-4 py-3">
+        <summary className="flex min-h-9 cursor-pointer list-none items-center gap-2 text-xs font-bold text-emerald-900"><HelpCircle size={15} aria-hidden />連携方法・よくある質問</summary>
+        <ol className="mt-2 list-decimal space-y-1 pl-5 text-xs font-bold leading-6 text-emerald-900">
           <li>「LINEと連携する」を押し、通知を受け取るLINEアカウントでログインします。</li>
           <li>認証画面で許可し、アプリに「連携済み」と表示されたことを確認します。</li>
           <li>通知が届かない場合は、公式アカウントをブロックしていないか、通知設定がONか確認します。</li>
         </ol>
-        <p className="mt-2 text-[11px] font-bold leading-5 text-green-800">Q. 別のLINEに変えたい：一度「連携を解除する」を押し、変更先のLINEで連携し直してください。</p>
+        <p className="mt-2 text-xs font-bold leading-5 text-emerald-800">Q. 別のLINEに変えたい：一度「連携を解除する」を押し、変更先のLINEで連携し直してください。</p>
       </details>
-      {message && <p className="mb-3 rounded-xl bg-slate-50 px-3 py-2 text-xs font-bold text-slate-600">{message}</p>}
+      {message && <p role="status" className="mb-3 rounded-input bg-canvas px-3 py-2 text-sm font-bold text-fg-muted">{message}</p>}
 
       {linked ? (
-        <div className="bg-[#06C755]/10 border border-[#06C755]/20 p-4 rounded-2xl flex flex-col gap-3">
-          <div className="flex items-center gap-2 text-[#06C755] font-bold text-sm">
-            <Check size={18} /> 連携済み
+        <div className="flex flex-col gap-3 rounded-card border border-[#06C755]/20 bg-[#06C755]/10 p-4">
+          <div className="flex items-center gap-2 text-sm font-bold text-emerald-700">
+            <Check size={18} aria-hidden /> 連携済み
           </div>
-          <button
-            onClick={unlink}
-            disabled={loading}
-            className="w-full py-2.5 bg-white text-gray-500 text-xs font-bold rounded-xl border border-gray-200 hover:bg-gray-50 transition-colors disabled:opacity-50"
-          >
+          <Button variant="secondary" fullWidth onClick={unlink} loading={loading}>
             {loading ? '処理中...' : '連携を解除する'}
-          </button>
+          </Button>
         </div>
       ) : (
         <button
+          type="button"
           onClick={startLink}
           disabled={loading}
-          className="w-full bg-[#06C755] hover:bg-[#05b34c] text-white py-3.5 rounded-2xl font-bold text-sm flex items-center justify-center gap-2 transition-all active:scale-95 shadow-md shadow-[#06C755]/20 disabled:opacity-50"
+          aria-busy={loading || undefined}
+          className="flex min-h-12 w-full items-center justify-center gap-2 rounded-btn bg-[#06C755] py-3 text-sm font-bold text-white shadow-sm transition-colors hover:bg-[#05b34c] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50"
         >
-          {loading ? <Loader2 className="animate-spin" size={18} /> : <MessageCircle size={18} fill="currentColor" />}
+          {loading ? <Loader2 className="motion-safe:animate-spin" size={18} aria-hidden /> : <MessageCircle size={18} fill="currentColor" aria-hidden />}
           LINEと連携する
         </button>
       )}

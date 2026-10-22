@@ -2,15 +2,124 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * ClassBase の共通デザイントークン（docs/ui-guidelines.md）。
+ * - 文字・枠・状態の色（成功/注意/危険/情報）は全アプリ共通。
+ * - 差し色（accent）だけをアプリごとに切り替える：data-portal を各レイアウトのいちばん外側に付ける。
+ * - 生徒は見た目の設定（テーマ・カード・余白）を student レイアウトがインラインで上書きする。
+ * 値は「R G B」の形で持ち、Tailwind の bg-accent/20 のような透明度指定に使えるようにしている。
+ */
 :root {
-  --foreground-rgb: 0, 0, 0;
-  --background-start-rgb: 214, 219, 220;
-  --background-end-rgb: 255, 255, 255;
+  --cb-canvas: 244 246 251;
+  --cb-surface: 255 255 255;
+  --cb-line: 226 232 240;
+  --cb-fg: 15 23 42;
+  --cb-fg-muted: 100 116 139;
+
+  --cb-accent: 79 70 229;
+  --cb-accent-hover: 67 56 202;
+  --cb-accent-soft: 238 242 255;
+  --cb-accent-ink: 255 255 255;
+
+  --cb-success: 5 150 105;
+  --cb-success-soft: 236 253 245;
+  --cb-warning: 217 119 6;
+  --cb-warning-soft: 255 251 235;
+  --cb-danger: 225 29 72;
+  --cb-danger-soft: 255 241 242;
+  --cb-info: 2 132 199;
+  --cb-info-soft: 240 249 255;
+
+  --cb-radius-input: 8px;
+  --cb-radius-btn: 12px;
+  --cb-radius-card: 20px;
+  --cb-radius-hero: 28px;
+  --cb-card-border: 1px;
+  --cb-card-alpha: 1;
+  --cb-card-blur: 0px;
+  --cb-shadow-card: 0 1px 2px rgb(15 23 42 / 0.05), 0 4px 16px -8px rgb(15 23 42 / 0.12);
+  --cb-space-card: 20px;
+  --cb-space-section: 24px;
+}
+
+/* アプリごとの差し色 */
+[data-portal="parent"] {
+  --cb-accent: 22 38 74;
+  --cb-accent-hover: 31 52 98;
+  --cb-accent-soft: 232 237 247;
+}
+[data-portal="eiken"] {
+  --cb-accent: 5 150 105;
+  --cb-accent-hover: 4 120 87;
+  --cb-accent-soft: 236 253 245;
+}
+[data-portal="teacher"],
+[data-portal="admin"] {
+  --cb-accent: 79 70 229;
+  --cb-accent-hover: 67 56 202;
+  --cb-accent-soft: 238 242 255;
 }
 
 body {
-  color: rgb(var(--foreground-rgb));
-  background: #f9fafb; /* bg-gray-50 */
+  background: rgb(var(--cb-canvas));
+  color: rgb(var(--cb-fg));
+}
+
+/*
+ * スマホの狭い幅での改行の決まり（全アプリ共通）。
+ * - line-break: strict … 行頭に「。」「、」「ー」などが来ないようにする（禁則処理）。
+ * - overflow-wrap: break-word … 長い英数字（ID・URL・メール）だけは途中で折り返し、画面からはみ出さない。
+ *   （anywhere は最小幅の計算まで変えて1文字ずつの縦長表示になることがあるので使わない）
+ * - 見出しは行の長さをそろえ（balance）、本文は最後の行に1文字だけ残らないようにする（pretty）。改行しない指定（nowrap）は崩さない。
+ * - 見出し・ボタン・ラベルは文節で改行する（Chrome・Android は auto-phrase、iPhone は <Phrase> の <wbr>）。
+ */
+@layer base {
+  html {
+    line-break: strict;
+  }
+  body {
+    overflow-wrap: break-word;
+  }
+  /* text-wrap（一括指定）は「改行しない（nowrap）」まで解除してしまうので、見た目の調整だけの text-wrap-style を使う。
+     表のセルは「改行しない」前提の表が多いので対象にしない。 */
+  h1, h2, h3, h4, h5, h6 {
+    text-wrap-style: balance;
+  }
+  p, li, dd, blockquote, figcaption {
+    text-wrap-style: pretty;
+  }
+  h1, h2, h3, h4, h5, h6, button, label, th, dt, summary, legend, [role="tab"], [role="button"] {
+    word-break: auto-phrase;
+  }
+}
+
+/* <Phrase> の中は、文節の切れ目（<wbr>）以外では改行しない。枠より長い文節だけは、はみ出さないよう折り返す。 */
+@layer components {
+  .cb-phrase {
+    word-break: keep-all;
+    overflow-wrap: break-word;
+  }
+}
+
+/* カード（生徒の「ガラス」設定では半透明＋ぼかしになる）。
+   components 層に置き、同じ要素の border-* / bg-* / shadow-* などのクラスで上書きできるようにする。 */
+@layer components {
+  .cb-card {
+    background: rgb(var(--cb-surface) / var(--cb-card-alpha));
+    border: var(--cb-card-border) solid rgb(var(--cb-line));
+    border-radius: var(--cb-radius-card);
+    box-shadow: var(--cb-shadow-card);
+    -webkit-backdrop-filter: blur(var(--cb-card-blur));
+    backdrop-filter: blur(var(--cb-card-blur));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 /* カレンダーのスタイル調整 (重要) */
@@ -27,16 +136,16 @@ body {
   z-index: 1;
 }
 .calendar-custom .react-calendar__tile--now {
-  background: #eff6ff !important;
-  color: #2563eb !important;
+  background: rgb(var(--cb-accent-soft)) !important;
+  color: rgb(var(--cb-accent)) !important;
   border-radius: 12px;
   font-weight: bold;
 }
 .calendar-custom .react-calendar__tile--active {
-  background: #2563eb !important;
-  color: white !important;
+  background: rgb(var(--cb-accent)) !important;
+  color: rgb(var(--cb-accent-ink)) !important;
   border-radius: 12px;
-  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+  box-shadow: 0 4px 12px rgb(var(--cb-accent) / 0.3);
 }
 .calendar-custom .react-calendar__navigation button {
   font-size: 1.1rem;

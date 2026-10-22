@@ -4,7 +4,7 @@ import { NextRequest } from 'next/server';
 import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, jsonError, requireMaster } from '@/lib/server-auth';
 import { normalizeTestPrepDefinition } from '@/lib/test-prep-registration';
-import { weekdayFromDateKey } from '@/lib/date-key';
+import { jstSchoolYear, weekdayFromDateKey } from '@/lib/date-key';
 
 export const runtime = 'nodejs';
 
@@ -36,7 +36,8 @@ const validate = (value: ReturnType<typeof normalizeTestPrepDefinition>) => {
 export async function GET(request: NextRequest) {
   try {
     await assertAdmin(request);
-    const year = Number(request.nextUrl.searchParams.get('year') || new Date().getFullYear());
+    // 年度は4月はじまり（日本時間）。
+    const year = Number(request.nextUrl.searchParams.get('year') || jstSchoolYear());
     const snap = await adminDb().collection('test_prep_course_options').where('year', '==', year).limit(500).get();
     const items = snap.docs
       .map(doc => normalizeTestPrepDefinition(doc.id, doc.data()))

@@ -2,9 +2,11 @@
 
 import { useState, useEffect } from 'react';
 import { auth } from '@/lib/firebase';
-import { ChevronDown, Loader2, CalendarX, Repeat } from 'lucide-react';
 import Link from 'next/link';
+import { ChevronDown, Loader2, CalendarX, Repeat, ClipboardEdit } from 'lucide-react';
 import ZoomButton from './ZoomButton';
+import TodayTransferModal from './student/TodayTransferModal';
+import { Button, ButtonLink, EmptyState, ErrorState, Phrase } from '@/app/components/ui';
 
 type Props = {
   profile: any;
@@ -35,6 +37,7 @@ export default function SmartClassButton({ profile, period, startTime, endTime, 
   const [loadError, setLoadError] = useState(false);
   const [scheduleMissing, setScheduleMissing] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  const [transferOpen, setTransferOpen] = useState(false);
 
   useEffect(() => {
     const fetchClassUrls = async () => {
@@ -81,8 +84,8 @@ export default function SmartClassButton({ profile, period, startTime, endTime, 
 
   if (loading) {
     return (
-      <div className="flex min-h-24 items-center justify-center gap-3 rounded-3xl border border-indigo-100 bg-white/70 px-4 py-6 text-sm font-black text-indigo-400">
-        <Loader2 className="animate-spin" size={20} />
+      <div role="status" className="flex min-h-24 items-center justify-center gap-3 rounded-card border border-accent/20 bg-surface/70 px-4 py-6 text-sm font-bold text-accent">
+        <Loader2 className="animate-spin" size={20} aria-hidden />
         本日の授業を確認中
       </div>
     );
@@ -90,37 +93,71 @@ export default function SmartClassButton({ profile, period, startTime, endTime, 
 
   if (loadError) {
     return (
-      <div className="flex min-h-24 flex-col items-center justify-center gap-3 rounded-3xl border border-red-100 bg-red-50 px-4 py-5 text-center">
-        <p className="text-sm font-black text-red-700">本日の授業情報を確認できません</p>
-        <p className="text-xs font-bold text-red-500">通信状況を確認し、再読み込みしてください。</p>
-        <button type="button" onClick={() => setReloadKey(value => value + 1)} className="rounded-xl bg-red-600 px-4 py-2 text-xs font-black text-white">
-          もう一度確認する
-        </button>
-      </div>
+      <ErrorState
+        title="本日の授業情報を確認できません"
+        message="通信状況を確認して、もう一度お試しください。"
+        onRetry={() => setReloadKey(value => value + 1)}
+      />
     );
   }
 
   // 表示するものがない場合
   if (classDataList.length === 0) {
-    return (
-      <div className="w-full flex flex-col gap-2">
-        <div className="bg-white/70 border-2 border-dashed border-indigo-100 rounded-3xl p-6 flex flex-col items-center justify-center text-slate-500 gap-2">
-          <CalendarX size={32} className="text-indigo-300" />
-          <div className="text-sm font-black text-center">{scheduleMissing ? '本日の授業配置が未反映です' : `${period}限目の登録授業はありません`}</div>
-          <p className="max-w-sm text-center text-xs font-bold leading-relaxed text-slate-400">
-            {scheduleMissing ? '過去の配置では参加できません。校舎へお問い合わせください。' : '本日の受講登録と一致する授業がありません。'}
-          </p>
-          {allowBetaTransfer && (
-            <Link
-              href="/student/absence?mode=transfer"
-              className="mt-1 inline-flex items-center gap-2 rounded-2xl border border-indigo-100 bg-white px-4 py-3 text-sm font-black text-indigo-600 no-underline"
-            >
-              <Repeat size={16} />
+    const title = scheduleMissing ? '本日の授業配置が未反映です' : `${period}限目の登録授業はありません`;
+    const description = scheduleMissing ? '過去の配置では参加できません。校舎の先生に確認してください。' : '本日の受講登録と一致する授業がありません。';
+    if (previewMode) {
+      return (
+        <EmptyState
+          icon={CalendarX}
+          title={title}
+          description={description}
+          className="w-full bg-surface/70"
+          action={allowBetaTransfer ? (
+            <ButtonLink href="/student/absence?mode=transfer" variant="secondary" icon={<Repeat size={16} aria-hidden />} className="no-underline">
               正式な振替候補を確認する
-            </Link>
+            </ButtonLink>
+          ) : undefined}
+        />
+      );
+    }
+    // 生徒：参加ボタンが出ていないときは、受講登録か今日の授業への振替へ案内する。
+    return (
+      <>
+        <EmptyState
+          icon={CalendarX}
+          title={title}
+          description={description}
+          className="w-full bg-surface/70"
+          action={(
+            <div className="flex w-full max-w-sm flex-col items-stretch gap-2">
+              <ButtonLink href="/student/change-request" icon={<ClipboardEdit size={16} aria-hidden />} className="no-underline">
+                受講講座を登録・変更する
+              </ButtonLink>
+              <p className="text-xs text-fg-muted">
+                <Phrase>受講登録がまだの場合は、ここから登録すると参加ボタンが出ます</Phrase>
+              </p>
+              {allowBetaTransfer && !scheduleMissing && (
+                <Button variant="secondary" icon={<Repeat size={16} aria-hidden />} onClick={() => setTransferOpen(true)} className="mt-1">
+                  振替で参加する（ここから選ぶ）
+                </Button>
+              )}
+              {allowBetaTransfer && (
+                <Link href="/student/absence?mode=transfer" className="mt-1 text-xs font-bold text-accent underline underline-offset-2">
+                  ほかの日の振替はこちら
+                </Link>
+              )}
+            </div>
           )}
-        </div>
-      </div>
+        />
+        {allowBetaTransfer && (
+          <TodayTransferModal
+            open={transferOpen}
+            onClose={() => setTransferOpen(false)}
+            period={period}
+            onRegistered={() => setReloadKey(value => value + 1)}
+          />
+        )}
+      </>
     );
   }
 
@@ -134,33 +171,34 @@ export default function SmartClassButton({ profile, period, startTime, endTime, 
 
     return (
       <div className="w-full space-y-3 animate-in fade-in slide-in-from-bottom-2 duration-500">
-        <div className="rounded-3xl border border-emerald-100 bg-white p-4 shadow-sm">
+        <div className="cb-card !border-emerald-100 p-4">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <p className="text-xs font-black text-emerald-600">講師テスト用</p>
-              <h3 className="mt-1 text-base font-black text-slate-900">{period}限目の参加確認</h3>
-              <p className="mt-1 text-xs font-bold leading-relaxed text-slate-500">
+              <p className="text-xs font-bold text-emerald-600">講師テスト用</p>
+              <h3 className="mt-1 text-base font-bold text-fg">{period}限目の参加確認</h3>
+              <p className="mt-1 text-xs leading-relaxed text-fg-muted">
                 当日の授業予定から参加確認できる候補をまとめています。必要な候補だけ開いて確認してください。
               </p>
             </div>
             <button
               type="button"
               onClick={() => setShowPreviewButtons(prev => !prev)}
-              className="inline-flex items-center justify-center gap-2 rounded-2xl bg-emerald-600 px-4 py-3 text-sm font-black text-white shadow-lg shadow-emerald-100"
+              aria-expanded={showPreviewButtons}
+              className="inline-flex min-h-11 items-center justify-center gap-2 rounded-btn bg-emerald-600 px-4 text-sm font-bold text-white shadow-lg shadow-emerald-100 hover:bg-emerald-700"
             >
               {showPreviewButtons ? '候補を閉じる' : `${classDataList.length}件の候補を表示`}
-              <ChevronDown size={16} className={`transition-transform ${showPreviewButtons ? 'rotate-180' : ''}`} />
+              <ChevronDown size={16} aria-hidden className={`transition-transform ${showPreviewButtons ? 'rotate-180' : ''}`} />
             </button>
           </div>
         </div>
 
         {showPreviewButtons && (
-          <div className="space-y-3 rounded-3xl border border-emerald-100 bg-emerald-50/70 p-3">
+          <div className="space-y-3 rounded-card border border-emerald-100 bg-emerald-50/70 p-3">
             {Object.entries(groupedByGrade).map(([grade, items]) => (
-              <section key={grade} className="rounded-2xl bg-white p-3 shadow-sm">
+              <section key={grade} className="rounded-btn bg-surface p-3 shadow-sm">
                 <div className="mb-3 flex items-center justify-between gap-2">
-                  <h4 className="text-sm font-black text-slate-800">{grade}</h4>
-                  <span className="rounded-full bg-emerald-50 px-3 py-1 text-[11px] font-black text-emerald-700">{items.length}件</span>
+                  <h4 className="text-sm font-bold text-fg">{grade}</h4>
+                  <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-bold text-emerald-700">{items.length}件</span>
                 </div>
                 <div className="space-y-2">
                   {items.map((classData) => (

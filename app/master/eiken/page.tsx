@@ -10,32 +10,42 @@ import {
   ChevronRight,
   ClipboardCheck,
   Languages,
-  Loader2,
   Megaphone,
   Plus,
   Users,
 } from 'lucide-react';
+import AdminPageHeader from '@/app/components/master/AdminPageHeader';
+import AdminTabs from '@/app/components/master/AdminTabs';
+import { SortableHeader, useTableSort } from '@/app/components/master/SortableHeader';
+import { Button, EmptyState, ErrorState, ListSkeleton, Skeleton, buttonClass, useToast } from '@/app/components/ui';
+import { formatDate, formatDateTime, toDate } from '@/lib/format';
 import EikenCalendar from '@/app/components/eiken/EikenCalendar';
 import { useEikenApi } from '@/app/eiken/useEikenApi';
 import { EIKEN_LEVELS, EIKEN_LEVEL_LABELS, EIKEN_TASK_TYPES, type EikenLevel } from '@/lib/eiken/types';
 
-const fieldClass = 'w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-emerald-600';
-const labelClass = 'block text-xs font-black text-slate-600';
+const fieldClass = 'min-h-10 w-full rounded-input border border-line bg-surface px-3 py-2 text-sm text-fg outline-none focus:border-accent focus:ring-2 focus:ring-accent/20';
+const labelClass = 'block text-xs font-bold text-slate-600';
+const cardClass = 'rounded-card border border-line bg-surface p-5 shadow-card';
+const listClass = 'mt-3 divide-y divide-slate-200 overflow-hidden rounded-card border border-line bg-surface';
+const toggleClass = buttonClass('secondary', 'sm', 'shrink-0');
+type Tab = 'overview' | 'courses' | 'tasks' | 'assessments' | 'lessons' | 'enrollments';
 
 export default function EikenAdminPage() {
   const api = useEikenApi();
   const [data, setData] = useState<any>(null);
-  const [tab, setTab] = useState<'overview' | 'courses' | 'tasks' | 'assessments' | 'lessons' | 'enrollments'>('overview');
+  const [tab, setTab] = useState<Tab>('overview');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const toast = useToast();
 
   const load = useCallback(async () => {
     setLoading(true);
+    setError('');
     try {
       setData(await api('/api/eiken/admin/catalog'));
     } catch (loadError) {
+      console.error(loadError);
       setError(loadError instanceof Error ? loadError.message : '英検管理情報を取得できませんでした。');
     } finally {
       setLoading(false);
@@ -48,18 +58,17 @@ export default function EikenAdminPage() {
 
   const createResource = async (resource: string, resourceData: Record<string, unknown>, form?: HTMLFormElement) => {
     setSaving(true);
-    setError('');
-    setMessage('');
     try {
       await api('/api/eiken/admin/catalog', {
         method: 'POST',
         body: JSON.stringify({ resource, data: resourceData }),
       });
-      setMessage('保存しました。');
+      toast.success('保存しました。');
       form?.reset();
       await load();
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : '保存できませんでした。');
+      console.error(saveError);
+      toast.error(saveError instanceof Error ? saveError.message : '保存できませんでした。');
     } finally {
       setSaving(false);
     }
@@ -72,17 +81,16 @@ export default function EikenAdminPage() {
     successMessage: string,
   ) => {
     setSaving(true);
-    setError('');
-    setMessage('');
     try {
       await api('/api/eiken/admin/catalog', {
         method: 'PATCH',
         body: JSON.stringify({ resource, id, data: resourceData }),
       });
-      setMessage(successMessage);
+      toast.success(successMessage);
       await load();
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : '更新できませんでした。');
+      console.error(saveError);
+      toast.error(saveError instanceof Error ? saveError.message : '更新できませんでした。');
     } finally {
       setSaving(false);
     }
@@ -110,63 +118,68 @@ export default function EikenAdminPage() {
       end_at: lesson.end_at || null,
     })), [dashboard?.lessons]
   );
+  // 受講生一覧：既定は確認ポイントのある受講生を先に。見出しを押すと読み込み済みの行を並べ替える。
+  const eikenStudents = useMemo(() => [...(dashboard?.students || [])].sort((a: any, b: any) => Number(Boolean(b.follow_up_reasons?.length)) - Number(Boolean(a.follow_up_reasons?.length))), [dashboard?.students]);
+  const { sorted: sortedEikenStudents, headerProps: eikenSortProps } = useTableSort(eikenStudents, {
+    name: (student: any) => student.name,
+    school: (student: any) => student.school,
+    course: (student: any) => `${student.course_name || ''} ${student.level || ''}`.trim(),
+    weekly: (student: any) => Number(student.weekly_completion_rate),
+    overall: (student: any) => Number(student.completion_rate),
+    lastLearning: (student: any) => student.last_learning_at ? toDate(student.last_learning_at) : null,
+    nextLesson: (student: any) => student.next_lesson_at ? toDate(student.next_lesson_at) : null,
+    quiz: (student: any) => student.latest_quiz_percentage ?? null,
+    followUp: (student: any) => student.follow_up_reasons?.length || 0,
+  });
 
-  if (loading && !data) return <div className="flex min-h-[60vh] items-center justify-center"><Loader2 className="animate-spin text-emerald-600" /></div>;
+  const header = <AdminPageHeader description="講座、学習の順番、LIVE授業、受講生を一か所で管理します。" />;
 
-  const tabs = [
-    ['overview', '概要'],
-    ['courses', '講座'],
-    ['tasks', '学習タスク'],
-    ['assessments', 'テスト・連絡'],
-    ['lessons', 'LIVE授業'],
-    ['enrollments', '受講・担当'],
-  ] as const;
+  if (loading && !data) return (
+    <div>
+      {header}
+      <Skeleton className="mb-6 h-12 w-full" />
+      <ListSkeleton rows={5} />
+    </div>
+  );
+
+  if (!data && error) return (
+    <div>
+      {header}
+      <ErrorState message={error} onRetry={() => void load()} />
+    </div>
+  );
+
+  const tabs: { id: Tab; label: string }[] = [
+    { id: 'overview', label: '概要' },
+    { id: 'courses', label: '講座' },
+    { id: 'tasks', label: '学習タスク' },
+    { id: 'assessments', label: 'テスト・連絡' },
+    { id: 'lessons', label: 'LIVE授業' },
+    { id: 'enrollments', label: '受講・担当' },
+  ];
 
   return (
-    <div className="mx-auto max-w-7xl">
-      <header className="mb-6">
-        <div className="flex items-center gap-3">
-          <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-emerald-600 text-white">
-            <Languages size={23} />
-          </div>
-          <div>
-            <p className="text-xs font-black text-emerald-700">英検対策講座</p>
-            <h1 className="text-2xl font-black text-slate-900">Booster管理</h1>
-          </div>
-        </div>
-        <p className="mt-3 text-sm text-slate-500">講座、学習の順番、LIVE授業、受講生を一か所で管理します。</p>
-      </header>
+    <div>
+      {header}
 
-      <nav className="mb-6 flex overflow-x-auto border-b border-slate-200 bg-white px-2">
-        {tabs.map(([id, label]) => (
-          <button
-            key={id}
-            type="button"
-            onClick={() => setTab(id)}
-            className={`min-w-max border-b-2 px-4 py-3 text-sm font-black ${tab === id ? 'border-emerald-600 text-emerald-700' : 'border-transparent text-slate-500'}`}
-          >
-            {label}
-          </button>
-        ))}
-      </nav>
+      <AdminTabs tabs={tabs} value={tab} onChange={setTab} urlParam="tab" ariaLabel="Booster 管理" className="mb-6" />
 
-      {message && <div className="mb-5 flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm font-bold text-emerald-800"><CheckCircle2 size={18} />{message}</div>}
-      {error && <div className="mb-5 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-4 text-sm font-bold text-red-700"><AlertCircle size={18} className="mt-0.5 shrink-0" />{error}</div>}
+      {error && <ErrorState className="mb-5" message={error} onRetry={() => void load()} />}
 
       {tab === 'overview' && (
         <div className="space-y-8">
           <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
             {[
-              ['有効受講生', dashboard?.metrics?.active_students || 0, Users, 'border-emerald-500'],
-              ['今週の学習実施率', `${dashboard?.metrics?.weekly_learning_rate || 0}%`, BookOpen, 'border-cyan-500'],
-              ['今週のタスク完了率', `${dashboard?.metrics?.weekly_task_completion_rate || 0}%`, CheckCircle2, 'border-indigo-500'],
-              ['LIVE授業出席率', dashboard?.metrics?.live_attendance_rate === null ? '--' : `${dashboard?.metrics?.live_attendance_rate || 0}%`, CalendarDays, 'border-sky-500'],
-              ['確認テスト受験率', dashboard?.metrics?.quiz_participation_rate === null ? '--' : `${dashboard?.metrics?.quiz_participation_rate || 0}%`, ClipboardCheck, 'border-violet-500'],
-              ['AI添削提出率', dashboard?.metrics?.writing_submission_rate === null ? '--' : `${dashboard?.metrics?.writing_submission_rate || 0}%`, Languages, 'border-teal-500'],
-              ['要フォロー', dashboard?.metrics?.follow_up_students || 0, AlertCircle, 'border-amber-500'],
-            ].map(([label, value, Icon, border]) => (
-              <div key={String(label)} className={`border-t-4 ${border} bg-white p-5 shadow-sm`}>
-                <Icon className="text-slate-500" size={21} />
+              ['有効受講生', dashboard?.metrics?.active_students || 0, Users, 'text-accent'],
+              ['今週の学習実施率', `${dashboard?.metrics?.weekly_learning_rate || 0}%`, BookOpen, 'text-accent'],
+              ['今週のタスク完了率', `${dashboard?.metrics?.weekly_task_completion_rate || 0}%`, CheckCircle2, 'text-accent'],
+              ['LIVE授業出席率', dashboard?.metrics?.live_attendance_rate === null ? '--' : `${dashboard?.metrics?.live_attendance_rate || 0}%`, CalendarDays, 'text-accent'],
+              ['確認テスト受験率', dashboard?.metrics?.quiz_participation_rate === null ? '--' : `${dashboard?.metrics?.quiz_participation_rate || 0}%`, ClipboardCheck, 'text-accent'],
+              ['AI添削提出率', dashboard?.metrics?.writing_submission_rate === null ? '--' : `${dashboard?.metrics?.writing_submission_rate || 0}%`, Languages, 'text-accent'],
+              ['要フォロー', dashboard?.metrics?.follow_up_students || 0, AlertCircle, 'text-amber-600'],
+            ].map(([label, value, Icon, iconColor]) => (
+              <div key={String(label)} className={cardClass}>
+                <Icon className={String(iconColor)} size={21} aria-hidden />
                 <p className="mt-3 text-xs font-bold text-slate-500">{String(label)}</p>
                 <p className="mt-1 text-3xl font-black">{String(value)}</p>
               </div>
@@ -174,39 +187,40 @@ export default function EikenAdminPage() {
           </section>
           <EikenCalendar events={calendarEvents} />
           <section>
-            <h2 className="font-black">受講生一覧</h2>
+            <h2 className="font-bold">受講生一覧</h2>
             <p className="mt-1 text-sm text-slate-500">確認ポイントのある受講生を先に表示しています。</p>
-            <div className="mt-3 overflow-x-auto border-y border-slate-200 bg-white">
+            <div className="mt-3 overflow-x-auto rounded-card border border-line bg-surface">
               <table className="w-full min-w-[1180px] text-left text-sm">
                 <thead className="bg-slate-50 text-xs text-slate-500">
-                  <tr><th className="px-4 py-3">氏名</th><th className="px-4 py-3">校舎</th><th className="px-4 py-3">講座・級</th><th className="px-4 py-3">今週</th><th className="px-4 py-3">全体</th><th className="px-4 py-3">最終学習</th><th className="px-4 py-3">次回授業</th><th className="px-4 py-3">最新テスト</th><th className="px-4 py-3">確認理由</th><th className="px-4 py-3"><span className="sr-only">詳細</span></th></tr>
+                  <tr><SortableHeader {...eikenSortProps('name')} className="px-4 py-1">氏名</SortableHeader><SortableHeader {...eikenSortProps('school')} className="px-4 py-1">校舎</SortableHeader><SortableHeader {...eikenSortProps('course')} className="px-4 py-1">講座・級</SortableHeader><SortableHeader {...eikenSortProps('weekly')} className="px-4 py-1">今週</SortableHeader><SortableHeader {...eikenSortProps('overall')} className="px-4 py-1">全体</SortableHeader><SortableHeader {...eikenSortProps('lastLearning')} className="px-4 py-1">最終学習</SortableHeader><SortableHeader {...eikenSortProps('nextLesson')} className="px-4 py-1">次回授業</SortableHeader><SortableHeader {...eikenSortProps('quiz')} className="px-4 py-1">最新テスト</SortableHeader><SortableHeader {...eikenSortProps('followUp')} className="px-4 py-1">確認理由</SortableHeader><th className="px-4 py-3"><span className="sr-only">詳細</span></th></tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200">
-                  {[...(dashboard?.students || [])].sort((a: any, b: any) => Number(Boolean(b.follow_up_reasons?.length)) - Number(Boolean(a.follow_up_reasons?.length))).map((student: any) => (
+                  {sortedEikenStudents.map((student: any) => (
                     <tr key={`${student.student_id}-${student.course_id}`}>
                       <td className="px-4 py-3 font-bold">{student.name}</td>
                       <td className="px-4 py-3">{student.school || '-'}</td>
                       <td className="px-4 py-3"><p className="font-bold">{student.course_name}</p><p className="text-xs text-slate-500">{student.level || '-'}</p></td>
                       <td className="px-4 py-3 font-bold">{student.weekly_completion_rate}%</td>
                       <td className="px-4 py-3 font-bold">{student.completion_rate}%</td>
-                      <td className="px-4 py-3 text-xs text-slate-500">{student.last_learning_at ? new Date(student.last_learning_at).toLocaleDateString('ja-JP') : '-'}</td>
-                      <td className="px-4 py-3 text-xs text-slate-500">{student.next_lesson_at ? new Date(student.next_lesson_at).toLocaleString('ja-JP') : '-'}</td>
+                      <td className="px-4 py-3 text-xs text-slate-500">{(student.last_learning_at && formatDate(student.last_learning_at)) || '-'}</td>
+                      <td className="px-4 py-3 text-xs text-slate-500">{(student.next_lesson_at && formatDateTime(student.next_lesson_at)) || '-'}</td>
                       <td className="px-4 py-3 font-bold">{student.latest_quiz_percentage ?? '--'}{student.latest_quiz_percentage !== null ? '%' : ''}</td>
                       <td className="max-w-xs px-4 py-3 text-amber-700">{student.follow_up_reasons.join(' / ') || '順調です'}</td>
                       <td className="px-4 py-3 text-right">
                         <Link
                           href={`/master/eiken/students/${encodeURIComponent(student.student_id)}?course_id=${encodeURIComponent(student.course_id)}`}
-                          className="inline-flex items-center gap-1 text-xs font-black text-emerald-700 hover:underline"
+                          aria-label={`${student.name} さんの詳細`}
+                          className="inline-flex min-h-9 items-center gap-1 text-xs font-bold text-accent hover:underline"
                         >
                           詳細
-                          <ChevronRight size={15} />
+                          <ChevronRight size={15} aria-hidden />
                         </Link>
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-              {!dashboard?.students?.length && <p className="py-8 text-center text-sm text-slate-500">受講登録された生徒はいません。</p>}
+              {!dashboard?.students?.length && <EmptyState className="m-4" icon={Users} title="受講登録された生徒はいません" description="「受講・担当」タブから生徒を受講登録できます。" />}
             </div>
           </section>
         </div>
@@ -216,11 +230,11 @@ export default function EikenAdminPage() {
         <div className="space-y-8">
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
           <section>
-            <h2 className="font-black">登録済み講座</h2>
-            <div className="mt-3 divide-y divide-slate-200 border-y border-slate-200 bg-white">
+            <h2 className="font-bold">登録済み講座</h2>
+            <div className={listClass}>
               {courses.map((course: any) => (
                 <div key={course.id} className="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center">
-                  <BookOpen className="shrink-0 text-emerald-600" size={20} />
+                  <BookOpen className="shrink-0 text-accent" size={20} aria-hidden />
                   <div className="min-w-0 flex-1">
                     <p className="font-bold">{course.name}</p>
                     <p className="mt-1 text-xs text-slate-500">{EIKEN_LEVEL_LABELS[course.level as EikenLevel] || course.level} ・ {course.academic_year}年度 ・ {course.status}</p>
@@ -229,17 +243,17 @@ export default function EikenAdminPage() {
                     type="button"
                     disabled={saving}
                     onClick={() => updateResource('course', course.id, { status: course.status === 'active' ? 'archived' : 'active' }, course.status === 'active' ? '講座を停止しました。' : '講座を公開しました。')}
-                    className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-black text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                    className={toggleClass}
                   >
                     {course.status === 'active' ? '停止する' : '公開する'}
                   </button>
                 </div>
               ))}
-              {!courses.length && <p className="px-4 py-8 text-center text-sm text-slate-500">講座を登録してください。</p>}
+              {!courses.length && <EmptyState className="m-4" title="講座を登録してください" />}
             </div>
           </section>
           <form
-            className="space-y-4 bg-white p-5 shadow-sm"
+            className={`space-y-4 ${cardClass}`}
             onSubmit={(event: FormEvent<HTMLFormElement>) => {
               event.preventDefault();
               const form = event.currentTarget;
@@ -254,7 +268,7 @@ export default function EikenAdminPage() {
               }, form);
             }}
           >
-            <h2 className="font-black">講座を追加</h2>
+            <h2 className="font-bold">講座を追加</h2>
             <label className={labelClass}>講座名<input name="name" required className={`${fieldClass} mt-1`} /></label>
             <label className={labelClass}>級<select name="level" className={`${fieldClass} mt-1`}>{EIKEN_LEVELS.map(level => <option key={level} value={level}>{EIKEN_LEVEL_LABELS[level]}</option>)}</select></label>
             <label className={labelClass}>年度<input name="academic_year" type="number" defaultValue={new Date().getFullYear()} className={`${fieldClass} mt-1`} /></label>
@@ -273,16 +287,16 @@ export default function EikenAdminPage() {
             </label>
             <label className={labelClass}>公開状態<select name="status" className={`${fieldClass} mt-1`}><option value="draft">下書き</option><option value="active">公開</option></select></label>
             <label className={labelClass}>説明<textarea name="description" rows={3} className={`${fieldClass} mt-1`} /></label>
-            <button disabled={saving} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-3 font-black text-white disabled:opacity-50"><Plus size={18} />追加</button>
+            <Button type="submit" fullWidth disabled={saving} icon={<Plus size={18} aria-hidden />}>追加</Button>
           </form>
         </div>
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
           <section>
-            <h2 className="font-black">フェーズ・Week・ユニット</h2>
-            <div className="mt-3 divide-y divide-slate-200 border-y border-slate-200 bg-white">
+            <h2 className="font-bold">フェーズ・Week・ユニット</h2>
+            <div className={listClass}>
               {[...units].sort((a: any, b: any) => Number(a.sequence) - Number(b.sequence)).map((unit: any) => (
                 <div key={unit.id} className="grid gap-2 px-4 py-4 sm:grid-cols-[100px_150px_minmax(0,1fr)]">
-                  <p className="text-xs font-black text-emerald-700">Week {unit.week_no}</p>
+                  <p className="text-xs font-bold text-accent">Week {unit.week_no}</p>
                   <p className="text-xs font-bold text-slate-500">{unit.phase}</p>
                   <div>
                     <p className="font-bold">{unit.title}</p>
@@ -290,11 +304,11 @@ export default function EikenAdminPage() {
                   </div>
                 </div>
               ))}
-              {!units.length && <p className="px-4 py-8 text-center text-sm text-slate-500">最初のユニットを登録してください。</p>}
+              {!units.length && <EmptyState className="m-4" title="最初のユニットを登録してください" />}
             </div>
           </section>
           <form
-            className="space-y-4 bg-white p-5 shadow-sm"
+            className={`space-y-4 ${cardClass}`}
             onSubmit={(event: FormEvent<HTMLFormElement>) => {
               event.preventDefault();
               const form = event.currentTarget;
@@ -310,7 +324,7 @@ export default function EikenAdminPage() {
               }, form);
             }}
           >
-            <h2 className="font-black">ユニットを追加</h2>
+            <h2 className="font-bold">ユニットを追加</h2>
             <label className={labelClass}>講座<select name="course_id" required className={`${fieldClass} mt-1`}><option value="">選択</option>{courses.map((course: any) => <option key={course.id} value={course.id}>{course.name}</option>)}</select></label>
             <label className={labelClass}>フェーズ<input name="phase" required placeholder="例: フェーズ1 基礎構築" className={`${fieldClass} mt-1`} /></label>
             <div className="grid grid-cols-2 gap-3">
@@ -320,7 +334,7 @@ export default function EikenAdminPage() {
             <label className={labelClass}>ユニット名<input name="title" required className={`${fieldClass} mt-1`} /></label>
             <label className={labelClass}>説明<textarea name="description" rows={3} className={`${fieldClass} mt-1`} /></label>
             <label className={labelClass}>状態<select name="status" className={`${fieldClass} mt-1`}><option value="draft">下書き</option><option value="published">公開</option></select></label>
-            <button disabled={saving} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-3 font-black text-white disabled:opacity-50"><Plus size={18} />追加</button>
+            <Button type="submit" fullWidth disabled={saving} icon={<Plus size={18} aria-hidden />}>追加</Button>
           </form>
         </div>
         </div>
@@ -329,11 +343,11 @@ export default function EikenAdminPage() {
       {tab === 'tasks' && (
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_400px]">
           <section>
-            <h2 className="font-black">学習の順番</h2>
-            <div className="mt-3 divide-y divide-slate-200 border-y border-slate-200 bg-white">
+            <h2 className="font-bold">学習の順番</h2>
+            <div className={listClass}>
               {(dashboard?.tasks || []).sort((a: any, b: any) => Number(a.sequence) - Number(b.sequence)).map((task: any) => (
                 <div key={task.id} className="flex items-center gap-3 px-4 py-4">
-                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xs font-black">{task.sequence}</span>
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xs font-bold">{task.sequence}</span>
                   <div className="min-w-0 flex-1">
                     <p className="font-bold">{task.title}</p>
                     <p className="mt-1 text-xs text-slate-500">{task.task_type} ・ {task.estimated_minutes || 0}分 ・ {task.status}</p>
@@ -342,7 +356,7 @@ export default function EikenAdminPage() {
                     type="button"
                     disabled={saving}
                     onClick={() => updateResource('task', task.id, { status: task.status === 'published' ? 'archived' : 'published' }, task.status === 'published' ? 'タスクを停止しました。' : 'タスクを公開しました。')}
-                    className="shrink-0 rounded-lg border border-slate-200 px-3 py-2 text-xs font-black text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                    className={toggleClass}
                   >
                     {task.status === 'published' ? '停止' : '公開'}
                   </button>
@@ -351,7 +365,7 @@ export default function EikenAdminPage() {
             </div>
           </section>
           <form
-            className="space-y-4 bg-white p-5 shadow-sm"
+            className={`space-y-4 ${cardClass}`}
             onSubmit={(event: FormEvent<HTMLFormElement>) => {
               event.preventDefault();
               const form = event.currentTarget;
@@ -380,7 +394,7 @@ export default function EikenAdminPage() {
               }, form);
             }}
           >
-            <h2 className="font-black">学習タスクを追加</h2>
+            <h2 className="font-bold">学習タスクを追加</h2>
             <label className={labelClass}>講座<select name="course_id" required className={`${fieldClass} mt-1`}><option value="">選択</option>{courses.map((course: any) => <option key={course.id} value={course.id}>{course.name}</option>)}</select></label>
             <label className={labelClass}>ユニット<select name="unit_id" className={`${fieldClass} mt-1`}><option value="">未設定</option>{units.map((unit: any) => <option key={unit.id} value={unit.id}>Week {unit.week_no} ・ {unit.title}</option>)}</select></label>
             <label className={labelClass}>種類<select name="task_type" className={`${fieldClass} mt-1`}>{EIKEN_TASK_TYPES.map(type => <option key={type} value={type}>{type}</option>)}</select></label>
@@ -392,7 +406,7 @@ export default function EikenAdminPage() {
             <label className={labelClass}>優先度<select name="priority" className={`${fieldClass} mt-1`}><option value="required">必須</option><option value="recommended">推奨</option><option value="optional">任意</option></select></label>
             <label className={labelClass}>説明<textarea name="description" rows={3} className={`${fieldClass} mt-1`} /></label>
             <details className="border-y border-slate-200 py-3">
-              <summary className="cursor-pointer text-sm font-black">種類別の詳細</summary>
+              <summary className="cursor-pointer text-sm font-bold">種類別の詳細</summary>
               <div className="mt-3 space-y-3">
                 <label className={labelClass}>動画URL<input name="video_url" className={`${fieldClass} mt-1`} /></label>
                 <label className={labelClass}>テキスト名<input name="textbook_name" className={`${fieldClass} mt-1`} /></label>
@@ -409,7 +423,7 @@ export default function EikenAdminPage() {
               </div>
             </details>
             <label className={labelClass}>状態<select name="status" className={`${fieldClass} mt-1`}><option value="draft">下書き</option><option value="published">公開</option></select></label>
-            <button disabled={saving} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-3 font-black text-white disabled:opacity-50"><Plus size={18} />追加</button>
+            <Button type="submit" fullWidth disabled={saving} icon={<Plus size={18} aria-hidden />}>追加</Button>
           </form>
         </div>
       )}
@@ -418,11 +432,11 @@ export default function EikenAdminPage() {
         <div className="space-y-8">
           <section>
             <div className="flex items-center gap-2">
-              <ClipboardCheck className="text-emerald-600" size={20} />
-              <h2 className="font-black">確認テスト</h2>
+              <ClipboardCheck className="text-accent" size={20} aria-hidden />
+              <h2 className="font-bold">確認テスト</h2>
             </div>
             <div className="mt-3 grid gap-6 xl:grid-cols-[minmax(0,1fr)_400px]">
-              <div className="divide-y divide-slate-200 border-y border-slate-200 bg-white">
+              <div className="divide-y divide-slate-200 overflow-hidden rounded-card border border-line bg-surface">
                 {quizzes.map((quiz: any) => (
                   <div key={quiz.id} className="flex items-center gap-3 px-4 py-4">
                     <div className="min-w-0 flex-1">
@@ -433,16 +447,16 @@ export default function EikenAdminPage() {
                       type="button"
                       disabled={saving}
                       onClick={() => updateResource('quiz', quiz.id, { status: quiz.status === 'published' ? 'archived' : 'published' }, quiz.status === 'published' ? '確認テストを停止しました。' : '確認テストを公開しました。')}
-                      className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-black text-slate-600 disabled:opacity-50"
+                      className={toggleClass}
                     >
                       {quiz.status === 'published' ? '停止' : '公開'}
                     </button>
                   </div>
                 ))}
-                {!quizzes.length && <p className="px-4 py-8 text-center text-sm text-slate-500">確認テストはまだありません。</p>}
+                {!quizzes.length && <EmptyState className="m-4" title="確認テストはまだありません" />}
               </div>
               <form
-                className="space-y-4 bg-white p-5 shadow-sm"
+                className={`space-y-4 ${cardClass}`}
                 onSubmit={(event: FormEvent<HTMLFormElement>) => {
                   event.preventDefault();
                   const form = event.currentTarget;
@@ -456,7 +470,7 @@ export default function EikenAdminPage() {
                   }, form);
                 }}
               >
-                <h3 className="font-black">確認テストを追加</h3>
+                <h3 className="font-bold">確認テストを追加</h3>
                 <label className={labelClass}>講座<select name="course_id" required className={`${fieldClass} mt-1`}><option value="">選択</option>{courses.map((course: any) => <option key={course.id} value={course.id}>{course.name}</option>)}</select></label>
                 <label className={labelClass}>タイトル<input name="title" required className={`${fieldClass} mt-1`} /></label>
                 <div className="grid grid-cols-2 gap-3">
@@ -464,14 +478,14 @@ export default function EikenAdminPage() {
                   <label className={labelClass}>受験上限<input name="max_attempts" type="number" min="1" defaultValue="1" className={`${fieldClass} mt-1`} /></label>
                 </div>
                 <label className={labelClass}>状態<select name="status" className={`${fieldClass} mt-1`}><option value="draft">下書き</option><option value="published">公開</option></select></label>
-                <button disabled={saving} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-3 font-black text-white disabled:opacity-50"><Plus size={18} />追加</button>
+                <Button type="submit" fullWidth disabled={saving} icon={<Plus size={18} aria-hidden />}>追加</Button>
               </form>
             </div>
           </section>
 
           <section className="grid gap-6 lg:grid-cols-2">
             <form
-              className="space-y-4 bg-white p-5 shadow-sm"
+              className={`space-y-4 ${cardClass}`}
               onSubmit={(event: FormEvent<HTMLFormElement>) => {
                 event.preventDefault();
                 const form = event.currentTarget;
@@ -490,7 +504,7 @@ export default function EikenAdminPage() {
                 }, form);
               }}
             >
-              <h3 className="font-black">設問を追加</h3>
+              <h3 className="font-bold">設問を追加</h3>
               <label className={labelClass}>確認テスト<select name="quiz_id" required className={`${fieldClass} mt-1`}><option value="">選択</option>{quizzes.map((quiz: any) => <option key={quiz.id} value={quiz.id}>{quiz.title}</option>)}</select></label>
               <label className={labelClass}>問題文<textarea name="question" rows={3} required className={`${fieldClass} mt-1`} /></label>
               <label className={labelClass}>回答形式<select name="question_type" className={`${fieldClass} mt-1`}><option value="single_choice">一つ選択</option><option value="multiple_choice">複数選択</option><option value="short_text">短文入力</option></select></label>
@@ -501,15 +515,15 @@ export default function EikenAdminPage() {
                 <label className={labelClass}>順番<input name="sequence" type="number" min="0" defaultValue="1" className={`${fieldClass} mt-1`} /></label>
               </div>
               <label className={labelClass}>解説<textarea name="explanation" rows={2} className={`${fieldClass} mt-1`} /></label>
-              <button disabled={saving || !quizzes.length} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-3 font-black text-white disabled:opacity-50"><Plus size={18} />追加</button>
+              <Button type="submit" fullWidth disabled={saving || !quizzes.length} icon={<Plus size={18} aria-hidden />}>追加</Button>
             </form>
 
             <div>
               <div className="flex items-center gap-2">
-                <Megaphone className="text-emerald-600" size={20} />
-                <h3 className="font-black">お知らせ</h3>
+                <Megaphone className="text-accent" size={20} aria-hidden />
+                <h3 className="font-bold">お知らせ</h3>
               </div>
-              <div className="mt-3 divide-y divide-slate-200 border-y border-slate-200 bg-white">
+              <div className={listClass}>
                 {announcements.map((announcement: any) => (
                   <div key={announcement.id} className="flex items-start gap-3 px-4 py-4">
                     <div className="min-w-0 flex-1">
@@ -520,7 +534,7 @@ export default function EikenAdminPage() {
                       type="button"
                       disabled={saving}
                       onClick={() => updateResource('announcement', announcement.id, { status: announcement.status === 'published' ? 'archived' : 'published' }, announcement.status === 'published' ? 'お知らせを停止しました。' : 'お知らせを公開しました。')}
-                      className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-black text-slate-600 disabled:opacity-50"
+                      className={toggleClass}
                     >
                       {announcement.status === 'published' ? '停止' : '公開'}
                     </button>
@@ -528,7 +542,7 @@ export default function EikenAdminPage() {
                 ))}
               </div>
               <form
-                className="mt-5 space-y-4 bg-white p-5 shadow-sm"
+                className={`mt-5 space-y-4 ${cardClass}`}
                 onSubmit={(event: FormEvent<HTMLFormElement>) => {
                   event.preventDefault();
                   const form = event.currentTarget;
@@ -541,12 +555,12 @@ export default function EikenAdminPage() {
                   }, form);
                 }}
               >
-                <h3 className="font-black">お知らせを追加</h3>
+                <h3 className="font-bold">お知らせを追加</h3>
                 <label className={labelClass}>講座<select name="course_id" required className={`${fieldClass} mt-1`}><option value="">選択</option>{courses.map((course: any) => <option key={course.id} value={course.id}>{course.name}</option>)}</select></label>
                 <label className={labelClass}>タイトル<input name="title" required className={`${fieldClass} mt-1`} /></label>
                 <label className={labelClass}>本文<textarea name="body" rows={4} required className={`${fieldClass} mt-1`} /></label>
                 <label className={labelClass}>状態<select name="status" className={`${fieldClass} mt-1`}><option value="draft">下書き</option><option value="published">公開</option></select></label>
-                <button disabled={saving} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-3 font-black text-white disabled:opacity-50"><Plus size={18} />追加</button>
+                <Button type="submit" fullWidth disabled={saving} icon={<Plus size={18} aria-hidden />}>追加</Button>
               </form>
             </div>
           </section>
@@ -557,7 +571,7 @@ export default function EikenAdminPage() {
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_400px]">
           <div><EikenCalendar events={calendarEvents} /></div>
           <form
-            className="space-y-4 bg-white p-5 shadow-sm"
+            className={`space-y-4 ${cardClass}`}
             onSubmit={(event: FormEvent<HTMLFormElement>) => {
               event.preventDefault();
               const form = event.currentTarget;
@@ -576,7 +590,7 @@ export default function EikenAdminPage() {
               }, form);
             }}
           >
-            <h2 className="font-black">LIVE授業を追加</h2>
+            <h2 className="font-bold">LIVE授業を追加</h2>
             <label className={labelClass}>講座<select name="course_id" required className={`${fieldClass} mt-1`}><option value="">選択</option>{courses.map((course: any) => <option key={course.id} value={course.id}>{course.name}</option>)}</select></label>
             <label className={labelClass}>授業名<input name="title" required className={`${fieldClass} mt-1`} /></label>
             <label className={labelClass}>開始<input name="start_at" type="datetime-local" required className={`${fieldClass} mt-1`} /></label>
@@ -584,7 +598,7 @@ export default function EikenAdminPage() {
             <label className={labelClass}>担当講師<select name="teacher_id" className={`${fieldClass} mt-1`}><option value="">未設定</option>{teachers.map((teacher: any) => <option key={teacher.id} value={teacher.id}>{teacher.name}</option>)}</select></label>
             <label className={labelClass}>Zoom Meeting ID<input name="meeting_id" className={`${fieldClass} mt-1`} /></label>
             <label className={labelClass}>状態<select name="status" className={`${fieldClass} mt-1`}><option value="draft">下書き</option><option value="scheduled">公開予定</option></select></label>
-            <button disabled={saving} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-3 font-black text-white disabled:opacity-50"><Plus size={18} />追加</button>
+            <Button type="submit" fullWidth disabled={saving} icon={<Plus size={18} aria-hidden />}>追加</Button>
           </form>
         </div>
       )}
@@ -593,7 +607,7 @@ export default function EikenAdminPage() {
         <div className="space-y-8">
         <div className="grid gap-6 lg:grid-cols-2">
           <form
-            className="space-y-4 bg-white p-5 shadow-sm"
+            className={`space-y-4 ${cardClass}`}
             onSubmit={(event: FormEvent<HTMLFormElement>) => {
               event.preventDefault();
               const form = event.currentTarget;
@@ -606,14 +620,14 @@ export default function EikenAdminPage() {
               }, form);
             }}
           >
-            <h2 className="font-black">生徒を受講登録</h2>
+            <h2 className="font-bold">生徒を受講登録</h2>
             <label className={labelClass}>生徒<select name="student_id" required className={`${fieldClass} mt-1`}><option value="">選択</option>{students.map((student: any) => <option key={student.id} value={student.id}>{student.name} {student.school ? `(${student.school})` : ''}</option>)}</select></label>
             <label className={labelClass}>講座<select name="course_id" required className={`${fieldClass} mt-1`}><option value="">選択</option>{courses.map((course: any) => <option key={course.id} value={course.id}>{course.name}</option>)}</select></label>
             <label className={labelClass}>校舎<input name="school_id" className={`${fieldClass} mt-1`} /></label>
-            <button disabled={saving} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-3 font-black text-white disabled:opacity-50"><Plus size={18} />受講登録</button>
+            <Button type="submit" fullWidth disabled={saving} icon={<Plus size={18} aria-hidden />}>受講登録</Button>
           </form>
           <form
-            className="space-y-4 bg-white p-5 shadow-sm"
+            className={`space-y-4 ${cardClass}`}
             onSubmit={(event: FormEvent<HTMLFormElement>) => {
               event.preventDefault();
               const form = event.currentTarget;
@@ -626,17 +640,17 @@ export default function EikenAdminPage() {
               }, form);
             }}
           >
-            <h2 className="font-black">講師を担当登録</h2>
+            <h2 className="font-bold">講師を担当登録</h2>
             <label className={labelClass}>講師<select name="teacher_id" required className={`${fieldClass} mt-1`}><option value="">選択</option>{teachers.map((teacher: any) => <option key={teacher.id} value={teacher.id}>{teacher.name}</option>)}</select></label>
             <label className={labelClass}>講座<select name="course_id" required className={`${fieldClass} mt-1`}><option value="">選択</option>{courses.map((course: any) => <option key={course.id} value={course.id}>{course.name}</option>)}</select></label>
             <label className={labelClass}>校舎<input name="school_id" defaultValue="all" className={`${fieldClass} mt-1`} /></label>
-            <button disabled={saving} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-3 font-black text-white disabled:opacity-50"><Plus size={18} />担当登録</button>
+            <Button type="submit" fullWidth disabled={saving} icon={<Plus size={18} aria-hidden />}>担当登録</Button>
           </form>
         </div>
         <div className="grid gap-8 xl:grid-cols-2">
           <section>
-            <h2 className="font-black">受講状況</h2>
-            <div className="mt-3 divide-y divide-slate-200 border-y border-slate-200 bg-white">
+            <h2 className="font-bold">受講状況</h2>
+            <div className={listClass}>
               {enrollments.map((enrollment: any) => {
                 const student = students.find((item: any) => item.id === enrollment.user_id);
                 const course = courses.find((item: any) => item.id === enrollment.course_id);
@@ -658,20 +672,20 @@ export default function EikenAdminPage() {
                         { status: active ? 'cancelled' : 'active' },
                         active ? '受講を停止しました。' : '受講を再開しました。',
                       )}
-                      className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-black text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                      className={toggleClass}
                     >
                       {active ? '受講を停止' : '受講を再開'}
                     </button>
                   </div>
                 );
               })}
-              {!enrollments.length && <p className="px-4 py-8 text-center text-sm text-slate-500">受講登録はありません。</p>}
+              {!enrollments.length && <EmptyState className="m-4" title="受講登録はありません" />}
             </div>
           </section>
 
           <section>
-            <h2 className="font-black">講師の担当状況</h2>
-            <div className="mt-3 divide-y divide-slate-200 border-y border-slate-200 bg-white">
+            <h2 className="font-bold">講師の担当状況</h2>
+            <div className={listClass}>
               {teacherAssignments.map((assignment: any) => {
                 const teacher = teachers.find((item: any) => item.id === assignment.teacher_id);
                 const course = courses.find((item: any) => item.id === assignment.course_id);
@@ -693,14 +707,14 @@ export default function EikenAdminPage() {
                         { status: active ? 'inactive' : 'active' },
                         active ? '担当を停止しました。' : '担当を再開しました。',
                       )}
-                      className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-black text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                      className={toggleClass}
                     >
                       {active ? '担当を停止' : '担当を再開'}
                     </button>
                   </div>
                 );
               })}
-              {!teacherAssignments.length && <p className="px-4 py-8 text-center text-sm text-slate-500">担当登録はありません。</p>}
+              {!teacherAssignments.length && <EmptyState className="m-4" title="担当登録はありません" />}
             </div>
           </section>
         </div>

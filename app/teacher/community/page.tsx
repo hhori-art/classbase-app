@@ -7,25 +7,33 @@ import {
   collection, query, where, orderBy, limit, onSnapshot
 } from 'firebase/firestore';
 import { 
-  MessageCircle, Heart, MessageSquare, Plus, Send, Loader2, 
-  ChevronDown, ChevronUp, UserCircle, ArrowLeft, X, Trash2, PlusCircle, 
-  BarChart2, MessagesSquare, LayoutGrid, Ghost, BookOpen, Briefcase, Users 
+  MessageCircle, Heart, MessageSquare, Plus, Send,
+  ChevronDown, ChevronUp, UserCircle, X, Trash2, PlusCircle,
+  BarChart2, MessagesSquare, LayoutGrid, Ghost, BookOpen, Briefcase, Users
 } from 'lucide-react';
-import Link from 'next/link';
+import {
+  Button, IconButton, Card, PageHeader, useToast, useConfirm,
+  ListSkeleton, EmptyState, ErrorState,
+} from '@/app/components/ui';
+import { formatDateTime } from '@/lib/format';
 
 // カテゴリ定義
 const CATEGORIES = {
   instruction: { label: '指導・教材', icon: BookOpen, color: 'bg-emerald-50 text-emerald-600 border-emerald-100', active: 'bg-emerald-600 text-white' },
-  operation: { label: '業務相談', icon: Briefcase, color: 'bg-blue-50 text-blue-600 border-blue-100', active: 'bg-blue-600 text-white' },
-  chat: { label: '雑談', icon: MessageCircle, color: 'bg-orange-50 text-orange-600 border-orange-100', active: 'bg-orange-500 text-white' }
+  operation: { label: '業務相談', icon: Briefcase, color: 'bg-sky-50 text-sky-600 border-sky-100', active: 'bg-sky-600 text-white' },
+  chat: { label: '雑談', icon: MessageCircle, color: 'bg-amber-50 text-amber-600 border-amber-100', active: 'bg-amber-500 text-white' }
 };
 
 export default function TeacherCommunityPage() {
   const { user } = useAuth();
-  
+  const toast = useToast();
+  const confirm = useConfirm();
+
   const uid = user?.uid;
 
   const [topics, setTopics] = useState<any[]>([]);
+  const [topicsLoaded, setTopicsLoaded] = useState(false);
+  const [topicsError, setTopicsError] = useState(false);
   const [filterCategory, setFilterCategory] = useState<'all' | 'instruction' | 'operation' | 'chat'>('all');
 
   // 投稿用
@@ -52,6 +60,11 @@ export default function TeacherCommunityPage() {
     // リアルタイム更新
     const unsubscribe = onSnapshot(q, (snap) => {
       setTopics(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      setTopicsLoaded(true);
+      setTopicsError(false);
+    }, (error) => {
+      console.error(error);
+      setTopicsError(true);
     });
     return () => unsubscribe();
   }, []);
@@ -96,8 +109,8 @@ export default function TeacherCommunityPage() {
   };
 
   const handlePostSubmit = async () => {
-    if (!newTitle.trim()) return alert('タイトルまたは内容を入力してください');
-    if (newType === 'vote' && voteOptions.some(o => !o.trim())) return alert('空欄の選択肢があります');
+    if (!newTitle.trim()) return toast.error('タイトルまたは内容を入力してください');
+    if (newType === 'vote' && voteOptions.some(o => !o.trim())) return toast.error('空欄の選択肢があります');
     if (!uid) return;
 
     setPostLoading(true);
@@ -114,13 +127,18 @@ export default function TeacherCommunityPage() {
       setNewTitle(''); 
       setVoteOptions(['', '']);
       setIsAnonymous(false);
-    } catch (e) { alert('送信失敗'); } finally { setPostLoading(false); }
+    } catch (e) { toast.error('送信に失敗しました'); } finally { setPostLoading(false); }
   };
 
   // ★追加: トピックの削除機能
   const handleDeleteTopic = async (e: React.MouseEvent, topicId: string) => {
     e.stopPropagation(); // クリック時にトピックが展開されるのを防ぐ
-    if (!confirm('この投稿を削除しますか？\n削除するとコメントや投票データも失われます。')) return;
+    if (!(await confirm({
+      title: 'この投稿を削除しますか？',
+      message: '削除するとコメントや投票データも失われます。',
+      tone: 'danger',
+      confirmLabel: '削除する',
+    }))) return;
 
     try {
       await postCommunityAction({ action: 'delete_topic', topic_id: topicId });
@@ -128,7 +146,7 @@ export default function TeacherCommunityPage() {
         setExpandedTopicId(null);
       }
     } catch (error) {
-      alert('削除に失敗しました。');
+      toast.error('削除に失敗しました。');
       console.error(error);
     }
   };
@@ -136,12 +154,12 @@ export default function TeacherCommunityPage() {
   // ★追加: コメントの削除機能
   const handleDeleteComment = async (commentId: string) => {
     if (!expandedTopicId) return;
-    if (!confirm('このコメントを削除しますか？')) return;
+    if (!(await confirm({ title: 'このコメントを削除しますか？', tone: 'danger', confirmLabel: '削除する' }))) return;
 
     try {
       await postCommunityAction({ action: 'delete_comment', topic_id: expandedTopicId, comment_id: commentId });
     } catch (error) {
-      alert('コメントの削除に失敗しました。');
+      toast.error('コメントの削除に失敗しました。');
       console.error(error);
     }
   };
@@ -162,7 +180,7 @@ export default function TeacherCommunityPage() {
     if (!uid) return;
     try {
       await postCommunityAction({ action: 'vote', topic_id: topicId, option_index: optionIndex });
-    } catch (e) { alert('投票失敗'); }
+    } catch (e) { toast.error('投票に失敗しました'); }
   };
 
   const handleCommentSubmit = async () => {
@@ -177,63 +195,54 @@ export default function TeacherCommunityPage() {
       });
       setNewComment('');
       setNewCommentIsAnonymous(false);
-    } catch (e) { alert('送信失敗'); } finally { setCommentLoading(false); }
+    } catch (e) { toast.error('送信に失敗しました'); } finally { setCommentLoading(false); }
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 pb-40 font-sans text-slate-800">
-      <div className="max-w-6xl mx-auto p-4 sm:p-6 lg:p-8">
-        
-        {/* レスポンシブレイアウト: PCでは2カラム、スマホでは1カラム */}
-        <div className="flex flex-col lg:flex-row gap-8 items-start">
-          
-          {/* === 左サイドバー (固定メニュー & 投稿フォーム) === */}
-          <div className="w-full lg:w-80 lg:shrink-0 lg:sticky lg:top-8 space-y-6 z-20">
-            
-            {/* ヘッダー */}
-            <div className="flex items-center gap-3 bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
-              <Link href="/teacher" className="bg-slate-100 p-2 rounded-full hover:bg-slate-200 transition-colors">
-                <ArrowLeft size={20} className="text-slate-600" />
-              </Link>
-              <h1 className="text-lg md:text-xl font-extrabold text-slate-800 flex items-center gap-2">
-                <Users className="text-indigo-600" fill="currentColor" /> 講師交流掲示板
-              </h1>
-            </div>
+    <div className="px-4 py-5 pb-40 text-fg sm:px-6">
+      <div className="mx-auto max-w-6xl space-y-6">
+        <PageHeader
+          tone="plain"
+          title="講師交流掲示板"
+          icon={Users}
+          description="講師同士に公開される交流掲示板です。運営からの正式連絡は「お知らせ」で確認してください。"
+          backHref="/teacher"
+        />
 
-            <p className="rounded-2xl bg-indigo-50 p-3 text-xs font-bold leading-5 text-indigo-700">講師同士に公開される交流掲示板です。運営からの正式連絡は「お知らせ」で確認してください。</p>
+        {/* レスポンシブレイアウト: PCでは2カラム、スマホでは1カラム */}
+        <div className="flex flex-col items-start gap-8 lg:flex-row">
+
+          {/* === 左サイドバー (固定メニュー & 投稿フォーム) === */}
+          <div className="z-20 w-full space-y-6 lg:sticky lg:top-8 lg:w-80 lg:shrink-0">
 
             {/* 投稿作成カード */}
             {!isPosting ? (
-              <button 
-                onClick={() => setIsPosting(true)}
-                className="w-full bg-gradient-to-r from-indigo-600 to-blue-600 text-white p-5 rounded-3xl shadow-lg shadow-indigo-200 flex items-center justify-center gap-3 font-bold hover:scale-[1.02] active:scale-95 transition-all group"
-              >
-                <div className="bg-white/20 p-2 rounded-full group-hover:rotate-90 transition-transform">
-                  <Plus size={24} />
-                </div>
+              <Button size="lg" fullWidth onClick={() => setIsPosting(true)} icon={<Plus size={22} aria-hidden />}>
                 相談・話題を投稿する
-              </button>
+              </Button>
             ) : (
-              <div className="bg-white p-5 rounded-3xl shadow-xl border border-indigo-200 animate-in zoom-in-95 duration-200">
+              <Card className="border-accent/30">
                 <div className="space-y-4">
-                  <div className="flex justify-between items-center">
-                    <h3 className="font-bold text-slate-800 flex items-center gap-2"><MessageSquare size={18} className="text-indigo-500"/> 投稿を作成</h3>
-                    <button onClick={() => setIsPosting(false)} className="text-slate-400 hover:text-slate-600 bg-slate-50 p-1 rounded-full"><X size={18}/></button>
+                  <div className="flex items-center justify-between">
+                    <h3 className="flex items-center gap-2 font-bold text-fg"><MessageSquare size={18} className="text-accent" aria-hidden /> 投稿を作成</h3>
+                    <IconButton label="閉じる" size="sm" onClick={() => setIsPosting(false)}><X size={18} aria-hidden /></IconButton>
                   </div>
-                  
+
                   {/* カテゴリ選択 */}
                   <div>
-                    <label className="text-xs font-bold text-slate-500 mb-2 block">カテゴリ</label>
+                    <label className="mb-2 block text-xs font-bold text-fg-muted">カテゴリ</label>
                     <div className="grid grid-cols-3 gap-2">
                       {Object.entries(CATEGORIES).map(([key, cat]) => (
                         <button
+                          type="button"
                           key={key}
+                          aria-pressed={newCategory === key}
                           onClick={() => setNewCategory(key as any)}
-                          className={`py-2 text-[10px] font-bold rounded-lg border transition-all flex flex-col items-center gap-1 ${
-                            newCategory === key ? cat.active : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
+                          className={`flex min-h-11 flex-col items-center justify-center gap-1 rounded-btn border py-2 text-xs font-bold transition-colors ${
+                            newCategory === key ? cat.active : 'border-line bg-surface text-slate-500 hover:bg-canvas'
                           }`}
                         >
-                          <cat.icon size={14}/>
+                          <cat.icon size={14} aria-hidden />
                           {cat.label}
                         </button>
                       ))}
@@ -242,86 +251,105 @@ export default function TeacherCommunityPage() {
 
                   {/* タイトル/内容入力 */}
                   <div>
-                    <label className="text-xs font-bold text-slate-500 mb-2 block">内容</label>
-                    <textarea 
-                      placeholder="相談したいこと、共有したいこと..." 
-                      className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium focus:border-indigo-400 outline-none transition-colors min-h-[100px] resize-none"
+                    <label htmlFor="community-new-title" className="mb-2 block text-xs font-bold text-fg-muted">内容</label>
+                    <textarea
+                      id="community-new-title"
+                      placeholder="相談したいこと、共有したいこと..."
+                      className="min-h-[100px] w-full resize-none rounded-input border border-line bg-surface p-3 text-sm font-medium outline-none transition-colors focus:border-accent"
                       value={newTitle}
                       onChange={(e) => setNewTitle(e.target.value)}
                     />
                   </div>
 
                   {/* 形式切り替え */}
-                  <div className="flex gap-2 p-1 bg-slate-100 rounded-xl">
-                    <button onClick={() => setNewType('thread')} className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all ${newType === 'thread' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}>💬 スレッド</button>
-                    <button onClick={() => setNewType('vote')} className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all ${newType === 'vote' ? 'bg-white text-orange-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}>📊 投票機能</button>
+                  <div className="flex gap-2 rounded-btn bg-slate-100 p-1">
+                    <button type="button" aria-pressed={newType === 'thread'} onClick={() => setNewType('thread')} className={`min-h-9 flex-1 rounded-input py-2 text-xs font-bold transition-colors ${newType === 'thread' ? 'bg-surface text-accent shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>💬 スレッド</button>
+                    <button type="button" aria-pressed={newType === 'vote'} onClick={() => setNewType('vote')} className={`min-h-9 flex-1 rounded-input py-2 text-xs font-bold transition-colors ${newType === 'vote' ? 'bg-surface text-amber-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>📊 投票機能</button>
                   </div>
-                  
+
                   {newType === 'vote' && (
-                    <div className="space-y-2 pl-2 border-l-2 border-orange-100">
-                      <p className="text-xs font-bold text-slate-400 mb-1">選択肢 (最大5つ)</p>
+                    <div className="space-y-2 border-l-2 border-amber-100 pl-2">
+                      <p className="mb-1 text-xs font-bold text-fg-muted">選択肢 (最大5つ)</p>
                       {voteOptions.map((opt, i) => (
                         <div key={i} className="flex gap-2">
-                          <input type="text" placeholder={`選択肢 ${i+1}`} className="flex-1 p-2 bg-white border border-slate-200 rounded-lg text-xs font-bold" value={opt} onChange={(e) => changeOption(i, e.target.value)} />
-                          {voteOptions.length > 2 && <button onClick={() => removeOption(i)} className="text-slate-300 hover:text-red-500 px-1"><Trash2 size={16}/></button>}
+                          <input type="text" placeholder={`選択肢 ${i+1}`} aria-label={`選択肢 ${i+1}`} className="min-h-9 flex-1 rounded-input border border-line bg-surface p-2 text-xs font-bold" value={opt} onChange={(e) => changeOption(i, e.target.value)} />
+                          {voteOptions.length > 2 && (
+                            <IconButton label={`選択肢 ${i+1} を削除`} size="sm" onClick={() => removeOption(i)} className="text-slate-400 hover:bg-danger-soft hover:text-danger">
+                              <Trash2 size={16} aria-hidden />
+                            </IconButton>
+                          )}
                         </div>
                       ))}
-                      {voteOptions.length < 5 && <button onClick={addOption} className="text-xs font-bold text-orange-500 flex items-center gap-1 hover:text-orange-600 py-1"><PlusCircle size={14}/> 追加</button>}
+                      {voteOptions.length < 5 && (
+                        <Button variant="ghost" size="sm" onClick={addOption} icon={<PlusCircle size={14} aria-hidden />} className="text-amber-600">
+                          追加
+                        </Button>
+                      )}
                     </div>
                   )}
 
                   {/* 匿名チェック */}
-                  <div className="flex items-center gap-2 bg-slate-50 p-3 rounded-xl border border-slate-100">
-                    <input 
-                      type="checkbox" 
-                      id="anon" 
-                      checked={isAnonymous} 
+                  <div className="flex items-center gap-2 rounded-btn border border-line bg-canvas p-3">
+                    <input
+                      type="checkbox"
+                      id="anon"
+                      checked={isAnonymous}
                       onChange={(e) => setIsAnonymous(e.target.checked)}
-                      className="w-4 h-4 text-indigo-600 rounded border-gray-300 focus:ring-indigo-500"
+                      className="h-4 w-4 rounded border-slate-300 text-accent focus:ring-accent"
                     />
-                    <label htmlFor="anon" className="text-xs font-bold text-slate-600 flex items-center gap-1 cursor-pointer w-full">
-                      <Ghost size={14} className={isAnonymous ? "text-indigo-500" : "text-slate-400"}/> 匿名で投稿する
+                    <label htmlFor="anon" className="flex w-full cursor-pointer items-center gap-1 text-xs font-bold text-slate-600">
+                      <Ghost size={14} className={isAnonymous ? 'text-accent' : 'text-slate-400'} aria-hidden /> 匿名で投稿する
                     </label>
                   </div>
 
-                  <button onClick={handlePostSubmit} disabled={postLoading} className="w-full bg-slate-800 text-white py-3.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 hover:bg-black transition-all active:scale-95 shadow-md">
-                    {postLoading ? <Loader2 className="animate-spin" size={18}/> : <Send size={18}/>} 投稿する
-                  </button>
+                  <Button fullWidth loading={postLoading} onClick={handlePostSubmit} icon={<Send size={18} aria-hidden />}>
+                    投稿する
+                  </Button>
                 </div>
-              </div>
+              </Card>
             )}
 
             {/* カテゴリフィルタ */}
-            <div className="bg-white p-2 rounded-2xl shadow-sm border border-slate-100 flex lg:flex-col overflow-x-auto lg:overflow-visible gap-2 no-scrollbar">
+            <Card padded={false} className="no-scrollbar flex gap-2 overflow-x-auto p-2 lg:flex-col lg:overflow-visible">
               <button
-                  onClick={() => setFilterCategory('all')}
-                  className={`flex items-center gap-3 px-4 py-3 rounded-xl text-xs font-bold whitespace-nowrap transition-all text-left ${
-                    filterCategory === 'all' ? 'bg-slate-800 text-white shadow-md' : 'bg-white text-slate-500 hover:bg-slate-50'
-                  }`}
-                >
-                  <LayoutGrid size={18} className={filterCategory === 'all' ? 'text-white' : 'text-slate-400'} /> すべて
+                type="button"
+                aria-pressed={filterCategory === 'all'}
+                onClick={() => setFilterCategory('all')}
+                className={`flex min-h-11 items-center gap-3 whitespace-nowrap rounded-btn px-4 py-3 text-left text-xs font-bold transition-colors ${
+                  filterCategory === 'all' ? 'bg-slate-800 text-white shadow-md' : 'bg-surface text-slate-500 hover:bg-canvas'
+                }`}
+              >
+                <LayoutGrid size={18} className={filterCategory === 'all' ? 'text-white' : 'text-slate-400'} aria-hidden /> すべて
               </button>
               {Object.entries(CATEGORIES).map(([key, cat]) => (
                 <button
+                  type="button"
                   key={key}
+                  aria-pressed={filterCategory === key}
                   onClick={() => setFilterCategory(key as any)}
-                  className={`flex items-center gap-3 px-4 py-3 rounded-xl text-xs font-bold whitespace-nowrap transition-all text-left ${
-                    filterCategory === key ? cat.active + ' shadow-md' : 'bg-white text-slate-500 hover:bg-slate-50'
+                  className={`flex min-h-11 items-center gap-3 whitespace-nowrap rounded-btn px-4 py-3 text-left text-xs font-bold transition-colors ${
+                    filterCategory === key ? cat.active + ' shadow-md' : 'bg-surface text-slate-500 hover:bg-canvas'
                   }`}
                 >
-                  <cat.icon size={18} className={filterCategory === key ? 'text-white' : 'text-slate-400'} />
+                  <cat.icon size={18} className={filterCategory === key ? 'text-white' : 'text-slate-400'} aria-hidden />
                   {cat.label}
                 </button>
               ))}
-            </div>
+            </Card>
           </div>
 
           {/* === 右メインコンテンツ (タイムライン) === */}
-          <div className="flex-1 min-w-0 space-y-4">
-            {filteredTopics.length === 0 ? (
-              <div className="text-center py-20 text-slate-400 text-sm bg-white rounded-3xl border border-dashed border-slate-200">
-                該当する投稿がありません。<br/>最初のトピックを作成してみましょう！
-              </div>
+          <div className="min-w-0 flex-1 space-y-4">
+            {topicsError ? (
+              <ErrorState message="掲示板を読み込めませんでした。ページを再読み込みしてください。" />
+            ) : !topicsLoaded ? (
+              <ListSkeleton rows={4} />
+            ) : filteredTopics.length === 0 ? (
+              <EmptyState
+                icon={MessageSquare}
+                title="該当する投稿がありません"
+                description="最初のトピックを作成してみましょう！"
+              />
             ) : (
               filteredTopics.map((topic) => {
                 const isLiked = uid ? topic.liked_by?.includes(uid) : false;
@@ -329,147 +357,159 @@ export default function TeacherCommunityPage() {
                 const isVoted = uid ? topic.voted_by?.includes(uid) : false;
                 const isMyTopic = uid === topic.creator_uid; // 自分が作成した投稿か判定
                 const totalVotes = Object.values(topic.votes || {}).reduce((a: any, b: any) => a + b, 0) as number;
-                
+
                 // カテゴリ情報取得
                 const categoryInfo = CATEGORIES[topic.category as keyof typeof CATEGORIES] || CATEGORIES.chat;
 
                 return (
-                  <div key={topic.id} className={`bg-white rounded-[24px] shadow-sm border transition-all duration-300 overflow-hidden ${isExpanded ? 'border-indigo-300 ring-4 ring-indigo-50 shadow-md' : 'border-slate-200 hover:border-slate-300'}`}>
-                    
+                  <Card key={topic.id} padded={false} className={`overflow-hidden transition-colors ${isExpanded ? 'border-accent/40 shadow-md ring-4 ring-accent-soft' : 'hover:border-slate-300'}`}>
+
                     {/* カードヘッダー */}
-                    <div onClick={() => setExpandedTopicId(isExpanded ? null : topic.id)} className="p-5 sm:p-6 cursor-pointer relative group">
-                      
-                      <div className="flex flex-wrap items-center gap-2 mb-3">
-                        <span className={`text-[10px] font-bold px-2 py-1 rounded border flex items-center gap-1 ${categoryInfo.color}`}>
-                          <categoryInfo.icon size={12}/>
+                    <div onClick={() => setExpandedTopicId(isExpanded ? null : topic.id)} className="group relative cursor-pointer p-5 sm:p-6">
+
+                      <div className="mb-3 flex flex-wrap items-center gap-2">
+                        <span className={`flex items-center gap-1 rounded border px-2 py-1 text-xs font-bold ${categoryInfo.color}`}>
+                          <categoryInfo.icon size={12} aria-hidden />
                           {categoryInfo.label}
                         </span>
-                        
+
                         {topic.type === 'vote' && (
-                          <span className="text-[10px] font-bold px-2 py-1 rounded bg-slate-100 text-slate-600 border border-slate-200 flex items-center gap-1">
-                            <BarChart2 size={12}/> 投票
+                          <span className="flex items-center gap-1 rounded border border-line bg-slate-100 px-2 py-1 text-xs font-bold text-slate-600">
+                            <BarChart2 size={12} aria-hidden /> 投票
                           </span>
                         )}
 
-                        <span className={`text-xs font-bold flex items-center gap-1 ml-2 ${topic.is_anonymous ? 'text-slate-400' : 'text-slate-600'}`}>
-                          {topic.is_anonymous ? <Ghost size={14}/> : <UserCircle size={14}/>} 
+                        <span className={`ml-2 flex items-center gap-1 text-xs font-bold ${topic.is_anonymous ? 'text-slate-400' : 'text-slate-600'}`}>
+                          {topic.is_anonymous ? <Ghost size={14} aria-hidden /> : <UserCircle size={14} aria-hidden />}
                           {topic.creator_name}
                         </span>
-                        
+
                         <div className="ml-auto flex items-center gap-2">
-                          <span className="text-[10px] text-slate-400 font-medium bg-slate-50 px-2 py-1 rounded-full">
-                            {topic.created_at?.toDate ? topic.created_at.toDate().toLocaleString('ja-JP', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : ''}
+                          <span className="rounded-full bg-canvas px-2 py-1 text-xs font-medium text-slate-400">
+                            {topic.created_at?.toDate ? formatDateTime(topic.created_at) : ''}
                           </span>
-                          
-                          {/* ★追加: 自分の投稿なら削除ボタンを表示 */}
+
+                          {/* 自分の投稿なら削除ボタンを表示 */}
                           {isMyTopic && (
-                            <button 
+                            <IconButton
+                              label="この投稿を削除"
+                              size="sm"
                               onClick={(e) => handleDeleteTopic(e, topic.id)}
-                              className="text-slate-300 hover:text-red-500 hover:bg-red-50 p-1.5 rounded-lg transition-colors"
-                              title="この投稿を削除"
+                              className="text-slate-400 hover:bg-danger-soft hover:text-danger"
                             >
-                              <Trash2 size={14} />
-                            </button>
+                              <Trash2 size={14} aria-hidden />
+                            </IconButton>
                           )}
                         </div>
                       </div>
-                      
-                      <h4 className="font-bold text-slate-800 text-base sm:text-lg mb-4 leading-relaxed group-hover:text-indigo-700 transition-colors whitespace-pre-wrap">{topic.title}</h4>
-                      
-                      <div className="flex items-center justify-between mt-2 pt-4 border-t border-slate-100">
-                          <button onClick={(e) => handleLike(e, topic)} className={`flex items-center gap-2 text-xs font-bold px-4 py-2 rounded-full transition-all ${isLiked ? 'bg-rose-50 text-rose-500 border border-rose-100' : 'bg-slate-50 text-slate-400 border border-transparent hover:bg-slate-100'}`}>
-                            <Heart size={16} fill={isLiked ? "currentColor" : "none"} className={isLiked ? "animate-bounce-short" : ""} /> {topic.likes || 0}
-                          </button>
-                          <div className={`flex items-center gap-1 text-xs font-bold transition-colors bg-slate-50 px-4 py-2 rounded-full border ${isExpanded ? 'bg-indigo-50 text-indigo-600 border-indigo-100' : 'text-slate-500 border-transparent group-hover:bg-slate-100'}`}>
-                            <MessageSquare size={16}/> コメント・詳細 {isExpanded ? <ChevronUp size={16}/> : <ChevronDown size={16}/>}
-                          </div>
+
+                      <h4 className="mb-4 whitespace-pre-wrap text-base font-bold leading-relaxed text-fg transition-colors group-hover:text-accent sm:text-lg">{topic.title}</h4>
+
+                      <div className="mt-2 flex items-center justify-between border-t border-line pt-4">
+                        <button type="button" aria-label={`いいね ${topic.likes || 0}`} aria-pressed={isLiked} onClick={(e) => handleLike(e, topic)} className={`flex min-h-10 items-center gap-2 rounded-full px-4 py-2 text-xs font-bold transition-colors ${isLiked ? 'border border-rose-100 bg-rose-50 text-rose-500' : 'border border-transparent bg-canvas text-slate-500 hover:bg-slate-100'}`}>
+                          <Heart size={16} fill={isLiked ? 'currentColor' : 'none'} aria-hidden /> {topic.likes || 0}
+                        </button>
+                        <div className={`flex items-center gap-1 rounded-full border px-4 py-2 text-xs font-bold transition-colors ${isExpanded ? 'border-accent/20 bg-accent-soft text-accent' : 'border-transparent bg-canvas text-slate-500 group-hover:bg-slate-100'}`}>
+                          <MessageSquare size={16} aria-hidden /> コメント・詳細 {isExpanded ? <ChevronUp size={16} aria-hidden /> : <ChevronDown size={16} aria-hidden />}
+                        </div>
                       </div>
                     </div>
 
                     {/* 展開エリア */}
                     {isExpanded && (
-                      <div className="bg-slate-50/80 border-t border-slate-200 p-5 sm:p-6 animate-in slide-in-from-top-4 duration-300">
-                        
+                      <div className="border-t border-line bg-canvas/80 p-5 sm:p-6">
+
                         {/* 投票 UI */}
                         {topic.type === 'vote' && topic.options && (
-                          <div className="mb-8 space-y-3 bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
-                            <h5 className="text-xs font-bold text-slate-500 mb-3 flex items-center gap-2"><BarChart2 size={14}/> アンケート結果 ({totalVotes}票)</h5>
+                          <div className="mb-8 space-y-3 rounded-card border border-line bg-surface p-5 shadow-sm">
+                            <h5 className="mb-3 flex items-center gap-2 text-xs font-bold text-fg-muted"><BarChart2 size={14} aria-hidden /> アンケート結果 ({totalVotes}票)</h5>
                             {topic.options.map((opt: string, i: number) => {
                               const count = (topic.votes && topic.votes[i]) || 0;
                               const percentage = totalVotes > 0 ? Math.round((count / totalVotes) * 100) : 0;
                               return (
-                                <button key={i} disabled={isVoted} onClick={() => handleVote(topic.id, i)} className={`w-full relative overflow-hidden text-left p-3 rounded-xl border transition-all ${isVoted ? 'bg-slate-50 border-slate-100' : 'bg-white border-slate-200 hover:border-indigo-300 hover:bg-indigo-50'}`}>
-                                  {isVoted && <div className="absolute top-0 left-0 h-full bg-indigo-100/50 transition-all duration-1000 ease-out" style={{ width: `${percentage}%` }} />}
-                                  <div className="relative flex justify-between items-center z-10">
+                                <button type="button" key={i} disabled={isVoted} onClick={() => handleVote(topic.id, i)} className={`relative min-h-11 w-full overflow-hidden rounded-btn border p-3 text-left transition-colors ${isVoted ? 'border-line bg-canvas' : 'border-line bg-surface hover:border-accent/40 hover:bg-accent-soft'}`}>
+                                  {isVoted && <div className="absolute left-0 top-0 h-full bg-accent-soft motion-safe:transition-all motion-safe:duration-1000 motion-safe:ease-out" style={{ width: `${percentage}%` }} />}
+                                  <div className="relative z-10 flex items-center justify-between">
                                     <span className={`text-sm font-bold ${isVoted ? 'text-slate-600' : 'text-slate-700'}`}>{opt}</span>
-                                    {isVoted && <span className="text-sm font-bold text-indigo-600">{percentage}% <span className="text-xs text-slate-400 ml-1">({count}票)</span></span>}
+                                    {isVoted && <span className="text-sm font-bold text-accent">{percentage}% <span className="ml-1 text-xs text-slate-400">({count}票)</span></span>}
                                   </div>
                                 </button>
                               );
                             })}
-                            {isVoted && <p className="text-xs text-center text-slate-400 font-bold mt-3">投票済み</p>}
+                            {isVoted && <p className="mt-3 text-center text-xs font-bold text-slate-400">投票済み</p>}
                           </div>
                         )}
 
                         {/* コメント UI */}
                         <div>
-                          <h5 className="text-xs font-bold text-slate-500 mb-3 flex items-center gap-2"><MessagesSquare size={14}/> コメント ({comments.length})</h5>
-                          <div className="space-y-3 mb-4 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
-                            {comments.length === 0 ? <div className="text-center text-xs text-slate-400 py-8 bg-white rounded-2xl border border-dashed border-slate-200">コメントはまだありません。<br/>アドバイスや感想を書いてみましょう！</div> : comments.map((c) => (
-                              <div key={c.id} className="bg-white p-4 rounded-2xl border border-slate-100 text-sm shadow-sm flex flex-col gap-2 group/comment">
-                                <div className="flex justify-between items-center">
-                                  <div className={`font-bold text-xs flex items-center gap-1 ${c.is_anonymous ? 'text-slate-400' : 'text-indigo-700'}`}>
-                                    {c.is_anonymous ? <Ghost size={12}/> : <UserCircle size={12}/>} {c.name}
+                          <h5 className="mb-3 flex items-center gap-2 text-xs font-bold text-fg-muted"><MessagesSquare size={14} aria-hidden /> コメント ({comments.length})</h5>
+                          <div className="custom-scrollbar mb-4 max-h-[400px] space-y-3 overflow-y-auto pr-2">
+                            {comments.length === 0 ? (
+                              <EmptyState
+                                icon={MessagesSquare}
+                                title="コメントはまだありません"
+                                description="アドバイスや感想を書いてみましょう！"
+                                className="bg-surface py-8"
+                              />
+                            ) : comments.map((c) => (
+                              <div key={c.id} className="group/comment flex flex-col gap-2 rounded-card border border-line bg-surface p-4 text-sm shadow-sm">
+                                <div className="flex items-center justify-between">
+                                  <div className={`flex items-center gap-1 text-xs font-bold ${c.is_anonymous ? 'text-slate-400' : 'text-accent'}`}>
+                                    {c.is_anonymous ? <Ghost size={12} aria-hidden /> : <UserCircle size={12} aria-hidden />} {c.name}
                                   </div>
                                   <div className="flex items-center gap-2">
-                                    <span className="text-[9px] text-slate-400">
-                                      {c.created_at?.toDate ? c.created_at.toDate().toLocaleString('ja-JP', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : ''}
+                                    <span className="text-xs text-slate-400">
+                                      {c.created_at?.toDate ? formatDateTime(c.created_at) : ''}
                                     </span>
-                                    
-                                    {/* ★追加: 自分のコメントなら削除ボタンを表示 */}
+
+                                    {/* 自分のコメントなら削除ボタンを表示 */}
                                     {uid === c.uid && (
-                                      <button 
+                                      <IconButton
+                                        label="コメントを削除"
+                                        size="sm"
                                         onClick={() => handleDeleteComment(c.id)}
-                                        className="text-slate-300 hover:text-red-500 transition-colors p-1"
-                                        title="コメントを削除"
+                                        className="text-slate-400 hover:bg-danger-soft hover:text-danger"
                                       >
-                                        <Trash2 size={12}/>
-                                      </button>
+                                        <Trash2 size={14} aria-hidden />
+                                      </IconButton>
                                     )}
                                   </div>
                                 </div>
-                                <div className="text-slate-700 leading-relaxed font-medium whitespace-pre-wrap">{c.text}</div>
+                                <div className="whitespace-pre-wrap font-medium leading-relaxed text-slate-700">{c.text}</div>
                               </div>
                             ))}
                           </div>
 
                           {/* コメント入力枠 */}
-                          <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-sm focus-within:ring-2 focus-within:ring-indigo-100 transition-all">
-                            <textarea 
-                              value={newComment} 
-                              onChange={(e) => setNewComment(e.target.value)} 
-                              placeholder="コメントを入力..." 
-                              className="w-full p-2 text-sm bg-transparent outline-none font-medium text-slate-700 placeholder:text-slate-300 resize-none h-16" 
+                          <div className="rounded-card border border-line bg-surface p-3 shadow-sm transition-shadow focus-within:ring-2 focus-within:ring-accent/30">
+                            <textarea
+                              value={newComment}
+                              onChange={(e) => setNewComment(e.target.value)}
+                              placeholder="コメントを入力..."
+                              aria-label="コメント"
+                              className="h-16 w-full resize-none bg-transparent p-2 text-sm font-medium text-slate-700 outline-none placeholder:text-slate-300"
                             />
-                            <div className="flex justify-between items-center mt-2 border-t border-slate-50 pt-2">
-                              <label className="flex items-center gap-1 text-xs font-bold text-slate-500 cursor-pointer hover:text-slate-700">
-                                <input type="checkbox" checked={newCommentIsAnonymous} onChange={e => setNewCommentIsAnonymous(e.target.checked)} className="rounded text-indigo-600 focus:ring-indigo-500" />
-                                <Ghost size={14}/> 匿名にする
+                            <div className="mt-2 flex items-center justify-between border-t border-line pt-2">
+                              <label className="flex min-h-9 cursor-pointer items-center gap-1 text-xs font-bold text-fg-muted hover:text-slate-700">
+                                <input type="checkbox" checked={newCommentIsAnonymous} onChange={e => setNewCommentIsAnonymous(e.target.checked)} className="rounded text-accent focus:ring-accent" />
+                                <Ghost size={14} aria-hidden /> 匿名にする
                               </label>
-                              <button 
-                                onClick={handleCommentSubmit} 
-                                disabled={commentLoading || !newComment.trim()} 
-                                className="bg-slate-800 text-white px-4 py-2 rounded-xl hover:bg-black disabled:opacity-50 transition-all flex items-center justify-center gap-1 text-xs font-bold shadow-md active:scale-95"
+                              <Button
+                                size="sm"
+                                onClick={handleCommentSubmit}
+                                loading={commentLoading}
+                                disabled={!newComment.trim()}
+                                icon={<Send size={14} aria-hidden />}
                               >
-                                {commentLoading ? <Loader2 size={14} className="animate-spin"/> : <Send size={14}/>} 送信
-                              </button>
+                                送信
+                              </Button>
                             </div>
                           </div>
                         </div>
 
                       </div>
                     )}
-                  </div>
+                  </Card>
                 );
               })
             )}

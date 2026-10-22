@@ -12,6 +12,11 @@ export type TransferOptionGrant = {
   subject: string;
   course_name: string;
   period: number;
+  /**
+   * 'grade' = 生徒ホームの「今日の同じ学年の授業へ振替」で発行した候補（単元一致を求めない）。
+   * 単元一致の通常の振替候補では付けない。確定時に学年・時限・終了時刻をもう一度確認する。
+   */
+  scope?: 'grade';
   exp: number;
 };
 
@@ -36,10 +41,11 @@ export function issueTransferOptionToken(
     subject: clean(input.subject),
     course_name: clean(input.course_name),
     period: Number(input.period) || 0,
+    ...(input.scope === 'grade' ? { scope: 'grade' as const } : {}),
     exp: Math.floor(now / 1000) + 30 * 60,
   };
   if (!grant.actor_id || !grant.student_id || !grant.absence_id || !grant.shift_id ||
-      !/^\d{4}-\d{2}-\d{2}$/.test(grant.target_date) || !grant.unit) {
+      !/^\d{4}-\d{2}-\d{2}$/.test(grant.target_date) || (!grant.unit && grant.scope !== 'grade')) {
     throw new Error('invalid transfer option grant');
   }
   const payload = encode(JSON.stringify(grant));
@@ -69,6 +75,7 @@ export function verifyTransferOptionToken(
       grant.absence_id !== expected.absence_id || grant.shift_id !== expected.shift_id) {
     throw new Error('invalid transfer option token');
   }
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(grant.target_date) || !grant.unit) throw new Error('invalid transfer option token');
+  if (grant.scope !== undefined && grant.scope !== 'grade') throw new Error('invalid transfer option token');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(grant.target_date) || (!grant.unit && grant.scope !== 'grade')) throw new Error('invalid transfer option token');
   return grant;
 }

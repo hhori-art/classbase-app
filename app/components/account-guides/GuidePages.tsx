@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
-  Bell, BookOpenCheck, CalendarCheck, CalendarX2, Camera, Coins, KeyRound, LineChart, Lock, PlayCircle,
+  Bell, BookOpenCheck, CalendarCheck, CalendarX2, Coins, KeyRound, LineChart, Lock, PlayCircle,
   QrCode, ShieldCheck, Smartphone, UserRound, Users, Video,
 } from 'lucide-react';
 import { CHECKLIST_ROWS_PER_PAGE, issuedDateLabel, passwordChunks, type GuideAccount } from './guide-model';
@@ -51,7 +51,8 @@ function Page({ children, account, kind }: { children: ReactNode; account?: Guid
       data-pdf-name={account ? `${account.name}_${kind}` : ''}
       data-pdf-skip={account ? undefined : 'true'}
     >
-      {children}
+      {/* A4いっぱいのデザインを、印刷余白の内側に縮小して置く（GUIDE_PRINT_CSS の .guide-sheet）。 */}
+      <div className="guide-sheet">{children}</div>
     </article>
   );
 }
@@ -109,6 +110,18 @@ function QrBox({ url, theme, caption, size = 30 }: { url: string; theme: Theme; 
   );
 }
 
+/** 右下のロゴ（左：エディック、右：創造学園）。印刷・PDF化で確実に描画されるよう通常の img を使う。 */
+function BrandLogos() {
+  return (
+    <div className="flex shrink-0 items-center gap-[3.5mm]" aria-label="エディック 創造学園">
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src="/brand/edic-logo.png" alt="エディック" className="h-[6mm] w-auto" />
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src="/brand/sozo-gakuen-logo.png" alt="創造学園" className="h-[5.6mm] w-auto" />
+    </div>
+  );
+}
+
 function Footer({ theme, label, account, index, total }: { theme: Theme; label: string; account?: GuideAccount; index?: number; total?: number }) {
   return (
     <footer className="absolute bottom-[9mm] left-[19mm] right-[12mm] flex items-end justify-between border-t-[0.4mm] pt-[2mm]" style={{ borderColor: theme.border }}>
@@ -116,7 +129,7 @@ function Footer({ theme, label, account, index, total }: { theme: Theme; label: 
         <p>{SUPPORT_TEXT}</p>
         {account && <p className="font-mono">{label} ・ No.{index}/{total} ・ {[account.school, account.grade, account.name].filter(Boolean).join(' ・ ')}</p>}
       </div>
-      <p className="text-[12pt] font-black tracking-[0.2em]" style={{ color: theme.ink }}>創造学園エディック</p>
+      <BrandLogos />
     </footer>
   );
 }
@@ -199,7 +212,7 @@ export function StudentGuidePage({ account, index, total, loginUrl }: PageProps)
         <FeatureGrid theme={theme} items={[
           { icon: <Video {...iconProps} />, title: '授業に参加', body: 'ボタンひとつでオンライン授業に入れます。' },
           { icon: <PlayCircle {...iconProps} />, title: '録画で復習', body: '授業の録画を見て、何度でも復習できます。' },
-          { icon: <Camera {...iconProps} />, title: '宿題を提出', body: 'ノートを撮影して、宿題を提出できます。' },
+          { icon: <BookOpenCheck {...iconProps} />, title: '宿題を提出', body: 'Monoxerのリンクから宿題を提出できます。' },
           { icon: <Coins {...iconProps} />, title: 'コインを集める', body: 'がんばるとコインやバッジがもらえます。' },
         ]} />
 

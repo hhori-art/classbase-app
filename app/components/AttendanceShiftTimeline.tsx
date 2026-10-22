@@ -12,7 +12,7 @@ const surname = (value: string) => value.trim().split(/[\s　]+/)[0] || value;
 
 const tone = {
   group: 'border-emerald-500 bg-emerald-50 text-emerald-950 ring-emerald-200',
-  individual: 'border-blue-500 bg-blue-50 text-blue-950 ring-blue-200',
+  individual: 'border-sky-500 bg-sky-50 text-sky-950 ring-sky-200',
   office: 'border-violet-500 bg-violet-50 text-violet-950 ring-violet-200',
 };
 
@@ -51,14 +51,14 @@ export default function AttendanceShiftTimeline({
 
   return <div className="w-full min-w-0 overflow-hidden bg-white">
     <div className="sticky top-0 z-30 grid border-b border-slate-200 bg-slate-50/95 shadow-sm backdrop-blur" style={{ gridTemplateColumns: columns }}>
-      <div className="flex items-center justify-center text-[9px] font-black text-slate-400">時刻</div>
-      {days.map(day => <button key={day} type="button" onClick={() => onSelectDate(day)} className={`min-w-0 border-l border-slate-200 px-0.5 py-2 text-[10px] font-black sm:text-xs ${day === selectedDate ? 'bg-indigo-100 text-indigo-800' : 'text-slate-600 hover:bg-indigo-50'}`}>
-        <span className={`inline-block max-w-full truncate ${day === today ? 'rounded-full bg-indigo-600 px-1.5 py-0.5 text-white' : ''}`}>{dateLabel(day)}</span>
-        <span className="block text-[8px] font-bold opacity-60">{shiftsByDay.get(day)?.length || 0}件</span>
+      <div className="flex items-center justify-center text-xs font-bold text-slate-400">時刻</div>
+      {days.map(day => <button key={day} type="button" onClick={() => onSelectDate(day)} className={`min-w-0 border-l border-slate-200 px-0.5 py-2 text-xs font-bold ${day === selectedDate ? 'bg-accent-soft text-accent' : 'text-slate-600 hover:bg-accent-soft'}`}>
+        <span className={`inline-block max-w-full truncate ${day === today ? 'rounded-full bg-accent px-1.5 py-0.5 text-accent-ink' : ''}`}>{dateLabel(day)}</span>
+        <span className="block text-[11px] font-bold opacity-60">{shiftsByDay.get(day)?.length || 0}件</span>
       </button>)}
     </div>
     <div className="relative grid w-full" style={{ gridTemplateColumns: columns, height: totalHeight }}>
-      <div className="relative z-20 bg-white">{hours.slice(0, -1).map((hour, index) => <span key={hour} className="absolute right-1 font-mono text-[9px] font-black text-slate-400" style={{ top: index * hourHeight - 6 }}>{pad(hour)}:00</span>)}</div>
+      <div className="relative z-20 bg-white">{hours.slice(0, -1).map((hour, index) => <span key={hour} className="absolute right-1 font-mono text-[11px] font-bold text-slate-400" style={{ top: index * hourHeight - 6 }}>{pad(hour)}:00</span>)}</div>
       {days.map(day => {
         const positioned = layoutAttendanceTimeline(shiftsByDay.get(day) || []);
         return <div
@@ -67,7 +67,7 @@ export default function AttendanceShiftTimeline({
           onDoubleClick={() => onCreate(day, selectedRoom)}
           onDragOver={event => event.preventDefault()}
           onDrop={event => handleDrop(event, day)}
-          className={`relative min-w-0 border-l border-slate-200 text-left ${day === selectedDate ? 'bg-indigo-50/35' : 'bg-white'} ${draggingId ? 'hover:bg-amber-50' : ''}`}
+          className={`relative min-w-0 border-l border-slate-200 text-left ${day === selectedDate ? 'bg-accent-soft/40' : 'bg-white'} ${draggingId ? 'hover:bg-amber-50' : ''}`}
         >
           {hours.slice(0, -1).map((hour, index) => <span key={hour} className="pointer-events-none absolute left-0 right-0 border-t border-slate-200" style={{ top: index * hourHeight }}><span className="absolute left-0 right-0 border-t border-dashed border-slate-100" style={{ top: hourHeight / 2 }} /></span>)}
           {positioned.map(({ shift, lane, laneCount }) => {
@@ -83,16 +83,16 @@ export default function AttendanceShiftTimeline({
               onDragStart={event => { event.stopPropagation(); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', shift.id); setDraggingId(shift.id); }}
               onDragEnd={() => setDraggingId('')}
               onClick={event => { event.stopPropagation(); onSelectShift(shift); }}
-              className={`absolute z-10 min-w-0 cursor-grab overflow-hidden rounded-md border-l-2 px-1 py-1 text-left font-black shadow-sm ring-1 transition hover:z-20 hover:brightness-95 active:cursor-grabbing ${tone[shift.category]} ${draggingId === shift.id ? 'opacity-40' : ''}`}
+              className={`absolute z-10 min-w-0 cursor-grab overflow-hidden rounded-md border-l-2 px-1 py-1 text-left font-bold shadow-sm ring-1 motion-safe:transition hover:z-20 hover:brightness-95 active:cursor-grabbing ${tone[shift.category]} ${draggingId === shift.id ? 'opacity-40' : ''}`}
               style={{ top, height, left: `calc(${lane * width}% + 2px)`, width: `calc(${width}% - 4px)` }}
               title={`${shift.start}–${shift.end} ${shift.teacher_name} ${shift.room || ''} ${shift.subject || shift.title || ''}`}
             >
-              <span className="block truncate font-mono text-[8px] leading-tight sm:text-[9px]">{shift.start}</span>
-              <span className="mt-0.5 block truncate text-[9px] leading-tight sm:text-[10px]">{surname(shift.teacher_name)}</span>
-              {!selectedRoom && shift.room ? <span className="mt-0.5 block truncate text-[8px] font-bold leading-tight opacity-65">{shift.room}</span> : null}
+              <span className="block truncate font-mono text-[11px] leading-tight">{shift.start}</span>
+              <span className="mt-0.5 block truncate text-[11px] leading-tight">{surname(shift.teacher_name)}</span>
+              {!selectedRoom && shift.room ? <span className="mt-0.5 block truncate text-[11px] font-bold leading-tight opacity-65">{shift.room}</span> : null}
             </button>;
           })}
-          {!positioned.length ? <button type="button" onClick={event => { event.stopPropagation(); onCreate(day, selectedRoom); }} className="absolute inset-x-1 top-3 rounded-lg border border-dashed border-slate-200 py-2 text-[8px] font-black text-slate-300 hover:border-indigo-300 hover:text-indigo-600">＋</button> : null}
+          {!positioned.length ? <button type="button" onClick={event => { event.stopPropagation(); onCreate(day, selectedRoom); }} className="absolute inset-x-1 top-3 rounded-lg border border-dashed border-slate-200 py-2 text-xs font-bold text-slate-400 hover:border-accent/40 hover:text-accent">＋</button> : null}
         </div>;
       })}
     </div>

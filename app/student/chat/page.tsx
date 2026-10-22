@@ -1,10 +1,27 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { useChat } from 'ai/react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useChat } from '@ai-sdk/react';
+import { DefaultChatTransport, type UIMessage } from 'ai';
 import { useAuth } from '@/app/context/AuthContext';
+import { auth } from '@/lib/firebase';
 import { Send, User, Bot, Loader2, Mail, Sparkles, MessageCircle, Info } from 'lucide-react';
 import { logActivity } from '@/lib/logActivity';
+import { EmptyState, ErrorState, IconButton, useConfirm, useToast } from '@/app/components/ui';
+
+const AI_CONTEXT_WINDOW = 40;
+
+type StoredChatMessage = { id?: string; role?: string; content?: string };
+
+/** サーバーに保存した会話（role と content）を画面用のメッセージに変換する。 */
+const toUiMessage = (message: StoredChatMessage, index: number): UIMessage => ({
+  id: String(message.id || `stored-${index}`),
+  role: message.role === 'assistant' ? 'assistant' : 'user',
+  parts: [{ type: 'text', text: String(message.content || '') }],
+});
+
+const messageText = (message: UIMessage) =>
+  message.parts.map(part => (part.type === 'text' ? part.text : '')).join('');
 
 export default function StudentChat() {
   const { user, profile } = useAuth();
@@ -14,13 +31,38 @@ export default function StudentChat() {
   const [teacherReplyLoading, setTeacherReplyLoading] = useState(false);
   const showChatDestination = process.env.NEXT_PUBLIC_SHOW_CHAT_DESTINATION !== 'false';
   const stamps = ['ありがとう', 'わかった', '質問です', '復習します'];
+  const [rateLimited, setRateLimited] = useState(false);
+  const [historyError, setHistoryError] = useState(false);
+  const toast = useToast();
+  const confirm = useConfirm();
   
-  // useChat フック
-  const { messages, input, handleInputChange, handleSubmit, isLoading, setMessages, error: aiError } = useChat({
+  const [input, setInput] = useState('');
+  const userRef = useRef(user);
+  userRef.current = user;
+
+  // 送信のたびに最新のログイントークンを付け、サーバーへは直近の会話だけを role と content で送る
+  // （長い会話でも送信できるよう。サーバー側も直近だけを使う）。
+  const transport = useMemo(() => new DefaultChatTransport<UIMessage>({
     api: '/api/chat',
-    
-    onFinish: async (message) => {
-      if (!user) return;
+    prepareSendMessagesRequest: async ({ messages: all }) => {
+      const token = await (userRef.current || auth.currentUser)?.getIdToken();
+      return {
+        headers: token ? { Authorization: `Bearer ${token}` } as Record<string, string> : undefined,
+        body: { messages: all.slice(-AI_CONTEXT_WINDOW).map(message => ({ role: message.role, content: messageText(message) })) },
+      };
+    },
+    fetch: async (input, init) => {
+      const response = await fetch(input, init);
+      setRateLimited(response.status === 429);
+      return response;
+    },
+  }), []);
+
+  // useChat フック
+  const { messages, sendMessage, status, setMessages, error: aiError } = useChat({
+    transport,
+    onFinish: async ({ isAbort, isDisconnect, isError }) => {
+      if (!user || isAbort || isDisconnect || isError) return;
       try {
         await logActivity(
           user.uid,
@@ -35,27 +77,28 @@ export default function StudentChat() {
   });
 
   // --- 1. 会話履歴の読み込み ---
-  useEffect(() => {
+  const loadHistory = useCallback(async () => {
     if (!user) return;
+    setHistoryError(false);
+    try {
+      const token = await user.getIdToken();
+      const response = await fetch('/api/chat/history', { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || 'history-load-failed');
+      const history = data.messages || [];
 
-    const loadHistory = async () => {
-      try {
-        const token = await user.getIdToken();
-        const response = await fetch('/api/chat/history', { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' });
-        const data = await response.json();
-        if (!response.ok || !data.ok) throw new Error(data.error || 'history-load-failed');
-        const history = data.messages || [];
-
-        if (history.length > 0) {
-          setMessages(history);
-        }
-      } catch (e) {
-        console.error("履歴読み込みエラー", e);
+      if (history.length > 0) {
+        setMessages(history.map(toUiMessage));
       }
-    };
-
-    loadHistory();
+    } catch (e) {
+      console.error("履歴読み込みエラー", e);
+      setHistoryError(true);
+    }
   }, [user, setMessages]);
+
+  useEffect(() => {
+    void loadHistory();
+  }, [loadHistory]);
 
   const loadTeacherMessages = useCallback(async () => {
     if (!user) return;
@@ -69,28 +112,30 @@ export default function StudentChat() {
   useEffect(() => { void loadTeacherMessages(); }, [loadTeacherMessages]);
 
   // --- 2. ユーザーのメッセージ送信時に保存 ---
+  const isLoading = status === 'submitted' || status === 'streaming';
   const customSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!user || !input.trim()) return;
+    const text = input;
+    if (!user || !text.trim() || isLoading) return;
 
-    const token = await user.getIdToken();
-    handleSubmit(e, { headers: { Authorization: `Bearer ${token}` } });
+    setInput('');
+    void sendMessage({ text });
   };
 
   // --- 3. 先生に送信機能 ---
   const handleSendToTeacher = async () => {
     if (!user || messages.length === 0) return;
-    if (!confirm('この会話の内容を先生に送信しますか？\n（先生が後で確認してアドバイスをくれます）')) return;
+    if (!(await confirm({ title: 'この会話の内容を先生に送信しますか？', message: '先生が後で確認してアドバイスをくれます。', confirmLabel: '送信する' }))) return;
 
     setIsSendingToTeacher(true);
     try {
       const response = await fetch('/api/student/teacher-chat', { method: 'POST', headers: { Authorization: `Bearer ${await user.getIdToken()}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'report_ai_chat' }) });
       const data = await response.json();
       if (!response.ok || !data.ok) throw new Error(data.error || 'report-failed');
-      alert('先生に送信しました！\n確認まで少し待っててね。');
+      toast.success('先生に送信しました！確認まで少し待っててね。');
     } catch (e) {
       console.error(e);
-      alert('送信に失敗しました');
+      toast.error('先生に送信できませんでした。時間を置いてもう一度お試しください。');
     } finally {
       setIsSendingToTeacher(false);
     }
@@ -102,9 +147,10 @@ export default function StudentChat() {
       const response = await fetch('/api/chat/history', { method: 'POST', headers: { Authorization: `Bearer ${await user.getIdToken()}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'stamp', stamp }) });
       const data = await response.json();
       if (!response.ok || !data.ok) throw new Error(data.error || 'stamp-failed');
-      setMessages(current => [...current, data.message]);
+      setMessages(current => [...current, toUiMessage(data.message, current.length)]);
     } catch (e) {
       console.error(e);
+      toast.error('スタンプを送れませんでした。もう一度お試しください。');
     }
   };
 
@@ -124,7 +170,7 @@ export default function StudentChat() {
       await loadTeacherMessages();
     } catch (e) {
       console.error(e);
-      alert('先生への返信に失敗しました');
+      toast.error('先生へ返信できませんでした。時間を置いてもう一度お試しください。');
     } finally {
       setTeacherReplyLoading(false);
     }
@@ -136,70 +182,68 @@ export default function StudentChat() {
   }, [messages]);
 
   return (
-    <div className="flex flex-col h-[calc(100vh-80px)] bg-[#F0F4F8] font-sans overflow-hidden">
-      
-      {/* ヘッダー: 教育アプリらしいポップで信頼感のあるデザイン */}
-      <div className="bg-white/80 backdrop-blur-md px-4 py-3 shadow-sm border-b border-indigo-50 flex items-center justify-between sticky top-0 z-10">
+    <div className="flex h-[calc(100dvh-85px-env(safe-area-inset-bottom))] flex-col overflow-hidden">
+
+      {/* ヘッダー */}
+      <div className="sticky top-0 z-10 flex items-center justify-between border-b border-line bg-surface/90 px-4 py-3 shadow-sm backdrop-blur-md">
         <div className="flex items-center gap-3">
-          <div className="relative group">
-            <div className="w-11 h-11 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl flex items-center justify-center text-white shadow-lg shadow-indigo-200 transform group-hover:scale-105 transition-transform">
-              <Bot size={22} className="fill-white/20" />
+          <div className="relative">
+            <div className="flex h-11 w-11 items-center justify-center rounded-btn bg-accent text-accent-ink shadow-card">
+              <Bot size={22} className="fill-white/20" aria-hidden />
             </div>
-            <div className="absolute -bottom-1 -right-1 w-3.5 h-3.5 bg-green-400 border-2 border-white rounded-full"></div>
+            <div className="absolute -bottom-1 -right-1 h-3.5 w-3.5 rounded-full border-2 border-white bg-emerald-400" aria-hidden></div>
           </div>
           <div>
-            <h1 className="font-bold text-gray-800 text-lg leading-tight flex items-center gap-1">
-              AIチューター <Sparkles size={14} className="text-yellow-500 fill-yellow-500 animate-pulse"/>
+            <h1 className="flex items-center gap-1 text-lg font-bold leading-tight text-fg">
+              AIチューター <Sparkles size={14} className="fill-amber-400 text-amber-500 motion-safe:animate-pulse" aria-hidden />
             </h1>
-            <p className="text-[10px] text-gray-500 font-bold bg-gray-100 px-2 py-0.5 rounded-full inline-block mt-0.5">
+            <p className="mt-0.5 inline-block rounded-full bg-slate-100 px-2 py-0.5 text-xs font-bold text-fg-muted">
               {showChatDestination ? '宛先: AIチューター' : '24時間いつでも質問OK'}
             </p>
           </div>
         </div>
-        
-        {/* 先生に送信ボタン: 「お助けボタン」のような見た目に */}
-        <button 
+
+        {/* 先生に送信ボタン */}
+        <button
           onClick={handleSendToTeacher}
           disabled={messages.length === 0 || isSendingToTeacher}
-          className="group flex flex-col items-center justify-center gap-0.5 disabled:opacity-50 disabled:cursor-not-allowed"
+          className="group flex min-h-11 min-w-11 flex-col items-center justify-center gap-0.5 rounded-btn px-1 disabled:cursor-not-allowed disabled:opacity-50"
           title="先生に会話を送る"
         >
-          <div className="w-9 h-9 bg-orange-50 text-orange-500 rounded-full flex items-center justify-center border border-orange-100 group-hover:bg-orange-100 group-hover:scale-110 transition-all shadow-sm">
-            {isSendingToTeacher ? <Loader2 size={16} className="animate-spin"/> : <Mail size={16} />}
+          <div className="flex h-9 w-9 items-center justify-center rounded-full border border-amber-100 bg-amber-50 text-amber-600 shadow-sm transition-all group-hover:bg-amber-100">
+            {isSendingToTeacher ? <Loader2 size={16} className="animate-spin" aria-hidden /> : <Mail size={16} aria-hidden />}
           </div>
-          <span className="text-[9px] font-bold text-orange-400 group-hover:text-orange-600">先生へ報告</span>
+          <span className="text-xs font-bold text-amber-700">先生へ報告</span>
         </button>
       </div>
 
       {/* メッセージエリア */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-6">
-        <details className="mx-auto max-w-3xl rounded-2xl border border-indigo-100 bg-indigo-50/80 px-4 py-3">
-          <summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-black text-indigo-900"><Info size={15}/>AIと先生、どちらに届く？</summary>
-          <div className="mt-2 space-y-1 text-xs font-bold leading-6 text-indigo-800"><p>下の入力欄はAIチューター宛です。先生に直接送る場合は「先生からのメッセージ」の返信欄を使います。</p><p>AIとの会話を先生に見せたい場合だけ、右上の「先生へ報告」を押してください。パスワードや個人情報は送らないでください。</p></div>
+      <div className="flex-1 space-y-6 overflow-y-auto p-4">
+        <details className="mx-auto max-w-3xl rounded-card border border-accent/30 bg-accent-soft px-4 py-3">
+          <summary className="flex min-h-9 cursor-pointer list-none items-center gap-2 text-sm font-bold text-accent"><Info size={15} aria-hidden />AIと先生、どちらに届く？</summary>
+          <div className="mt-2 space-y-1 text-xs leading-6 text-fg"><p>下の入力欄はAIチューター宛です。先生に直接送る場合は「先生からのメッセージ」の返信欄を使います。</p><p>AIとの会話を先生に見せたい場合だけ、右上の「先生へ報告」を押してください。パスワードや個人情報は送らないでください。</p></div>
         </details>
-        <section className="mx-auto max-w-3xl rounded-3xl border border-orange-100 bg-white p-4 shadow-sm">
+        <section className="cb-card mx-auto max-w-3xl p-card">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div className="flex items-center gap-2">
-              <div className="rounded-2xl bg-orange-50 p-2 text-orange-500"><MessageCircle size={18} /></div>
+              <div className="rounded-btn bg-amber-50 p-2 text-amber-600"><MessageCircle size={18} aria-hidden /></div>
               <div>
-                <h2 className="text-sm font-black text-gray-800">先生からのメッセージ</h2>
-                <p className="text-[10px] font-bold text-gray-400">先生宛の返信もここから送れます</p>
+                <h2 className="text-sm font-bold text-fg">先生からのメッセージ</h2>
+                <p className="text-xs text-fg-muted">先生宛の返信もここから送れます</p>
               </div>
             </div>
-            <span className="rounded-full bg-orange-50 px-3 py-1 text-[10px] font-black text-orange-500">{teacherMessages.length}件</span>
+            <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-bold text-amber-700">{teacherMessages.length}件</span>
           </div>
 
           {teacherMessages.length === 0 ? (
-            <div className="rounded-2xl bg-gray-50 px-4 py-5 text-center text-xs font-bold text-gray-400">
-              まだ先生からのメッセージはありません
-            </div>
+            <EmptyState icon={MessageCircle} title="まだ先生からのメッセージはありません" className="mb-3 py-6" />
           ) : (
             <div className="mb-3 max-h-56 space-y-2 overflow-y-auto pr-1">
               {teacherMessages.slice(-8).map((m) => {
                 const isTeacher = m.role === 'teacher';
                 return (
-                  <div key={m.id} className={`rounded-2xl px-3 py-2 text-xs font-bold leading-relaxed ${isTeacher ? 'bg-orange-50 text-gray-800' : 'bg-indigo-50 text-indigo-700'}`}>
-                    <div className="mb-1 text-[10px] font-black opacity-60">{isTeacher ? '先生' : '自分'}</div>
+                  <div key={m.id} className={`rounded-btn px-3 py-2 text-sm leading-relaxed ${isTeacher ? 'bg-amber-50 text-fg' : 'bg-accent-soft text-fg'}`}>
+                    <div className="mb-1 text-xs font-bold text-fg-muted">{isTeacher ? '先生' : '自分'}</div>
                     <div className="whitespace-pre-wrap">{m.message || m.content}</div>
                   </div>
                 );
@@ -213,35 +257,39 @@ export default function StudentChat() {
               onChange={(e) => setTeacherReply(e.target.value)}
               maxLength={2000}
               placeholder="先生へ返信..."
-              className="min-w-0 flex-1 rounded-2xl border border-gray-100 bg-gray-50 px-4 py-3 text-sm font-bold outline-none focus:border-orange-200 focus:bg-white"
+              aria-label="先生への返信"
+              className="min-h-11 min-w-0 flex-1 rounded-input border border-line bg-slate-50 px-4 py-2 text-sm text-fg outline-none focus:border-accent focus:bg-surface focus:ring-2 focus:ring-accent/30"
             />
-            <button
-              type="button"
+            <IconButton
+              variant="primary"
               onClick={sendTeacherReply}
               disabled={!teacherReply.trim() || teacherReplyLoading}
-              className="rounded-2xl bg-orange-500 px-4 py-3 text-white shadow-sm disabled:opacity-50"
-              aria-label="先生へ返信"
+              label="先生へ返信"
             >
-              {teacherReplyLoading ? <Loader2 className="animate-spin" size={18} /> : <Send size={18} />}
-            </button>
+              {teacherReplyLoading ? <Loader2 className="animate-spin" size={18} aria-hidden /> : <Send size={18} aria-hidden />}
+            </IconButton>
           </div>
         </section>
 
-        {messages.length === 0 && (
-          <div className="h-full flex flex-col items-center justify-center text-center opacity-80 animate-in fade-in zoom-in duration-500">
-            <div className="w-24 h-24 bg-white rounded-full flex items-center justify-center shadow-xl mb-4 border-4 border-indigo-50">
-              <Sparkles size={40} className="text-indigo-400 fill-indigo-100"/>
+        {historyError && (
+          <ErrorState className="mx-auto max-w-3xl" title="これまでの会話を読み込めませんでした" onRetry={() => void loadHistory()} />
+        )}
+
+        {messages.length === 0 && !historyError && (
+          <div className="flex h-full flex-col items-center justify-center text-center animate-in fade-in zoom-in duration-500">
+            <div className="mb-4 flex h-24 w-24 items-center justify-center rounded-full border-4 border-accent-soft bg-surface shadow-card">
+              <Sparkles size={40} className="fill-accent-soft text-accent" aria-hidden />
             </div>
-            <h3 className="text-lg font-bold text-gray-700 mb-2">何でも聞いてね！</h3>
-            <p className="text-xs text-gray-500 font-medium bg-white px-4 py-2 rounded-xl shadow-sm border border-gray-100">
-              「数学の宿題がわからない」<br/>
-              「英単語の覚え方を教えて」<br/>
-              「勉強のやる気が出ない...」
+            <h3 className="mb-2 text-lg font-bold text-fg">理科・社会のことを聞いてね！</h3>
+            <p className="rounded-btn border border-line bg-surface px-4 py-2 text-xs font-medium text-fg-muted shadow-sm">
+              「光合成のしくみを教えて」<br/>
+              「鎌倉幕府と室町幕府のちがいは？」<br/>
+              「理科・社会の暗記のコツを教えて」
             </p>
           </div>
         )}
 
-        {messages.map((m: any, index: number) => {
+        {messages.map((m, index) => {
           const isUser = m.role === 'user';
           return (
             <div
@@ -249,77 +297,68 @@ export default function StudentChat() {
               className={`flex items-end gap-2.5 ${isUser ? 'flex-row-reverse' : ''} animate-in slide-in-from-bottom-2 duration-300`}
             >
               {/* アイコン */}
-              <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 shadow-sm text-white text-xs font-bold
-                ${isUser 
-                  ? 'bg-blue-400 shadow-blue-200' 
-                  : 'bg-gradient-to-br from-indigo-500 to-purple-600 shadow-indigo-200'
-                }
-              `}>
-                {isUser ? <User size={14} /> : <Bot size={14} />}
+              <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-bold shadow-sm ${isUser ? 'bg-slate-400 text-white' : 'bg-accent text-accent-ink'}`}>
+                {isUser ? <User size={14} aria-hidden /> : <Bot size={14} aria-hidden />}
               </div>
 
               {/* 吹き出し */}
-              <div className={`max-w-[80%] p-3.5 rounded-2xl text-[13.5px] leading-relaxed shadow-sm relative group
-                ${isUser 
-                  ? 'bg-blue-500 text-white rounded-br-none shadow-blue-100' 
-                  : 'bg-white text-gray-800 border border-gray-100 rounded-bl-none shadow-gray-100'
-                }
-              `}>
-                <div className="whitespace-pre-wrap">{m.content}</div>
-                
-                {/* 送信時間などのメタ情報（必要なら表示） */}
-                {/* <div className={`text-[9px] mt-1 text-right opacity-60 ${isUser ? 'text-white' : 'text-gray-400'}`}>Just now</div> */}
+              <div className={`relative max-w-[80%] rounded-card p-3.5 text-sm leading-relaxed shadow-sm ${isUser
+                ? 'rounded-br-none bg-accent text-accent-ink'
+                : 'rounded-bl-none border border-line bg-surface text-fg'
+              }`}>
+                <div className="whitespace-pre-wrap">{messageText(m)}</div>
               </div>
             </div>
           );
         })}
-        
-        {/* ローディング表示: 可愛らしく */}
+
+        {/* ローディング表示 */}
         {isLoading && (
-          <div className="flex items-center gap-2 ml-10 animate-pulse">
-            <div className="flex gap-1">
-              <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
-              <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
-              <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+          <div role="status" className="ml-10 flex items-center gap-2">
+            <div className="flex gap-1" aria-hidden>
+              <div className="h-2 w-2 rounded-full bg-accent/60 motion-safe:animate-bounce" style={{ animationDelay: '0ms' }}></div>
+              <div className="h-2 w-2 rounded-full bg-accent/60 motion-safe:animate-bounce" style={{ animationDelay: '150ms' }}></div>
+              <div className="h-2 w-2 rounded-full bg-accent/60 motion-safe:animate-bounce" style={{ animationDelay: '300ms' }}></div>
             </div>
-            <span className="text-xs font-bold text-indigo-400">考え中...</span>
+            <span className="text-xs font-bold text-accent">考え中...</span>
           </div>
         )}
         <div ref={messagesEndRef} />
       </div>
 
-      {/* 入力エリア: 浮かんでいるようなモダンなデザイン */}
-      <div className="p-3 pb-6 bg-[#F0F4F8] sm:p-4"> {/* 背景色に合わせて一体感を出す */}
-        {aiError && <div role="alert" className="mx-auto mb-2 max-w-3xl rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-black text-rose-700">AIチューターへ送信できませんでした。通信状態を確認し、時間を置いてもう一度お試しください。</div>}
+      {/* 入力エリア */}
+      <div className="p-3 pb-6 sm:p-4">
+        {aiError && <div role="alert" className="mx-auto mb-2 max-w-3xl rounded-btn border border-danger/20 bg-danger-soft px-4 py-3 text-xs font-bold text-danger">{rateLimited || /rate-limit/.test(aiError.message || '')
+          ? '短い時間にたくさん質問したため、少し休憩中です。1分ほど待ってからもう一度送ってね。（1時間に送れる回数にも上限があります）'
+          : 'AIチューターへ送信できませんでした。通信状態を確認し、時間を置いてもう一度お試しください。'}</div>}
         <div className="mx-auto mb-2 flex max-w-3xl gap-2 overflow-x-auto pb-1">
           {stamps.map(stamp => (
-            <button key={stamp} onClick={() => sendStamp(stamp)} className="shrink-0 rounded-full bg-white px-3 py-1.5 text-xs font-black text-indigo-500 shadow-sm border border-indigo-50">
+            <button key={stamp} onClick={() => sendStamp(stamp)} className="min-h-9 shrink-0 rounded-full border border-accent/30 bg-surface px-3 text-xs font-bold text-accent shadow-sm hover:bg-accent-soft">
               {stamp}
             </button>
           ))}
         </div>
-        <form onSubmit={customSubmit} className="relative flex items-end gap-2 max-w-3xl mx-auto">
-          <div className="flex-1 bg-white rounded-3xl shadow-lg shadow-gray-200 border border-gray-100 focus-within:ring-2 focus-within:ring-indigo-100 transition-all flex items-center p-1.5 pl-4">
+        <form onSubmit={customSubmit} className="relative mx-auto flex max-w-3xl items-end gap-2">
+          <div className="flex flex-1 items-center rounded-hero border border-line bg-surface p-1.5 pl-4 shadow-card transition-all focus-within:ring-2 focus-within:ring-accent/30">
             <input
-              className="w-full bg-transparent text-gray-800 text-sm focus:outline-none py-2 font-bold placeholder:text-gray-300 placeholder:font-medium"
+              className="w-full bg-transparent py-2 text-sm text-fg placeholder:text-fg-muted/60 focus:outline-none"
               value={input}
-              onChange={handleInputChange}
+              onChange={event => setInput(event.target.value)}
               placeholder="メッセージを入力..."
+              aria-label="AIチューターへのメッセージ"
               disabled={isLoading}
               autoComplete="off"
             />
             <button
               type="submit"
               disabled={!input.trim() || isLoading}
-              className={`
-                p-2.5 rounded-full transition-all duration-300 transform active:scale-95 flex items-center justify-center
-                ${!input.trim() || isLoading 
-                  ? 'bg-gray-100 text-gray-400 cursor-not-allowed' 
-                  : 'bg-gradient-to-r from-indigo-500 to-blue-500 text-white shadow-md shadow-indigo-200 hover:shadow-lg'
-                }
-              `}
+              aria-label="送信"
+              className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full transition-all active:scale-95 ${!input.trim() || isLoading
+                ? 'cursor-not-allowed bg-slate-100 text-slate-400'
+                : 'bg-accent text-accent-ink shadow-sm hover:bg-accent-hover'
+              }`}
             >
-              {isLoading ? <Loader2 size={18} className="animate-spin"/> : <Send size={18} className="ml-0.5" />}
+              {isLoading ? <Loader2 size={18} className="animate-spin" aria-hidden /> : <Send size={18} className="ml-0.5" aria-hidden />}
             </button>
           </div>
         </form>

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
 import { collection, getDocs, limit, query, where } from 'firebase/firestore';
@@ -12,29 +12,49 @@ import { loadStudentCalendar } from '@/lib/client-student-homework';
 import { courseOptionMatchesSelection, getCourseOptionCourseKey, getCourseOptionScheduleKey, getCourseOptionStableKey, hasCourseOptionSelection, removeCourseOptionSelections } from '@/lib/course-registration-selection';
 import { calendarScheduleKind, calendarScheduleLabel } from '@/lib/calendar-schedule-display';
 import { usePortalVisibility } from '@/app/hooks/usePortalVisibility';
-import AppSwitcherLink from '@/app/components/AppSwitcherLink';
+import { DEFAULT_CLASS_BUTTON_SETTINGS } from '@/lib/class-button-settings';
+import { jstTodayKey, lessonDayEnded } from '@/lib/lesson-deadline';
+import { AbsenceRequestError, isTransferOptionError } from '@/lib/absence-request-errors';
+import LessonDayList, { summarizeLessonDays, type LessonDay } from '@/app/components/parent/LessonDayList';
+import Link from 'next/link';
+import { ParentCard, ParentEmpty, ParentPageHeader, ParentSectionTitle, parentStatusLabel, parentStatusPillTone } from '@/app/components/parent/ParentUI';
+import ChildSwitcher, { pickChildId } from '@/app/components/parent/ChildSwitcher';
+import { Button, ButtonLink, ErrorState, IconButton, Modal, Skeleton, Spinner, StatusPill, useConfirm, useToast } from '@/app/components/ui';
+import { formatDate, formatDateTime } from '@/lib/format';
+import { TERMS } from '@/lib/glossary';
+import { cn } from '@/lib/cn';
 import {
-  AlertCircle,
+  BarChart3,
   Bell,
   BookOpen,
-  CalendarCheck,
+  CalendarX2,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
   ClipboardCheck,
-  Loader2,
+  GraduationCap,
+  Megaphone,
   MessageCircle,
+  MessagesSquare,
   MonitorPlay,
-  Repeat,
   Send,
   Sparkles,
+  Users,
   Video,
   X,
 } from 'lucide-react';
 
 type Student = { id: string; student_name?: string; grade?: string; school?: string; school_id?: string; day_of_week?: string; selected_course_ids?: string[] };
-type DetailItem = { id: string; title: string; meta: string; body?: string; status?: string };
-type RequestMode = 'absence' | 'transfer' | 'student_transfer';
+type DetailItem = { id: string; title: string; meta: string; body?: string; status?: string; requestType?: string; targetDate?: string };
+type RequestMode = 'absence' | 'late' | 'transfer' | 'student_transfer';
+type SentRequest = { target_date: string; kind: 'absent' | 'late' | 'transfer'; absence_id?: string };
+type HomeSummary = { unread_replies: number; urgent_news: { id: string; title: string; label: string; published_at: string }[] };
+/** 見送り・取消になった連絡（カレンダーでは「連絡済み」にしない） */
+type DeclinedRequest = { target_date: string; status: string };
+type DashboardSummary = { window_days: number; homework_count: number; ai_question_count: number };
+const INACTIVE_REQUEST_STATUSES = ['rejected', 'cancelled', 'canceled'];
+const requestDateLabel = (date: string) => /^\d{4}-\d{2}-\d{2}$/.test(date) ? formatDate(date) : '';
+type ClassTimes = { period1_end: string; period2_end: string };
 type TransferOption = {
   id: string;
   title: string;
@@ -52,17 +72,9 @@ const emptyDetails = (): Record<string, DetailItem[]> => ({
   homework: [], attendance: [], absence: [], recordings: [], aiMessages: [], announcements: [],
 });
 
-const toDateLabel = (value: any) => {
-  if (!value) return '-';
-  const date = value?.toDate ? value.toDate() : new Date(value);
-  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleDateString('ja-JP');
-};
+const toDateLabel = (value: any) => (value ? formatDate(value, { withYear: true }) || String(value) : '-');
 
-const toDateTimeLabel = (value: any) => {
-  if (!value) return '-';
-  const date = value?.toDate ? value.toDate() : new Date(value);
-  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('ja-JP');
-};
+const toDateTimeLabel = (value: any) => (value ? formatDateTime(value, { withYear: true }) || String(value) : '-');
 
 const scheduleStart = (item: any) => item.start_date || item.target_date || '';
 const scheduleEnd = (item: any) => item.end_date || item.target_date || scheduleStart(item);
@@ -76,6 +88,8 @@ const normalizeGrade = (value: any) => {
 };
 export default function ParentDashboardPage() {
   const { user, profile } = useAuth();
+  const toast = useToast();
+  const confirm = useConfirm();
   const [students, setStudents] = useState<Student[]>([]);
   const [selectedId, setSelectedId] = useState('');
   const [loading, setLoading] = useState(true);
@@ -100,6 +114,16 @@ export default function ParentDashboardPage() {
   const [transferOptions, setTransferOptions] = useState<TransferOption[]>([]);
   const [selectedTransferShiftId, setSelectedTransferShiftId] = useState('');
   const [loadingTransferOptions, setLoadingTransferOptions] = useState(false);
+  const [transferOptionsReload, setTransferOptionsReload] = useState(0);
+  const [activityTab, setActivityTab] = useState('');
+  const [lessons, setLessons] = useState<LessonDay[]>([]);
+  const [sentRequests, setSentRequests] = useState<SentRequest[]>([]);
+  const [declinedRequests, setDeclinedRequests] = useState<DeclinedRequest[]>([]);
+  const [summary, setSummary] = useState<DashboardSummary | null>(null);
+  const [homeSummary, setHomeSummary] = useState<HomeSummary | null>(null);
+  const [cancellingId, setCancellingId] = useState('');
+  const [classTimes, setClassTimes] = useState<ClassTimes>({ period1_end: DEFAULT_CLASS_BUTTON_SETTINGS.period1_end, period2_end: DEFAULT_CLASS_BUTTON_SETTINGS.period2_end });
+  const requestPanelRef = useRef<HTMLDivElement>(null);
 
   const selectedStudent = useMemo(() => students.find(s => s.id === selectedId), [students, selectedId]);
   const registeredWeekdays = useMemo(() => {
@@ -113,6 +137,21 @@ export default function ParentDashboardPage() {
     }
     return Array.from(days);
   }, [courseOptions, selectedCourseIds, selectedStudent?.day_of_week]);
+  // 欠席・遅刻の連絡締切は、サーバー（/api/parent/absence-requests）と同じく、その日いちばん遅い授業（2時間目）の終了時刻。
+  // 授業が終わった日でも、振替（休んだ授業の補講）の登録はできる。
+  const lessonEndFor = (_date: string) => classTimes.period2_end;
+  const selectedDateEnded = Boolean(selectedDate) && lessonDayEnded(selectedDate, lessonEndFor(selectedDate));
+  /** その日に表示する連絡の種類（画面のボタンの並びと同じ順）。 */
+  const allowedRequestModes = (date: string): RequestMode[] => {
+    const ended = lessonDayEnded(date, lessonEndFor(date));
+    return [
+      ...(visibility.absence && !ended ? ['absence', 'late', 'student_transfer'] as RequestMode[] : []),
+      ...(visibility.transfer ? ['transfer'] as RequestMode[] : []),
+    ];
+  };
+  const REQUEST_PANEL_TITLE: Record<RequestMode, string> = {
+    absence: '欠席を連絡', late: '遅刻を連絡', student_transfer: '欠席を連絡', transfer: '振替を登録',
+  };
 
   useEffect(() => {
     const loadStudents = async () => {
@@ -127,7 +166,7 @@ export default function ParentDashboardPage() {
         if (!response.ok || !data.ok) throw new Error(data.error || 'failed');
         const fetched: Student[] = Array.isArray(data.students) ? data.students : [];
         setStudents(fetched);
-        setSelectedId(current => fetched.some(student => student.id === current) ? current : fetched[0]?.id || '');
+        setSelectedId(current => pickChildId(user.uid, fetched.map(student => student.id), current));
       } catch (e) {
         console.error(e);
         setStudents([]);
@@ -167,6 +206,10 @@ export default function ParentDashboardPage() {
       setDetailsLoading(true);
       setDetailsError('');
       setDetails(emptyDetails());
+      setLessons([]);
+      setSentRequests([]);
+      setDeclinedRequests([]);
+      setSummary(null);
       try {
         const [dashboardResponse, announcements] = await Promise.all([
           fetch(`/api/parent/dashboard?student_id=${encodeURIComponent(selectedId)}`, {
@@ -178,12 +221,40 @@ export default function ParentDashboardPage() {
         if (!dashboardResponse.ok || !dashboard.ok) throw new Error(dashboard.error || 'failed');
         if (!active) return;
         const source = dashboard.details || {};
+        setLessons(Array.isArray(source.lessons) ? source.lessons : []);
+        // カレンダーの「連絡済み」は休む日（振替は元の授業日）に付ける。振替済みを優先して1日1件にまとめる。
+        // 見送り・取消になった連絡は「連絡済み」にせず、別に結果だけを表示する。
+        const markers = new Map<string, SentRequest['kind']>();
+        const absenceIds = new Map<string, string>();
+        const declined = new Map<string, string>();
+        (source.absence || []).forEach((item: any) => {
+          const date = String(item.type === 'transfer' ? item.absence_date || '' : item.target_date || '');
+          if (!date) return;
+          if (INACTIVE_REQUEST_STATUSES.includes(String(item.status || ''))) {
+            if (!declined.has(date) || item.status === 'rejected') declined.set(date, String(item.status));
+            return;
+          }
+          const kind: SentRequest['kind'] = item.type === 'transfer' || item.transfer_status === 'registered' ? 'transfer' : item.absence_type === 'late' ? 'late' : 'absent';
+          if (markers.get(date) !== 'transfer') markers.set(date, kind);
+          if (item.type === 'absence' && item.id) absenceIds.set(date, String(item.id));
+        });
+        setSentRequests(Array.from(markers, ([target_date, kind]) => ({ target_date, kind, absence_id: absenceIds.get(target_date) })));
+        setDeclinedRequests(Array.from(declined).filter(([date]) => !markers.has(date)).map(([target_date, status]) => ({ target_date, status })));
+        setSummary(dashboard.summary && typeof dashboard.summary === 'object' ? {
+          window_days: Number(dashboard.summary.window_days) || 60,
+          homework_count: Number(dashboard.summary.homework_count) || 0,
+          ai_question_count: Number(dashboard.summary.ai_question_count) || 0,
+        } : null);
+        if (dashboard.class_times?.period2_end) setClassTimes(dashboard.class_times);
 
         setDetails({
           homework: (source.homework || []).map((item: any) => ({ id: item.id, title: item.title, meta: toDateTimeLabel(item.occurred_at), body: item.body, status: item.status })),
-          attendance: (source.attendance || []).map((item: any) => ({ id: item.id, title: item.title, meta: item.status, body: item.body })),
-          absence: (source.absence || []).map((item: any) => ({ id: item.id, title: item.title, meta: `${item.target_date || '-'} / ${item.status || 'pending'}`, body: item.body, status: item.status })),
-          recordings: (source.recordings || []).map((item: any) => ({ id: item.id, title: item.title, meta: `${toDateTimeLabel(item.occurred_at)} / ${item.status}`, body: item.watch_seconds ? `${Math.round(item.watch_seconds / 60)}分視聴` : '' })),
+          absence: (source.absence || []).map((item: any) => {
+            const target = requestDateLabel(String(item.target_date || ''));
+            const original = requestDateLabel(String(item.absence_date || ''));
+            const meta = item.type === 'transfer' && original ? `${original}の授業 → ${target || '日付未定'}に振替` : target || '日付未定';
+            return { id: item.id, title: item.title, meta, body: item.body, status: item.status, requestType: String(item.type || ''), targetDate: String(item.target_date || '') };
+          }),
           aiMessages: (source.aiMessages || []).map((item: any) => ({ id: item.id, title: item.role === 'assistant' ? 'AIからの返信' : '生徒の質問', meta: toDateTimeLabel(item.occurred_at), body: item.body })),
           announcements: announcements
             .map((data: any) => {
@@ -202,6 +273,24 @@ export default function ParentDashboardPage() {
     loadDetails();
     return () => { active = false; controller.abort(); };
   }, [selectedId, user, detailsReload]);
+
+  // 教室からの返信の未読数と、まだ読んでいない重要・緊急のお知らせ（保護者本人の分だけ）。
+  useEffect(() => {
+    if (!user) return;
+    let active = true;
+    (async () => {
+      try {
+        const response = await fetch('/api/parent/home-summary', { headers: { Authorization: `Bearer ${await user.getIdToken()}` }, cache: 'no-store' });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.ok) throw new Error(data.error || 'failed');
+        if (active) setHomeSummary({ unread_replies: Number(data.unread_replies) || 0, urgent_news: Array.isArray(data.urgent_news) ? data.urgent_news : [] });
+      } catch (e) {
+        // ご対応のお願いの追加表示だけなので、失敗しても画面全体はエラーにしない。
+        console.warn('Parent home summary failed:', e);
+      }
+    })();
+    return () => { active = false; };
+  }, [user, dashboardReload]);
 
   useEffect(() => {
     const loadCourseOptions = async () => {
@@ -238,7 +327,7 @@ export default function ParentDashboardPage() {
     const loadCourseRequests = async () => {
       if (!user || !selectedStudent) return;
       try {
-        const today = new Date().toISOString().slice(0, 10);
+        const today = jstTodayKey();
         const [requestSnap, registrationSnap] = await Promise.all([
           getDocs(query(collection(db, 'registration_requests'), where('is_active', '==', true), limit(50))).catch(() => ({ docs: [] as any[] })),
           getDocs(query(collection(db, 'course_registrations'), where('parent_id', '==', user.uid), limit(50))).catch(() => ({ docs: [] as any[] })),
@@ -282,7 +371,7 @@ export default function ParentDashboardPage() {
         const params = new URLSearchParams({ student_id: selectedStudent.id, absence_date: selectedDate });
         const res = await fetch(`/api/student/transfer-options?${params}`, { headers: { Authorization: `Bearer ${token}` } });
         const data = await res.json().catch(() => ({}));
-        if (!res.ok || data.ok === false) throw new Error(data.error || 'failed');
+        if (!res.ok || data.ok === false) throw new AbsenceRequestError(data, '振替候補を読み込めませんでした。');
         setTransferOptions((Array.isArray(data.options) ? data.options : []).map((option: any) => ({
           id: String(option.id || ''), title: String(option.title || ''), unit: String(option.unit || ''),
           subject: String(option.subject || ''), courseName: String(option.course_name || ''),
@@ -298,13 +387,24 @@ export default function ParentDashboardPage() {
       }
     };
     loadTransferOptions();
-  }, [user, selectedStudent, selectedDate, requestMode]);
+  }, [user, selectedStudent, selectedDate, requestMode, transferOptionsReload]);
+
+  useEffect(() => {
+    if (selectedDate) requestPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [selectedDate]);
+
+  // 「欠席・遅刻の連絡」（/parent#absence）から来たときは、カレンダーまで移動する。
+  useEffect(() => {
+    if (loading || typeof window === 'undefined' || window.location.hash !== '#absence') return;
+    const timer = window.setTimeout(() => document.getElementById('absence')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 150);
+    return () => window.clearTimeout(timer);
+  }, [loading, students.length]);
 
   const submitCalendarRequest = async () => {
     if (!user || !selectedStudent || !selectedDate) return;
     const selectedTransfer = transferOptions.find(option => option.id === selectedTransferShiftId);
     if (requestMode === 'transfer' && !selectedTransfer) {
-      alert('振替で参加したい授業を選択してください。');
+      toast.error('振替で参加したい授業を選択してください。');
       return;
     }
     setSubmitting(true);
@@ -312,13 +412,14 @@ export default function ParentDashboardPage() {
       const token = await user.getIdToken();
       const isTransfer = requestMode === 'transfer';
       const isStudentTransfer = requestMode === 'student_transfer';
+      const isLate = requestMode === 'late';
       const res = await fetch('/api/parent/absence-requests', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
           student_id: selectedStudent.id,
           type: isTransfer ? 'transfer' : 'absence',
-          absence_type: isTransfer ? null : 'absent',
+          absence_type: isTransfer ? null : isLate ? 'late' : 'absent',
           target_date: selectedDate,
           reason: requestText,
           student_selects_transfer: isStudentTransfer,
@@ -335,23 +436,86 @@ export default function ParentDashboardPage() {
         }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || data.ok === false) throw new Error(data.error || 'failed');
+      if (!res.ok || data.ok === false) throw new AbsenceRequestError(data);
       setRequestText('');
       setSelectedTransferShiftId('');
+      // 同じ日の連絡は1件にまとめて更新されるので、目印も置き換える。
+      setSentRequests(current => [
+        ...current.filter(item => item.target_date !== selectedDate),
+        { target_date: selectedDate, kind: isTransfer ? 'transfer' : isLate ? 'late' : 'absent' },
+      ]);
       setSelectedDate('');
-      alert(isTransfer ? '振替を確定しました。' : isStudentTransfer ? '欠席連絡を送信しました。生徒画面に振替選択を表示します。' : '欠席連絡を送信しました。');
+      setDetailsReload(value => value + 1);
+      toast.success(isTransfer ? '振替を確定しました。' : isStudentTransfer ? '欠席連絡を送信しました。お子さまの画面に振替を選ぶ案内を表示します。' : isLate ? '遅刻の連絡を送信しました。' : '欠席連絡を送信しました。');
     } catch (e) {
       console.error(e);
-      alert('送信に失敗しました。');
+      // 候補の期限切れ・変更のときは、最新の候補を読み込み直してから選び直してもらう。
+      if (requestMode === 'transfer' && e instanceof AbsenceRequestError && isTransferOptionError(e.code)) {
+        setTransferOptionsReload(value => value + 1);
+      }
+      toast.error(e instanceof Error ? e.message : '送信に失敗しました。');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  /** 送った欠席・遅刻の連絡を取り消す。振替が登録されているときは、振替も取り消すかを改めて確認する。 */
+  const cancelAbsenceRequest = async (absenceId: string, targetDate: string, kindLabel: string) => {
+    if (!user || !selectedStudent || !absenceId || cancellingId) return;
+    const dateLabel = formatDate(targetDate);
+    if (!(await confirm({
+      title: `${dateLabel}の${kindLabel}連絡を取り消しますか？`,
+      message: `取り消すと、教室と${selectedStudent.student_name || 'お子さま'}さんに取り消したことが届きます。`,
+      confirmLabel: '取り消す',
+      cancelLabel: 'やめる',
+      tone: 'danger',
+    }))) return;
+    setCancellingId(absenceId);
+    try {
+      const send = async (cancelTransfer: boolean) => {
+        const res = await fetch('/api/parent/absence-requests', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${await user.getIdToken()}` },
+          body: JSON.stringify({ action: 'cancel', request_id: absenceId, cancel_transfer: cancelTransfer }),
+        });
+        return { res, data: await res.json().catch(() => ({})) };
+      };
+      let { res, data } = await send(false);
+      if (res.status === 409 && data.error === 'transfer-registered') {
+        const transferLabel = String(data.transfer?.label || '').trim();
+        const alsoTransfer = await confirm({
+          title: '振替も一緒に取り消しますか？',
+          message: `${data.message || 'この欠席には振替が登録されています。'}${transferLabel ? `（振替先：${transferLabel}）` : ''}`,
+          confirmLabel: '振替も取り消す',
+          cancelLabel: 'やめる',
+          tone: 'danger',
+        });
+        if (!alsoTransfer) return;
+        ({ res, data } = await send(true));
+      }
+      if (!res.ok || data.ok === false) throw new AbsenceRequestError(data, '取り消しできませんでした。');
+      setSentRequests(current => current.filter(item => item.target_date !== targetDate));
+      setDeclinedRequests(current => [...current.filter(item => item.target_date !== targetDate), { target_date: targetDate, status: 'cancelled' }]);
+      setDetails(current => ({ ...current, absence: current.absence.map(item => item.id === absenceId || (data.transfer_cancelled && item.requestType === 'transfer' && item.id === `${absenceId}_transfer`) ? { ...item, status: 'cancelled' } : item) }));
+      setDetailsReload(value => value + 1);
+      toast.success(data.transfer_cancelled ? `${kindLabel}連絡と振替を取り消しました。` : `${kindLabel}連絡を取り消しました。`);
+    } catch (e) {
+      console.error(e);
+      toast.error(e instanceof Error ? e.message : '取り消しできませんでした。');
+    } finally {
+      setCancellingId('');
     }
   };
 
   const saveCourseRegistration = async (term: string, year: number, requestId = '', scopedSelectedIds?: string[]) => {
     if (!user || !selectedStudent) return;
     const intendedSelectedCourseIds = scopedSelectedIds ?? selectedCourseIds;
-    if (intendedSelectedCourseIds.length === 0 && !confirm('登録済みの講座をすべて解除します。よろしいですか？')) return;
+    if (intendedSelectedCourseIds.length === 0 && !(await confirm({
+      title: `${selectedStudent.student_name || 'お子さま'}さんの登録済みの講座をすべて解除しますか？`,
+      message: '解除すると、次のタームの受講講座が未登録になります。',
+      confirmLabel: 'すべて解除する',
+      tone: 'danger',
+    }))) return;
     setSavingCourses(true);
     try {
       const selectedBeforeRefresh = courseOptions.filter(option => intendedSelectedCourseIds.includes(String(option.id)));
@@ -394,93 +558,242 @@ export default function ParentDashboardPage() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.ok === false) throw new Error(data.error || 'failed');
       setSelectedCourseIds(freshSelectedCourseIds);
-      alert(freshSelectedCourseIds.length === 0 ? '受講講座の登録を解除しました。' : '受講講座を登録しました。');
+      toast.success(freshSelectedCourseIds.length === 0 ? '受講講座の登録を解除しました。' : '受講講座を登録しました。');
       if (requestId) {
         setPendingCourseRequests(prev => prev.filter(req => req.id !== requestId));
         setActiveCourseRequest(null);
       }
     } catch (e: any) {
-      alert(`登録に失敗しました: ${e.message || e}`);
+      toast.error(`登録に失敗しました: ${e.message || e}`);
     } finally {
       setSavingCourses(false);
     }
   };
 
   if (loading && students.length === 0) {
-    return <div className="min-h-[60vh]" aria-busy="true" />;
+    return (
+      <div className="space-y-6" role="status" aria-label="読み込み中">
+        <div aria-hidden className="h-48 rounded-hero bg-accent/80 motion-safe:animate-pulse" />
+        <div className="grid gap-4 sm:grid-cols-4">{[0, 1, 2, 3].map(index => <Skeleton key={index} className="h-28 w-full rounded-card" />)}</div>
+      </div>
+    );
   }
 
   if (dashboardError) {
-    return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-8 text-center"><AlertCircle className="mx-auto mb-3 text-rose-500" /><p className="font-black text-rose-900">{dashboardError}</p><button type="button" onClick={() => setDashboardReload(value => value + 1)} className="mt-5 rounded-xl bg-rose-600 px-5 py-3 text-sm font-black text-white">再読み込み</button></div>;
+    return <ErrorState message={dashboardError} onRetry={() => setDashboardReload(value => value + 1)} />;
   }
 
   if (students.length === 0) {
     return (
-      <div className="rounded-2xl bg-white p-8 text-center shadow-sm">
-        <AlertCircle className="mx-auto mb-3 text-amber-500" />
-        <p className="font-black text-gray-800">紐づく生徒がまだ登録されていません</p>
-        <p className="mt-2 text-sm font-bold text-gray-400">校舎へ保護者アカウントの紐づけをご依頼ください。</p>
+      <div className="space-y-6">
+        <ParentPageHeader eyebrow="はじめに" title="保護者ページへようこそ" description="お子さまのアカウントとの紐づけが完了すると、学習の様子をここで確認できます。" icon={GraduationCap} />
+        <ParentCard>
+          <ParentEmpty icon={Users} title="紐づくお子さまがまだ登録されていません" description="お手数ですが、通塾中の校舎へ保護者アカウントの紐づけをご依頼ください。" />
+        </ParentCard>
       </div>
     );
   }
 
   const sections = [
-    { key: 'homework', label: '宿題提出', icon: ClipboardCheck, color: 'text-emerald-600', bg: 'bg-emerald-50' },
-    { key: 'attendance', label: '出席状況', icon: CalendarCheck, color: 'text-blue-600', bg: 'bg-blue-50' },
-    { key: 'absence', label: '欠席・振替', icon: Send, color: 'text-orange-600', bg: 'bg-orange-50' },
-    { key: 'recordings', label: '録画視聴', icon: MonitorPlay, color: 'text-rose-600', bg: 'bg-rose-50' },
-    { key: 'aiMessages', label: 'AIメッセージ', icon: MessageCircle, color: 'text-violet-600', bg: 'bg-violet-50' },
-    { key: 'announcements', label: 'お知らせ', icon: Bell, color: 'text-slate-600', bg: 'bg-slate-50' },
-  ].filter(section => visibility[section.key as keyof typeof visibility]);
+    { key: 'homework', label: TERMS.homework, icon: ClipboardCheck, tone: 'emerald' as const },
+    { key: 'lessons', label: TERMS.lesson, icon: Video, tone: 'sky' as const },
+    { key: 'absence', label: '欠席・振替', icon: Send, tone: 'amber' as const },
+    { key: 'aiMessages', label: 'AI学習', icon: MessageCircle, tone: 'violet' as const },
+    { key: 'announcements', label: TERMS.news, icon: Bell, tone: 'navy' as const },
+  ].filter(section => section.key === 'lessons'
+    ? Boolean(visibility.attendance || visibility.recordings)
+    : visibility[section.key as keyof typeof visibility]);
 
-  const totalItems = sections.reduce((sum, section) => sum + (details[section.key] || []).length, 0);
+  const countFor = (key: string) => key === 'lessons' ? lessons.length : (details[key] || []).length;
+  const totalItems = sections.reduce((sum, section) => sum + countFor(section.key), 0);
+  const lessonSummary = summarizeLessonDays(lessons);
   const pendingAbsences = details.absence.filter(item => item.status === 'pending').length;
-  const latestAnnouncement = details.announcements[0];
+  const latestAnnouncement = visibility.announcements ? details.announcements[0] : undefined;
+  const sectionsWithItems = sections.filter(section => countFor(section.key) > 0);
+  const currentActivity = sectionsWithItems.find(section => section.key === activityTab) || sectionsWithItems[0];
+  const studentName = selectedStudent?.student_name || 'お子さま';
+  const guardianName = String(profile?.parent_name || profile?.name || '').trim();
+  const now = new Date();
+  const hour = Number(new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', hour: 'numeric', hour12: false }).format(now).replace(/\D/g, '')) % 24;
+  const greeting = hour < 11 ? 'おはようございます' : hour < 18 ? 'こんにちは' : 'こんばんは';
+  const todayLabel = formatDate(now);
+  // 件数はサーバーが直近の期間（日本時間）で数えた値。一覧は新しい順の一部だけなので数には使わない。
+  const aiQuestions = summary ? summary.ai_question_count : details.aiMessages.filter(item => item.title === '生徒の質問').length;
+  const homeworkCount = summary ? summary.homework_count : details.homework.length;
+  const summaryDays = summary?.window_days || 60;
+  const stats = [
+    visibility.attendance && { key: 'lessons', label: 'Zoomで参加', value: lessonSummary.liveDays, unit: '日', icon: Video, tone: 'text-info bg-info-soft' },
+    visibility.homework && { key: 'homework', label: '宿題の提出', value: homeworkCount, unit: '件', icon: ClipboardCheck, tone: 'text-success bg-success-soft' },
+    visibility.recordings && { key: 'lessons-recording', label: '録画で視聴', value: lessonSummary.recordingCount, unit: '本', icon: MonitorPlay, tone: 'text-danger bg-danger-soft' },
+    visibility.aiMessages && { key: 'aiMessages', label: 'AIへの質問', value: aiQuestions, unit: '回', icon: MessageCircle, tone: 'text-accent bg-accent-soft' },
+  ].filter(Boolean) as { key: string; label: string; value: number; unit: string; icon: any; tone: string }[];
+  const urgentNewsTodos = visibility.announcements ? (homeSummary?.urgent_news || []).map(news => ({
+    key: `news_${news.id}`, icon: Megaphone,
+    tone: news.label === 'alert' ? 'border-danger/30 bg-danger-soft text-danger' : 'border-warning/30 bg-warning-soft text-warning',
+    title: `【${news.label === 'alert' ? '緊急' : '重要'}】${news.title}`,
+    description: `まだお読みになっていない大切な${TERMS.news}です。${news.published_at ? `（${toDateLabel(news.published_at)}）` : ''}`,
+    href: `/parent/news/${encodeURIComponent(news.id)}`, actionLabel: '読む',
+  })) : [];
+  const unreadReplies = visibility.contact !== false ? homeSummary?.unread_replies || 0 : 0;
+  const todos = [
+    ...urgentNewsTodos,
+    unreadReplies > 0 && {
+      key: 'replies', icon: MessagesSquare, tone: 'border-accent/30 bg-accent-soft text-accent',
+      title: `教室から返信があります（${unreadReplies}件）`,
+      description: `「${TERMS.parentContact}」で内容をご確認ください。`,
+      href: '/parent/contact', actionLabel: '返信を見る',
+    },
+    pendingCourseRequests.length > 0 && {
+      key: 'course', icon: BookOpen, tone: 'border-warning/30 bg-warning-soft text-warning',
+      title: `受講講座の登録をお願いします（${pendingCourseRequests.length}件）`,
+      description: pendingCourseRequests[0]?.title || '次のタームで受講する講座をお選びください。',
+      action: () => setActiveCourseRequest(pendingCourseRequests[0]), actionLabel: '登録する',
+    },
+    pendingAbsences > 0 && {
+      key: 'absence', icon: Send, tone: 'border-info/30 bg-info-soft text-info',
+      title: `欠席・振替の連絡 ${pendingAbsences}件を教室で確認中です`,
+      description: '確認が終わると、このページの「欠席・振替」に結果が表示されます。',
+      action: () => setActivityTab('absence'), actionLabel: '内容を見る',
+    },
+  ].filter(Boolean) as { key: string; icon: any; tone: string; title: string; description: string; action?: () => void; href?: string; actionLabel: string }[];
+  const learningVisible = Boolean(visibility.attendance || visibility.recordings || visibility.homework);
+  const quickActions = [
+    visibility.absence && { href: '/parent#absence', label: TERMS.absenceContact, description: 'カレンダーから休む日・遅れる日を選びます', icon: CalendarX2 },
+    visibility.contact !== false && { href: '/parent/contact', label: TERMS.parentContact, description: '先生とのやりとりを残せます', icon: MessagesSquare },
+    learningVisible && { href: '/parent/pf', label: '学習状況', description: 'いつ・どの授業を受けたか', icon: BarChart3 },
+    visibility.announcements && { href: '/parent/news', label: TERMS.news, description: '教室からの正式なご案内', icon: Megaphone },
+  ].filter(Boolean) as { href: string; label: string; description: string; icon: any }[];
+  const childOptions = students.map(student => ({ id: student.id, name: student.student_name }));
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-end">
-        <AppSwitcherLink className="w-full sm:w-auto" />
-      </div>
-      <section className="overflow-hidden rounded-[28px] bg-slate-950 text-white shadow-xl">
-        <div className="grid gap-6 p-6 lg:grid-cols-[1.4fr_0.8fr] lg:items-end">
+      <section className="relative overflow-hidden rounded-hero bg-accent text-accent-ink shadow-card">
+        <div aria-hidden className="pointer-events-none absolute -right-16 -top-24 h-72 w-72 rounded-full bg-white/10 blur-3xl" />
+        <div className="relative grid gap-6 p-6 sm:p-7 lg:grid-cols-[1.35fr_1fr] lg:items-center">
           <div>
-            <p className="text-xs font-black uppercase tracking-[0.25em] text-indigo-300">Parent Dashboard</p>
-            <h2 className="mt-2 text-3xl font-black">お子さまの学習をひと目で確認</h2>
-            <p className="mt-2 text-sm font-bold leading-relaxed text-slate-300">宿題、出席、欠席・振替、録画視聴、AIメッセージ、月間予定をまとめて確認できます。</p>
-            <div className="mt-5 grid gap-3 sm:grid-cols-3">
-              <MiniStat icon={BookOpen} label="確認項目" value={`${totalItems}件`} />
-              <MiniStat icon={Send} label="申請中" value={`${pendingAbsences}件`} />
-              <MiniStat icon={Sparkles} label="今月の予定" value={`${monthlySchedules.length}件`} />
-            </div>
+            <p className="text-sm font-bold text-accent-ink/75">{todayLabel}</p>
+            <h1 className="mt-2 text-2xl font-black leading-snug sm:text-3xl">
+              {greeting}{guardianName ? `、${guardianName} 様` : ''}
+            </h1>
+            <p className="mt-2 text-sm leading-relaxed text-accent-ink/80">
+              {studentName}さんの学習の様子をお届けします。毎日の積み重ねを、ご家庭でもあたたかく見守ってください。
+            </p>
+            <ChildSwitcher tone="hero" className="mt-5" options={childOptions} value={selectedId} onChange={setSelectedId} />
           </div>
-          <div className="rounded-3xl bg-white/10 p-4 ring-1 ring-white/10">
-            <label className="mb-2 block text-xs font-black text-slate-300">表示する生徒</label>
-            <select value={selectedId} onChange={e => setSelectedId(e.target.value)} className="w-full rounded-2xl border border-white/10 bg-white px-4 py-3 text-sm font-black text-slate-900 outline-none focus:ring-2 focus:ring-indigo-200">
-              {students.map(s => <option key={s.id} value={s.id}>{s.student_name || s.id} {s.grade ? `(${s.grade})` : ''}</option>)}
-            </select>
-            {latestAnnouncement && (
-              <div className="mt-4 rounded-2xl bg-white p-4 text-slate-900">
-                <p className="text-[10px] font-black text-indigo-500">最新のお知らせ</p>
-                <p className="mt-1 line-clamp-2 text-sm font-black">{latestAnnouncement.title}</p>
+          <div className="rounded-card bg-white/10 p-5 ring-1 ring-white/15">
+            <div className="flex items-center gap-4">
+              <div aria-hidden className="flex h-14 w-14 shrink-0 items-center justify-center rounded-btn bg-surface text-xl font-bold text-accent">{studentName.slice(0, 1)}</div>
+              <div className="min-w-0">
+                <p className="text-xs font-bold text-accent-ink/70">表示中のお子さま</p>
+                <p className="truncate text-lg font-bold">{studentName}<span className="ml-1 text-sm font-medium text-accent-ink/75">さん</span></p>
               </div>
+            </div>
+            <div className="mt-4 flex flex-wrap gap-2 text-xs font-bold">
+              {selectedStudent?.grade && <span className="rounded-full bg-white/10 px-3 py-1 ring-1 ring-white/15">{selectedStudent.grade}</span>}
+              {selectedStudent?.school && <span className="rounded-full bg-white/10 px-3 py-1 ring-1 ring-white/15">{selectedStudent.school}</span>}
+              {registeredWeekdays.length > 0 && <span className="rounded-full bg-white/20 px-3 py-1 ring-1 ring-white/25">通塾 {registeredWeekdays.map(day => `${day}曜`).join('・')}</span>}
+            </div>
+            <Link href="/parent/courses" className="mt-3 inline-flex min-h-9 items-center gap-1 rounded-btn text-xs font-bold text-accent-ink/90 underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white">
+              受講講座の登録・変更<ChevronRight size={14} aria-hidden />
+            </Link>
+            {latestAnnouncement && (
+              <Link href="/parent/news" className="mt-4 flex min-h-12 items-center gap-3 rounded-btn bg-surface p-3.5 text-fg hover:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white">
+                <Megaphone size={18} className="shrink-0 text-warning" aria-hidden />
+                <span className="min-w-0 flex-1">
+                  <span className="block text-xs text-fg-muted">最新の{TERMS.news} ・ {latestAnnouncement.meta}</span>
+                  <span className="block truncate text-sm font-bold">{latestAnnouncement.title}</span>
+                </span>
+                <ChevronRight size={16} className="shrink-0 text-fg-muted" aria-hidden />
+              </Link>
             )}
           </div>
         </div>
       </section>
 
-      {detailsError && <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-rose-200 bg-rose-50 px-5 py-4 text-sm font-bold text-rose-900"><span>{detailsError}</span><button type="button" onClick={() => setDetailsReload(value => value + 1)} className="rounded-xl bg-rose-600 px-4 py-2 text-xs font-black text-white">再読み込み</button></div>}
+      {detailsError && <ErrorState title="一部の情報を読み込めませんでした" message={detailsError} onRetry={() => setDetailsReload(value => value + 1)} />}
 
-      {visibility.calendar && (
+      {todos.length > 0 && (
+        <section className="space-y-3" aria-label="ご対応のお願い">
+          {todos.map(todo => {
+            const Icon = todo.icon;
+            return (
+              <div key={todo.key} className={cn('flex flex-col gap-3 rounded-card border p-4 sm:flex-row sm:items-center', todo.tone)}>
+                <div className="flex flex-1 items-start gap-3">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-btn bg-surface/80"><Icon size={19} aria-hidden /></span>
+                  <div>
+                    <p className="text-sm font-bold text-fg">{todo.title}</p>
+                    <p className="mt-0.5 text-sm text-fg-muted">{todo.description}</p>
+                  </div>
+                </div>
+                {todo.href
+                  ? <ButtonLink variant="secondary" href={todo.href} className="shrink-0">{todo.actionLabel}</ButtonLink>
+                  : <Button variant="secondary" onClick={todo.action} className="shrink-0">{todo.actionLabel}</Button>}
+              </div>
+            );
+          })}
+        </section>
+      )}
+
+      {stats.length > 0 && (
+        <section aria-labelledby="parent-stats-heading">
+          <div className="mb-3 flex flex-wrap items-end justify-between gap-1 px-1">
+            <h2 id="parent-stats-heading" className="text-base font-bold text-fg">{studentName}さんのがんばり</h2>
+            <p className="text-xs text-fg-muted">直近{summaryDays}日間の記録から集計</p>
+          </div>
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            {stats.map(stat => {
+              const Icon = stat.icon;
+              return (
+                <button key={stat.key} type="button" onClick={() => setActivityTab(stat.key.startsWith('lessons') ? 'lessons' : stat.key)} className="cb-card p-4 text-left transition-colors hover:border-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
+                  <span className={cn('mb-3 flex h-9 w-9 items-center justify-center rounded-btn', stat.tone)}><Icon size={18} aria-hidden /></span>
+                  <p className="text-xs font-bold text-fg-muted">{stat.label}</p>
+                  <p className="mt-1 text-2xl font-black tabular-nums text-fg">{detailsLoading ? '…' : stat.value}<span className="ml-1 text-xs font-bold text-fg-muted">{stat.unit}</span></p>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      {quickActions.length > 0 && (
+        <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4" aria-label="よく使う操作">
+          {quickActions.map(action => {
+            const Icon = action.icon;
+            return (
+              <Link key={action.href} href={action.href} className="cb-card group flex min-h-16 items-center gap-3 p-4 transition-colors hover:border-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-btn bg-accent-soft text-accent transition-colors group-hover:bg-accent group-hover:text-accent-ink"><Icon size={19} aria-hidden /></span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-sm font-bold text-fg">{action.label}</span>
+                  <span className="block truncate text-xs text-fg-muted">{action.description}</span>
+                </span>
+                <ChevronRight size={16} className="shrink-0 text-fg-muted" aria-hidden />
+              </Link>
+            );
+          })}
+        </section>
+      )}
+
+      {(visibility.calendar || visibility.absence) && (
         <ParentActionCalendar
           month={currentMonth}
           onChangeMonth={setCurrentMonth}
           selectedDate={selectedDate}
-          onSelectDate={setSelectedDate}
+          onSelectDate={date => {
+            setSelectedDate(date);
+            setCurrentMonth(new Date(`${date}T12:00:00`));
+            // 日付を選ぶたびに、その日に選べる最初の種類へ戻す（前の日の選択や、表示されない種類が残らないように）。
+            // 授業が終わった日は振替の登録だけできる。
+            setRequestMode(allowedRequestModes(date)[0] || 'absence');
+            setRequestText('');
+          }}
           canAbsence={visibility.absence}
           canTransfer={visibility.transfer}
           schedules={monthlySchedules}
           registeredWeekdays={registeredWeekdays}
+          lessonEndFor={lessonEndFor}
+          sentRequests={sentRequests}
+          declinedRequests={declinedRequests}
+          studentName={studentName}
         />
       )}
 
@@ -495,109 +808,159 @@ export default function ParentDashboardPage() {
       />
 
       {selectedDate && (visibility.absence || visibility.transfer) && (
-        <section className="rounded-[28px] bg-white p-6 shadow-sm">
-          <div className="mb-4 flex items-start justify-between gap-4">
+        <div ref={requestPanelRef} className="scroll-mt-20">
+        <ParentCard className="ring-2 ring-accent/10">
+          <div className="mb-5 flex items-start justify-between gap-4">
             <div>
-              <p className="text-xs font-black text-indigo-500">{selectedDate}</p>
-              <h3 className="mt-1 text-lg font-black text-slate-900">欠席・振替を登録</h3>
+              <p className="text-sm font-bold text-accent">{formatDate(selectedDate)}</p>
+              <h3 className="mt-1 text-lg font-bold text-fg">{studentName}さんの{REQUEST_PANEL_TITLE[requestMode]}</h3>
+              {sentRequests.some(item => item.target_date === selectedDate && item.kind === 'transfer')
+                ? <p className="mt-1 text-sm text-success">この日は振替を登録済みです。振替先を変える場合は教室へご連絡ください。</p>
+                : sentRequests.some(item => item.target_date === selectedDate)
+                  ? <p className="mt-1 text-sm text-success">この日はすでに連絡済みです。欠席・遅刻の切り替えや理由の修正は、もう一度送信すると同じ連絡として更新されます。</p>
+                  : declinedRequests.some(item => item.target_date === selectedDate) && <p className="mt-1 text-sm text-danger">この日の連絡は「{parentStatusLabel(declinedRequests.find(item => item.target_date === selectedDate)?.status)}」になりました。必要な場合は、もう一度連絡するか教室へご相談ください。</p>}
+              {selectedDateEnded && <p className="mt-1 text-sm text-fg-muted">この日の授業は終わったため、欠席・遅刻の連絡はできません。振替先の登録だけできます。</p>}
+              {(() => {
+                const sent = sentRequests.find(item => item.target_date === selectedDate && item.absence_id);
+                if (!sent?.absence_id || selectedDateEnded || !visibility.absence) return null;
+                const kindLabel = sent.kind === 'late' ? '遅刻' : '欠席';
+                return (
+                  <Button variant="secondary" size="sm" className="mt-2" loading={cancellingId === sent.absence_id} disabled={Boolean(cancellingId)}
+                    onClick={() => void cancelAbsenceRequest(sent.absence_id!, selectedDate, kindLabel)}>
+                    この{kindLabel}連絡を取り消す
+                  </Button>
+                );
+              })()}
             </div>
-            <button onClick={() => setSelectedDate('')} className="rounded-xl bg-slate-100 p-2 text-slate-400 hover:text-slate-700"><X size={18} /></button>
+            <IconButton label="閉じる" variant="secondary" onClick={() => setSelectedDate('')}><X size={18} aria-hidden /></IconButton>
           </div>
-          <div className="grid gap-4 md:grid-cols-[220px_1fr_auto] md:items-end">
+          <div className="grid gap-5 md:grid-cols-[240px_1fr]">
             <div>
-              <label className="mb-2 block text-xs font-black text-slate-500">種類</label>
-              <div className="grid gap-2">
-                {visibility.absence && <button type="button" onClick={() => setRequestMode('absence')} className={`rounded-2xl border-2 px-3 py-3 text-sm font-black ${requestMode === 'absence' ? 'border-orange-300 bg-orange-50 text-orange-600' : 'border-slate-100 bg-slate-50 text-slate-400'}`}>欠席</button>}
-                {visibility.absence && <button type="button" onClick={() => setRequestMode('student_transfer')} className={`rounded-2xl border-2 px-3 py-3 text-sm font-black ${requestMode === 'student_transfer' ? 'border-sky-300 bg-sky-50 text-sky-600' : 'border-slate-100 bg-slate-50 text-slate-400'}`}>お子様が選択</button>}
-                {visibility.transfer && <button type="button" onClick={() => setRequestMode('transfer')} className={`rounded-2xl border-2 px-3 py-3 text-sm font-black ${requestMode === 'transfer' ? 'border-indigo-300 bg-indigo-50 text-indigo-600' : 'border-slate-100 bg-slate-50 text-slate-400'}`}>保護者が振替確定</button>}
+              <p className="mb-2 text-sm font-bold text-fg-muted">② 連絡の種類をえらぶ</p>
+              <div className="grid gap-2" role="radiogroup" aria-label="連絡の種類">
+                {visibility.absence && !selectedDateEnded && <RequestModeButton active={requestMode === 'absence'} onClick={() => setRequestMode('absence')} title="欠席する" description="振替は後で相談" />}
+                {visibility.absence && !selectedDateEnded && <RequestModeButton active={requestMode === 'late'} onClick={() => setRequestMode('late')} title="遅刻する" description="授業に遅れて参加" />}
+                {visibility.absence && !selectedDateEnded && <RequestModeButton active={requestMode === 'student_transfer'} onClick={() => setRequestMode('student_transfer')} title="欠席して、振替はお子さまが選ぶ" description="生徒画面に振替選択を表示" />}
+                {visibility.transfer && <RequestModeButton active={requestMode === 'transfer'} onClick={() => setRequestMode('transfer')} title="振替先をいま決める" description="保護者が授業を選んで確定" />}
               </div>
             </div>
-            <div>
-              <label className="mb-2 block text-xs font-black text-slate-500">理由・希望内容</label>
+            <div className="space-y-3">
               {requestMode === 'transfer' && (
-                <div className="mb-3 rounded-2xl border border-indigo-100 bg-indigo-50 p-3">
-                  <div className="mb-2 flex items-center gap-2 text-xs font-black text-indigo-700">
-                    <Video size={14} /> この日に実施している単元から選択
+                <div className="rounded-card border border-line bg-canvas p-3">
+                  <div className="mb-2 flex items-center gap-2 text-sm font-bold text-accent">
+                    <Video size={15} aria-hidden /> この日に受けられる同じ単元の授業
                   </div>
                   {loadingTransferOptions ? (
-                    <div className="flex items-center gap-2 rounded-xl bg-white px-3 py-3 text-xs font-bold text-slate-400">
-                      <Loader2 size={14} className="animate-spin" /> 読み込み中...
-                    </div>
+                    <div className="rounded-btn bg-surface px-3 py-3"><Spinner label="振替候補を読み込み中" /></div>
                   ) : transferOptions.length === 0 ? (
-                    <div className="rounded-xl bg-white px-3 py-3 text-xs font-bold text-slate-500">この日に選択できる振替候補がありません。</div>
+                    <div className="rounded-btn bg-surface px-3 py-3 text-sm text-fg-muted">この日に選べる振替候補はありません。</div>
                   ) : (
-                    <div className="grid gap-2 md:grid-cols-2">
-                      {transferOptions.map(option => (
-                        <button
-                          key={option.id}
-                          type="button"
-                          onClick={() => setSelectedTransferShiftId(option.id)}
-                          className={`rounded-xl border-2 p-3 text-left transition ${selectedTransferShiftId === option.id ? 'border-indigo-400 bg-white text-indigo-700 shadow-sm' : 'border-white bg-white/80 text-slate-700 hover:border-indigo-200'}`}
-                        >
-                          <p className="text-sm font-black">{option.title}</p>
-                          <p className="mt-1 text-[11px] font-bold text-slate-500">{option.unit || '単元名未設定'} / {option.matchLabel}</p>
-                        </button>
-                      ))}
+                    <div className="grid gap-2 md:grid-cols-2" role="radiogroup" aria-label="振替先の授業">
+                      {transferOptions.map(option => {
+                        const active = selectedTransferShiftId === option.id;
+                        return (
+                          <button
+                            key={option.id}
+                            type="button"
+                            role="radio"
+                            aria-checked={active}
+                            onClick={() => setSelectedTransferShiftId(option.id)}
+                            className={cn('min-h-11 rounded-btn border-2 p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent', active ? 'border-accent bg-surface text-accent shadow-sm' : 'border-transparent bg-surface text-fg hover:border-line')}
+                          >
+                            <p className="text-sm font-bold">{option.title}</p>
+                            <p className="mt-1 text-xs text-fg-muted">{option.unit || '単元名未設定'} / {option.matchLabel}</p>
+                          </button>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
               )}
               {requestMode === 'student_transfer' && (
-                <div className="mb-3 rounded-2xl border border-sky-100 bg-sky-50 p-4 text-xs font-bold text-sky-700">
-                  欠席連絡後、生徒画面に振替選択ポップアップを表示します。お子様が振替先を選ぶまでホーム画面を進めない設定になります。
+                <div className="rounded-card border border-info/20 bg-info-soft p-4 text-sm leading-relaxed text-info">
+                  連絡後、お子さまの画面に振替先を選ぶ案内が表示されます。振替先を選ぶまで、お子さまのホーム画面は先へ進めません。
                 </div>
               )}
-              <textarea value={requestText} onChange={e => setRequestText(e.target.value)} className="min-h-24 w-full resize-none rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100" placeholder={requestMode === 'transfer' ? '希望時間や補足を入力してください' : '欠席理由を入力してください'} />
+              <label className="block">
+                <span className="mb-2 block text-sm font-bold text-fg-muted">③ {requestMode === 'transfer' ? '補足（任意）' : requestMode === 'late' ? '遅刻の理由と、参加できそうな時刻' : '欠席の理由'}</span>
+                <textarea value={requestText} onChange={e => setRequestText(e.target.value)} className="min-h-24 w-full resize-none rounded-input border border-line bg-surface p-4 text-sm text-fg outline-none focus:border-accent focus:ring-2 focus:ring-accent/30" placeholder={requestMode === 'transfer' ? '希望時間などがあればご記入ください' : requestMode === 'late' ? '例：部活のため、20時ごろから参加します' : '例：体調不良のため'} />
+              </label>
+              <Button size="lg" fullWidth onClick={submitCalendarRequest} loading={submitting} disabled={(requestMode !== 'transfer' && !requestText.trim()) || (requestMode === 'transfer' && !selectedTransferShiftId)} icon={<Send size={18} aria-hidden />}>
+                {submitting ? '送信中...' : '④ 教室へ連絡する'}
+              </Button>
+              <p className="text-center text-xs text-fg-muted">連絡すると、校舎・先生と{studentName}さんに理由つきで届きます。</p>
             </div>
-            <button onClick={submitCalendarRequest} disabled={submitting || ((requestMode === 'absence' || requestMode === 'student_transfer') && !requestText.trim()) || (requestMode === 'transfer' && !selectedTransferShiftId)} className="rounded-2xl bg-slate-900 px-5 py-4 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-50">
-              {submitting ? '送信中...' : '送信'}
-            </button>
           </div>
-        </section>
+        </ParentCard>
+        </div>
       )}
 
-      {detailsLoading && <div className="flex justify-center py-4"><Loader2 className="animate-spin text-indigo-500" /></div>}
-
-      {!detailsLoading && totalItems === 0 ? (
-        <section className="rounded-[28px] bg-white px-6 py-8 text-center shadow-sm">
-          <ClipboardCheck className="mx-auto mb-3 text-slate-300" size={28} />
-          <h3 className="text-sm font-black text-slate-700">学習履歴はまだありません</h3>
-          <p className="mt-1 text-xs font-bold text-slate-400">宿題提出、出席、録画視聴などの記録が入ると、ここにまとめて表示されます。</p>
-        </section>
-      ) : <section className="grid gap-4 lg:grid-cols-2">
-        {sections.filter(section => (details[section.key] || []).length > 0).map(section => {
-          const Icon = section.icon;
-          const items = details[section.key] || [];
-          return (
-            <div key={section.key} className="rounded-[28px] bg-white p-5 shadow-sm">
-              <div className="mb-4 flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className={`flex h-11 w-11 items-center justify-center rounded-2xl ${section.bg} ${section.color}`}>
-                    <Icon size={22} />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-black text-slate-800">{section.label}</h3>
-                    <p className="text-xs font-bold text-slate-400">{items.length}件</p>
-                  </div>
-                </div>
-              </div>
-              <div className="max-h-80 space-y-3 overflow-y-auto pr-1">
-                  {items.map(item => (
-                    <div key={item.id} className="rounded-2xl bg-slate-50 p-4">
-                      <div className="mb-1 flex items-center justify-between gap-3">
-                        <p className="text-sm font-black text-slate-800">{item.title}</p>
-                        {item.status && <span className="rounded-full bg-white px-2 py-1 text-[10px] font-black text-slate-400">{item.status}</span>}
-                      </div>
-                      <p className="text-[11px] font-bold text-slate-400">{item.meta}</p>
-                      {item.body && <p className="mt-2 line-clamp-4 whitespace-pre-wrap text-sm font-bold leading-relaxed text-slate-600">{item.body}</p>}
-                    </div>
-                  ))}
-              </div>
+      <ParentCard>
+        <ParentSectionTitle icon={Sparkles} tone="amber" title="最近の学習のようす" description="授業（Zoom参加・録画視聴）・宿題・欠席連絡などを新しい順に表示します。" trailing={detailsLoading ? <Spinner /> : <StatusPill>{totalItems}件</StatusPill>} />
+        {!detailsLoading && sectionsWithItems.length === 0 ? (
+          <ParentEmpty icon={ClipboardCheck} title="学習の記録はまだありません" description="宿題の提出や授業への出席、録画の視聴などがあると、ここにまとめて表示されます。" />
+        ) : (
+          <>
+            <div className="-mx-1 mb-4 flex gap-2 overflow-x-auto px-1 pb-1" role="tablist" aria-label="記録の種類">
+              {sectionsWithItems.map(section => {
+                const Icon = section.icon;
+                const active = currentActivity?.key === section.key;
+                return (
+                  <button key={section.key} type="button" role="tab" aria-selected={active} onClick={() => setActivityTab(section.key)}
+                    className={cn('flex min-h-10 shrink-0 items-center gap-1.5 rounded-full px-3.5 text-sm font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent', active ? 'bg-accent text-accent-ink' : 'bg-canvas text-fg-muted hover:bg-accent-soft hover:text-accent')}>
+                    <Icon size={15} aria-hidden />{section.label}<span className={cn('rounded-full px-1.5 text-[11px]', active ? 'bg-white/15' : 'bg-surface')}>{countFor(section.key)}</span>
+                  </button>
+                );
+              })}
             </div>
-          );
-        })}
-      </section>}
+            {currentActivity?.key === 'lessons' && (
+              <div className="space-y-3">
+                <LessonDayList days={lessons.slice(0, 5)} />
+                <Link href="/parent/pf" className="flex min-h-11 items-center justify-center gap-1 rounded-btn bg-canvas py-3 text-sm font-bold text-accent hover:bg-accent-soft">月ごとの授業の記録を見る<ChevronRight size={15} aria-hidden /></Link>
+              </div>
+            )}
+            {currentActivity && currentActivity.key !== 'lessons' && (
+              <ol className="relative max-h-[28rem] space-y-3 overflow-y-auto pl-5 pr-1 before:absolute before:bottom-2 before:left-[7px] before:top-2 before:w-px before:bg-line">
+                {(details[currentActivity.key] || []).map(item => (
+                  <li key={item.id} className="relative">
+                    <span aria-hidden className="absolute -left-5 top-4 h-3.5 w-3.5 rounded-full border-[3px] border-surface bg-accent shadow" />
+                    <div className="rounded-btn bg-canvas p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <p className="text-sm font-bold text-fg">{item.title}</p>
+                        {item.status && <StatusPill tone={parentStatusPillTone(item.status)} className="shrink-0">{parentStatusLabel(item.status)}</StatusPill>}
+                      </div>
+                      <p className="mt-0.5 text-xs text-fg-muted">{item.meta}</p>
+                      {item.body && <p className="mt-2 line-clamp-4 whitespace-pre-wrap text-sm leading-relaxed text-fg">{item.body}</p>}
+                      {visibility.absence && item.requestType === 'absence' && item.targetDate && !INACTIVE_REQUEST_STATUSES.includes(String(item.status || '')) && !lessonDayEnded(item.targetDate, lessonEndFor(item.targetDate)) && (
+                        <div className="mt-3 flex justify-end">
+                          <Button variant="secondary" size="sm" loading={cancellingId === item.id} disabled={Boolean(cancellingId)}
+                            onClick={() => void cancelAbsenceRequest(item.id, item.targetDate!, item.title.startsWith('遅刻') ? '遅刻' : '欠席')}>
+                            取り消す
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </>
+        )}
+      </ParentCard>
     </div>
+  );
+}
+
+function RequestModeButton({ active, onClick, title, description }: { active: boolean; onClick: () => void; title: string; description: string }) {
+  return (
+    <button type="button" role="radio" onClick={onClick} aria-checked={active}
+      className={cn('min-h-11 rounded-btn border-2 px-4 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent', active ? 'border-accent bg-accent-soft text-accent' : 'border-line bg-surface text-fg hover:border-accent/30')}>
+      <span className="flex items-center gap-2 text-sm font-bold">
+        <span aria-hidden className={cn('flex h-4 w-4 items-center justify-center rounded-full border-2', active ? 'border-accent' : 'border-slate-300')}>{active && <span className="h-1.5 w-1.5 rounded-full bg-accent" />}</span>
+        {title}
+      </span>
+      <span className="mt-0.5 block pl-6 text-xs text-fg-muted">{description}</span>
+    </button>
   );
 }
 
@@ -617,7 +980,7 @@ function CourseRegistrationPanel({
   saving: boolean;
 }) {
   if (options.length === 0) return null;
-  const today = new Date().toISOString().slice(0, 10);
+  const today = jstTodayKey();
   const grouped = options.reduce((acc, option) => {
     const key = `${option.year || ''}_${option.term || 'other'}`;
     if (!acc[key]) acc[key] = [];
@@ -636,22 +999,22 @@ function CourseRegistrationPanel({
   const saved = registrations.find(item => item.term === first.term && Number(item.year) === Number(first.year));
   const isOpen = first.registration_opens_at && first.term_start_date && first.registration_opens_at <= today && today <= first.term_start_date;
   return (
-    <section className="rounded-[28px] bg-white p-6 shadow-sm">
+    <section className="cb-card p-card">
       <div className="mb-5 flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
         <div>
-          <p className="text-xs font-black text-indigo-500">受講講座登録</p>
-          <h3 className="mt-1 text-xl font-black text-slate-900">{first.term_label || '次ターム'}の受講講座</h3>
-          <p className="mt-1 text-sm font-bold text-slate-500">
+          <p className="text-xs font-bold text-accent">受講講座登録</p>
+          <h3 className="mt-1 text-xl font-bold text-fg">{first.term_label || '次ターム'}の受講講座</h3>
+          <p className="mt-1 text-sm text-fg-muted">
             {isOpen ? '次のターム開始が近づいています。受講する講座を選択してください。' : '次タームの講座候補です。受付開始日になると登録できます。'}
           </p>
         </div>
-        <div className="rounded-2xl bg-indigo-50 px-4 py-3 text-xs font-black text-indigo-700">
-          受付開始 {first.registration_opens_at || '-'} / ターム開始 {first.term_start_date || '-'}
+        <div className="rounded-btn bg-accent-soft px-4 py-3 text-xs font-bold text-accent">
+          受付開始 {formatDate(first.registration_opens_at) || '-'} / ターム開始 {formatDate(first.term_start_date) || '-'}
         </div>
       </div>
       {saved && (
-        <div className="mb-4 flex items-center gap-2 rounded-2xl bg-emerald-50 px-4 py-3 text-sm font-black text-emerald-700">
-          <CheckCircle2 size={18} /> 登録済みです。変更する場合は選び直して再登録できます。
+        <div className="mb-4 flex items-center gap-2 rounded-btn bg-success-soft px-4 py-3 text-sm font-bold text-success">
+          <CheckCircle2 size={18} aria-hidden /> 登録済みです。変更する場合は選び直して再登録できます。
         </div>
       )}
       <div className="mb-5">
@@ -662,13 +1025,9 @@ function CourseRegistrationPanel({
         selectedIds={selectedCourseIds}
         onToggle={onToggleCourse}
       />
-      <button
-        onClick={() => onSave(first.term, Number(first.year))}
-        disabled={saving || !isOpen}
-        className="mt-5 w-full rounded-2xl bg-slate-900 py-4 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-50"
-      >
+      <Button size="lg" fullWidth className="mt-5" onClick={() => onSave(first.term, Number(first.year))} loading={saving} disabled={!isOpen}>
         {saving ? '登録中...' : isOpen ? '受講講座を登録する' : '受付開始前です'}
-      </button>
+      </Button>
     </section>
   );
 }
@@ -798,135 +1157,117 @@ function ParentCourseRequestModal({
   };
   const toggleSingleCourseOption = (id: string) => toggleCourseGroup([id]);
 
-  if (!request) return null;
+  const submitTerm = first.term || request?.term || 'term';
+  const submitYear = Number(first.year || request?.year || new Date().getFullYear());
 
   return (
-    <div className="fixed inset-0 z-[240] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm">
-      <div className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-[28px] bg-white shadow-2xl">
-        <div className="shrink-0 bg-gradient-to-r from-indigo-600 to-sky-600 p-6 text-white">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <p className="text-xs font-black uppercase tracking-[0.2em] text-indigo-100">Course Registration</p>
-              <h2 className="mt-2 text-2xl font-black">{request.title || '受講講座登録'}</h2>
-              <p className="mt-2 text-sm font-bold text-indigo-50">登録期間: {request.period_start || '-'} - {request.period_end || request.deadline || '-'}</p>
-            </div>
-            <button onClick={onClose} className="rounded-full bg-white/15 p-2 hover:bg-white/25"><X size={20} /></button>
-          </div>
-        </div>
-        <div className="overflow-y-auto p-6">
-          <div className="space-y-5">
-            <CourseOpeningMap
-              options={requestOptions}
-              selectedIds={visibleSelectedIds}
-              title="この登録で選べる週間開講状況"
-              description="先に曜日と時限の全体像を確認してから、下で講座を選べます。"
-            />
-            <div className="rounded-3xl border border-indigo-100 bg-indigo-50/70 p-4">
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <div>
-                  <p className="text-xs font-black text-indigo-500">1. 科目</p>
-                  <h3 className="text-base font-black text-slate-900">受講したい講座を選ぶ</h3>
-                </div>
-                <span className="rounded-full bg-white px-3 py-1 text-[11px] font-black text-indigo-600">{selectedCourseKeys.length}科目</span>
-              </div>
-              {courseChoices.length === 0 ? (
-                <div className="rounded-2xl border-2 border-dashed border-indigo-100 bg-white/70 p-5 text-center text-sm font-black text-slate-400">
-                  この登録で選べる講座が見つかりません。時間をおいて再度確認してください。
-                </div>
-              ) : (
-                <div className="grid gap-2 sm:grid-cols-2">
-                  {courseChoices.map(choice => {
-                    const active = selectedCourseKeys.includes(choice.key);
-                    const option = choice.option;
-                    const units = Array.from(choice.units);
-                    const daySlots = Array.from(choice.daySlots);
-                    return (
-                      <button
-                        key={choice.key}
-                        type="button"
-                        onClick={() => toggleCourseKey(choice.key)}
-                        aria-pressed={active}
-                        className={`rounded-2xl border-2 p-4 text-left transition ${
-                          active
-                            ? 'border-indigo-500 bg-white text-indigo-700 shadow-sm'
-                            : 'border-white bg-white/80 text-slate-700 hover:border-indigo-200'
-                        }`}
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <p className="text-sm font-black">{[option.grade, getCourseSubject(option), option.course_name || option.title].filter(Boolean).join(' ')}</p>
-                            <p className="mt-1 text-[11px] font-bold text-slate-400">
-                              {daySlots.slice(0, 4).join(' / ') || '曜日・時間未設定'}
-                              {daySlots.length > 4 ? ` ほか${daySlots.length - 4}件` : ''}
-                            </p>
-                            <p className="mt-2 text-[11px] font-black text-emerald-600">
-                              {daySlots.length === 1 ? '選ぶだけで曜日・時間も確定' : `${daySlots.length}個の曜日・時間から選択`}
-                              {units.length > 0 ? ` ・ 全${units.length}単元` : ''}
-                            </p>
-                          </div>
-                          {active && <CheckCircle2 size={18} className="shrink-0 text-indigo-600" />}
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            <div className="rounded-3xl border border-slate-100 bg-white p-4">
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <div>
-                  <p className="text-xs font-black text-slate-500">2. 曜日・時間</p>
-                  <h3 className="text-base font-black text-slate-900">通える曜日・時間を決める</h3>
-                  <p className="mt-1 text-xs font-bold text-slate-400">同じ曜日・時限は1講座のみ、同じ講座は別の曜日・時限と重複して選べません。</p>
-                </div>
-                <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-black text-slate-600">{visibleSelectedIds.length}件</span>
-              </div>
-              {selectedCourseKeys.length === 0 ? (
-                <div className="rounded-2xl border-2 border-dashed border-slate-200 p-6 text-center text-sm font-black text-slate-400">
-                  先に受講したい科目を選択してください
-                </div>
-              ) : (
-                <CourseRegistrationCalendar
-                  options={visibleCourseOptions}
-                  selectedIds={visibleSelectedIds}
-                  onToggle={toggleSingleCourseOption}
-                  onToggleGroup={toggleCourseGroup}
-                  compact
-                  emptyMessage="選択した科目に開講曜日がありません。別の科目を選択してください。"
-                />
-              )}
-            </div>
-          </div>
-        </div>
-        <div className="grid shrink-0 gap-3 border-t border-slate-100 bg-slate-50 p-5 sm:grid-cols-2">
+    <Modal
+      open={Boolean(request)}
+      onClose={onClose}
+      size="lg"
+      title={request?.title || '受講講座登録'}
+      description={request ? `登録期間：${formatDate(request.period_start) || '-'} 〜 ${formatDate(request.period_end || request.deadline) || '-'}` : undefined}
+      footer={request ? (
+        <>
           <button
-            onClick={() => onSubmit(first.term || request.term || 'term', Number(first.year || request.year || new Date().getFullYear()), request.id, visibleSelectedIds)}
-            disabled={saving || requestOptions.length === 0 || visibleSelectedIds.length === 0}
-            className="w-full rounded-2xl bg-slate-900 py-4 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-40"
-          >
-            {saving ? '保存中...' : '登録する'}
-          </button>
-          <button
-            onClick={() => onSubmit(first.term || request.term || 'term', Number(first.year || request.year || new Date().getFullYear()), request.id, [])}
+            type="button"
+            onClick={() => onSubmit(submitTerm, submitYear, request.id, [])}
             disabled={saving || requestOptions.length === 0 || visibleSelectedIds.length > 0}
-            className="w-full rounded-2xl border-2 border-rose-200 bg-white py-4 text-sm font-black text-rose-600 hover:bg-rose-50 disabled:opacity-30"
+            className="inline-flex min-h-11 items-center justify-center rounded-btn border border-danger/30 bg-surface px-4 text-sm font-bold text-danger transition-colors hover:bg-danger-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger disabled:pointer-events-none disabled:opacity-40"
           >
             すべて解除する
           </button>
+          <Button
+            onClick={() => onSubmit(submitTerm, submitYear, request.id, visibleSelectedIds)}
+            loading={saving}
+            disabled={requestOptions.length === 0 || visibleSelectedIds.length === 0}
+          >
+            {saving ? '保存中...' : '登録する'}
+          </Button>
+        </>
+      ) : undefined}
+    >
+      <div className="space-y-5">
+        <CourseOpeningMap
+          options={requestOptions}
+          selectedIds={visibleSelectedIds}
+          title="この登録で選べる週間開講状況"
+          description="先に曜日と時限の全体像を確認してから、下で講座を選べます。"
+        />
+        <div className="rounded-card border border-accent/15 bg-accent-soft p-4">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <p className="text-xs font-bold text-accent">1. 科目</p>
+              <h3 className="text-base font-bold text-fg">受講したい講座を選ぶ</h3>
+            </div>
+            <span className="inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-bold bg-surface text-accent">{selectedCourseKeys.length}科目</span>
+          </div>
+          {courseChoices.length === 0 ? (
+            <div className="rounded-btn border-2 border-dashed border-line bg-surface/70 p-5 text-center text-sm font-bold text-fg-muted">
+              この登録で選べる講座が見つかりません。時間をおいて再度確認してください。
+            </div>
+          ) : (
+            <div className="grid gap-2 sm:grid-cols-2">
+              {courseChoices.map(choice => {
+                const active = selectedCourseKeys.includes(choice.key);
+                const option = choice.option;
+                const units = Array.from(choice.units);
+                const daySlots = Array.from(choice.daySlots);
+                return (
+                  <button
+                    key={choice.key}
+                    type="button"
+                    onClick={() => toggleCourseKey(choice.key)}
+                    aria-pressed={active}
+                    className={cn('rounded-btn border-2 p-4 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent', active ? 'border-accent bg-surface text-accent shadow-sm' : 'border-transparent bg-surface/80 text-fg hover:border-accent/30')}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-bold">{[option.grade, getCourseSubject(option), option.course_name || option.title].filter(Boolean).join(' ')}</p>
+                        <p className="mt-1 text-xs text-fg-muted">
+                          {daySlots.slice(0, 4).join(' / ') || '曜日・時間未設定'}
+                          {daySlots.length > 4 ? ` ほか${daySlots.length - 4}件` : ''}
+                        </p>
+                        <p className="mt-2 text-xs font-bold text-success">
+                          {daySlots.length === 1 ? '選ぶだけで曜日・時間も確定' : `${daySlots.length}個の曜日・時間から選択`}
+                          {units.length > 0 ? ` ・ 全${units.length}単元` : ''}
+                        </p>
+                      </div>
+                      {active && <CheckCircle2 size={18} className="shrink-0 text-accent" aria-hidden />}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-card border border-line bg-surface p-4">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <p className="text-xs font-bold text-fg-muted">2. 曜日・時間</p>
+              <h3 className="text-base font-bold text-fg">通える曜日・時間を決める</h3>
+              <p className="mt-1 text-xs text-fg-muted">同じ曜日・時限は1講座のみ、同じ講座は別の曜日・時限と重複して選べません。</p>
+            </div>
+            <StatusPill>{visibleSelectedIds.length}件</StatusPill>
+          </div>
+          {selectedCourseKeys.length === 0 ? (
+            <div className="rounded-btn border-2 border-dashed border-line p-6 text-center text-sm font-bold text-fg-muted">
+              先に受講したい科目を選択してください
+            </div>
+          ) : (
+            <CourseRegistrationCalendar
+              options={visibleCourseOptions}
+              selectedIds={visibleSelectedIds}
+              onToggle={toggleSingleCourseOption}
+              onToggleGroup={toggleCourseGroup}
+              compact
+              emptyMessage="選択した科目に開講曜日がありません。別の科目を選択してください。"
+            />
+          )}
         </div>
       </div>
-    </div>
-  );
-}
-
-function MiniStat({ icon: Icon, label, value }: { icon: any; label: string; value: string }) {
-  return (
-    <div className="rounded-2xl bg-white/10 p-4 ring-1 ring-white/10">
-      <Icon className="mb-2 text-indigo-200" size={18} />
-      <p className="text-[10px] font-black text-slate-300">{label}</p>
-      <p className="mt-1 text-xl font-black text-white">{value}</p>
-    </div>
+    </Modal>
   );
 }
 
@@ -939,6 +1280,10 @@ function ParentActionCalendar({
   canTransfer,
   schedules,
   registeredWeekdays,
+  lessonEndFor,
+  sentRequests,
+  declinedRequests,
+  studentName,
 }: {
   month: Date;
   onChangeMonth: (value: Date) => void;
@@ -948,11 +1293,38 @@ function ParentActionCalendar({
   canTransfer: boolean;
   schedules: any[];
   registeredWeekdays: string[];
+  lessonEndFor: (date: string) => string;
+  sentRequests: SentRequest[];
+  declinedRequests: DeclinedRequest[];
+  studentName: string;
 }) {
+  const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
   const year = month.getFullYear();
   const monthIndex = month.getMonth();
   const firstDay = new Date(year, monthIndex, 1);
   const lastDay = new Date(year, monthIndex + 1, 0);
+  const today = jstTodayKey();
+  const canContact = canAbsence || canTransfer;
+  const dateKeyOf = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  const weekdayOf = (date: string) => WEEKDAYS[new Date(`${date}T12:00:00`).getDay()];
+  const isClosed = (date: string) => schedules.some(item => scheduleCoversDate(item, date) && calendarScheduleKind(item) === 'closed');
+  const sentKind = (date: string) => sentRequests.find(item => item.target_date === date)?.kind;
+  const SENT_LABEL = { absent: '欠席連絡済み', late: '遅刻連絡済み', transfer: '振替済み' } as const;
+  const declinedStatus = (date: string) => declinedRequests.find(item => item.target_date === date)?.status;
+
+  // これから連絡できる通塾日（今日を含めて最大3日）。授業が終わった日は含めない。
+  const upcoming = useMemo(() => {
+    const result: string[] = [];
+    const cursor = new Date(`${today}T12:00:00`);
+    for (let i = 0; i < 42 && result.length < 3; i += 1) {
+      const date = dateKeyOf(cursor);
+      if (registeredWeekdays.includes(weekdayOf(date)) && !isClosed(date) && !lessonDayEnded(date, lessonEndFor(date))) result.push(date);
+      cursor.setDate(cursor.getDate() + 1);
+    }
+    return result;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [today, registeredWeekdays, schedules, lessonEndFor]);
+
   const days = Array.from({ length: firstDay.getDay() }, (_, i) => ({ label: '', date: '', key: `blank-${i}` }))
     .concat(Array.from({ length: lastDay.getDate() }, (_, i) => {
       const day = i + 1;
@@ -964,48 +1336,99 @@ function ParentActionCalendar({
     }));
 
   return (
-    <section className="rounded-[28px] bg-white p-5 shadow-sm">
-      <div className="mb-4 flex items-center justify-between">
-        <div>
-          <h3 className="text-lg font-black text-slate-900">{year}年 {monthIndex + 1}月</h3>
-          <p className="text-xs font-bold text-slate-400">日付を選ぶと欠席連絡・振替希望を登録できます。</p>
+    <section id="absence" className="cb-card scroll-mt-20 p-card" aria-labelledby="absence-heading">
+      <div className="mb-4">
+        <p className="text-xs font-bold text-warning">{TERMS.absenceContact}（欠席・遅刻）</p>
+        <h3 id="absence-heading" className="mt-0.5 text-lg font-bold text-fg">{studentName}さんの通塾カレンダー</h3>
+        {canContact && (
+          <ol className="mt-3 grid gap-2 text-sm font-bold text-fg sm:grid-cols-2 lg:grid-cols-4">
+            <li className="flex items-center gap-2 rounded-btn bg-warning-soft px-3 py-2 text-warning"><span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-warning text-xs text-white">1</span>休む日・遅れる日をタップ</li>
+            <li className="flex items-center gap-2 rounded-btn bg-canvas px-3 py-2"><span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-slate-400 text-xs text-white">2</span>連絡の種類をえらぶ</li>
+            <li className="flex items-center gap-2 rounded-btn bg-canvas px-3 py-2"><span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-slate-400 text-xs text-white">3</span>理由などを入力</li>
+            <li className="flex items-center gap-2 rounded-btn bg-canvas px-3 py-2"><span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-slate-400 text-xs text-white">4</span>「教室へ連絡する」を押す</li>
+          </ol>
+        )}
+      </div>
+
+      {canContact && (
+        <div className="mb-5">
+          <p className="mb-2 text-sm font-bold text-fg-muted">次の通塾日</p>
+          {upcoming.length === 0 ? (
+            <p className="rounded-btn bg-canvas px-4 py-3 text-sm text-fg-muted">連絡できる通塾日が見つかりません。受講講座の登録内容をご確認ください。</p>
+          ) : (
+            <div className="grid gap-2 sm:grid-cols-3">
+              {upcoming.map(date => {
+                const sent = sentKind(date);
+                const declined = sent ? undefined : declinedStatus(date);
+                const active = selectedDate === date;
+                return (
+                  <button key={date} type="button" onClick={() => onSelectDate(date)} aria-pressed={active}
+                    className={cn('flex min-h-14 items-center justify-between gap-2 rounded-btn border-2 px-4 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent', active ? 'border-accent bg-accent text-accent-ink' : 'border-warning/30 bg-warning-soft text-fg hover:border-warning/60')}>
+                    <span>
+                      <span className="block text-sm font-bold">{formatDate(date)}{date === today ? '（今日）' : ''}</span>
+                      <span className={cn('block text-xs', active ? 'text-accent-ink/80' : sent ? 'text-success' : declined ? 'text-danger' : 'text-warning')}>{sent ? SENT_LABEL[sent] : declined ? `前回の連絡は${parentStatusLabel(declined)}` : `${lessonEndFor(date)} まで連絡できます`}</span>
+                    </span>
+                    <ChevronRight size={16} aria-hidden className={active ? 'text-accent-ink/80' : 'text-warning'} />
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
+      )}
+
+      <div className="mb-3 flex items-center justify-between">
+        <p className="text-base font-bold text-fg">{year}年 {monthIndex + 1}月</p>
         <div className="flex gap-2">
-          <button onClick={() => onChangeMonth(new Date(year, monthIndex - 1, 1))} className="rounded-xl bg-slate-100 p-2 text-slate-500 hover:bg-slate-200"><ChevronLeft size={18} /></button>
-          <button onClick={() => onChangeMonth(new Date(year, monthIndex + 1, 1))} className="rounded-xl bg-slate-100 p-2 text-slate-500 hover:bg-slate-200"><ChevronRight size={18} /></button>
+          <IconButton label="前の月" variant="secondary" onClick={() => onChangeMonth(new Date(year, monthIndex - 1, 1))}><ChevronLeft size={18} aria-hidden /></IconButton>
+          <IconButton label="次の月" variant="secondary" onClick={() => onChangeMonth(new Date(year, monthIndex + 1, 1))}><ChevronRight size={18} aria-hidden /></IconButton>
         </div>
       </div>
-      <div className="mb-2 grid grid-cols-7 text-center text-xs font-black text-slate-400">
-        {['日', '月', '火', '水', '木', '金', '土'].map(day => <div key={day}>{day}</div>)}
+      <div className="mb-2 grid grid-cols-[repeat(7,minmax(0,1fr))] text-center text-xs font-bold text-fg-muted" aria-hidden>
+        {WEEKDAYS.map((day, index) => <div key={day} className={index === 0 ? 'text-danger' : index === 6 ? 'text-info' : ''}>{day}</div>)}
       </div>
-      <div className="grid grid-cols-7 gap-1.5">
+      <div className="grid grid-cols-[repeat(7,minmax(0,1fr))] gap-1 sm:gap-1.5">
         {days.map(day => day.date ? (() => {
           const daySchedules = schedules.filter(item => scheduleCoversDate(item, day.date));
-          const weekday = ['日', '月', '火', '水', '木', '金', '土'][new Date(`${day.date}T12:00:00`).getDay()];
           const isClosedDay = daySchedules.some(item => calendarScheduleKind(item) === 'closed');
-          const isLessonDay = daySchedules.some(item => calendarScheduleKind(item) === 'lesson');
-          const isRegisteredDay = registeredWeekdays.includes(weekday);
-          const actionable = !isClosedDay && isRegisteredDay && (canAbsence || canTransfer);
+          const isRegisteredDay = registeredWeekdays.includes(weekdayOf(day.date));
+          const ended = isRegisteredDay && lessonDayEnded(day.date, lessonEndFor(day.date));
+          // 授業が終わった日は、振替（補講）の登録だけできる。
+          const actionable = !isClosedDay && isRegisteredDay && (ended ? canTransfer : canContact);
+          const sent = sentKind(day.date);
+          const declined = sent ? undefined : declinedStatus(day.date);
+          const selected = selectedDate === day.date;
+          const tone = selected
+            ? 'border-accent bg-accent text-accent-ink shadow-md'
+            : isClosedDay ? 'cursor-default border-danger/20 bg-danger-soft text-danger'
+            : ended ? `border-line bg-slate-100 text-fg-muted ${actionable ? 'hover:border-slate-300' : 'cursor-default'}`
+            : actionable ? 'border-warning/40 bg-warning-soft text-fg hover:border-warning'
+            : 'cursor-default border-line bg-surface text-fg-muted';
+          const badge = 'truncate rounded px-1 py-0.5 text-[11px] font-bold leading-tight';
           return (
-          <button key={day.key} disabled={!actionable} onClick={() => actionable && onSelectDate(day.date)} className={`min-h-24 rounded-2xl border p-2 text-left transition ${selectedDate === day.date ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : isClosedDay ? 'cursor-default border-rose-200 bg-rose-50 text-rose-500' : isLessonDay ? 'border-sky-200 bg-sky-50 text-sky-800' : actionable ? 'border-slate-100 bg-slate-50 hover:border-slate-200' : 'cursor-default border-slate-100 bg-slate-50/60 text-slate-400'}`}>
-            <span className="text-sm font-black">{day.label}</span>
-            <div className="mt-2 flex flex-col gap-1">
-              {daySchedules.slice(0, 2).map(item => {
+          <button key={day.key} type="button" disabled={!actionable} onClick={() => actionable && onSelectDate(day.date)} aria-pressed={selected} aria-label={`${formatDate(day.date)}${ended ? (actionable ? '（授業は終了・振替の登録のみ）' : '（授業は終了）') : actionable ? '（連絡できます）' : ''}${sent ? `・${SENT_LABEL[sent]}` : ''}`}
+            className={cn('min-h-[4.5rem] min-w-0 overflow-hidden rounded-btn border p-1 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent sm:min-h-24 sm:p-2', tone, day.date === today && !selected && 'ring-2 ring-accent/40')}>
+            <span className="text-sm font-bold">{day.label}</span>
+            <div className="mt-1.5 flex flex-col gap-1">
+              {sent && <span className={cn(badge, selected ? 'bg-white/15 text-white' : 'bg-success-soft text-success')}><span className="sm:hidden">済み</span><span className="hidden sm:inline">{SENT_LABEL[sent]}</span></span>}
+              {declined && <span className={cn(badge, selected ? 'bg-white/15 text-white' : 'bg-danger-soft text-danger')}>{parentStatusLabel(declined)}</span>}
+              {!sent && !declined && actionable && !ended && <span className={cn(badge, selected ? 'bg-white/15 text-accent-ink' : 'bg-warning/15 text-warning')}><span className="sm:hidden">連絡可</span><span className="hidden sm:inline">連絡できる</span></span>}
+              {!sent && !declined && ended && <span className={cn(badge, 'bg-slate-200 text-slate-600')}>{actionable ? <><span className="sm:hidden">振替可</span><span className="hidden sm:inline">終了・振替のみ</span></> : '終了'}</span>}
+              {daySchedules.slice(0, 1).map(item => {
                 const kind = calendarScheduleKind(item);
-                return <span key={item.id} className={`rounded px-1.5 py-0.5 text-[9px] font-black ${kind === 'closed' ? 'bg-rose-100 text-rose-700' : kind === 'lesson' ? 'bg-sky-100 text-sky-800' : 'bg-emerald-100 text-emerald-700'}`}>{calendarScheduleLabel(item)}</span>;
+                return <span key={item.id} className={cn(badge, 'sm:px-1.5', kind === 'closed' ? 'bg-danger-soft text-danger' : kind === 'lesson' ? 'bg-info-soft text-info' : 'bg-success-soft text-success')}>{calendarScheduleLabel(item)}</span>;
               })}
-              {actionable && canAbsence && <span className="rounded bg-orange-100 px-1.5 py-0.5 text-[9px] font-black text-orange-600">欠席</span>}
-              {actionable && canTransfer && <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[9px] font-black text-indigo-600"><Repeat size={8} className="inline" /> 振替</span>}
             </div>
           </button>
           );
         })() : <div key={day.key} className="min-h-20" />)}
       </div>
-      <div className="mt-4 flex flex-wrap gap-3 rounded-2xl bg-slate-50 px-4 py-3 text-[11px] font-black text-slate-600">
-        <span className="flex items-center gap-1"><i className="h-3 w-3 rounded bg-sky-200" />授業実施日</span>
-        <span className="flex items-center gap-1"><i className="h-3 w-3 rounded bg-rose-200" />休み・休講</span>
-        <span className="flex items-center gap-1"><i className="h-3 w-3 rounded bg-emerald-200" />その他予定</span>
-        <span className="font-bold text-slate-400">予定がない日は休みとは判定しません。</span>
+      <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 rounded-btn bg-canvas px-4 py-3 text-xs font-bold text-fg-muted">
+        <span className="flex items-center gap-1.5"><i aria-hidden className="h-3 w-3 rounded bg-warning-soft ring-1 ring-warning/60" />連絡できる通塾日</span>
+        <span className="flex items-center gap-1.5"><i aria-hidden className="h-3 w-3 rounded bg-slate-200" />{canTransfer ? '授業が終わった日（振替の登録のみ）' : '授業が終わった日（連絡できません）'}</span>
+        <span className="flex items-center gap-1.5"><i aria-hidden className="h-3 w-3 rounded bg-success-soft ring-1 ring-success/40" />連絡済み</span>
+        {declinedRequests.length > 0 && <span className="flex items-center gap-1.5"><i aria-hidden className="h-3 w-3 rounded bg-danger-soft ring-1 ring-danger/40" />見送り・取消（もう一度連絡できます）</span>}
+        <span className="flex items-center gap-1.5"><i aria-hidden className="h-3 w-3 rounded bg-danger-soft" />休み・休講</span>
       </div>
     </section>
   );

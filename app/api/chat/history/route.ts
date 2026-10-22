@@ -24,7 +24,9 @@ export async function POST(request: NextRequest) {
     if (body.action !== 'stamp' || !STAMPS.has(String(body.stamp || ''))) return Response.json({ ok: false, error: 'invalid-stamp' }, { status: 400 });
     if (!(await consumeRateLimit(`chat_stamp_${actor.uid}`, 20, 60_000))) return Response.json({ ok: false, error: 'rate-limit' }, { status: 429 });
     const content = `[スタンプ] ${body.stamp}`;
-    const ref = await adminDb().collection('users').doc(actor.uid).collection('chat_history').add({ role: 'user', content, message_type: 'stamp', createdAt: FieldValue.serverTimestamp() });
+    // スタンプは定型文のため安全確認の対象外。
+    const ref = adminDb().collection('users').doc(actor.uid).collection('chat_history').doc();
+    await ref.set({ role: 'user', content, message_type: 'stamp', createdAt: FieldValue.serverTimestamp(), created_at_ms: Date.now(), seq: 0, request_id: ref.id });
     return Response.json({ ok: true, message: { id: ref.id, role: 'user', content } });
   } catch (error) { return jsonError(error); }
 }

@@ -55,22 +55,22 @@ export default function LandingPage() {
           <div className="pt-12 grid grid-cols-3 gap-8 opacity-60 grayscale hover:grayscale-0 transition-all duration-500">
             {/* 装飾用アイコン */}
             <div className="flex flex-col items-center gap-2">
-              <div className="w-12 h-12 bg-gray-100 rounded-2xl flex items-center justify-center">📚</div>
-              <span className="text-xs font-bold text-gray-400">宿題管理</span>
+              <div className="w-12 h-12 bg-slate-100 rounded-2xl flex items-center justify-center">📚</div>
+              <span className="text-xs font-bold text-slate-400">宿題管理</span>
             </div>
             <div className="flex flex-col items-center gap-2">
-              <div className="w-12 h-12 bg-gray-100 rounded-2xl flex items-center justify-center">🎥</div>
-              <span className="text-xs font-bold text-gray-400">授業録画</span>
+              <div className="w-12 h-12 bg-slate-100 rounded-2xl flex items-center justify-center">🎥</div>
+              <span className="text-xs font-bold text-slate-400">授業録画</span>
             </div>
             <div className="flex flex-col items-center gap-2">
-              <div className="w-12 h-12 bg-gray-100 rounded-2xl flex items-center justify-center">💬</div>
-              <span className="text-xs font-bold text-gray-400">相談チャット</span>
+              <div className="w-12 h-12 bg-slate-100 rounded-2xl flex items-center justify-center">💬</div>
+              <span className="text-xs font-bold text-slate-400">相談チャット</span>
             </div>
           </div>
         </div>
       </main>
 
-      <footer className="p-6 text-center text-xs text-gray-400 border-t border-gray-100">
+      <footer className="p-6 text-center text-xs text-slate-400 border-t border-slate-100">
         © 2025 ClassBase System. All rights reserved.
       </footer>
     </div>

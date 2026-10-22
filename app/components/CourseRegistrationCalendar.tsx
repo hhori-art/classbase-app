@@ -1,5 +1,6 @@
 'use client';
 
+import { formatShortDate } from '@/lib/format';
 import { CalendarDays, Check, Info } from 'lucide-react';
 import { getCourseSubjectGroup, normalizeCourseText } from '@/lib/course-text';
 
@@ -199,11 +200,11 @@ export function CourseOpeningMap({
         <div>
           <div className="flex items-center gap-2">
             <span className="rounded-xl bg-indigo-100 p-2 text-indigo-600"><CalendarDays size={18} aria-hidden="true" /></span>
-            <h3 id="course-opening-map-title" className="text-base font-black text-slate-900">{title}</h3>
+            <h3 id="course-opening-map-title" className="text-base font-bold text-slate-900">{title}</h3>
           </div>
           <p className="mt-2 text-xs font-bold text-slate-500">{description}</p>
         </div>
-        <div className="flex flex-wrap gap-2 text-[11px] font-black" aria-label="色分け">
+        <div className="flex flex-wrap gap-2 text-[11px] font-bold" aria-label="色分け">
           <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-emerald-700">理科</span>
           <span className="rounded-full border border-orange-200 bg-orange-50 px-3 py-1 text-orange-700">社会</span>
           {selectedIds.length > 0 && <span className="rounded-full bg-indigo-600 px-3 py-1 text-white">選択中</span>}
@@ -211,20 +212,20 @@ export function CourseOpeningMap({
       </div>
 
       {activeDays.length === 0 ? (
-        <div className="p-8 text-center text-sm font-black text-slate-400">曜日・時間が設定された講座はありません</div>
+        <div className="p-8 text-center text-sm font-bold text-slate-400">曜日・時間が設定された講座はありません</div>
       ) : (
         <>
           <div className="space-y-3 p-4 sm:hidden">
             {activeDays.map(day => (
               <article key={day} className="overflow-hidden rounded-2xl border border-slate-200">
-                <h4 className="bg-slate-900 px-4 py-2 text-sm font-black text-white">{day}曜日</h4>
+                <h4 className="bg-slate-900 px-4 py-2 text-sm font-bold text-white">{day}曜日</h4>
                 {['1時間目', '2時間目'].map(slot => {
                   const items = itemsFor(day, slot);
                   return (
                     <div key={slot} className="grid grid-cols-[3.75rem_minmax(0,1fr)] gap-3 border-t border-slate-100 p-3 first:border-t-0">
-                      <p className="pt-1 text-xs font-black text-slate-500">{slotLabel(slot)}</p>
+                      <p className="pt-1 text-xs font-bold text-slate-500">{slotLabel(slot)}</p>
                       <div className="flex flex-wrap gap-1.5">
-                        {items.length > 0 ? items.map(item => <span key={item.label} className={`rounded-lg border px-2.5 py-1.5 text-xs font-black ${openingTone(item.subject, item.selected)}`}>{item.selected && <Check className="mr-1 inline" size={12} aria-hidden="true" />}{item.label}</span>) : <span className="py-1 text-xs font-bold text-slate-300">開講なし</span>}
+                        {items.length > 0 ? items.map(item => <span key={item.label} className={`rounded-lg border px-2.5 py-1.5 text-xs font-bold ${openingTone(item.subject, item.selected)}`}>{item.selected && <Check className="mr-1 inline" size={12} aria-hidden="true" />}{item.label}</span>) : <span className="py-1 text-xs font-bold text-slate-300">開講なし</span>}
                       </div>
                     </div>
                   );
@@ -236,17 +237,17 @@ export function CourseOpeningMap({
           <div className="hidden overflow-x-auto sm:block">
             <table className="w-full min-w-[820px] table-fixed border-collapse">
               <caption className="sr-only">曜日と時限別の開講講座一覧</caption>
-              <thead><tr className="bg-white"><th scope="col" className="w-20 border-b border-r border-slate-100 p-3 text-xs font-black text-slate-400">時限</th>{mapDays.map(day => <th key={day} scope="col" className="border-b border-r border-slate-100 p-3 text-sm font-black text-slate-800 last:border-r-0">{day}曜日</th>)}</tr></thead>
+              <thead><tr className="bg-white"><th scope="col" className="w-20 border-b border-r border-slate-100 p-3 text-xs font-bold text-slate-400">時限</th>{mapDays.map(day => <th key={day} scope="col" className="border-b border-r border-slate-100 p-3 text-sm font-bold text-slate-800 last:border-r-0">{day}曜日</th>)}</tr></thead>
               <tbody>
                 {['1時間目', '2時間目'].map(slot => (
                   <tr key={slot}>
-                    <th scope="row" className="border-b border-r border-slate-100 bg-slate-50 p-3 text-xs font-black text-slate-600 last:border-b-0">{slotLabel(slot)}</th>
+                    <th scope="row" className="border-b border-r border-slate-100 bg-slate-50 p-3 text-xs font-bold text-slate-600 last:border-b-0">{slotLabel(slot)}</th>
                     {mapDays.map(day => {
                       const items = itemsFor(day, slot);
                       return (
                         <td key={day} className="h-28 border-b border-r border-slate-100 p-2 align-top last:border-r-0">
                           <div className="space-y-1.5">
-                            {items.length > 0 ? items.map(item => <div key={item.label} className={`rounded-xl border px-2 py-2 text-[11px] font-black leading-snug ${openingTone(item.subject, item.selected)}`}>{item.selected && <Check className="mr-1 inline" size={12} aria-hidden="true" />}{item.label}</div>) : <p className="pt-7 text-center text-xs font-bold text-slate-300">—</p>}
+                            {items.length > 0 ? items.map(item => <div key={item.label} className={`rounded-xl border px-2 py-2 text-[11px] font-bold leading-snug ${openingTone(item.subject, item.selected)}`}>{item.selected && <Check className="mr-1 inline" size={12} aria-hidden="true" />}{item.label}</div>) : <p className="pt-7 text-center text-xs font-bold text-slate-300">—</p>}
                           </div>
                         </td>
                       );
@@ -290,7 +291,7 @@ export default function CourseRegistrationCalendar({
 
   if (options.length === 0) {
     return (
-      <div className="rounded-2xl border-2 border-dashed border-slate-200 p-6 text-center text-sm font-black text-slate-400">
+      <div className="rounded-2xl border-2 border-dashed border-slate-200 p-6 text-center text-sm font-bold text-slate-400">
         {emptyMessage}
       </div>
     );
@@ -372,18 +373,18 @@ export default function CourseRegistrationCalendar({
           {selected && <Check size={13} strokeWidth={4} className="mt-0.5 shrink-0" />}
         </span>
         {showMeta && (optionDescription(option) || option.term_label || option.matched_dates?.length > 0) && (
-          <span className="mt-1 block text-[10px] font-bold text-slate-400">
+          <span className="mt-1 block text-[11px] font-bold text-slate-400">
             {[option.term_label || option.term, optionDescription(option)].filter(Boolean).join(' / ')}
           </span>
         )}
         {showMeta && option.matched_units?.length > 1 && (
-          <span className="mt-1 block text-[10px] font-bold text-emerald-600">
+          <span className="mt-1 block text-[11px] font-bold text-emerald-600">
             単元 {option.matched_units.length}件
           </span>
         )}
         {showMeta && option.matched_dates?.length > 0 && (
-          <span className="mt-1 block text-[10px] font-bold text-slate-400">
-            初回 {option.matched_dates[0]}
+          <span className="mt-1 block whitespace-nowrap text-[11px] font-bold text-slate-400">
+            初回 {formatShortDate(option.matched_dates[0])}
           </span>
         )}
       </button>
@@ -394,7 +395,7 @@ export default function CourseRegistrationCalendar({
     <div className="space-y-4">
       {selectedGroups.length > 0 && (
         <div className="rounded-2xl border border-indigo-100 bg-indigo-50 p-3">
-          <p className="mb-2 text-xs font-black text-indigo-700">選択中の講座</p>
+          <p className="mb-2 text-xs font-bold text-indigo-700">選択中の講座</p>
           <div className="flex flex-wrap gap-2">
             {selectedGroups.map(group => {
               const option = group.option;
@@ -405,7 +406,7 @@ export default function CourseRegistrationCalendar({
                 onClick={() => toggleGroup(group.ids)}
                 aria-pressed="true"
                 aria-label={`${courseFullDisplayLabel(option)}の選択を解除`}
-                className="inline-flex items-center gap-1 rounded-full bg-white px-3 py-1.5 text-xs font-black text-indigo-700 shadow-sm ring-1 ring-indigo-100"
+                className="inline-flex items-center gap-1 rounded-full bg-white px-3 py-1.5 text-xs font-bold text-indigo-700 shadow-sm ring-1 ring-indigo-100"
               >
                 <Check size={12} strokeWidth={4} />
                 {courseFullDisplayLabel(option)} / {getCourseDay(option)}曜 {slotLabel(getCourseSlot(option))}
@@ -423,10 +424,10 @@ export default function CourseRegistrationCalendar({
           <section key={sectionLabel} className={`rounded-2xl border bg-white p-4 shadow-sm ${subject === '理科' ? 'border-emerald-100' : subject === '社会' ? 'border-orange-100' : 'border-slate-100'}`}>
             <div className="mb-3 flex items-center justify-between gap-3">
               <div>
-                <p className={`text-xs font-black ${subject === '理科' ? 'text-emerald-600' : subject === '社会' ? 'text-orange-600' : 'text-slate-500'}`}>{sectionLabel}</p>
-                <h3 className="text-base font-black text-slate-900">受講したい科目を選択</h3>
+                <p className={`text-xs font-bold ${subject === '理科' ? 'text-emerald-600' : subject === '社会' ? 'text-orange-600' : 'text-slate-500'}`}>{sectionLabel}</p>
+                <h3 className="text-base font-bold text-slate-900">受講したい科目を選択</h3>
               </div>
-              <span className="rounded-full bg-slate-50 px-3 py-1 text-[11px] font-black text-slate-500">{courseGroups.length}科目</span>
+              <span className="rounded-full bg-slate-50 px-3 py-1 text-[11px] font-bold text-slate-500">{courseGroups.length}科目</span>
             </div>
             <div className="space-y-3">
               {courseGroups.map(group => {
@@ -438,17 +439,17 @@ export default function CourseRegistrationCalendar({
                   <div key={`${group.subject}-${group.course}`} className={`rounded-2xl border p-3 transition ${groupSelected ? 'border-indigo-200 bg-indigo-50/40' : 'border-slate-100 bg-slate-50'}`}>
                     <div className="mb-2 flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
                       <div>
-                        <h4 className="text-sm font-black text-slate-800">
+                        <h4 className="text-sm font-bold text-slate-800">
                           {compactLabelParts(group.grade, group.subject, group.course).join(' ') || group.course}
                         </h4>
                         {showMeta && months.length > 0 && (
-                          <p className="mt-1 text-[11px] font-black text-sky-600">
+                          <p className="mt-1 text-[11px] font-bold text-sky-600">
                             期内の時期: {months.slice(0, 4).join(' / ')}
                           </p>
                         )}
                         {showMeta && units.length > 0 && (
                           <div className="mt-3 rounded-xl border border-slate-100 bg-white p-3">
-                            <p className="mb-2 text-[11px] font-black text-slate-600">この期のカリキュラム</p>
+                            <p className="mb-2 text-[11px] font-bold text-slate-600">この期のカリキュラム</p>
                             <ol className="max-h-44 space-y-1.5 overflow-y-auto pr-1">
                               {orderedCurriculum.map((item, index) => (
                                 <li key={`${item.month}_${item.week}_${item.unit}_${index}`} className="grid grid-cols-[1.5rem_minmax(0,1fr)] gap-1.5 text-[11px] font-bold text-slate-500">
@@ -463,7 +464,7 @@ export default function CourseRegistrationCalendar({
                           </div>
                         )}
                       </div>
-                      {groupSelected && <span className="inline-flex items-center gap-1 rounded-full bg-indigo-600 px-2 py-1 text-[10px] font-black text-white"><Check size={11} />選択中</span>}
+                      {groupSelected && <span className="inline-flex items-center gap-1 rounded-full bg-indigo-600 px-2 py-1 text-[11px] font-bold text-white"><Check size={11} />選択中</span>}
                     </div>
                     <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                       {DAYS.map(day => {
@@ -505,20 +506,20 @@ export default function CourseRegistrationCalendar({
                                   : 'border-white bg-white text-slate-700 hover:border-indigo-200'
                               } ${disabled ? 'cursor-not-allowed opacity-50' : ''}`}
                             >
-                              <span className="flex items-center justify-between gap-2 text-sm font-black">
-                                {day}曜 {slotLabel(slot)}
+                              <span className="flex items-center justify-between gap-2 text-sm font-bold">
+                                <span className="whitespace-nowrap">{day}曜 {slotLabel(slot)}</span>
                                 {selected && <Check size={14} strokeWidth={4} />}
                               </span>
                               {showMeta && dates[0] && (
-                                <span className="mt-1 block text-[10px] font-bold text-slate-400">初回 {dates[0]}</span>
+                                <span className="mt-1 block whitespace-nowrap text-[11px] font-bold text-slate-400">初回 {formatShortDate(dates[0])}</span>
                               )}
                               {showMeta && units.length > 0 && (
-                                <span className="mt-1 block text-[10px] font-black text-emerald-600">
+                                <span className="mt-1 block text-[11px] font-bold text-emerald-600">
                                   この期で扱う単元: {units.length}件
                                 </span>
                               )}
                               {showMeta && slotOptions.some((option: any) => option.shift_match_status === 'course_matched' || option.shift_match_status === 'subject_matched') && (
-                                <span className="mt-1 block text-[10px] font-black text-amber-600">
+                                <span className="mt-1 block text-[11px] font-bold text-amber-600">
                                   {slotOptions.some((option: any) => option.shift_match_status === 'subject_matched') ? '講師配置から開講確認' : '講座名一致'}
                                 </span>
                               )}
@@ -537,7 +538,7 @@ export default function CourseRegistrationCalendar({
 
       {unsetOptions.length > 0 && (
         <div className="rounded-2xl border border-amber-100 bg-amber-50 p-3">
-          <div className="mb-2 flex items-center gap-2 text-xs font-black text-amber-700">
+          <div className="mb-2 flex items-center gap-2 text-xs font-bold text-amber-700">
             <Info size={14} /> 曜日・時間が未設定の講座
           </div>
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">

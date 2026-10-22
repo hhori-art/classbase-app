@@ -35,6 +35,8 @@ const SAFE_DEFAULTS: Record<VisibilityGroup, VisibilityMap> = {
     history: false,
   },
   parent: {
+    // 受講講座の登録・変更は従来いつも表示していたので、設定がなければ表示する。
+    courseRegistration: true,
     homework: false,
     attendance: false,
     absence: false,

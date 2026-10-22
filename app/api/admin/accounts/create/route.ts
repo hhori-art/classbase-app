@@ -3,6 +3,7 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { canManageSchool, getServerUser, jsonError } from '@/lib/server-auth';
 import { writeLearningEvent } from '@/lib/events';
+import { writeAuditLog } from '@/lib/server/audit-log';
 import { generateInitialPassword } from '@/lib/password';
 import type { AdminAppPermissions } from '@/lib/admin-app-permissions';
 import { normalizeEmploymentCategory } from '@/lib/employment-category';
@@ -154,11 +155,12 @@ export async function POST(request: NextRequest) {
       : {};
     const adminPermissions: AdminAppPermissions =
       role === 'master'
-        ? { science_social: true, eiken: true, attendance: true }
+        ? { science_social: true, eiken: true, attendance: true, online_school: true }
         : {
               science_social: requestedPermissions.science_social === true,
               eiken: requestedPermissions.eiken === true,
               attendance: requestedPermissions.attendance === true,
+              online_school: requestedPermissions.online_school === true,
             };
     const importBatchId = String(body.import_batch_id || '').trim().slice(0, 120);
     const importFileName = String(body.import_file_name || '').trim().slice(0, 240);
@@ -354,6 +356,23 @@ export async function POST(request: NextRequest) {
         error: eventError instanceof Error ? eventError.message : String(eventError),
       });
     }
+
+    // 操作ログ（パスワードは残さない）。記録に失敗してもアカウントの作成・更新は成功のまま返す。
+    await writeAuditLog({
+      actor,
+      action: before.exists ? 'account_update' : 'account_create',
+      target_type: 'user',
+      target_id: uid,
+      target_label: displayName,
+      school_id: schoolId || null,
+      details: {
+        target_role: role,
+        status,
+        login_id: loginId,
+        parent_id: parentInfo?.uid || null,
+        parent_created: Boolean(parentInfo && !parentInfo.updated),
+      },
+    });
 
     return Response.json({
       ok: true,

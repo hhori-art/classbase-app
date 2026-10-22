@@ -5,10 +5,13 @@ import { db } from '@/lib/firebase';
 import { collection, query, where, getDocs, doc, getDoc } from 'firebase/firestore';
 import { useAuth } from '@/app/context/AuthContext';
 import { fetchTeacherStudents } from '@/lib/teacher-students-client';
-import { 
-  ArrowLeft, AlertTriangle, CheckCircle, Loader2, Search, RefreshCw
+import {
+  AlertTriangle, CheckCircle, Search, RefreshCw
 } from 'lucide-react';
-import Link from 'next/link';
+import {
+  Button, Card, PageHeader, useToast, useConfirm,
+  ListSkeleton, EmptyState, ErrorState,
+} from '@/app/components/ui';
 
 // データ型定義
 interface Student {
@@ -43,6 +46,9 @@ export default function RiskMonitorPage() {
   const [risks, setRisks] = useState<RiskData[]>([]);
   const [loading, setLoading] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const toast = useToast();
+  const confirm = useConfirm();
   
   // フィルター
   const [filterStatus, setFilterStatus] = useState<'unresolved' | 'resolved' | 'all'>('unresolved');
@@ -53,6 +59,7 @@ export default function RiskMonitorPage() {
   // データ取得関数
   const fetchData = async () => {
     setLoading(true);
+    setLoadError(false);
     try {
       // 1. 設定から年度取得
       const settingsSnap = await getDoc(doc(db, 'settings', 'global'));
@@ -160,6 +167,7 @@ export default function RiskMonitorPage() {
 
     } catch (e) {
       console.error(e);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -171,7 +179,11 @@ export default function RiskMonitorPage() {
 
   // AI分析の実行
   const runAiAnalysis = async () => {
-    if (!confirm('未分析または更新が必要な生徒のデータをAI分析しますか？\n(処理に時間がかかる場合があります)')) return;
+    if (!(await confirm({
+      title: '未分析または更新が必要な生徒のデータをAI分析しますか？',
+      message: '処理に時間がかかる場合があります。',
+      confirmLabel: '分析する',
+    }))) return;
     setAnalyzing(true);
     try {
       // API呼び出し (実装されている前提)
@@ -182,13 +194,14 @@ export default function RiskMonitorPage() {
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ batchSize: 50 }), 
       });
-      const data = await res.json();
-      
-      alert(`分析完了: ${data.processed}人を更新しました。\n(内、詳細AI分析: ${data.ai_analyzed}人)`);
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 429) { toast.error('分析の実行回数が上限に達しました。しばらくしてからお試しください。'); return; }
+      if (!res.ok) throw new Error(data.error || 'analyze-failed');
+      toast.success(`分析完了: ${data.processed}人を更新しました（内、詳細AI分析: ${data.ai_analyzed}人）`);
       fetchData(); // 画面更新
     } catch (e) {
       console.error(e);
-      alert('分析中にエラーが発生しました');
+      toast.error('分析中にエラーが発生しました');
     } finally {
       setAnalyzing(false);
     }
@@ -213,7 +226,7 @@ export default function RiskMonitorPage() {
       ));
 
     } catch (e) {
-      alert('更新エラー');
+      toast.error('更新できませんでした');
       console.error(e);
     }
   };
@@ -232,146 +245,148 @@ export default function RiskMonitorPage() {
     });
   }, [risks, filterStatus, searchQuery]);
 
+  const tabClass = (active: boolean, activeText: string) =>
+    `min-h-9 rounded-input px-4 py-2 text-xs font-bold transition-colors ${active ? `bg-surface ${activeText} shadow-sm` : 'text-slate-500 hover:text-slate-700'}`;
+
   return (
-    <div className="min-h-screen bg-[#F0F4F8] p-6 pb-32 font-sans">
-      <div className="max-w-4xl mx-auto">
-        
+    <div className="px-4 py-5 pb-32 sm:px-6">
+      <div className="mx-auto max-w-4xl space-y-6">
+
         {/* ヘッダー */}
-        <div className="flex items-center justify-between mb-8">
-          <div className="flex items-center gap-4">
-            {/* ★修正: リンク先を /teacher から /teacher/work に変更 */}
-            <Link href="/teacher/work" className="bg-white p-3 rounded-full shadow-sm hover:bg-gray-50 text-gray-600 transition-colors">
-              <ArrowLeft size={20} />
-            </Link>
-            <div>
-              <h1 className="text-2xl font-extrabold text-gray-800 flex items-center gap-2">
-                <AlertTriangle className="text-red-500" /> 退塾アラート管理
-              </h1>
-              <p className="text-xs text-gray-500 font-bold mt-1">
-                出席・提出状況・AIチャット分析 ({currentYear}年度)
-              </p>
-            </div>
-          </div>
-          <button 
-            onClick={runAiAnalysis}
-            disabled={analyzing}
-            className="bg-indigo-600 text-white px-4 py-2 rounded-xl text-xs font-bold shadow-lg shadow-indigo-200 hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2 transition-all"
-          >
-            {analyzing ? <Loader2 className="animate-spin" size={16}/> : <RefreshCw size={16}/>}
-            データ更新・分析
-          </button>
-        </div>
+        <PageHeader
+          tone="plain"
+          title="退塾アラート管理"
+          icon={AlertTriangle}
+          description={`出席・提出状況・AIチャット分析 (${currentYear}年度)`}
+          backHref="/teacher/work"
+          actions={(
+            <Button onClick={runAiAnalysis} loading={analyzing} icon={<RefreshCw size={16} aria-hidden />}>
+              データ更新・分析
+            </Button>
+          )}
+        />
 
         {/* フィルターエリア */}
-        <div className="bg-white p-4 rounded-2xl shadow-sm border border-gray-200 mb-6 flex flex-wrap gap-4 items-center justify-between">
-          <div className="flex bg-gray-100 p-1 rounded-xl">
-            <button 
+        <Card className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex rounded-btn bg-slate-100 p-1" role="group" aria-label="対応状況">
+            <button
+              type="button"
+              aria-pressed={filterStatus === 'unresolved'}
               onClick={() => setFilterStatus('unresolved')}
-              className={`px-4 py-2 rounded-lg text-xs font-bold transition-all ${filterStatus === 'unresolved' ? 'bg-white text-red-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+              className={tabClass(filterStatus === 'unresolved', 'text-danger')}
             >
               未対応 ({risks.filter(r => !r.isResolved).length})
             </button>
-            <button 
+            <button
+              type="button"
+              aria-pressed={filterStatus === 'resolved'}
               onClick={() => setFilterStatus('resolved')}
-              className={`px-4 py-2 rounded-lg text-xs font-bold transition-all ${filterStatus === 'resolved' ? 'bg-white text-green-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+              className={tabClass(filterStatus === 'resolved', 'text-success')}
             >
               対応済
             </button>
-            <button 
+            <button
+              type="button"
+              aria-pressed={filterStatus === 'all'}
               onClick={() => setFilterStatus('all')}
-              className={`px-4 py-2 rounded-lg text-xs font-bold transition-all ${filterStatus === 'all' ? 'bg-white text-gray-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+              className={tabClass(filterStatus === 'all', 'text-slate-700')}
             >
               全て
             </button>
           </div>
 
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={14} />
-            <input 
-              type="text" 
-              placeholder="生徒名検索..." 
-              className="pl-9 pr-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-100 w-48"
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} aria-hidden />
+            <input
+              type="text"
+              placeholder="生徒名検索..."
+              aria-label="生徒名検索"
+              className="min-h-11 w-48 rounded-input border border-line bg-surface py-2 pl-9 pr-4 text-sm outline-none focus:ring-2 focus:ring-accent/30"
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
             />
           </div>
-        </div>
+        </Card>
 
         {/* リスト表示 */}
         {loading ? (
-          <div className="flex justify-center py-20"><Loader2 className="animate-spin text-gray-400"/></div>
+          <ListSkeleton rows={4} />
+        ) : loadError ? (
+          <ErrorState onRetry={fetchData} />
         ) : displayRisks.length === 0 ? (
-          <div className="text-center py-20 bg-white rounded-3xl border border-dashed border-gray-200">
-            <CheckCircle className="mx-auto text-green-200 mb-4" size={48}/>
-            <p className="text-gray-400 font-bold">該当するアラートはありません</p>
-            <p className="text-xs text-gray-300 mt-2">現在、リスクの高い生徒は検知されていません</p>
-          </div>
+          <EmptyState
+            icon={CheckCircle}
+            title="該当するアラートはありません"
+            description="現在、リスクの高い生徒は検知されていません"
+          />
         ) : (
           <div className="grid gap-4">
             {displayRisks.map((data, idx) => (
-              <div 
-                key={idx} 
-                className={`bg-white p-6 rounded-2xl shadow-sm border transition-all ${
-                  data.isResolved ? 'border-gray-100 opacity-70' : 'border-red-100 hover:border-red-300 hover:shadow-md'
+              <Card
+                key={idx}
+                className={`transition-colors ${
+                  data.isResolved ? 'opacity-70' : 'border-rose-100 hover:border-rose-300 hover:shadow-md'
                 }`}
               >
-                <div className="flex flex-col md:flex-row md:items-start justify-between gap-6">
-                  
+                <div className="flex flex-col justify-between gap-6 md:flex-row md:items-start">
+
                   {/* 左側: 生徒情報 & リスク詳細 */}
                   <div className="flex-1">
-                    <div className="flex items-center gap-3 mb-2">
-                      <h2 className="text-xl font-extrabold text-gray-800">{data.student.student_name}</h2>
-                      <span className="text-xs font-bold bg-gray-100 text-gray-500 px-2 py-0.5 rounded">{data.student.grade}</span>
-                      {data.student.classroom && <span className="text-xs font-bold bg-gray-100 text-gray-500 px-2 py-0.5 rounded">{data.student.classroom}</span>}
+                    <div className="mb-2 flex flex-wrap items-center gap-3">
+                      <h2 className="text-xl font-bold text-fg">{data.student.student_name}</h2>
+                      <span className="rounded bg-slate-100 px-2 py-0.5 text-xs font-bold text-slate-500">{data.student.grade}</span>
+                      {data.student.classroom && <span className="rounded bg-slate-100 px-2 py-0.5 text-xs font-bold text-slate-500">{data.student.classroom}</span>}
                     </div>
-                    
+
                     {/* リスクタグ */}
-                    <div className="flex flex-wrap gap-2 mb-3">
+                    <div className="mb-3 flex flex-wrap gap-2">
                       {data.reasons.map((reason, i) => (
-                        <span key={i} className={`text-xs font-bold px-2 py-1 rounded border flex items-center gap-1 ${reason.includes('AI') ? 'bg-purple-50 text-purple-700 border-purple-100' : 'bg-red-50 text-red-700 border-red-100'}`}>
-                          <AlertTriangle size={10}/> {reason}
+                        <span key={i} className={`flex items-center gap-1 rounded border px-2 py-1 text-xs font-bold ${reason.includes('AI') ? 'border-violet-100 bg-violet-50 text-violet-700' : 'border-rose-100 bg-rose-50 text-rose-700'}`}>
+                          <AlertTriangle size={12} aria-hidden /> {reason}
                         </span>
                       ))}
                     </div>
 
                     {/* AI分析詳細 (あれば表示) */}
                     {data.aiReason && (
-                      <div className="mt-3 bg-purple-50/50 rounded-xl p-3 border border-purple-100">
-                        <p className="text-xs font-bold text-purple-800 mb-1 flex items-center gap-1">🤖 AI分析レポート</p>
-                        <p className="text-xs text-gray-600 mb-2 leading-relaxed"><span className="font-bold">理由:</span> {data.aiReason}</p>
-                        {data.aiAction && <p className="text-xs text-blue-600 leading-relaxed"><span className="font-bold">推奨対応:</span> {data.aiAction}</p>}
+                      <div className="mt-3 rounded-btn border border-violet-100 bg-violet-50/50 p-3">
+                        <p className="mb-1 flex items-center gap-1 text-xs font-bold text-violet-800">🤖 AI分析レポート</p>
+                        <p className="mb-2 text-xs leading-relaxed text-slate-600"><span className="font-bold">理由:</span> {data.aiReason}</p>
+                        {data.aiAction && <p className="text-xs leading-relaxed text-sky-700"><span className="font-bold">推奨対応:</span> {data.aiAction}</p>}
                       </div>
                     )}
                   </div>
 
                   {/* 右側: 数値データ & アクションボタン */}
-                  <div className="flex items-center gap-6 md:border-l md:pl-6 border-gray-100 shrink-0">
+                  <div className="flex shrink-0 items-center gap-6 border-line md:border-l md:pl-6">
                     <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-center">
                       <div>
-                        <div className="text-[10px] text-gray-400 font-bold uppercase">欠席</div>
-                        <div className="text-lg font-black text-gray-800">{data.absentCount}回</div>
+                        <div className="text-xs font-bold text-slate-400">欠席</div>
+                        <div className="text-lg font-bold text-fg">{data.absentCount}回</div>
                       </div>
                       <div>
-                        <div className="text-[10px] text-gray-400 font-bold uppercase">提出率</div>
-                        <div className={`text-lg font-black ${data.hwRate < 50 ? 'text-red-500' : 'text-gray-800'}`}>{data.hwRate}%</div>
+                        <div className="text-xs font-bold text-slate-400">提出率</div>
+                        <div className={`text-lg font-bold ${data.hwRate < 50 ? 'text-danger' : 'text-fg'}`}>{data.hwRate}%</div>
                       </div>
                     </div>
 
-                    <button 
+                    <button
+                      type="button"
+                      aria-pressed={data.isResolved}
                       onClick={() => toggleResolution(data.student.id, data.isResolved)}
-                      className={`flex flex-col items-center justify-center w-20 h-16 rounded-xl border-2 transition-all ${
-                        data.isResolved 
-                          ? 'bg-green-50 border-green-200 text-green-600' 
-                          : 'bg-white border-gray-200 text-gray-300 hover:border-green-400 hover:text-green-500 hover:shadow-sm'
+                      className={`flex h-16 w-20 flex-col items-center justify-center rounded-btn border-2 transition-colors ${
+                        data.isResolved
+                          ? 'border-emerald-200 bg-success-soft text-success'
+                          : 'border-line bg-surface text-slate-400 hover:border-emerald-400 hover:text-success hover:shadow-sm'
                       }`}
                     >
-                      <CheckCircle size={24} className={data.isResolved ? 'fill-current' : ''}/>
-                      <span className="text-[10px] font-bold mt-1">{data.isResolved ? '対応済' : '対応する'}</span>
+                      <CheckCircle size={24} className={data.isResolved ? 'fill-current' : ''} aria-hidden />
+                      <span className="mt-1 text-xs font-bold">{data.isResolved ? '対応済' : '対応する'}</span>
                     </button>
                   </div>
 
                 </div>
-              </div>
+              </Card>
             ))}
           </div>
         )}

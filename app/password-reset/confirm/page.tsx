@@ -50,7 +50,7 @@ export default function PasswordResetConfirmPage() {
             <CheckCircle2 className="mx-auto text-emerald-500" size={48} />
             <h1 className="mt-4 text-xl font-black text-slate-900">変更しました</h1>
             <p className="mt-3 text-sm font-bold text-slate-600">新しいパスワードでログインしてください。</p>
-            <Link href="/" className="mt-6 inline-flex rounded-xl bg-slate-900 px-6 py-3 text-sm font-black text-white">ログインへ</Link>
+            <Link href="/" className="mt-6 inline-flex rounded-xl bg-slate-900 px-6 py-3 text-sm font-bold text-white">ログインへ</Link>
           </div>
         ) : (
           <>
@@ -65,7 +65,7 @@ export default function PasswordResetConfirmPage() {
               <input required type="password" autoComplete="new-password" value={password} onChange={event => setPassword(event.target.value)} placeholder="新しいパスワード" className="w-full rounded-xl border border-slate-200 px-3 py-3 text-base font-bold outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" />
               <input required type="password" autoComplete="new-password" value={confirmPassword} onChange={event => setConfirmPassword(event.target.value)} placeholder="もう一度入力" className="w-full rounded-xl border border-slate-200 px-3 py-3 text-base font-bold outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" />
               {error && <p className="rounded-xl bg-red-50 p-3 text-sm font-bold text-red-600">{error}</p>}
-              <button disabled={saving || !token} className="flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 py-3.5 text-sm font-black text-white hover:bg-indigo-700 disabled:opacity-60">
+              <button disabled={saving || !token} className="flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 py-3.5 text-sm font-bold text-white hover:bg-indigo-700 disabled:opacity-60">
                 {saving && <Loader2 size={18} className="animate-spin" />} パスワードを変更する
               </button>
             </form>

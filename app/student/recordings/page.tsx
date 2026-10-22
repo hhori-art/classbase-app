@@ -1,14 +1,16 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
-import { 
-  ArrowLeft, Video, Calendar as CalendarIcon, PlayCircle, Loader2, 
-  ChevronLeft, ChevronRight, MonitorPlay, Filter, Atom, FlaskConical, 
-  Leaf, Mountain, Globe, ScrollText, Landmark, X, Search, Coins, Layers
-} from 'lucide-react';
-import Link from 'next/link';
 import {
+  AlertCircle, Archive, Atom, CalendarDays, CheckCircle2, ChevronLeft, ChevronRight, FlaskConical, Globe, History, Landmark, Leaf, Loader2,
+  MonitorPlay, Mountain, PlayCircle, ScrollText, Search, Sparkles, Video, X,
+} from 'lucide-react';
+import { PageHeader, Button, IconButton, Modal, ListSkeleton, EmptyState, ErrorState, Spinner, StatusPill } from '@/app/components/ui';
+import { formatDate, jstDateKey, weekdayFromDateKey } from '@/lib/format';
+import { RECORDING_HEARTBEAT_SECONDS } from '@/lib/recording-watch';
+import {
+  getCurrentSchoolYear,
   getRecordingYearScope,
   normalizeRecordingType,
   normalizeSchoolYear,
@@ -37,6 +39,8 @@ type RecordingItem = {
   year_scope: RecordingYearScope;
   searchText: string;
   zoom_share: boolean;
+  /** 自分の視聴記録。completed＝最後まで見た、partial＝途中まで。 */
+  watch_status: 'completed' | 'partial' | null;
 };
 
 type PlaybackOption = {
@@ -58,26 +62,35 @@ export default function StudentRecordingsPage() {
   const [videoLoading, setVideoLoading] = useState(false);
   const [videoError, setVideoError] = useState('');
   const [videoRetry, setVideoRetry] = useState(0);
+  // Zoom共有の録画はモーダルを開かずに新しいタブで開くため、失敗はモーダルの外のお知らせで出す。
+  const [openError, setOpenError] = useState('');
+  // 一覧の読み込み失敗を「録画なし」と区別する。
+  const [listError, setListError] = useState('');
+  const [listReloadKey, setListReloadKey] = useState(0);
   const [recordingSessionId, setRecordingSessionId] = useState('');
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const [playbackChoices, setPlaybackChoices] = useState<{ recording: RecordingItem; options: PlaybackOption[] } | null>(null);
   
-  // UI状態
-  const [searchMode, setSearchMode] = useState<'calendar' | 'unit'>('calendar'); 
+  // UI状態：今年度と過去の録画をはっきり分けて表示する。
+  const [scope, setScope] = useState<RecordingYearScope>('current');
   const [gradeFilter, setGradeFilter] = useState('all');
+  const [subjectFilter, setSubjectFilter] = useState('all');
   const [unitFilter, setUnitFilter] = useState('all');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [yearScopeFilter, setYearScopeFilter] = useState<'all' | RecordingYearScope>('current');
   const [typeFilter, setTypeFilter] = useState<'all' | RecordingType>('all');
-  
-  // カレンダー用
-  const [currentDate, setCurrentDate] = useState(new Date()); 
-  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
+  const [pastYearFilter, setPastYearFilter] = useState<'all' | number>('all');
+  // 今年度：実施月・カレンダーの日付で絞り込む。
+  const [monthFilter, setMonthFilter] = useState<'all' | string>('all');
+  const [dayFilter, setDayFilter] = useState('');
+  const [calendarMonth, setCalendarMonth] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const currentSchoolYear = getCurrentSchoolYear();
 
   // データ取得
   useEffect(() => {
     const fetchRecordings = async () => {
       if (!user) return;
       setLoading(true);
+      setListError('');
 
       try {
         const token = await user.getIdToken();
@@ -107,116 +120,116 @@ export default function StudentRecordingsPage() {
             recording_type_label: typeLabel,
             school_year: schoolYear,
             year_scope: getRecordingYearScope(schoolYear),
+            watch_status: d.watch_status === 'completed' || d.watch_status === 'partial' ? d.watch_status : null,
             zoom_share: d.zoom_share === true,
             searchText: `${d.title} ${d.subject} ${d.grade} ${d.target_date} ${d.unit || ''} ${d.detail_subject || ''} ${typeLabel} ${schoolYear}年度`.toLowerCase()
           };
         });
 
         setAllRecordings(data);
-
-        if (data.length > 0) {
-          const initial = data.find(rec => rec.year_scope === 'current') || data[0];
-          setSelectedDate(initial.target_date);
-          setCurrentDate(new Date(initial.target_date));
-        }
+        // 今年度の録画がまだない場合は、過去の録画を最初に表示する。
+        if (data.length > 0 && !data.some(rec => rec.year_scope === 'current')) setScope('past');
 
       } catch (error) {
         console.error("録画取得エラー:", error);
+        setListError('録画一覧を読み込めませんでした。通信状況を確認して、もう一度お試しください。');
       } finally {
         setLoading(false);
       }
     };
     fetchRecordings();
-  }, [user]);
-
-  // モード切り替え
-  const handleModeChange = (mode: 'calendar' | 'unit') => {
-    setSearchMode(mode);
-    setSearchQuery(''); 
-    if (mode === 'calendar') {
-      setUnitFilter('all');
-    }
-  };
-
-  // 表示データの決定
-  const displayVideos = (() => {
-    let list = allRecordings;
-
-    if (yearScopeFilter !== 'all') {
-      list = list.filter(rec => rec.year_scope === yearScopeFilter);
-    }
-
-    if (typeFilter !== 'all') {
-      list = list.filter(rec => rec.recording_type === typeFilter);
-    }
-
-    // 1. 学年フィルタ
-    if (gradeFilter !== 'all') {
-      list = list.filter(rec => rec.grade === gradeFilter);
-    }
-
-    // 2. キーワード検索
-    if (searchQuery) {
-      const lowerQ = searchQuery.toLowerCase();
-      return list.filter(rec => rec.searchText.includes(lowerQ));
-    }
-
-    // 3. モード別フィルタ
-    if (searchMode === 'unit') {
-      if (unitFilter !== 'all') {
-        return list.filter(rec => {
-          const target = `${rec.title} ${rec.subject} ${rec.unit} ${rec.detail_subject}`.toLowerCase();
-          return target.includes(unitFilter);
-        });
-      }
-      return list; 
-    } else {
-      return list.filter(rec => rec.target_date === selectedDate);
-    }
-  })();
-
-  // カレンダー計算
-  const getDaysInMonth = (year: number, month: number) => new Date(year, month + 1, 0).getDate();
-  const getFirstDayOfMonth = (year: number, month: number) => new Date(year, month, 1).getDay();
-  const year = currentDate.getFullYear();
-  const month = currentDate.getMonth();
-  const days = [];
-  for (let i = 0; i < getFirstDayOfMonth(year, month); i++) days.push(null);
-  for (let i = 1; i <= getDaysInMonth(year, month); i++) days.push(i);
-  
-  const calendarRecordings = allRecordings.filter(rec => {
-    const matchesYearScope = yearScopeFilter === 'all' || rec.year_scope === yearScopeFilter;
-    const matchesType = typeFilter === 'all' || rec.recording_type === typeFilter;
-    const matchesGrade = gradeFilter === 'all' || rec.grade === gradeFilter;
-    return matchesYearScope && matchesType && matchesGrade;
-  });
-  const recordingDates = new Set(calendarRecordings.map(r => r.target_date));
-  const currentYearCount = allRecordings.filter(rec => rec.year_scope === 'current').length;
-  const pastYearCount = allRecordings.filter(rec => rec.year_scope === 'past').length;
-  const testPrepCount = allRecordings.filter(rec => rec.recording_type === 'test_prep').length;
-
-  useEffect(() => {
-    if (searchMode !== 'calendar' || searchQuery || calendarRecordings.length === 0) return;
-    const selectedStillVisible = calendarRecordings.some(rec => rec.target_date === selectedDate);
-    if (!selectedStillVisible) {
-      setSelectedDate(calendarRecordings[0].target_date);
-      setCurrentDate(new Date(calendarRecordings[0].target_date));
-    }
-  }, [allRecordings, gradeFilter, typeFilter, yearScopeFilter, searchMode, searchQuery, selectedDate]);
+  }, [user, listReloadKey]);
 
   const SCIENCE_UNITS = [
-    { label: '物理', icon: <Atom size={16}/>, color: 'text-blue-500', bg: 'bg-blue-50', border: 'border-blue-200' },
-    { label: '化学', icon: <FlaskConical size={16}/>, color: 'text-purple-500', bg: 'bg-purple-50', border: 'border-purple-200' },
-    { label: '生物', icon: <Leaf size={16}/>, color: 'text-green-500', bg: 'bg-green-50', border: 'border-green-200' },
-    { label: '地学', icon: <Mountain size={16}/>, color: 'text-amber-600', bg: 'bg-amber-50', border: 'border-amber-200' },
+    { label: '物理', icon: <Atom size={15}/> },
+    { label: '化学', icon: <FlaskConical size={15}/> },
+    { label: '生物', icon: <Leaf size={15}/> },
+    { label: '地学', icon: <Mountain size={15}/> },
   ];
   const SOCIAL_UNITS = [
-    { label: '地理', icon: <Globe size={16}/>, color: 'text-emerald-500', bg: 'bg-emerald-50', border: 'border-emerald-200' },
-    { label: '歴史', icon: <ScrollText size={16}/>, color: 'text-rose-500', bg: 'bg-rose-50', border: 'border-rose-200' },
-    { label: '公民', icon: <Landmark size={16}/>, color: 'text-indigo-500', bg: 'bg-indigo-50', border: 'border-indigo-200' },
+    { label: '地理', icon: <Globe size={15}/> },
+    { label: '歴史', icon: <ScrollText size={15}/> },
+    { label: '公民', icon: <Landmark size={15}/> },
   ];
 
-  const postRecordingView = async (recordingId: string, eventType: 'start' | 'progress' | 'complete', watchedSeconds: number, sessionId = '') => {
+  const currentCount = allRecordings.filter(rec => rec.year_scope === 'current').length;
+  const pastCount = allRecordings.filter(rec => rec.year_scope === 'past').length;
+  const pastYears = useMemo(() => Array.from(new Set(allRecordings.filter(rec => rec.year_scope === 'past').map(rec => rec.school_year))).sort((a, b) => b - a), [allRecordings]);
+  const unitOptions = subjectFilter === '社会' ? SOCIAL_UNITS : subjectFilter === '理科' ? SCIENCE_UNITS : [...SCIENCE_UNITS, ...SOCIAL_UNITS];
+
+  // 月・日付以外の条件で絞った録画（カレンダーの印と月ごとの本数に使う）。
+  const filteredWithoutDate = useMemo(() => {
+    const lowerQ = searchQuery.trim().toLowerCase();
+    return allRecordings.filter(rec => {
+      if (rec.year_scope !== scope) return false;
+      if (scope === 'past' && pastYearFilter !== 'all' && rec.school_year !== pastYearFilter) return false;
+      if (typeFilter !== 'all' && rec.recording_type !== typeFilter) return false;
+      if (gradeFilter !== 'all' && rec.grade !== gradeFilter) return false;
+      if (subjectFilter !== 'all' && rec.subject !== subjectFilter) return false;
+      if (unitFilter !== 'all' && !`${rec.title} ${rec.unit} ${rec.detail_subject}`.includes(unitFilter)) return false;
+      return !lowerQ || rec.searchText.includes(lowerQ);
+    });
+  }, [allRecordings, scope, pastYearFilter, typeFilter, gradeFilter, subjectFilter, unitFilter, searchQuery]);
+
+  const monthCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    filteredWithoutDate.forEach(rec => {
+      const key = rec.target_date.slice(0, 7);
+      if (/^\d{4}-\d{2}$/.test(key)) map.set(key, (map.get(key) || 0) + 1);
+    });
+    return map;
+  }, [filteredWithoutDate]);
+  // 今年度の月（4月〜翌3月）。録画のある月だけ選べる。
+  const schoolMonths = useMemo(() => Array.from({ length: 12 }, (_, index) => {
+    const month = ((index + 3) % 12) + 1;
+    const year = month >= 4 ? currentSchoolYear : currentSchoolYear + 1;
+    return `${year}-${String(month).padStart(2, '0')}`;
+  }), [currentSchoolYear]);
+  // 年度の切り替え前に始まった授業（3月など）も選べるようにする。
+  // まだ来ていない月は出さない。
+  const monthOptions = useMemo(() => {
+    const thisMonth = jstDateKey().slice(0, 7);
+    return Array.from(new Set([...Array.from(monthCounts.keys()), ...schoolMonths.filter(key => key <= thisMonth)])).sort();
+  }, [monthCounts, schoolMonths]);
+  const latestMonth = useMemo(() => Array.from(monthCounts.keys()).sort().at(-1) || '', [monthCounts]);
+  const shownCalendarMonth = calendarMonth || (monthFilter !== 'all' ? monthFilter : latestMonth);
+
+  const displayVideos = useMemo(() => filteredWithoutDate.filter(rec => {
+    if (scope !== 'current') return true;
+    if (dayFilter) return rec.target_date === dayFilter;
+    if (monthFilter !== 'all') return rec.target_date.startsWith(monthFilter);
+    return true;
+  }), [filteredWithoutDate, scope, dayFilter, monthFilter]);
+
+  const selectMonth = (value: 'all' | string) => {
+    setMonthFilter(value);
+    setDayFilter('');
+    setCalendarMonth(value === 'all' ? '' : value);
+  };
+  const selectDay = (date: string) => {
+    if (dayFilter === date) { setDayFilter(''); return; }
+    setDayFilter(date);
+    setMonthFilter(date.slice(0, 7));
+    setCalendarMonth(date.slice(0, 7));
+  };
+
+  // 今年度は月ごと、過去は年度ごとにまとめる。
+  const groups = useMemo(() => {
+    const map = new Map<string, RecordingItem[]>();
+    displayVideos.forEach(rec => {
+      const key = scope === 'current' ? rec.target_date.slice(0, 7) : String(rec.school_year);
+      map.set(key, [...(map.get(key) || []), rec]);
+    });
+    return Array.from(map.entries()).sort(([a], [b]) => b.localeCompare(a));
+  }, [displayVideos, scope]);
+  const groupLabel = (key: string) => {
+    if (scope === 'past') return `${key}年度の録画`;
+    const [y, m] = key.split('-');
+    return `${Number(m)}月の授業${Number(y) !== new Date().getFullYear() ? `（${y}年）` : ''}`;
+  };
+  const isPast = scope === 'past';
+
+  const postRecordingView = async (recordingId: string, eventType: 'start' | 'progress' | 'complete', watchedSeconds: number, sessionId = '', video?: HTMLVideoElement | null) => {
     if (!user) return;
     const token = await user.getIdToken();
     const response = await fetch('/api/recording-view', {
@@ -227,6 +240,8 @@ export default function StudentRecordingsPage() {
         event_type: eventType,
         watched_seconds: watchedSeconds,
         session_id: sessionId,
+        position_seconds: video && Number.isFinite(video.currentTime) ? video.currentTime : null,
+        duration_seconds: video && Number.isFinite(video.duration) ? video.duration : null,
       }),
     });
     const data = await response.json().catch(() => ({}));
@@ -262,7 +277,7 @@ export default function StudentRecordingsPage() {
       return true;
     } catch (error) {
       if (playbackWindow) playbackWindow.close();
-      setVideoError(error instanceof Error ? error.message : '録画を開けませんでした。');
+      setOpenError(error instanceof Error ? error.message : '録画を開けませんでした。');
       return false;
     }
   };
@@ -272,6 +287,7 @@ export default function StudentRecordingsPage() {
     if (processingId) return;
     const zoomSharePlayback = rec.zoom_share;
     if (zoomSharePlayback) {
+      setOpenError('');
       const playbackWindow = window.open('', '_blank');
       if (playbackWindow) playbackWindow.opener = null;
       setProcessingId(rec.id);
@@ -299,7 +315,7 @@ export default function StudentRecordingsPage() {
     setWatchStartedAt(Date.now());
     setProcessingId(rec.id);
     try {
-      const view = await postRecordingView(rec.id, 'start', 0);
+      const view = await postRecordingView(rec.id, 'start', 0, '', videoRef.current);
       setRecordingSessionId(String(view?.session_id || ''));
     } catch (err) { console.error(err); } 
     finally { setTimeout(() => setProcessingId(null), 1000); }
@@ -308,7 +324,8 @@ export default function StudentRecordingsPage() {
   const closeRecordingModal = async () => {
     if (!activeRecording) return;
     const watchedSeconds = watchStartedAt ? Math.max(1, Math.round((Date.now() - watchStartedAt) / 1000)) : 0;
-    const eventType = watchedSeconds >= 900 ? 'complete' : 'progress';
+    // 閉じるときは最後の合図を送って、この視聴を終える（コインの判定はサーバーが再生時間で行う）。
+    const eventType = 'complete';
     const recordingId = activeRecording.id;
     setActiveRecording(null);
     setWatchStartedAt(null);
@@ -318,11 +335,36 @@ export default function StudentRecordingsPage() {
     setVideoRetry(0);
     setRecordingSessionId('');
     try {
-      await postRecordingView(recordingId, eventType, watchedSeconds, recordingSessionId);
+      const result = await postRecordingView(recordingId, eventType, watchedSeconds, recordingSessionId, videoRef.current);
+      // 一覧の「視聴済み／途中まで」をその場で更新する（次に開いたときはサーバーの記録を表示）。
+      const nextStatus: RecordingItem['watch_status'] = result?.rewarded || result?.already_rewarded ? 'completed' : watchedSeconds >= RECORDING_HEARTBEAT_SECONDS ? 'partial' : null;
+      if (nextStatus) {
+        setAllRecordings(prev => prev.map(item => item.id === recordingId && item.watch_status !== 'completed' ? { ...item, watch_status: nextStatus } : item));
+      }
     } catch (err) {
       console.warn('recording progress log failed:', err);
     }
   };
+
+  // 再生中（一時停止・タブ非表示でない）の間だけ、約30秒ごとに視聴中の合図を送る。
+  const sendHeartbeat = async () => {
+    if (!activeRecording || !recordingSessionId) return;
+    try {
+      await postRecordingView(activeRecording.id, 'progress', 0, recordingSessionId, videoRef.current);
+    } catch (err) {
+      console.warn('recording heartbeat failed:', err);
+    }
+  };
+  useEffect(() => {
+    if (!activeRecording || activeRecording.zoom_share || !recordingSessionId) return;
+    const timer = window.setInterval(() => {
+      const video = videoRef.current;
+      if (!video || video.paused || video.ended || document.visibilityState !== 'visible') return;
+      void sendHeartbeat();
+    }, RECORDING_HEARTBEAT_SECONDS * 1000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeRecording, recordingSessionId]);
 
   const activeRecordingSrc = activeRecording
     ? (activeRecording.zoom_share
@@ -340,59 +382,79 @@ export default function StudentRecordingsPage() {
     return () => window.clearTimeout(timeout);
   }, [activeRecording, activeRecordingSrc, videoLoading]);
 
-  if (loading) return <div className="min-h-screen flex items-center justify-center bg-[#F0F4F8]"><Loader2 className="animate-spin text-red-400" size={40}/></div>;
+  if (loading) {
+    return (
+      <div className="mx-auto max-w-6xl space-y-5 px-4 py-6">
+        <ListSkeleton rows={5} />
+      </div>
+    );
+  }
 
   return (
-    <div className="min-h-screen bg-[#F0F4F8] p-4 pb-24 font-sans sm:p-8">
-      {playbackChoices && (
-        <div className="fixed inset-0 z-[220] flex items-center justify-center bg-slate-950/75 p-4 backdrop-blur-sm">
-          <div className="w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl">
-            <div className="flex items-start justify-between gap-4">
-              <div><p className="text-xs font-black text-red-500">複数の録画があります</p><h2 className="mt-1 text-lg font-black text-slate-900">視聴する録画を選択</h2><p className="mt-2 text-xs font-bold text-slate-500">{playbackChoices.recording.title}</p></div>
-              <button type="button" onClick={() => setPlaybackChoices(null)} aria-label="閉じる" className="rounded-xl bg-slate-100 p-2 text-slate-500"><X size={18}/></button>
-            </div>
-            <div className="mt-5 space-y-2">
-              {playbackChoices.options.map((option, index) => (
-                <button
-                  key={option.key}
-                  type="button"
-                  onClick={() => {
-                    const target = window.open('', '_blank');
-                    if (!target) {
-                      setVideoError('ブラウザで新しいタブがブロックされました。');
-                      return;
-                    }
-                    target.opener = null;
-                    target.location.href = option.playback_url;
-                    void postRecordingView(playbackChoices.recording.id, 'start', 0).catch(error => console.warn('recording start log failed:', error));
-                    setPlaybackChoices(null);
-                  }}
-                  className="flex w-full items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-left transition hover:border-red-200 hover:bg-red-50"
-                >
-                  <span><span className="block text-sm font-black text-slate-800">録画 {index + 1}</span><span className="mt-1 block text-xs font-bold text-slate-500">{option.label}</span></span>
-                  <PlayCircle className="text-red-500" size={24}/>
-                </button>
-              ))}
-            </div>
+    <div className="mx-auto max-w-6xl space-y-5 px-4 py-6">
+      {openError && (
+        <div role="alert" className="fixed inset-x-0 top-0 z-[230] flex justify-center px-4 pt-[calc(env(safe-area-inset-top)+12px)]">
+          <div className="flex w-full max-w-md items-start gap-3 rounded-card border border-danger/25 bg-surface px-4 py-3 shadow-card">
+            <AlertCircle size={20} className="mt-2.5 shrink-0 text-danger" aria-hidden />
+            <p className="flex-1 py-2 text-sm font-bold text-fg">{openError}</p>
+            <IconButton label="お知らせを閉じる" size="sm" onClick={() => setOpenError('')}><X size={16} aria-hidden /></IconButton>
           </div>
         </div>
       )}
+      <Modal
+        open={Boolean(playbackChoices)}
+        onClose={() => setPlaybackChoices(null)}
+        title="視聴する録画を選択"
+        description={playbackChoices ? <>複数の録画があります。<br />{playbackChoices.recording.title}</> : undefined}
+        size="sm"
+      >
+        {playbackChoices && (
+          <div className="space-y-2">
+            {playbackChoices.options.map((option, index) => (
+              <button
+                key={option.key}
+                type="button"
+                onClick={() => {
+                  const target = window.open('', '_blank');
+                  if (!target) {
+                    setOpenError('ブラウザで新しいタブがブロックされました。ポップアップを許可して、もう一度お試しください。');
+                    return;
+                  }
+                  target.opener = null;
+                  target.location.href = option.playback_url;
+                  void postRecordingView(playbackChoices.recording.id, 'start', 0).catch(error => console.warn('recording start log failed:', error));
+                  setPlaybackChoices(null);
+                }}
+                className="flex min-h-14 w-full items-center justify-between rounded-btn border border-line bg-slate-50 px-4 py-3 text-left transition hover:border-accent/30 hover:bg-accent-soft"
+              >
+                <span><span className="block text-sm font-bold text-fg">録画 {index + 1}</span><span className="mt-1 block text-xs text-fg-muted">{option.label}</span></span>
+                <PlayCircle className="text-accent" size={24} aria-hidden />
+              </button>
+            ))}
+          </div>
+        )}
+      </Modal>
       {activeRecording && (
         <div className="fixed inset-0 z-[200] bg-slate-950/80 p-3 sm:p-6">
-          <div className="mx-auto flex h-full max-w-6xl flex-col overflow-hidden rounded-3xl bg-white shadow-2xl">
-            <div className="flex items-center justify-between gap-3 border-b border-slate-100 p-4">
+          <div className="mx-auto flex h-full max-w-6xl flex-col overflow-hidden rounded-card bg-surface shadow-2xl">
+            <div className="flex items-center justify-between gap-3 border-b border-line p-4">
               <div className="min-w-0">
-                <p className="truncate text-sm font-black text-slate-900">{activeRecording.title}</p>
-                <p className="text-xs font-bold text-slate-400">視聴時間を記録しています</p>
+                <p className="truncate text-sm font-bold text-fg">{activeRecording.title}</p>
+                <p className="text-xs text-fg-muted">
+                  {activeRecording.zoom_share
+                    ? 'Zoomで開く録画は視聴時間を記録できないため、コインの対象外です'
+                    // 残り時間を見せると「そこまでしか見ない」ので、基準や残りは表示しない。
+                    : '視聴の記録中です。最後まで見て学習しましょう'}
+                </p>
               </div>
-              <button onClick={closeRecordingModal} className="rounded-xl bg-slate-900 px-4 py-2 text-xs font-black text-white">閉じる</button>
+              <Button variant="secondary" onClick={closeRecordingModal} icon={<X size={16} aria-hidden />}>閉じる</Button>
             </div>
             <div className="relative min-h-0 flex-1 bg-slate-900">
               {activeRecordingUsesZoomPlayer ? (
                 <div className="flex h-full items-center justify-center bg-slate-950 p-6 text-center text-white">
                   <div>
-                    <PlayCircle className="mx-auto text-red-400" size={44} />
-                    <p className="mt-4 text-sm font-black">Zoom公式プレイヤーで再生します</p>
+                    <PlayCircle className="mx-auto text-white/70" size={44} aria-hidden />
+                    <p className="mt-4 text-sm font-bold">Zoom公式プレイヤーで再生します</p>
                     <button
                       type="button"
                       onClick={() => {
@@ -400,7 +462,7 @@ export default function StudentRecordingsPage() {
                         if (playbackWindow) playbackWindow.opener = null;
                         void openZoomRecording(activeRecording, playbackWindow);
                       }}
-                      className="mt-4 inline-flex rounded-xl bg-white px-5 py-3 text-xs font-black text-slate-900 hover:bg-slate-100"
+                      className="mt-4 inline-flex min-h-11 items-center rounded-btn bg-white px-5 text-sm font-bold text-slate-900 hover:bg-slate-100"
                     >
                       録画を開く
                     </button>
@@ -408,6 +470,7 @@ export default function StudentRecordingsPage() {
                 </div>
               ) : (
                 <video
+                  ref={videoRef}
                   src={activeRecordingSrc}
                   title={activeRecording.title}
                   className="h-full w-full bg-slate-900"
@@ -421,6 +484,9 @@ export default function StudentRecordingsPage() {
                   onLoadStart={() => { setVideoLoading(true); setVideoError(''); }}
                   onCanPlay={() => setVideoLoading(false)}
                   onPlaying={() => setVideoLoading(false)}
+                  // 再生を始めた・止めた時点でも合図を送り、サーバー側の区切りをそろえる。
+                  onPlay={() => { void sendHeartbeat(); }}
+                  onPause={() => { void sendHeartbeat(); }}
                   onError={() => {
                     setVideoLoading(false);
                     setVideoError('録画を読み込めませんでした。少し待ってからもう一度お試しください。');
@@ -440,8 +506,8 @@ export default function StudentRecordingsPage() {
               {videoLoading && !videoError && (
                 <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-slate-950/70 text-white">
                   <div className="text-center">
-                    <Loader2 className="mx-auto animate-spin" size={32}/>
-                    <p className="mt-3 text-xs font-black">録画を準備しています</p>
+                    <Loader2 className="mx-auto animate-spin" size={32} aria-hidden />
+                    <p className="mt-3 text-xs font-bold">録画を準備しています</p>
                   </div>
                 </div>
               )}
@@ -449,30 +515,32 @@ export default function StudentRecordingsPage() {
                 <div className="absolute inset-0 flex items-center justify-center bg-slate-950 p-6 text-center text-sm font-bold text-white">
                   <div>
                     <p>{videoError}</p>
-                    {activeRecordingUsesZoomPlayer && (
-                      <button type="button" onClick={() => {
-                        const playbackWindow = window.open('', '_blank');
-                        if (playbackWindow) playbackWindow.opener = null;
-                        void openZoomRecording(activeRecording, playbackWindow);
-                      }} className="mt-4 inline-flex rounded-xl bg-white px-4 py-2 text-xs font-black text-slate-900">
-                        Zoomで録画を開く
+                    <div className="mt-4 flex flex-wrap justify-center gap-2">
+                      {activeRecordingUsesZoomPlayer && (
+                        <button type="button" onClick={() => {
+                          const playbackWindow = window.open('', '_blank');
+                          if (playbackWindow) playbackWindow.opener = null;
+                          void openZoomRecording(activeRecording, playbackWindow);
+                        }} className="inline-flex min-h-11 items-center rounded-btn bg-white px-4 text-sm font-bold text-slate-900">
+                          Zoomで録画を開く
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (activeRecordingUsesZoomPlayer) {
+                            void closeRecordingModal();
+                            return;
+                          }
+                          setVideoError('');
+                          setVideoLoading(true);
+                          setVideoRetry(value => value + 1);
+                        }}
+                        className="inline-flex min-h-11 items-center rounded-btn bg-white px-4 text-sm font-bold text-slate-900"
+                      >
+                        {activeRecordingUsesZoomPlayer ? '閉じる' : '再読み込み'}
                       </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (activeRecordingUsesZoomPlayer) {
-                          void closeRecordingModal();
-                          return;
-                        }
-                        setVideoError('');
-                        setVideoLoading(true);
-                        setVideoRetry(value => value + 1);
-                      }}
-                      className={`${activeRecordingUsesZoomPlayer ? 'ml-2' : 'mt-4'} rounded-xl bg-white px-4 py-2 text-xs font-black text-slate-900`}
-                    >
-                      {activeRecordingUsesZoomPlayer ? '閉じる' : '再読み込み'}
-                    </button>
+                    </div>
                   </div>
                 </div>
               )}
@@ -483,240 +551,241 @@ export default function StudentRecordingsPage() {
           </div>
         </div>
       )}
-      <div className="max-w-6xl mx-auto">
-        
-        {/* ヘッダー */}
-        <div className="flex items-center gap-4 mb-8">
-          <Link href="/student" className="bg-white p-4 rounded-full shadow-sm text-gray-400 hover:text-red-600 hover:shadow-md transition-all active:scale-95">
-            <ArrowLeft size={24} strokeWidth={3} />
-          </Link>
-          <div>
-            <h1 className="text-2xl font-black text-gray-800 flex items-center gap-3 tracking-tight">
-              {/* ★変更: 赤いグラデーション */}
-              <span className="bg-gradient-to-br from-red-500 to-pink-600 text-white p-2.5 rounded-2xl shadow-lg shadow-red-200">
-                <Video size={24} strokeWidth={3} />
-              </span>
-              授業アーカイブ
-            </h1>
-            <p className="text-xs font-bold text-gray-400 mt-1 pl-1">過去の授業で復習しよう。視聴ログは自動で記録されます</p>
+
+      <PageHeader
+        tone="hero"
+        title="授業の録画"
+        description="見たい録画の年度を選んでね。視聴の記録は自動で残ります"
+        icon={Video}
+        backHref="/student"
+      />
+
+      {/* 今年度 / 過去 を大きなカードで切り替える */}
+      <div className="grid gap-3 sm:grid-cols-2" role="tablist" aria-label="録画の年度">
+        <button type="button" role="tab" aria-selected={!isPast} onClick={() => { setScope('current'); setPastYearFilter('all'); }}
+          className={`relative overflow-hidden rounded-card p-5 text-left transition-all ${!isPast ? 'bg-accent text-accent-ink shadow-card ring-4 ring-accent/20' : 'cb-card text-fg hover:ring-2 hover:ring-accent/30'}`}>
+          <div className="flex items-center justify-between">
+            <span className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-bold ${!isPast ? 'bg-white/20' : 'bg-accent-soft text-accent'}`}><Sparkles size={14} aria-hidden />今年度の授業</span>
+            <span className="text-3xl font-black">{currentCount}<span className="ml-1 text-sm font-bold">本</span></span>
           </div>
+          <p className="mt-3 text-2xl font-black">{currentSchoolYear}年度</p>
+          <p className={`mt-1 text-xs font-medium ${!isPast ? 'text-accent-ink/85' : 'text-fg-muted'}`}>いま受けている授業の録画。休んだ日や復習に</p>
+        </button>
+        <button type="button" role="tab" aria-selected={isPast} onClick={() => { setScope('past'); setMonthFilter('all'); setDayFilter(''); }} disabled={pastCount === 0}
+          className={`relative overflow-hidden rounded-card p-5 text-left transition-all disabled:cursor-not-allowed disabled:opacity-50 ${isPast ? 'bg-slate-800 text-white shadow-card ring-4 ring-slate-200' : 'cb-card text-fg hover:ring-2 hover:ring-slate-300'}`}>
+          <div className="flex items-center justify-between">
+            <span className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-bold ${isPast ? 'bg-white/15' : 'bg-slate-100 text-slate-600'}`}><History size={14} aria-hidden />過去の録画</span>
+            <span className="text-3xl font-black">{pastCount}<span className="ml-1 text-sm font-bold">本</span></span>
+          </div>
+          <p className="mt-3 text-2xl font-black">{pastYears.length > 0 ? `${pastYears[pastYears.length - 1]}〜${pastYears[0]}年度` : `${currentSchoolYear - 1}年度以前`}</p>
+          <p className={`mt-1 text-xs font-medium ${isPast ? 'text-white/75' : 'text-fg-muted'}`}>去年までの授業の録画。予習や総復習に</p>
+        </button>
+      </div>
+
+      {isPast && (
+        <div className="flex items-start gap-3 rounded-card border-2 border-slate-300 bg-slate-100 px-4 py-3 text-sm font-medium text-slate-700">
+          <Archive size={20} className="mt-0.5 shrink-0 text-slate-500" aria-hidden />
+          <p>ここは<span className="font-bold text-slate-900">過去の年度の録画</span>です。今年度の授業とは、内容や進み方、テスト範囲が違うことがあります。</p>
         </div>
+      )}
 
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-          
-          {/* === 左カラム: コントロール === */}
-          <div className="lg:col-span-5 space-y-6 lg:sticky lg:top-8">
-            
-            {/* 検索バー */}
-            {/* ★変更: フォーカス時のリング色を赤に */}
-            <div className="bg-white p-2 rounded-[24px] shadow-sm border border-gray-100 flex items-center gap-2 focus-within:ring-4 focus-within:ring-red-100 focus-within:border-red-300 transition-all">
-              <div className="p-3 bg-gray-50 text-gray-400 rounded-full"><Search size={20} strokeWidth={3}/></div>
-              <input type="text" placeholder="キーワード検索 (例: 鎌倉, 電流...)" className="flex-1 bg-transparent font-bold text-gray-700 outline-none h-full py-3" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)}/>
-              {searchQuery && <button onClick={() => setSearchQuery('')} className="p-2 mr-1 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-full"><X size={18} strokeWidth={3}/></button>}
-            </div>
-
-            {/* モード切り替えタブ */}
-            <div className="bg-gray-200/50 p-1.5 rounded-2xl flex gap-1">
-              <button 
-                onClick={() => handleModeChange('calendar')}
-                // ★変更: アクティブ色を赤に
-                className={`flex-1 py-3 rounded-xl text-xs font-black flex items-center justify-center gap-2 transition-all ${
-                  searchMode === 'calendar' ? 'bg-white text-red-600 shadow-sm' : 'text-gray-500 hover:bg-gray-200/50'
-                }`}
-              >
-                <CalendarIcon size={16}/> 日付から探す
-              </button>
-              <button 
-                onClick={() => handleModeChange('unit')}
-                // ★変更: アクティブ色を赤(またはピンク)に
-                className={`flex-1 py-3 rounded-xl text-xs font-black flex items-center justify-center gap-2 transition-all ${
-                  searchMode === 'unit' ? 'bg-white text-pink-600 shadow-sm' : 'text-gray-500 hover:bg-gray-200/50'
-                }`}
-              >
-                <Layers size={16}/> 単元から探す
-              </button>
-            </div>
-
-            {/* モード別コンテンツ */}
-            <div className="relative overflow-hidden">
-              
-              {/* === カレンダーモード === */}
-              {searchMode === 'calendar' && !searchQuery && (
-                <div className="bg-white p-6 rounded-[32px] shadow-xl shadow-gray-100 border-2 border-white animate-in slide-in-from-left-4 duration-300">
-                  <div className="flex items-center justify-between mb-6">
-                    <button onClick={() => setCurrentDate(new Date(year, month - 1, 1))} className="p-3 hover:bg-gray-100 rounded-full text-gray-400"><ChevronLeft size={24}/></button>
-                    {/* ★変更: 月表示を赤に */}
-                    <h2 className="text-xl font-black text-gray-800 tracking-tight">{year}年 <span className="text-red-500">{month + 1}月</span></h2>
-                    <button onClick={() => setCurrentDate(new Date(year, month + 1, 1))} className="p-3 hover:bg-gray-100 rounded-full text-gray-400"><ChevronRight size={24}/></button>
-                  </div>
-                  <div className="grid grid-cols-7 text-center mb-4">
-                    {['日', '月', '火', '水', '木', '金', '土'].map((d, i) => (<div key={i} className={`text-xs font-black ${i === 0 ? 'text-red-400' : i === 6 ? 'text-blue-400' : 'text-gray-300'}`}>{d}</div>))}
-                  </div>
-                  <div className="grid grid-cols-7 gap-2">
-                    {days.map((day, idx) => {
-                      if (!day) return <div key={idx}></div>;
-                      const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-                      const hasRecording = recordingDates.has(dateStr);
-                      const isSelected = selectedDate === dateStr;
-                      return (
-                        <button key={idx} onClick={() => setSelectedDate(dateStr)} className={`aspect-square rounded-2xl flex flex-col items-center justify-center relative transition-all duration-300 ${isSelected ? 'bg-red-600 text-white shadow-lg shadow-red-200 scale-110 z-10' : hasRecording ? 'bg-white border-2 border-red-100 text-gray-700 hover:border-red-300' : 'hover:bg-gray-50 text-gray-400'}`}>
-                          <span className={`text-sm ${isSelected ? 'font-black' : 'font-bold'}`}>{day}</span>
-                          {!isSelected && hasRecording && <span className="absolute bottom-2 w-1.5 h-1.5 rounded-full bg-red-400"></span>}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {/* === 単元リストモード === */}
-              {searchMode === 'unit' && !searchQuery && (
-                <div className="bg-white p-6 rounded-[32px] shadow-xl shadow-gray-100 border-2 border-white animate-in slide-in-from-right-4 duration-300 space-y-6">
-                  <div className="text-center">
-                    <h3 className="font-bold text-gray-800">単元・カテゴリーを選択</h3>
-                    <p className="text-xs text-gray-400 mt-1">選択すると全期間から動画を表示します</p>
-                  </div>
-                  
-                  {/* 全表示ボタン */}
-                  <button 
-                    onClick={() => setUnitFilter('all')}
-                    className={`w-full py-3 rounded-xl text-sm font-bold border-2 transition-all flex items-center justify-center gap-2 ${unitFilter === 'all' ? 'bg-gray-800 text-white border-gray-800' : 'bg-gray-50 text-gray-500 border-gray-100'}`}
-                  >
-                    <Layers size={16}/> すべての動画を表示
+      {/* 絞り込み */}
+      <div className="cb-card p-card space-y-3">
+        <div className={`flex items-center gap-2 rounded-input border border-line bg-slate-50 px-3 transition-all focus-within:bg-surface ${isPast ? 'focus-within:border-slate-400' : 'focus-within:border-accent'}`}>
+          <Search size={18} className="text-fg-muted" aria-hidden />
+          <input type="text" aria-label="キーワードで探す" placeholder="キーワードで探す（例：電流、鎌倉幕府）" className="h-12 flex-1 bg-transparent font-medium text-fg outline-none" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
+          {searchQuery && <IconButton label="検索をクリア" size="sm" onClick={() => setSearchQuery('')}><X size={16} aria-hidden /></IconButton>}
+        </div>
+        {isPast && pastYears.length > 1 && (
+          <FilterRow label="年度">
+            <Chip active={pastYearFilter === 'all'} onClick={() => setPastYearFilter('all')} dark>すべての年度</Chip>
+            {pastYears.map(yearValue => <Chip key={yearValue} active={pastYearFilter === yearValue} onClick={() => setPastYearFilter(yearValue)} dark>{yearValue}年度</Chip>)}
+          </FilterRow>
+        )}
+        {!isPast && (
+          <>
+            <FilterRow label="実施月">
+              <Chip active={monthFilter === 'all' && !dayFilter} onClick={() => selectMonth('all')}>すべての月</Chip>
+              {monthOptions.map(key => {
+                const count = monthCounts.get(key) || 0;
+                return (
+                  <button key={key} type="button" disabled={count === 0} onClick={() => selectMonth(key)} aria-pressed={monthFilter === key}
+                    className={`min-h-9 rounded-full border-2 px-3 py-1.5 text-xs font-bold transition-all disabled:cursor-not-allowed disabled:opacity-35 ${monthFilter === key ? 'border-accent bg-accent text-accent-ink' : 'border-line bg-surface text-fg-muted hover:border-slate-300'}`}>
+                    {Number(key.slice(5))}月{count > 0 && <span className={`ml-1 ${monthFilter === key ? 'text-accent-ink/80' : 'text-slate-400'}`}>{count}</span>}
                   </button>
-
-                  <div className="space-y-4">
-                    <div>
-                      <p className="text-xs font-bold text-gray-400 pl-1 mb-2">理科</p>
-                      <div className="grid grid-cols-2 gap-2">{SCIENCE_UNITS.map(u => <button key={u.label} onClick={() => setUnitFilter(u.label)} className={`px-3 py-3 rounded-xl text-xs font-bold transition-all border-2 flex items-center gap-2 ${unitFilter === u.label ? `${u.bg} ${u.border} text-black border-current shadow-sm scale-105` : 'bg-white text-gray-500 border-gray-100 hover:border-gray-200'}`}><span className={`${u.color}`}>{u.icon}</span>{u.label}</button>)}</div>
-                    </div>
-                    <div>
-                      <p className="text-xs font-bold text-gray-400 pl-1 mb-2">社会</p>
-                      <div className="grid grid-cols-3 gap-2">{SOCIAL_UNITS.map(u => <button key={u.label} onClick={() => setUnitFilter(u.label)} className={`px-2 py-3 rounded-xl text-xs font-bold transition-all border-2 flex flex-col items-center justify-center gap-1 ${unitFilter === u.label ? `${u.bg} ${u.border} text-black border-current shadow-sm scale-105` : 'bg-white text-gray-500 border-gray-100 hover:border-gray-200'}`}><span className={`${u.color}`}>{u.icon}</span>{u.label}</button>)}</div>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* 検索中メッセージ */}
-              {searchQuery && (
-                // ★変更: 枠線を赤系に
-                <div className="bg-white p-8 rounded-[32px] border-2 border-red-100 text-center animate-in fade-in">
-                  <Search size={32} className="mx-auto text-red-200 mb-2"/>
-                  <p className="font-bold text-red-900">キーワード検索中</p>
-                  <p className="text-xs text-red-400">日付・単元に関係なく検索しています</p>
-                </div>
-              )}
-
-            </div>
-
-            {/* 共通フィルター (学年) */}
-            <div className="bg-white p-6 rounded-[32px] shadow-sm border border-gray-100 space-y-3">
-              <div className="flex items-center gap-2 text-xs font-black text-gray-400 uppercase tracking-wider"><Filter size={14}/> 絞り込み</div>
-              <div className="grid grid-cols-3 gap-2">
-                {[
-                  { key: 'current', label: '今年度', count: currentYearCount },
-                  { key: 'past', label: '過去', count: pastYearCount },
-                  { key: 'all', label: '全年度', count: allRecordings.length },
-                ].map(item => (
-                  <button
-                    key={item.key}
-                    onClick={() => setYearScopeFilter(item.key as 'all' | RecordingYearScope)}
-                    className={`rounded-xl border-2 px-2 py-3 text-center transition-all ${
-                      yearScopeFilter === item.key ? 'border-gray-800 bg-gray-800 text-white' : 'border-gray-100 bg-white text-gray-500'
-                    }`}
-                  >
-                    <span className="block text-[10px] font-black">{item.label}</span>
-                    <span className="text-xs font-black">{item.count}</span>
-                  </button>
-                ))}
-              </div>
-              <div className="grid grid-cols-3 gap-2">
-                {[
-                  { key: 'all', label: '全種別' },
-                  { key: 'regular', label: '通常授業' },
-                  { key: 'test_prep', label: `テスト対策 ${testPrepCount}` },
-                ].map(item => (
-                  <button
-                    key={item.key}
-                    onClick={() => setTypeFilter(item.key as 'all' | RecordingType)}
-                    className={`rounded-xl border-2 px-2 py-3 text-xs font-black transition-all ${
-                      typeFilter === item.key ? 'border-red-500 bg-red-500 text-white' : 'border-gray-100 bg-white text-gray-500'
-                    }`}
-                  >
-                    {item.label}
-                  </button>
-                ))}
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {['all', '中1', '中2', '中3'].map(g => (
-                  <button key={g} onClick={() => setGradeFilter(g)} className={`flex-1 min-w-[60px] px-3 py-3 rounded-xl text-xs font-bold transition-all border-2 ${gradeFilter === g ? 'bg-gray-800 text-white border-gray-800' : 'bg-white text-gray-500 border-gray-100'}`}>{g === 'all' ? '全学年' : g}</button>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          {/* === 右カラム: 動画リスト === */}
-          <div className="lg:col-span-7">
-            <div className="bg-white/50 backdrop-blur-sm p-4 rounded-[32px] border border-white/50 mb-4 shadow-sm flex items-center justify-between px-2 sticky top-0 z-10">
-                <h3 className="font-black text-gray-700 flex items-center gap-2 text-lg">
-                  {/* ★変更: アイコン背景を赤に */}
-                  <span className={`p-2 rounded-lg shadow-sm ${searchMode === 'unit' || searchQuery ? 'bg-pink-500 text-white' : 'bg-red-500 text-white'}`}>
-                    {searchQuery ? <Search size={20}/> : searchMode === 'unit' ? <Layers size={20}/> : <CalendarIcon size={20}/>}
-                  </span>
-                  {searchQuery ? (
-                    <span>検索結果</span>
-                  ) : searchMode === 'unit' ? (
-                    <span>{unitFilter === 'all' ? 'すべての動画' : `${unitFilter}の動画`} <span className="text-xs bg-gray-100 text-gray-500 px-2 py-1 rounded ml-1">{yearScopeFilter === 'current' ? '今年度' : yearScopeFilter === 'past' ? '過去' : '全年度'}</span></span>
-                  ) : (
-                    <span>{new Date(selectedDate).toLocaleDateString('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' })}<span className="text-sm font-medium text-gray-400 ml-2">の授業</span></span>
-                  )}
-                </h3>
-                <span className="bg-gray-800 text-white px-3 py-1 rounded-full text-xs font-bold shadow-sm">{displayVideos.length} Videos</span>
-            </div>
-
-            {displayVideos.length === 0 ? (
-              <div className="text-center py-20 bg-white rounded-[40px] border-4 border-dashed border-gray-100 text-gray-300 flex flex-col items-center">
-                <div className="bg-gray-50 p-6 rounded-full mb-4"><MonitorPlay size={48} className="text-gray-200"/></div>
-                <p className="text-lg font-bold text-gray-400">動画は見つかりませんでした</p>
-                {searchMode === 'calendar' && !searchQuery && <p className="text-xs text-red-400 mt-4 bg-red-50 px-3 py-1 rounded-full animate-pulse">※ 赤い点がある日付を選んでください</p>}
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {displayVideos.map((rec) => (
-                  <button key={rec.id} onClick={(e) => handleWatchVideo(e, rec)} className="block group w-full text-left">
-                    {/* ★変更: hover時のボーダーやシャドウを赤系に */}
-                    <div className="bg-white p-5 sm:p-6 rounded-[32px] shadow-sm border border-gray-100 hover:border-red-200 hover:shadow-xl hover:shadow-red-50 hover:-translate-y-1 transition-all duration-300 flex items-center justify-between gap-4 relative overflow-hidden">
-                      <div className="relative z-10 flex-1 min-w-0">
-                        <div className="flex flex-wrap items-center gap-2 mb-3">
-                          <span className="text-[10px] font-black px-3 py-1 rounded-full bg-gray-100 text-gray-600 border border-gray-200">{rec.grade} | {rec.subject}</span>
-                          <span className={rec.year_scope === 'current' ? 'text-[10px] font-black px-3 py-1 rounded-full bg-green-100 text-green-700 border border-green-200' : 'text-[10px] font-black px-3 py-1 rounded-full bg-gray-100 text-gray-500 border border-gray-200'}>{rec.school_year}年度</span>
-                          <span className={rec.recording_type === 'test_prep' ? 'text-[10px] font-black px-3 py-1 rounded-full bg-amber-100 text-amber-800 border border-amber-200' : 'text-[10px] font-black px-3 py-1 rounded-full bg-blue-50 text-blue-600 border border-blue-100'}>{rec.recording_type_label}</span>
-                          {(searchMode === 'unit' || searchQuery) && <span className="text-[10px] font-bold text-gray-400 bg-gray-50 px-2 py-1 rounded-lg">{rec.target_date}</span>}
-                          <span className="text-[10px] font-bold bg-yellow-100 text-yellow-800 px-2 py-1 rounded-full flex items-center gap-1 shadow-sm"><Coins size={10} /> 完了時に記録</span>
-                        </div>
-                        {/* ★変更: タイトルホバー色を赤に */}
-                        <h4 className="text-lg font-black text-gray-800 group-hover:text-red-600 transition-colors line-clamp-2">{rec.title}</h4>
-                        {rec.unit && <p className="mt-1 line-clamp-1 text-xs font-bold text-gray-400">{rec.unit}</p>}
-                        <div className="flex items-center gap-2 mt-2 text-xs font-bold text-gray-400">
-                          <span className="w-1.5 h-1.5 rounded-full bg-green-400"></span>
-                          {processingId === rec.id ? '視聴開始を記録中...' : '視聴開始を記録して開く'}
-                        </div>
-                      </div>
-                      
-                      {/* ★変更: 再生ボタンを赤に */}
-                      <div className="relative z-10 w-12 h-12 rounded-full bg-red-50 text-red-500 flex items-center justify-center group-hover:bg-red-500 group-hover:text-white transition-all shadow-sm shrink-0">
-                        {processingId === rec.id ? <Loader2 className="animate-spin" /> : <PlayCircle size={28} fill="currentColor" strokeWidth={2}/>}
-                      </div>
-                    </div>
-                  </button>
-                ))}
+                );
+              })}
+            </FilterRow>
+            {shownCalendarMonth && (
+              <RecordingCalendar
+                month={shownCalendarMonth}
+                records={filteredWithoutDate}
+                selectedDay={dayFilter}
+                canPrev={monthOptions.some(key => key < shownCalendarMonth)}
+                canNext={monthOptions.some(key => key > shownCalendarMonth)}
+                onMove={offset => {
+                  const [y, m] = shownCalendarMonth.split('-').map(Number);
+                  const date = new Date(y, m - 1 + offset, 1);
+                  setCalendarMonth(`${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`);
+                }}
+                onSelectDay={selectDay}
+              />
+            )}
+            {dayFilter && (
+              <div className="flex items-center gap-2 rounded-btn bg-accent-soft px-3 py-2 text-xs font-bold text-accent">
+                <CalendarDays size={15} aria-hidden />{formatDate(dayFilter, { withWeekday: false })}の録画を表示中
+                <button type="button" onClick={() => setDayFilter('')} className="ml-auto min-h-9 rounded-full bg-surface px-3 text-xs font-bold text-accent hover:bg-white">日付の選択を解除</button>
               </div>
             )}
-          </div>
+          </>
+        )}
+        <FilterRow label="学年">
+          {['all', '中1', '中2', '中3'].map(g => <Chip key={g} active={gradeFilter === g} onClick={() => setGradeFilter(g)} dark={isPast}>{g === 'all' ? 'すべて' : g}</Chip>)}
+        </FilterRow>
+        <FilterRow label="科目">
+          {['all', '理科', '社会'].map(value => <Chip key={value} active={subjectFilter === value} onClick={() => { setSubjectFilter(value); setUnitFilter('all'); }} dark={isPast}>{value === 'all' ? 'すべて' : value}</Chip>)}
+          <span className="mx-1 h-5 w-px bg-line" />
+          {unitOptions.map(unit => <Chip key={unit.label} active={unitFilter === unit.label} onClick={() => setUnitFilter(unitFilter === unit.label ? 'all' : unit.label)} dark={isPast}><span className="flex items-center gap-1">{unit.icon}{unit.label}</span></Chip>)}
+        </FilterRow>
+        <FilterRow label="種類">
+          {([['all', 'すべて'], ['regular', '通常授業'], ['test_prep', 'テスト対策'], ['group_meeting', 'グループミーティング']] as const).map(([key, label]) => <Chip key={key} active={typeFilter === key} onClick={() => setTypeFilter(key)} dark={isPast}>{label}</Chip>)}
+        </FilterRow>
+      </div>
 
+      {listError ? (
+        <ErrorState title="録画を読み込めませんでした" message={listError} onRetry={() => setListReloadKey(key => key + 1)} />
+      ) : displayVideos.length === 0 ? (
+        <EmptyState
+          icon={MonitorPlay}
+          title={`${isPast ? '過去の録画' : '今年度の録画'}は見つかりませんでした`}
+          description="絞り込みを「すべて」にすると見つかるかもしれません"
+        />
+      ) : (
+        <div className="space-y-8">
+          {groups.map(([key, items]) => (
+            <section key={key}>
+              <div className="mb-3 flex items-center gap-3 px-1">
+                <h2 className={`flex items-center gap-2 text-lg font-bold ${isPast ? 'text-slate-700' : 'text-fg'}`}>
+                  {isPast ? <History size={20} className="text-slate-500" aria-hidden /> : <CalendarDays size={20} className="text-accent" aria-hidden />}
+                  {groupLabel(key)}
+                </h2>
+                <span className="rounded-full bg-slate-800 px-2.5 py-0.5 text-xs font-bold text-white">{items.length}本</span>
+                <span className="h-px flex-1 bg-line" />
+              </div>
+              <div className="grid gap-3 md:grid-cols-2">
+                {items.map(rec => <RecordingCard key={rec.id} rec={rec} past={isPast} busy={processingId === rec.id} onWatch={(event) => handleWatchVideo(event, rec)} />)}
+              </div>
+            </section>
+          ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
+
+function RecordingCalendar({ month, records, selectedDay, canPrev, canNext, onMove, onSelectDay }: {
+  month: string;
+  records: RecordingItem[];
+  selectedDay: string;
+  canPrev: boolean;
+  canNext: boolean;
+  onMove: (offset: number) => void;
+  onSelectDay: (date: string) => void;
+}) {
+  const [year, monthNumber] = month.split('-').map(Number);
+  const firstWeekday = new Date(year, monthNumber - 1, 1).getDay();
+  const daysInMonth = new Date(year, monthNumber, 0).getDate();
+  const counts = new Map<string, number>();
+  records.forEach(rec => { if (rec.target_date.startsWith(month)) counts.set(rec.target_date, (counts.get(rec.target_date) || 0) + 1); });
+  const todayKey = jstDateKey();
+  const cells: (string | null)[] = [
+    ...Array.from({ length: firstWeekday }, () => null),
+    ...Array.from({ length: daysInMonth }, (_, index) => `${month}-${String(index + 1).padStart(2, '0')}`),
+  ];
+  return (
+    <div className="rounded-btn border border-accent/20 bg-accent-soft/40 p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <IconButton label="前の月" size="sm" onClick={() => onMove(-1)} disabled={!canPrev}><ChevronLeft size={18} aria-hidden /></IconButton>
+        <p className="text-sm font-bold text-fg">{year}年 <span className="text-accent">{monthNumber}月</span> の授業</p>
+        <IconButton label="次の月" size="sm" onClick={() => onMove(1)} disabled={!canNext}><ChevronRight size={18} aria-hidden /></IconButton>
+      </div>
+      <div className="grid grid-cols-7 gap-1 text-center">
+        {WEEKDAYS.map((label, index) => (
+          <span key={label} className={`py-1 text-xs font-bold ${index === 0 ? 'text-rose-400' : index === 6 ? 'text-sky-500' : 'text-fg-muted'}`}>{label}</span>
+        ))}
+        {cells.map((date, index) => {
+          if (!date) return <span key={`blank-${index}`} />;
+          const count = counts.get(date) || 0;
+          const selected = selectedDay === date;
+          return (
+            <button key={date} type="button" disabled={count === 0} onClick={() => onSelectDay(date)}
+              aria-label={`${Number(date.slice(8))}日 録画${count}本`}
+              aria-pressed={selected}
+              className={`flex aspect-square flex-col items-center justify-center rounded-input text-xs font-bold transition-all sm:aspect-auto sm:h-11 ${
+                selected ? 'bg-accent text-accent-ink shadow-sm'
+                  : count > 0 ? 'bg-surface text-fg ring-1 ring-accent/20 hover:ring-accent/50'
+                    : 'text-slate-300'
+              } ${date === todayKey && !selected ? 'ring-2 ring-accent' : ''}`}>
+              {Number(date.slice(8))}
+              {count > 0 && <span className={`mt-0.5 text-[11px] leading-none ${selected ? 'text-accent-ink/85' : 'text-accent'}`}>{count}本</span>}
+            </button>
+          );
+        })}
       </div>
     </div>
+  );
+}
+
+function FilterRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <span className="w-12 shrink-0 text-xs font-bold text-fg-muted">{label}</span>
+      {children}
+    </div>
+  );
+}
+
+function Chip({ active, onClick, children, dark }: { active: boolean; onClick: () => void; children: React.ReactNode; dark?: boolean }) {
+  return (
+    <button type="button" aria-pressed={active} onClick={onClick} className={`min-h-9 rounded-full border-2 px-3 py-1.5 text-xs font-bold transition-all ${active ? (dark ? 'border-slate-800 bg-slate-800 text-white' : 'border-accent bg-accent text-accent-ink') : 'border-line bg-surface text-fg-muted hover:border-slate-300'}`}>
+      {children}
+    </button>
+  );
+}
+
+function RecordingCard({ rec, past, busy, onWatch }: { rec: RecordingItem; past: boolean; busy: boolean; onWatch: (event: React.MouseEvent) => void }) {
+  const valid = /^\d{4}-\d{2}-\d{2}$/.test(rec.target_date);
+  const weekday = valid ? weekdayFromDateKey(rec.target_date) : '';
+  return (
+    <button type="button" onClick={onWatch} className="group block w-full text-left">
+      <div className={`relative flex items-stretch gap-4 overflow-hidden rounded-card border p-4 transition-all duration-300 hover:-translate-y-0.5 ${past ? 'border-slate-200 bg-slate-50 hover:border-slate-400 hover:shadow-card' : 'cb-card hover:ring-2 hover:ring-accent/30'}`}>
+        <div className={`flex w-16 shrink-0 flex-col items-center justify-center rounded-btn ${past ? 'bg-slate-200 text-slate-600' : 'bg-accent-soft text-accent'}`}>
+          {past && <span className="text-[11px] font-bold">{rec.school_year}年度</span>}
+          <span className="text-xs font-bold">{valid ? `${Number(rec.target_date.slice(5, 7))}月` : ''}</span>
+          <span className="text-2xl font-black leading-none">{valid ? Number(rec.target_date.slice(8, 10)) : '-'}</span>
+          <span className="text-xs font-medium">{weekday ? `(${weekday})` : ''}</span>
+        </div>
+        <div className="min-w-0 flex-1 py-0.5">
+          <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
+            {past
+              ? <span className="rounded-full bg-slate-700 px-2 py-0.5 text-[11px] font-bold text-white">過去の録画</span>
+              : <span className="rounded-full bg-emerald-500 px-2 py-0.5 text-[11px] font-bold text-white">今年度</span>}
+            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-600">{rec.grade} ・ {rec.subject}</span>
+            {rec.recording_type === 'test_prep' && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-bold text-amber-800">テスト対策</span>}
+            {rec.recording_type === 'group_meeting' && <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-bold text-sky-800">グループミーティング</span>}
+            {rec.watch_status === 'completed' && <StatusPill tone="success" icon={<CheckCircle2 size={12} aria-hidden />} className="text-[11px]">視聴済み</StatusPill>}
+            {rec.watch_status === 'partial' && <StatusPill tone="info" className="text-[11px]">途中まで</StatusPill>}
+          </div>
+          <h3 className={`line-clamp-2 text-base font-bold ${past ? 'text-slate-700 group-hover:text-slate-900' : 'text-fg group-hover:text-accent'}`}>{rec.title}</h3>
+          {rec.unit && rec.unit !== rec.title && <p className="mt-0.5 line-clamp-1 text-xs text-fg-muted">{rec.unit}</p>}
+          <p className="mt-1.5 text-xs text-fg-muted">{busy ? '視聴開始を記録中...' : '押すと録画が開きます'}</p>
+        </div>
+        <div className={`flex h-12 w-12 shrink-0 items-center justify-center self-center rounded-full transition-all ${past ? 'bg-slate-200 text-slate-600 group-hover:bg-slate-700 group-hover:text-white' : 'bg-accent-soft text-accent group-hover:bg-accent group-hover:text-accent-ink'}`}>
+          {busy ? <Spinner size={22} label="視聴開始を記録中" className="text-current" /> : <PlayCircle size={28} strokeWidth={2.2} aria-hidden />}
+        </div>
+      </div>
+    </button>
   );
 }

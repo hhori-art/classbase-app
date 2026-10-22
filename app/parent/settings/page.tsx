@@ -4,14 +4,30 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { auth } from '@/lib/firebase';
 import { signInWithEmailAndPassword } from 'firebase/auth';
-import { Bell, ChevronRight, Lock, Mail, MessageCircle, Save, Shield, Smartphone } from 'lucide-react';
+import { Bell, ChevronRight, Lock, Mail, MessageCircle, Settings, Shield, Smartphone } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
 import LineLinkPanel from '@/app/components/LineLinkPanel';
+import PushNotificationToggle from '@/app/components/PushNotificationToggle';
 import RecoveryEmailSettings from '@/app/components/RecoveryEmailSettings';
+import SignedInPasswordHelp, { displayLoginId } from '@/app/components/SignedInPasswordHelp';
+import { ParentCard, ParentPageHeader, ParentSectionTitle } from '@/app/components/parent/ParentUI';
+import { Button, Spinner, useToast } from '@/app/components/ui';
+import { TERMS } from '@/lib/glossary';
+
+const ITEMS = [
+  { key: 'email', label: 'メール通知', icon: Mail },
+  { key: 'line', label: 'LINE通知', icon: MessageCircle },
+  { key: 'in_app', label: 'アプリ内通知', icon: Smartphone },
+  { key: 'class_start', label: '授業開始通知', icon: Bell },
+  { key: 'homework', label: '宿題通知', icon: Bell },
+  { key: 'announcements', label: `${TERMS.news}の通知`, icon: Bell },
+] as const;
+type PrefKey = typeof ITEMS[number]['key'];
 
 export default function ParentSettingsPage() {
-  const { profile } = useAuth();
-  const [prefs, setPrefs] = useState({
+  const { user, profile } = useAuth();
+  const toast = useToast();
+  const [prefs, setPrefs] = useState<Record<PrefKey, boolean>>({
     email: false,
     line: false,
     in_app: true,
@@ -19,7 +35,7 @@ export default function ParentSettingsPage() {
     homework: true,
     announcements: true,
   });
-  const [saving, setSaving] = useState(false);
+  const [savingKey, setSavingKey] = useState<PrefKey | ''>('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [passwordMessage, setPasswordMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -31,32 +47,32 @@ export default function ParentSettingsPage() {
     }
   }, [profile]);
 
-  const save = async () => {
-    setSaving(true);
+  const lineLinked = Boolean(String(profile?.line_user_id || '').trim());
+
+  /** 切り替えたらすぐ保存する。失敗したら元に戻して知らせる。 */
+  const toggle = async (key: PrefKey, value: boolean) => {
+    if (savingKey) return;
+    const previous = prefs[key];
+    setPrefs(current => ({ ...current, [key]: value }));
+    setSavingKey(key);
     try {
       const token = await auth.currentUser?.getIdToken();
       const res = await fetch('/api/notifications/preferences', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify(prefs),
+        body: JSON.stringify({ [key]: value }),
       });
-      if (!res.ok) throw new Error('failed');
-      alert('通知設定を保存しました。');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) throw new Error('failed');
+      toast.success(`${ITEMS.find(item => item.key === key)?.label || '通知'}を${value ? 'オン' : 'オフ'}にしました。`);
     } catch {
-      alert('保存に失敗しました。');
+      setPrefs(current => ({ ...current, [key]: previous }));
+      toast.error('保存できませんでした。通信状態を確認して、もう一度お試しください。');
     } finally {
-      setSaving(false);
+      setSavingKey('');
     }
   };
 
-  const items = [
-    { key: 'email', label: 'メール通知', icon: Mail },
-    { key: 'line', label: 'LINE通知', icon: MessageCircle },
-    { key: 'in_app', label: 'アプリ内通知', icon: Smartphone },
-    { key: 'class_start', label: '授業開始通知', icon: Bell },
-    { key: 'homework', label: '宿題通知', icon: Bell },
-    { key: 'announcements', label: 'お知らせ通知', icon: Bell },
-  ] as const;
 
   const changePassword = async () => {
     if (newPassword.length < 6) return setPasswordMessage({ type: 'error', text: 'パスワードは6文字以上で入力してください。' });
@@ -87,59 +103,80 @@ export default function ParentSettingsPage() {
     }
   };
 
+  const inputClass = 'min-h-11 w-full rounded-input border border-line bg-surface px-3 text-sm text-fg focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30';
+
   return (
     <div className="mx-auto max-w-2xl space-y-4">
-      <div>
-        <p className="text-xs font-black uppercase tracking-wider text-indigo-400">Notification</p>
-        <h2 className="text-2xl font-black text-slate-900">通知設定</h2>
-      </div>
-      <Link href="/manual" className="flex min-h-12 items-center justify-between rounded-2xl border border-indigo-200 bg-indigo-50 px-5 py-3 text-sm font-black text-indigo-800">保護者向け操作マニュアル <ChevronRight size={19} /></Link>
+      <ParentPageHeader eyebrow="アカウント" title="設定" description="パスワード・LINE連携・通知の受け取り方を変更できます。" icon={Settings} />
+      <Link href="/manual" className="cb-card flex min-h-12 items-center justify-between px-5 py-3 text-sm font-bold text-accent hover:bg-accent-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">保護者向け操作マニュアル <ChevronRight size={19} aria-hidden /></Link>
       {profile?.isFirstLogin === true && (
-        <div className="rounded-2xl border-2 border-amber-300 bg-amber-50 p-4 text-sm font-black leading-relaxed text-amber-900">
+        <div role="status" className="rounded-card border-2 border-warning/40 bg-warning-soft p-4 text-sm font-bold leading-relaxed text-warning">
           初回ログインのため、新しいパスワードを設定してください。変更後に通常画面を利用できます。
         </div>
       )}
-      <div className="rounded-2xl bg-white p-4 shadow-sm">
-        <h3 className="flex items-center gap-2 text-sm font-black text-slate-800"><Lock size={18} /> パスワード変更</h3>
-        <div className="mt-4 space-y-3">
-          <input type="password" autoComplete="new-password" value={newPassword} onChange={event => setNewPassword(event.target.value)} placeholder="新しいパスワード（6文字以上）" className="w-full rounded-xl border border-slate-200 px-3 py-3 text-sm font-bold" />
-          <input type="password" autoComplete="new-password" value={confirmPassword} onChange={event => setConfirmPassword(event.target.value)} placeholder="もう一度入力" className="w-full rounded-xl border border-slate-200 px-3 py-3 text-sm font-bold" />
-          {passwordMessage && <p className={`flex items-center gap-2 text-xs font-black ${passwordMessage.type === 'success' ? 'text-emerald-600' : 'text-red-600'}`}><Shield size={15} />{passwordMessage.text}</p>}
-          <button onClick={changePassword} disabled={changingPassword} className="w-full rounded-xl bg-indigo-600 py-3 text-sm font-black text-white disabled:opacity-60">
+      <ParentCard>
+        <ParentSectionTitle icon={Lock} title="パスワード変更" />
+        <div className="space-y-3">
+          <SignedInPasswordHelp
+            loginId={displayLoginId(profile, user?.email)}
+            hasVerifiedRecoveryEmail={Boolean(profile?.recovery_email && profile?.recovery_email_verified_at)}
+            audience="parent"
+          />
+          <label className="block text-sm font-bold text-fg">新しいパスワード
+            <input type="password" autoComplete="new-password" value={newPassword} onChange={event => setNewPassword(event.target.value)} placeholder="6文字以上" className={`mt-1 ${inputClass}`} />
+          </label>
+          <label className="block text-sm font-bold text-fg">もう一度入力
+            <input type="password" autoComplete="new-password" value={confirmPassword} onChange={event => setConfirmPassword(event.target.value)} placeholder="確認のため同じものを入力" className={`mt-1 ${inputClass}`} />
+          </label>
+          {passwordMessage && <p role={passwordMessage.type === 'error' ? 'alert' : 'status'} className={`flex items-center gap-2 text-sm font-bold ${passwordMessage.type === 'success' ? 'text-success' : 'text-danger'}`}><Shield size={15} aria-hidden />{passwordMessage.text}</p>}
+          <Button onClick={changePassword} loading={changingPassword} fullWidth>
             {changingPassword ? '変更中...' : 'パスワードを変更'}
-          </button>
+          </Button>
         </div>
-      </div>
+      </ParentCard>
       <LineLinkPanel
         role="parent"
         lineUserId={profile?.line_user_id}
         description="連携すると、授業開始・欠席連絡・登録依頼・お知らせなどをLINEでも受け取れます。"
         compact
       />
-      <div className="rounded-2xl bg-white p-4 shadow-sm">
+      <PushNotificationToggle compact />
+      <ParentCard>
         <RecoveryEmailSettings
           currentEmail={profile?.recovery_email}
           verified={Boolean(profile?.recovery_email_verified_at)}
           compact
         />
-      </div>
-      <div className="rounded-2xl bg-white p-4 shadow-sm">
-        {items.map(item => {
+      </ParentCard>
+      <ParentCard>
+        <ParentSectionTitle icon={Bell} title="通知の受け取り方" />
+        <p className="mb-2 text-sm text-fg-muted">切り替えるとすぐに保存されます。</p>
+        {ITEMS.map(item => {
           const Icon = item.icon;
+          const lineLocked = item.key === 'line' && !lineLinked;
+          const id = `pref-${item.key}`;
           return (
-            <label key={item.key} className="flex items-center justify-between border-b border-slate-100 py-4 last:border-b-0">
-              <span className="flex items-center gap-3 text-sm font-black text-slate-700">
-                <Icon size={18} className="text-indigo-500" />
-                {item.label}
-              </span>
-              <input type="checkbox" checked={prefs[item.key]} onChange={e => setPrefs(prev => ({ ...prev, [item.key]: e.target.checked }))} className="h-5 w-5 accent-indigo-600" />
-            </label>
+            <div key={item.key} className="flex min-h-12 items-center justify-between gap-3 border-b border-line py-3 last:border-b-0">
+              <label htmlFor={id} className={`flex flex-1 items-center gap-3 text-sm font-bold ${lineLocked ? 'cursor-not-allowed text-fg-muted' : 'cursor-pointer text-fg'}`}>
+                <Icon size={18} className={lineLocked ? 'text-fg-muted' : 'text-accent'} aria-hidden />
+                <span>
+                  {item.label}
+                  {lineLocked && <span className="mt-0.5 block text-xs font-medium text-fg-muted">LINE連携をすると使えます</span>}
+                </span>
+              </label>
+              {savingKey === item.key && <Spinner label="保存中" size={16} />}
+              <input
+                id={id}
+                type="checkbox"
+                checked={lineLocked ? false : prefs[item.key]}
+                disabled={lineLocked || Boolean(savingKey)}
+                onChange={event => void toggle(item.key, event.target.checked)}
+                className="h-5 w-5 accent-accent disabled:cursor-not-allowed disabled:opacity-50"
+              />
+            </div>
           );
         })}
-      </div>
-      <button onClick={save} disabled={saving} className="flex w-full items-center justify-center gap-2 rounded-2xl bg-slate-900 py-4 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-60">
-        <Save size={18} /> {saving ? '保存中...' : '保存する'}
-      </button>
+      </ParentCard>
     </div>
   );
 }

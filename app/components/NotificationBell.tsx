@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Bell } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
@@ -16,10 +16,13 @@ type NotificationItem = {
   read?: boolean;
 };
 
+/** 通知の一覧で既読にしたときに出すイベント。ベルの未読数をすぐ読み直す。 */
+export const NOTIFICATIONS_CHANGED_EVENT = 'classbase:notifications-changed';
+
 export default function NotificationBell({ href, className = '' }: Props) {
   const { user, profile } = useAuth();
   const { play } = useSound(profile?.settings?.sound_se !== false);
-  const [items, setItems] = useState<NotificationItem[]>([]);
+  const [unreadCount, setUnreadCount] = useState(0);
   const previousUnreadRef = useRef<number | null>(null);
   const requestInFlightRef = useRef(false);
   const lastLoadedAtRef = useRef(0);
@@ -33,18 +36,22 @@ export default function NotificationBell({ href, className = '' }: Props) {
       try {
         const token = await user.getIdToken();
         if (!token) return;
-        const res = await fetch('/api/notifications?limit=20', {
+        const res = await fetch('/api/notifications?limit=1', {
           headers: { Authorization: `Bearer ${token}` },
         });
         const data = await res.json().catch(() => ({}));
         if (!cancelled && data.ok) {
-          const nextItems = data.notifications || [];
-          const unreadCount = nextItems.filter((item: NotificationItem) => !item.read).length;
-          if (previousUnreadRef.current !== null && unreadCount > previousUnreadRef.current) {
+          const nextItems: NotificationItem[] = data.notifications || [];
+          // サーバーが自分宛ての未読をすべて数えた値を使う（最新20件だけでは数え切れない）。
+          const serverCount = Number(data.unread_count);
+          const nextUnread = Number.isFinite(serverCount) && serverCount >= 0
+            ? serverCount
+            : nextItems.filter(item => !item.read).length;
+          if (previousUnreadRef.current !== null && nextUnread > previousUnreadRef.current) {
             play('notification');
           }
-          previousUnreadRef.current = unreadCount;
-          setItems(nextItems);
+          previousUnreadRef.current = nextUnread;
+          setUnreadCount(nextUnread);
           lastLoadedAtRef.current = Date.now();
         }
       } catch (e) {
@@ -57,22 +64,29 @@ export default function NotificationBell({ href, className = '' }: Props) {
     const loadIfVisible = () => {
       if (document.visibilityState === 'visible' && Date.now() - lastLoadedAtRef.current >= 5 * 60 * 1000) void load();
     };
+    const reloadNow = () => { void load(); };
     const interval = window.setInterval(loadIfVisible, 5 * 60 * 1000);
     document.addEventListener('visibilitychange', loadIfVisible);
+    window.addEventListener(NOTIFICATIONS_CHANGED_EVENT, reloadNow);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
       document.removeEventListener('visibilitychange', loadIfVisible);
+      window.removeEventListener(NOTIFICATIONS_CHANGED_EVENT, reloadNow);
     };
   }, [user, play]);
 
-  const unreadCount = useMemo(() => items.filter(item => !item.read).length, [items]);
-
+  const label = unreadCount > 0 ? `通知（未読${unreadCount}件）` : '通知';
   return (
-    <Link href={href} className={`relative rounded-xl bg-slate-100 p-2 text-slate-500 hover:bg-indigo-50 hover:text-indigo-600 ${className}`} title="通知">
-      <Bell size={18} />
+    <Link
+      href={href}
+      aria-label={label}
+      title={label}
+      className={`relative inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-btn border border-line bg-surface text-fg-muted transition-colors hover:bg-accent-soft hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${className}`}
+    >
+      <Bell size={18} aria-hidden />
       {unreadCount > 0 && (
-        <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-rose-500 px-1 text-[10px] font-black text-white">
+        <span aria-hidden className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-danger px-1 text-[11px] font-bold text-white">
           {unreadCount > 9 ? '9+' : unreadCount}
         </span>
       )}

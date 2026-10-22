@@ -7,6 +7,7 @@ import {
   type AdminAppPermissions,
 } from '@/lib/admin-app-permissions';
 import { getServerUser, jsonError } from '@/lib/server-auth';
+import { writeAuditLog } from '@/lib/server/audit-log';
 
 export const runtime = 'nodejs';
 
@@ -22,6 +23,7 @@ function parsePermissions(value: unknown): AdminAppPermissions {
     science_social: source.science_social === true,
     eiken: source.eiken === true,
     attendance: source.attendance === true,
+    online_school: source.online_school === true,
   };
 }
 
@@ -115,6 +117,7 @@ export async function PATCH(request: NextRequest) {
     if (!isConfigurableAdminRole(targetRole)) throw new Error('admin-account-required');
 
     const permissions = parsePermissions(body.permissions);
+    const previousPermissions = normalizeAdminAppPermissions(target.data()?.role, target.data() || {});
     await targetRef.update({
       admin_permissions: permissions,
       eiken_admin: permissions.eiken,
@@ -132,6 +135,15 @@ export async function PATCH(request: NextRequest) {
       actor_uid: actor.uid,
       actor_email: actor.email || '',
       created_at: FieldValue.serverTimestamp(),
+    });
+    await writeAuditLog({
+      actor,
+      action: 'app_permission_change',
+      target_type: 'user',
+      target_id: userId,
+      target_label: String(target.data()?.name || target.data()?.teacher_name || target.data()?.email || ''),
+      school_id: String(target.data()?.school_id || target.data()?.school || ''),
+      details: { permissions, previous_permissions: previousPermissions },
     });
 
     return Response.json({
@@ -189,6 +201,15 @@ export async function POST(request: NextRequest) {
       actor_uid: actor.uid,
       actor_email: actor.email || '',
       created_at: FieldValue.serverTimestamp(),
+    });
+
+    await writeAuditLog({
+      actor,
+      action: 'app_permission_initialize',
+      target_type: 'user_bulk',
+      target_id: 'admin_accounts',
+      target_label: `管理者 ${targets.length}件`,
+      details: { count: targets.length },
     });
 
     return Response.json({ ok: true, initialized_count: targets.length });

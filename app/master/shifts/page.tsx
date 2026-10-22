@@ -3,8 +3,8 @@
 import { useState, useEffect } from 'react';
 import { auth, db } from '@/lib/firebase';
 import { collection, query, where, getDocs, addDoc, deleteDoc, doc, updateDoc, orderBy, limit, getDoc } from 'firebase/firestore';
-import { Briefcase, Trash2, ArrowLeft, Video, Save, Loader2, Link as LinkIcon, Users, MapPin, User, GripVertical, CheckCircle, HelpCircle, Clock, KeyRound, Zap, BarChart2, X, Settings, AlertTriangle, Bell, XCircle, ClipboardCheck, Search, ChevronDown, ChevronUp, CalendarClock, UserPlus } from 'lucide-react';
-import Link from 'next/link';
+import { reportAuditLog } from '@/app/components/master/audit-log-client';
+import { Trash2, Video, Save, Loader2, Link as LinkIcon, Users, MapPin, User, GripVertical, CheckCircle, HelpCircle, Clock, KeyRound, Zap, BarChart2, X, Settings, AlertTriangle, Bell, XCircle, ClipboardCheck, Search, ChevronDown, ChevronUp, CalendarClock, UserPlus } from 'lucide-react';
 import { usePathname } from 'next/navigation';
 import ShiftImportButton from '@/app/components/ShiftImportButton';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, CartesianGrid } from 'recharts';
@@ -13,6 +13,9 @@ import { jstDateKey } from '@/lib/date-key';
 import { selectDisplayShiftAssignments } from '@/lib/shift-assignment-display';
 import { availabilityStatusForWeeklyDay, weekdayKeyForDate, weeklyDaySummary, type TeacherAvailabilityProfile } from '@/lib/teacher-weekly-availability';
 import { isConfigurableAdminRole } from '@/lib/admin-app-permissions';
+import AdminPageHeader from '@/app/components/master/AdminPageHeader';
+import { Button, ButtonLink, buttonClass, EmptyState, ErrorState, IconButton, ListSkeleton, Modal, Spinner, useConfirm, useToast } from '@/app/components/ui';
+import { formatDate } from '@/lib/format';
 
 // --- 型定義 ---
 type ShiftAssignment = {
@@ -102,6 +105,8 @@ export default function ShiftManagementPage() {
   const pathname = usePathname();
   const teacherSurface = pathname.startsWith('/teacher/');
   const { user, profile } = useAuth();
+  const toast = useToast();
+  const confirm = useConfirm();
   const schoolAdminReadOnly = isConfigurableAdminRole(profile?.role) && profile?.role !== 'master';
   const [date, setDate] = useState(jstDateKey());
   const [dayOfWeek, setDayOfWeek] = useState('');
@@ -122,6 +127,7 @@ export default function ShiftManagementPage() {
   const [isSurveyModalOpen, setIsSurveyModalOpen] = useState(false);
   const [selectedTeacherForResults, setSelectedTeacherForResults] = useState<{id: string, name: string} | null>(null);
   const [surveyLoading, setSurveyLoading] = useState(false);
+  const [surveyError, setSurveyError] = useState(false);
 
   // ドラッグ＆ドロップ用
   const [draggedTeacher, setDraggedTeacher] = useState<Teacher | null>(null);
@@ -140,6 +146,7 @@ export default function ShiftManagementPage() {
     targetClassId: ''
   });
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [relinking, setRelinking] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [teacherSearch, setTeacherSearch] = useState('');
@@ -153,6 +160,7 @@ export default function ShiftManagementPage() {
   // データ取得
   const fetchData = async () => {
     try {
+      setLoadError(false);
       const tQ = query(collection(db, 'users'), where('role', '==', 'teacher'));
       const avQ = query(collection(db, 'teacher_availability'), where('available_date', '==', date));
       const asQ = query(collection(db, 'shift_assignments'), where('target_date', '==', date));
@@ -188,7 +196,12 @@ export default function ShiftManagementPage() {
         setSurveyQuestions(tmplSnap.data().questions || []);
       }
 
-    } catch (e) { console.error(e); } finally { setLoading(false); }
+    } catch (e) { console.error(e); setLoadError(true); } finally { setLoading(false); }
+  };
+
+  const reloadData = () => {
+    setLoading(true);
+    fetchData();
   };
 
   const notifyUnassignedTeachers = async () => {
@@ -210,7 +223,12 @@ export default function ShiftManagementPage() {
   };
 
   const relinkShiftTeachers = async () => {
-    if (!confirm(`${date} の講師配置を、講師名から再照合して紐付け直しますか？`)) return;
+    if (!(await confirm({
+      title: `${date} の講師配置を再照合しますか？`,
+      message: 'この日の講師配置を、講師名から再照合して紐付け直します。',
+      confirmLabel: '再照合する',
+      tone: 'danger',
+    }))) return;
     setRelinking(true);
     try {
       const token = await user?.getIdToken();
@@ -222,10 +240,10 @@ export default function ShiftManagementPage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || 'relink failed');
-      alert(`再照合しました。\n更新: ${data.updated}件\n未解決: ${data.unresolved}件`);
+      toast.success(`再照合しました。更新 ${data.updated}件／未解決 ${data.unresolved}件`);
       await fetchData();
     } catch (e: any) {
-      alert(`紐付け再照合に失敗しました: ${e.message || e}`);
+      toast.error(`紐付けを再照合できませんでした。${e.message || e}`);
     } finally {
       setRelinking(false);
     }
@@ -302,11 +320,14 @@ export default function ShiftManagementPage() {
       }
       
       fetchData();
-    } catch (e: any) { alert('エラー: ' + e.message); }
+    } catch (e: any) {
+      console.error(e);
+      toast.error(`配置できませんでした。${e?.message || ''}`);
+    }
   };
 
   const handleManualAssign = () => {
-    if (!form.userId) return alert('先生を選択してください');
+    if (!form.userId) return toast.error('講師を選択してください。');
     let targetClass: ShiftAssignment | undefined = undefined;
     if (form.role === 'sub' && form.targetClassId) {
       targetClass = assignments.find(a => a.id === form.targetClassId);
@@ -340,24 +361,41 @@ export default function ShiftManagementPage() {
     const actualPeriodStr = periodStr || (targetClass?.note.includes('1限') ? '1限' : '2限');
 
     if (zone === 'main' && targetClass) {
-      if (!confirm(`「${targetClass.target_subject}」の担当講師を\n「${draggedTeacher.student_name || draggedTeacher.name}」先生に変更しますか？`)) return;
+      if (!(await confirm({ title: `「${targetClass.target_subject}」の担当講師を「${draggedTeacher.student_name || draggedTeacher.name}」先生に変更しますか？`, confirmLabel: '変更する' }))) return;
       await executeAssign(draggedTeacher.id, 'main', targetClass, actualPeriodStr);
     } else if (zone === 'sub' && targetClass) {
-      if (!confirm(`「${targetClass.target_subject}」に\n「${draggedTeacher.student_name || draggedTeacher.name}」先生をサポートとして追加しますか？`)) return;
+      if (!(await confirm({ title: `「${targetClass.target_subject}」に「${draggedTeacher.student_name || draggedTeacher.name}」先生をサポートとして追加しますか？`, confirmLabel: '追加する' }))) return;
       await executeAssign(draggedTeacher.id, 'sub', targetClass, actualPeriodStr);
     } else if (zone === 'general') {
-      if (!confirm(`「${actualPeriodStr}」の全体サポートに\n「${draggedTeacher.student_name || draggedTeacher.name}」先生を追加しますか？`)) return;
+      if (!(await confirm({ title: `「${actualPeriodStr}」の全体サポートに「${draggedTeacher.student_name || draggedTeacher.name}」先生を追加しますか？`, confirmLabel: '追加する' }))) return;
       await executeAssign(draggedTeacher.id, 'general', undefined, actualPeriodStr);
     }
     setDraggedTeacher(null);
   };
 
   const handleDelete = async (id: string) => {
-    if(!confirm('この配置を解除しますか？')) return;
+    const target = assignments.find(a => a.id === id);
+    const targetName = target?.teacher_name ? `「${target.teacher_name}」先生の配置` : 'この配置';
+    if (!(await confirm({
+      title: `${targetName}を解除しますか？`,
+      message: target ? [target.note, target.target_grade, target.target_subject, target.target_detail_subject].filter(Boolean).join(' ') : undefined,
+      confirmLabel: '解除する',
+      tone: 'danger',
+    }))) return;
     try {
       await deleteDoc(doc(db, 'shift_assignments', id));
       setAssignments(prev => prev.filter(a => a.id !== id));
-    } catch (e: any) { alert('削除エラー: ' + e.message); }
+      void reportAuditLog({
+        action: 'shift_unassign',
+        target_type: 'shift_assignment',
+        target_id: id,
+        target_label: [target?.teacher_name, target?.target_date, target?.target_subject].filter(Boolean).join(' '),
+        details: { teacher_id: target?.user_id || null, target_date: target?.target_date || null, role_type: target?.role_type || null },
+      });
+    } catch (e: any) {
+      console.error(e);
+      toast.error(`配置を解除できませんでした。${e?.message || ''}`);
+    }
   };
 
   const handleUpdate = async () => {
@@ -375,17 +413,20 @@ export default function ShiftManagementPage() {
       });
       setEditingShift(null);
       fetchData();
-    } catch (e) { alert('更新エラー'); }
+    } catch (e) {
+      console.error(e);
+      toast.error('保存できませんでした。通信状態を確認して、もう一度お試しください。');
+    }
   };
 
   const handleUpdateZoomPasscode = async () => {
     if (!editingShift) return;
     const meetingId = normalizeMeetingId(editingShift.target_meeting_id);
     const passcode = String(editingShift.target_password || '').trim();
-    if (!meetingId) return alert('先にZoom IDを入力してください。');
-    if (!passcode) return alert('Zoomパスコードを入力してください。');
+    if (!meetingId) return toast.error('先にZoom IDを入力してください。');
+    if (!passcode) return toast.error('Zoomパスコードを入力してください。');
     if (!/^[A-Za-z0-9@_-]{1,10}$/.test(passcode)) {
-      return alert('Zoomパスコードは半角英数字と @ _ - を使い、10文字以内で入力してください。');
+      return toast.error('Zoomパスコードは半角英数字と @ _ - を使い、10文字以内で入力してください。');
     }
 
     setUpdatingPasscode(true);
@@ -408,12 +449,12 @@ export default function ShiftManagementPage() {
         shift.id === editingShift.id ? { ...shift, target_password: result.passcode || passcode } : shift
       )));
       if (result.join_url_ready) {
-        alert('Zoomのパスコードを更新し、暗号化済みの生徒用参加リンクも取得しました。');
+        toast.success('Zoomのパスコードを更新し、暗号化済みの生徒用参加リンクも取得しました。');
       } else {
-        alert(`Zoomのパスコードは更新しましたが、生徒用参加リンクを取得できませんでした。${result.warning ? `\n${result.warning}` : ''}`);
+        toast.error(`Zoomのパスコードは更新しましたが、生徒用参加リンクを取得できませんでした。${result.warning ? ` ${result.warning}` : ''}`);
       }
     } catch (error: any) {
-      alert(`パスコードの更新に失敗しました: ${error?.message || '通信エラー'}`);
+      toast.error(`パスコードを更新できませんでした。${error?.message || '通信エラー'}`);
     } finally {
       setUpdatingPasscode(false);
     }
@@ -460,13 +501,13 @@ export default function ShiftManagementPage() {
           start_url: data.start_url,
           target_join_url: data.join_url,
         } : shift));
-        alert('Zoomミーティングを発行し、講師配置へ保存しました。');
+        toast.success('Zoomミーティングを発行し、講師配置へ保存しました。');
       } else {
-        alert(`作成失敗: ${data.error}`);
+        toast.error(`Zoomミーティングを発行できませんでした。${data.error || ''}`);
       }
     } catch (e) {
       console.error(e);
-      alert(`Zoom作成中にエラーが発生しました: ${e instanceof Error ? e.message : '通信エラー'}`);
+      toast.error(`Zoomミーティングを発行できませんでした。${e instanceof Error ? e.message : '通信エラー'}`);
     } finally {
       setCreatingZoom(false);
     }
@@ -477,6 +518,7 @@ export default function ShiftManagementPage() {
     if (!teacherId) return;
     setSelectedTeacherForResults({ id: teacherId, name: teacherName });
     setSurveyLoading(true);
+    setSurveyError(false);
     setIsSurveyModalOpen(true);
     try {
       const q = query(
@@ -491,6 +533,7 @@ export default function ShiftManagementPage() {
     } catch (err) {
       console.error(err);
       setSurveyResults([]);
+      setSurveyError(true);
     } finally {
       setSurveyLoading(false);
     }
@@ -526,7 +569,7 @@ export default function ShiftManagementPage() {
       .map((res: any) => ({
         id: res.id,
         text: res.answers[questionId],
-        date: res.created_at?.seconds ? new Date(res.created_at.seconds * 1000).toLocaleDateString() : '',
+        date: res.created_at?.seconds ? formatDate(new Date(res.created_at.seconds * 1000), { withYear: true }) : '',
         student: res.student_name,
         subject: res.subject
       }));
@@ -662,7 +705,7 @@ export default function ShiftManagementPage() {
 
   const renderTeacherList = (list: Teacher[], type: 'available' | 'maybe' | 'unavailable' | 'unsubmitted') => {
     const filteredList = list.filter(teacher => teacherMatches(teacher, teacherSearch));
-    if (filteredList.length === 0) return <div className="text-xs text-gray-400 p-2">該当なし</div>;
+    if (filteredList.length === 0) return <div className="text-xs text-slate-400 p-2">該当なし</div>;
     
     return filteredList.map(t => {
       const assignedCount = assignments.filter(a => a.user_id === t.id).length;
@@ -679,33 +722,33 @@ export default function ShiftManagementPage() {
           draggable 
           onDragStart={(e) => handleDragStart(e, t)}
           onClick={() => setForm({ ...form, userId: t.id })}
-          className={`p-3 rounded-xl border mb-2 cursor-grab active:cursor-grabbing transition-all text-sm group relative flex flex-col shadow-sm
-            ${form.userId === t.id ? 'ring-2 ring-indigo-50 bg-indigo-50 border-indigo-500' : 'bg-white hover:bg-gray-50 border-slate-200'}
-            ${assignedCount > 0 ? 'opacity-70 bg-gray-50' : ''}
+          className={`p-3 rounded-btn border mb-2 cursor-grab active:cursor-grabbing transition-all text-sm group relative flex flex-col shadow-sm
+            ${form.userId === t.id ? 'ring-2 ring-accent/20 bg-accent-soft border-accent' : 'bg-white hover:bg-slate-50 border-slate-200'}
+            ${assignedCount > 0 ? 'opacity-70 bg-slate-50' : ''}
           `}
         >
           <div className="flex justify-between items-center w-full">
             <div className="flex items-center gap-2">
-              <GripVertical size={14} className="text-gray-300" />
+              <GripVertical size={14} className="text-slate-300" />
               <div>
                 <span className="font-bold text-slate-700 block">{teacherNameOf(t)}</span>
               </div>
             </div>
-            {type === 'available' && <CheckCircle size={16} className="text-green-500" />}
-            {type === 'maybe' && <HelpCircle size={16} className="text-yellow-500" />}
-            {type === 'unavailable' && <span className="rounded bg-red-50 px-2 py-0.5 text-[10px] font-bold text-red-600">提出済・勤務不可</span>}
-            {type === 'unsubmitted' && <span className="rounded bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-500">未提出</span>}
+            {type === 'available' && <CheckCircle size={16} className="text-emerald-500" />}
+            {type === 'maybe' && <HelpCircle size={16} className="text-amber-500" />}
+            {type === 'unavailable' && <span className="rounded bg-rose-50 px-2 py-0.5 text-xs font-bold text-rose-600">提出済・勤務不可</span>}
+            {type === 'unsubmitted' && <span className="rounded bg-slate-100 px-2 py-0.5 text-xs font-bold text-slate-500">未提出</span>}
           </div>
           
           <div className="pl-6 mt-1.5 flex flex-wrap gap-2 items-center w-full">
              {avail && type !== 'unsubmitted' && (
-               <div className="text-[11px] font-bold text-indigo-600 bg-indigo-50 px-2 py-1 rounded border border-indigo-100 w-full truncate">
-                 <span className="text-indigo-400 mr-1 text-[9px] uppercase">{avail.source === 'weekly' ? '基本設定:' : '個別提出:'}</span>
+               <div className="text-xs font-bold text-accent bg-accent-soft px-2 py-1 rounded border border-accent/20 w-full truncate">
+                 <span className="text-accent/70 mr-1 text-xs uppercase">{avail.source === 'weekly' ? '基本設定:' : '個別提出:'}</span>
                  {[workplace, avail.time_range, roles || avail.note].filter(Boolean).join(' / ')}
                </div>
              )}
              {assignedCount > 0 && (
-               <span className="text-[9px] text-white bg-green-500 px-1.5 py-0.5 rounded-full">配置済: {assignedCount}</span>
+               <span className="text-xs text-white bg-emerald-500 px-1.5 py-0.5 rounded-full">配置済: {assignedCount}</span>
              )}
           </div>
         </div>
@@ -724,85 +767,79 @@ export default function ShiftManagementPage() {
       return !assignedSchool || schools.size === 0 || schools.has(assignedSchool);
     });
     return (
-      <main className="min-h-screen bg-slate-50 p-4 text-slate-800 md:p-6">
-        <div className="mx-auto max-w-6xl space-y-5">
-          <header className="rounded-3xl bg-slate-950 p-6 text-white shadow-xl">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div className="flex items-center gap-4"><Link href="/master" className="rounded-full bg-white/10 p-3 hover:bg-white/20" aria-label="管理画面へ戻る"><ArrowLeft size={20} /></Link><div><p className="text-xs font-black text-indigo-300">READ ONLY</p><h1 className="mt-1 text-2xl font-black">シフト配置（閲覧のみ）</h1><p className="mt-1 text-sm font-bold text-slate-300">配置の変更はマスター管理者へ依頼してください。</p></div></div>
-              <label className="flex items-center gap-2 rounded-2xl bg-white/10 px-4 py-3"><CalendarClock size={18} /><input type="date" value={date} onChange={event => setDate(event.target.value)} className="bg-transparent text-sm font-black text-white outline-none [color-scheme:dark]" /></label>
-            </div>
-          </header>
-          {loading ? <div className="grid min-h-48 place-items-center"><Loader2 className="animate-spin text-indigo-600" size={32} /></div> : (
-            <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-              <div className="flex items-end justify-between gap-3"><div><h2 className="text-lg font-black">{date}（{dayOfWeek}）の配置</h2><p className="mt-1 text-xs font-bold text-slate-400">講師・担当・教室を一覧で確認できます。</p></div><span className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-black text-indigo-700">{scopedAssignments.length}件</span></div>
+      <div className="text-slate-800">
+        <div className="space-y-5">
+          <AdminPageHeader
+            title="シフト配置・提出確認（閲覧のみ）"
+            description="配置の変更はマスター管理者へ依頼してください。"
+            actions={<label className="flex min-h-11 items-center gap-2 rounded-input border border-line bg-white px-4 text-slate-700"><CalendarClock size={18} aria-hidden /><span className="sr-only">表示する日付</span><input type="date" value={date} onChange={event => setDate(event.target.value)} className="bg-transparent text-sm font-bold text-slate-700 outline-none" /></label>}
+          />
+          {loading ? <ListSkeleton rows={4} /> : loadError ? <ErrorState onRetry={reloadData} /> : (
+            <section className="rounded-card border border-slate-200 bg-white p-5 shadow-sm">
+              <div className="flex items-end justify-between gap-3"><div><h2 className="text-lg font-bold">{date}（{dayOfWeek}）の配置</h2><p className="mt-1 text-xs font-bold text-slate-400">講師・担当・教室を一覧で確認できます。</p></div><span className="rounded-full bg-accent-soft px-3 py-1 text-xs font-bold text-accent">{scopedAssignments.length}件</span></div>
               <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {scopedAssignments.map(item => <article key={item.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-4"><div className="flex items-start justify-between gap-2"><p className="font-black text-slate-900">{item.teacher_name || '講師未設定'}</p><span className="rounded-full bg-white px-2 py-1 text-[10px] font-black text-indigo-600">{item.note?.match(/[12]限/)?.[0] || item.role_type}</span></div><p className="mt-3 text-sm font-bold text-slate-700">{[item.target_grade, item.target_subject, item.target_detail_subject].filter(Boolean).join('・') || '全体サポート'}</p><p className="mt-2 flex items-center gap-1 text-xs font-bold text-slate-500"><MapPin size={13} />{item.target_place || item.teacher_workplace || '教室未設定'}</p>{item.unit ? <p className="mt-2 text-xs font-medium text-slate-500">単元：{item.unit}</p> : null}</article>)}
-                {scopedAssignments.length === 0 ? <div className="col-span-full rounded-2xl bg-slate-50 py-14 text-center text-sm font-black text-slate-400">この日の配置はありません。</div> : null}
+                {scopedAssignments.map(item => <article key={item.id} className="rounded-card border border-slate-200 bg-slate-50 p-4"><div className="flex items-start justify-between gap-2"><p className="font-bold text-slate-900">{item.teacher_name || '講師未設定'}</p><span className="rounded-full bg-white px-2 py-1 text-xs font-bold text-accent">{item.note?.match(/[12]限/)?.[0] || item.role_type}</span></div><p className="mt-3 text-sm font-bold text-slate-700">{[item.target_grade, item.target_subject, item.target_detail_subject].filter(Boolean).join('・') || '全体サポート'}</p><p className="mt-2 flex items-center gap-1 text-xs font-bold text-slate-500"><MapPin size={13} />{item.target_place || item.teacher_workplace || '教室未設定'}</p>{item.unit ? <p className="mt-2 text-xs font-medium text-slate-500">単元：{item.unit}</p> : null}</article>)}
+                {scopedAssignments.length === 0 ? <EmptyState className="col-span-full" title="この日の配置はありません" description="別の日付を選ぶと、その日の配置を確認できます。" /> : null}
               </div>
             </section>
           )}
         </div>
-      </main>
+      </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 p-4 md:p-6 pb-40 font-sans text-slate-800">
-      <div className="max-w-[1800px] mx-auto">
-        <div className="flex flex-col md:flex-row items-center justify-between mb-6 gap-4 bg-white p-4 rounded-2xl shadow-sm border border-slate-200">
-          <div className="flex items-center gap-4 w-full md:w-auto">
-            <Link href={teacherSurface ? '/teacher/attendance-approvals' : '/master'} className="bg-slate-100 p-2.5 rounded-full hover:bg-slate-200 text-slate-600 transition-colors" aria-label={teacherSurface ? '勤怠承認へ戻る' : '管理画面へ戻る'}>
-              <ArrowLeft size={20} />
-            </Link>
-            <div>
-              <h1 className="text-xl md:text-2xl font-black text-slate-800 flex items-center gap-2">
-                <Briefcase className="text-indigo-600" /> 講師シフト管理
-              </h1>
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center justify-end gap-3">
-            <button
-              type="button"
+    <div className="pb-40 font-sans text-slate-800">
+      <div>
+        <AdminPageHeader
+          title={teacherSurface ? 'シフト配置・提出確認' : undefined}
+          backHref={teacherSurface ? '/teacher/attendance-approvals' : undefined}
+          actions={<>
+            <Button
+              variant="secondary"
               onClick={() => setToolsOpen(previous => !previous)}
-              className="flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 transition-colors hover:bg-slate-50"
               aria-expanded={toolsOpen}
+              icon={<Settings size={16} aria-hidden />}
             >
-              <Settings size={14} /> データ取込・設定 {toolsOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-            </button>
-            <div className="flex items-center gap-2 bg-slate-100 p-1.5 rounded-xl border border-slate-200">
-              <input type="date" className="font-bold bg-transparent outline-none text-slate-700 cursor-pointer text-sm px-2" value={date} onChange={e => setDate(e.target.value)} />
-              <span className="text-xs font-black bg-indigo-600 text-white px-3 py-1.5 rounded-lg">{dayOfWeek}曜日</span>
+              データ取込・設定 {toolsOpen ? <ChevronUp size={16} aria-hidden /> : <ChevronDown size={16} aria-hidden />}
+            </Button>
+            <div className="flex min-h-11 items-center gap-2 rounded-input border border-line bg-white p-1.5">
+              <input type="date" aria-label="表示する日付" className="font-bold bg-transparent outline-none text-slate-700 cursor-pointer text-sm px-2" value={date} onChange={e => setDate(e.target.value)} />
+              <span className="text-xs font-bold bg-accent-soft text-accent px-3 py-1.5 rounded-btn">{dayOfWeek}曜日</span>
             </div>
-          </div>
-        </div>
+          </>}
+        />
 
         {toolsOpen && (
-          <div className="mb-4 flex flex-wrap items-center gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="mb-4 flex flex-wrap items-center gap-3 rounded-card border border-slate-200 bg-white p-4 shadow-sm">
             <div className="mr-auto">
-              <p className="text-sm font-black text-slate-700">データ取込・保守設定</p>
+              <p className="text-sm font-bold text-slate-700">データ取込・保守設定</p>
               <p className="mt-0.5 text-xs text-slate-500">通常の配置作業では閉じたままで問題ありません。</p>
             </div>
             <ShiftImportButton onSuccess={fetchData} />
-            <button
+            <Button
+              variant="secondary"
               onClick={relinkShiftTeachers}
-              disabled={relinking}
-              className="flex items-center gap-2 rounded-lg border border-rose-100 px-4 py-2 text-xs font-bold text-rose-600 transition-colors hover:bg-rose-50 disabled:opacity-50"
+              loading={relinking}
+              icon={<Settings size={16} aria-hidden />}
             >
-              {relinking ? <Loader2 size={14} className="animate-spin" /> : <Settings size={14}/>} 紐付け再照合
-            </button>
-            {!teacherSurface && <Link href="/master/settings" className="flex items-center gap-2 rounded-lg border border-indigo-100 px-4 py-2 text-xs font-bold text-indigo-600 transition-colors hover:bg-indigo-50">
-              <LinkIcon size={14}/> URL設定
-            </Link>}
+              紐付け再照合
+            </Button>
+            {!teacherSurface && <ButtonLink href="/master/settings" variant="secondary" icon={<LinkIcon size={16} aria-hidden />}>
+              URL設定
+            </ButtonLink>}
           </div>
         )}
 
+        {loadError && <ErrorState className="mb-4" title="シフトを読み込めませんでした" onRetry={reloadData} />}
+
         {unassignedSubmittedTeachers.length > 0 && (
-          <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-amber-900 shadow-sm">
+          <div className="mb-4 rounded-card border border-amber-200 bg-amber-50 p-4 text-amber-900 shadow-sm">
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
               <div className="flex items-start gap-3">
                 <AlertTriangle size={20} className="mt-0.5 text-amber-600 shrink-0" />
                 <div>
-                  <p className="text-sm font-black">シフト提出済みで、まだ配置されていない先生がいます</p>
+                  <p className="text-sm font-bold">シフト提出済みで、まだ配置されていない先生がいます</p>
                   <p className="mt-1 text-xs font-bold text-amber-800">
                     {unassignedSubmittedTeachers.map(teacherNameOf).slice(0, 8).join('、')}
                     {unassignedSubmittedTeachers.length > 8 ? ` ほか${unassignedSubmittedTeachers.length - 8}名` : ''}
@@ -817,20 +854,20 @@ export default function ShiftManagementPage() {
           </div>
         )}
 
-        <div className="mb-6 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="mb-6 rounded-card border border-slate-200 bg-white p-4 shadow-sm">
           <div className="mb-3 flex items-center justify-between">
-            <h2 className="flex items-center gap-2 text-sm font-black text-slate-800">
-              <ClipboardCheck size={16} className="text-indigo-600" /> 本日の提出・勤務可能状況
+            <h2 className="flex items-center gap-2 text-sm font-bold text-slate-800">
+              <ClipboardCheck size={16} className="text-accent" /> 本日の提出・勤務可能状況
             </h2>
-            <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-500">
+            <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-500">
               全講師 {allTeachers.length}名
             </span>
           </div>
           <div className="mb-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-            <div className="rounded-xl bg-emerald-50 p-3 ring-1 ring-emerald-100"><p className="text-[10px] font-black text-emerald-600">勤務可能</p><p className="mt-1 text-2xl font-black text-emerald-800">{workableTeachers.length}<span className="ml-1 text-xs">名</span></p></div>
-            <div className="rounded-xl bg-amber-50 p-3 ring-1 ring-amber-100"><p className="text-[10px] font-black text-amber-600">勤務可能・未配置</p><p className="mt-1 text-2xl font-black text-amber-800">{unassignedSubmittedTeachers.length}<span className="ml-1 text-xs">名</span></p></div>
-            <div className="rounded-xl bg-rose-50 p-3 ring-1 ring-rose-100"><p className="text-[10px] font-black text-rose-600">提出済・勤務不可</p><p className="mt-1 text-2xl font-black text-rose-800">{unavailableTeachers.length}<span className="ml-1 text-xs">名</span></p></div>
-            <div className="rounded-xl bg-slate-100 p-3"><p className="text-[10px] font-black text-slate-500">未提出</p><p className="mt-1 text-2xl font-black text-slate-700">{notSubmittedTeachers.length}<span className="ml-1 text-xs">名</span></p></div>
+            <div className="rounded-xl bg-emerald-50 p-3 ring-1 ring-emerald-100"><p className="text-xs font-bold text-emerald-600">勤務可能</p><p className="mt-1 text-2xl font-black text-emerald-800">{workableTeachers.length}<span className="ml-1 text-xs">名</span></p></div>
+            <div className="rounded-xl bg-amber-50 p-3 ring-1 ring-amber-100"><p className="text-xs font-bold text-amber-600">勤務可能・未配置</p><p className="mt-1 text-2xl font-black text-amber-800">{unassignedSubmittedTeachers.length}<span className="ml-1 text-xs">名</span></p></div>
+            <div className="rounded-xl bg-rose-50 p-3 ring-1 ring-rose-100"><p className="text-xs font-bold text-rose-600">提出済・勤務不可</p><p className="mt-1 text-2xl font-black text-rose-800">{unavailableTeachers.length}<span className="ml-1 text-xs">名</span></p></div>
+            <div className="rounded-xl bg-slate-100 p-3"><p className="text-xs font-bold text-slate-500">未提出</p><p className="mt-1 text-2xl font-black text-slate-700">{notSubmittedTeachers.length}<span className="ml-1 text-xs">名</span></p></div>
           </div>
           {submittedTeachers.length > 0 ? (
             <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
@@ -841,15 +878,15 @@ export default function ShiftManagementPage() {
                 return (
                   <div key={teacher.id} className={`rounded-xl border p-3 ${!canWork ? 'border-rose-100 bg-rose-50/60' : assignedCount > 0 ? 'border-emerald-100 bg-emerald-50/40' : 'border-amber-200 bg-amber-50/70'}`}>
                     <div className="flex items-center justify-between gap-3">
-                      <p className="text-sm font-black text-slate-800">{teacherNameOf(teacher)}</p>
-                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-black ${!canWork ? 'bg-rose-600 text-white' : assignedCount > 0 ? 'bg-emerald-600 text-white' : 'bg-amber-500 text-white'}`}>
+                      <p className="text-sm font-bold text-slate-800">{teacherNameOf(teacher)}</p>
+                      <span className={`rounded-full px-2 py-0.5 text-xs font-bold ${!canWork ? 'bg-rose-600 text-white' : assignedCount > 0 ? 'bg-emerald-600 text-white' : 'bg-amber-500 text-white'}`}>
                         {!canWork ? '勤務不可' : assignedCount > 0 ? `配置済 ${assignedCount}` : '勤務可能・未配置'}
                       </span>
                     </div>
                     <div className="mt-2 space-y-1">
                       {teacherAvailabilities.map(availability => (
-                        <div key={availability.id} className="flex flex-wrap gap-2 text-[11px] font-bold text-slate-600">
-                          <span className={`rounded px-2 py-1 ${availability.source === 'weekly' ? 'bg-violet-100 text-violet-700' : 'bg-blue-100 text-blue-700'}`}>{availability.source === 'weekly' ? '基本設定' : '個別提出'}</span>
+                        <div key={availability.id} className="flex flex-wrap gap-2 text-xs font-bold text-slate-600">
+                          <span className={`rounded px-2 py-1 ${availability.source === 'weekly' ? 'bg-accent-soft text-accent' : 'bg-sky-100 text-sky-700'}`}>{availability.source === 'weekly' ? '基本設定' : '個別提出'}</span>
                           <span className="flex items-center gap-1 rounded bg-white px-2 py-1"><MapPin size={11} className="text-slate-400" />{availability.workplace || availability.location || '勤務地未設定'}</span>
                           <span className="flex items-center gap-1 rounded bg-white px-2 py-1"><Clock size={11} className="text-slate-400" />{availability.time_range || '時間未設定'}</span>
                           <span className="rounded bg-white px-2 py-1">{Array.isArray(availability.roles) && availability.roles.length ? availability.roles.join(' / ') : availability.note || '希望未設定'}</span>
@@ -861,47 +898,45 @@ export default function ShiftManagementPage() {
               })}
             </div>
           ) : (
-            <div className="rounded-xl border-2 border-dashed border-slate-100 py-6 text-center text-xs font-bold text-slate-400">
-              この日付のシフト提出はまだありません
-            </div>
+            <EmptyState title="この日付のシフト提出はまだありません" description="講師がシフトを提出すると、ここに勤務可能状況が出ます。" />
           )}
         </div>
 
         <div className="flex flex-col lg:flex-row gap-6 items-start">
           <div className="w-full lg:w-[320px] flex flex-col gap-6 shrink-0 h-[calc(100vh-200px)] overflow-y-auto custom-scrollbar pr-2">
-            <div className="bg-white p-4 rounded-2xl shadow-sm border border-indigo-100 shrink-0">
+            <div className="bg-white p-4 rounded-card shadow-sm border border-accent/20 shrink-0">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="font-bold text-slate-700 text-xs flex gap-2 items-center">
-                  <Save size={16} className="text-indigo-600"/> 新規クラス作成
+                  <Save size={16} className="text-accent"/> 新規クラス作成
                 </h3>
               </div>
               <div className="space-y-3">
-                <div className={`p-2 rounded text-center font-bold text-xs border ${form.userId ? 'bg-indigo-50 border-indigo-300 text-indigo-700' : 'bg-gray-50 text-gray-400 border-dashed'}`}>
-                  {form.userId ? teacherNameOf(allTeachers.find(t => t.id === form.userId)) : "先生を選択してください"}
+                <div className={`p-2 rounded-btn text-center font-bold text-xs border ${form.userId ? 'bg-accent-soft border-accent/40 text-accent' : 'bg-slate-50 text-slate-400 border-dashed'}`}>
+                  {form.userId ? teacherNameOf(allTeachers.find(t => t.id === form.userId)) : "講師を選択してください"}
                 </div>
                 <div className="grid grid-cols-2 gap-2">
-                  <select className="w-full p-2 border rounded text-xs" value={form.time_slot} onChange={e => setForm({...form, time_slot: e.target.value})}>
+                  <select aria-label="時限" className="w-full min-h-10 p-2 border border-line rounded-input text-xs" value={form.time_slot} onChange={e => setForm({...form, time_slot: e.target.value})}>
                     <option>1限</option><option>2限</option>
                   </select>
-                  <select className="w-full p-2 border rounded text-xs" value={form.role} onChange={e => setForm({...form, role: e.target.value})}>
+                  <select aria-label="役割" className="w-full min-h-10 p-2 border border-line rounded-input text-xs" value={form.role} onChange={e => setForm({...form, role: e.target.value})}>
                     <option value="main">メイン</option>
                     <option value="general">全体</option>
                   </select>
                 </div>
                 {form.role === 'main' && (
                   <div className="grid grid-cols-2 gap-2 text-xs">
-                    <select className="border rounded p-1" value={form.grade} onChange={e => setForm({...form, grade: e.target.value})}><option>中1</option><option>中2</option><option>中3</option></select>
-                    <select className="border rounded p-1" value={form.subject} onChange={e => setForm({...form, subject: e.target.value})}><option>理科</option><option>社会</option></select>
-                    <input className="border rounded p-1 col-span-2" placeholder="詳細科目" value={form.detail_subject} onChange={e => setForm({...form, detail_subject: e.target.value})}/>
+                    <select className="min-h-10 border border-line rounded-input p-1" value={form.grade} onChange={e => setForm({...form, grade: e.target.value})}><option>中1</option><option>中2</option><option>中3</option></select>
+                    <select className="min-h-10 border border-line rounded-input p-1" value={form.subject} onChange={e => setForm({...form, subject: e.target.value})}><option>理科</option><option>社会</option></select>
+                     <input className="min-h-10 border border-line rounded-input p-1 col-span-2" placeholder="詳細科目" value={form.detail_subject} onChange={e => setForm({...form, detail_subject: e.target.value})}/>
                   </div>
                 )}
-                <button onClick={handleManualAssign} className="w-full bg-indigo-600 text-white text-xs font-bold py-2 rounded hover:bg-indigo-700">配置</button>
+                <Button size="sm" fullWidth onClick={handleManualAssign}>配置</Button>
               </div>
             </div>
 
-            <div className="sticky top-0 z-10 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
-              <label className="mb-2 block text-xs font-black text-slate-700">講師・勤務条件を検索</label>
-              <div className="flex items-center gap-2 rounded-xl border border-slate-300 bg-slate-50 px-3 focus-within:border-indigo-400 focus-within:ring-2 focus-within:ring-indigo-100">
+            <div className="sticky top-0 z-10 rounded-card border border-slate-200 bg-white p-3 shadow-sm">
+              <label className="mb-2 block text-xs font-bold text-slate-700">講師・勤務条件を検索</label>
+              <div className="flex items-center gap-2 rounded-xl border border-slate-300 bg-slate-50 px-3 focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/20">
                 <Search size={16} className="text-slate-400" />
                 <input
                   value={teacherSearch}
@@ -909,13 +944,13 @@ export default function ShiftManagementPage() {
                   placeholder="氏名、ID、校舎、時間で検索"
                   className="min-w-0 flex-1 bg-transparent py-2.5 text-sm outline-none"
                 />
-                {teacherSearch && <button type="button" onClick={() => setTeacherSearch('')} aria-label="検索をクリア" className="text-slate-400 hover:text-slate-700"><X size={15} /></button>}
+                {teacherSearch && <IconButton size="sm" label="検索をクリア" onClick={() => setTeacherSearch('')}><X size={15} aria-hidden /></IconButton>}
               </div>
             </div>
 
             <div className="space-y-4">
               <div>
-                <h3 className="text-xs font-bold text-green-700 bg-green-50 px-3 py-2 rounded-lg mb-2 flex items-center gap-2">
+                <h3 className="text-xs font-bold text-emerald-700 bg-emerald-50 px-3 py-2 rounded-lg mb-2 flex items-center gap-2">
                   <CheckCircle size={14}/> 出勤可能 (シフト提出済)
                 </h3>
                 <div className="space-y-1">
@@ -924,7 +959,7 @@ export default function ShiftManagementPage() {
               </div>
 
               <div>
-                <h3 className="text-xs font-bold text-yellow-700 bg-yellow-50 px-3 py-2 rounded-lg mb-2 flex items-center gap-2">
+                <h3 className="text-xs font-bold text-amber-700 bg-amber-50 px-3 py-2 rounded-lg mb-2 flex items-center gap-2">
                   <HelpCircle size={14}/> 調整可能
                 </h3>
                 <div className="space-y-1">
@@ -933,7 +968,7 @@ export default function ShiftManagementPage() {
               </div>
 
               <div>
-                <h3 className="text-xs font-bold text-gray-500 bg-gray-100 px-3 py-2 rounded-lg mb-2 flex items-center gap-2">
+                <h3 className="text-xs font-bold text-slate-500 bg-slate-100 px-3 py-2 rounded-lg mb-2 flex items-center gap-2">
                   <XCircle size={14}/> 提出済・勤務不可
                 </h3>
                 <div className="space-y-1 opacity-90">
@@ -954,15 +989,15 @@ export default function ShiftManagementPage() {
 
           <div className="flex-1 space-y-8 min-w-0">
             {['1限', '2限'].map((period) => (
-              <div key={period} className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+              <div key={period} className="bg-white rounded-card shadow-sm border border-slate-200 overflow-hidden">
                 <div className={`px-4 py-2 flex items-center justify-between shrink-0 ${period === '1限' ? 'bg-slate-800 text-white' : 'bg-slate-700 text-slate-100'}`}>
                   <div className="flex items-center gap-2 font-bold text-sm">
-                    <Clock size={16} className={period === '1限' ? 'text-blue-400' : 'text-indigo-400'}/>
+                    <Clock size={16} className={period === '1限' ? 'text-sky-300' : 'text-sky-200'}/>
                     {period} <span className="opacity-60 font-mono text-xs font-normal ml-1">{period === '1限' ? '19:20 - 20:25' : '20:35 - 21:40'}</span>
                   </div>
-                  <div className="flex gap-2 text-[10px] font-bold">
+                  <div className="flex gap-2 text-xs font-bold">
                     <span className="bg-emerald-500/20 px-2 py-0.5 rounded text-emerald-100">理 {getAllClassesForSubject(period, '理科').length}</span>
-                    <span className="bg-orange-500/20 px-2 py-0.5 rounded text-orange-100">社 {getAllClassesForSubject(period, '社会').length}</span>
+                    <span className="bg-amber-500/20 px-2 py-0.5 rounded text-amber-100">社 {getAllClassesForSubject(period, '社会').length}</span>
                   </div>
                 </div>
 
@@ -970,7 +1005,7 @@ export default function ShiftManagementPage() {
                   <div className="flex gap-4 min-w-max items-start">
                     
                     <div className="flex flex-col gap-2 min-w-[220px] shrink-0">
-                      <div className="flex items-center gap-1 text-[10px] font-bold text-emerald-700 border-b border-emerald-100 pb-1 mb-1">
+                      <div className="flex items-center gap-1 text-xs font-bold text-emerald-700 border-b border-emerald-100 pb-1 mb-1">
                         <Users size={12}/> 理科グループ
                       </div>
                       <div className="flex gap-2">
@@ -995,7 +1030,7 @@ export default function ShiftManagementPage() {
                     <div className="w-px bg-slate-200 self-stretch my-2"></div>
 
                     <div className="flex flex-col gap-2 min-w-[220px] shrink-0">
-                      <div className="flex items-center gap-1 text-[10px] font-bold text-orange-700 border-b border-orange-100 pb-1 mb-1">
+                      <div className="flex items-center gap-1 text-xs font-bold text-amber-700 border-b border-amber-100 pb-1 mb-1">
                         <Users size={12}/> 社会グループ
                       </div>
                       <div className="flex gap-2">
@@ -1022,20 +1057,20 @@ export default function ShiftManagementPage() {
                     <div className="flex flex-col gap-1 ml-1 shrink-0">
                       <div 
                         className={`bg-slate-100 rounded-xl p-2 border border-slate-200 w-[200px] min-h-[140px] flex flex-col transition-all duration-200
-                          ${dragOverCardId === `general-${period}` ? 'bg-indigo-50 border-indigo-300 ring-2 ring-indigo-100 shadow-md' : ''}
+                          ${dragOverCardId === `general-${period}` ? 'bg-accent-soft border-accent/40 ring-2 ring-accent/20 shadow-md' : ''}
                         `}
                         onDragOver={(e) => handleDragOver(e, `general-${period}`, 'general')}
                         onDragLeave={handleDragLeave}
                         onDrop={(e) => handleDrop(e, null, 'general', period)}
                       >
-                        <div className="text-[10px] font-bold text-slate-400 mb-2 flex items-center gap-1 uppercase tracking-wider shrink-0">
-                          <User size={12}/> General Support
+                        <div className="text-xs font-bold text-slate-400 mb-2 flex items-center gap-1 uppercase tracking-wider shrink-0">
+                          <User size={12}/> 全体サポート
                           <button
                             type="button"
                             onClick={() => { setAssignmentSearch(''); setAssignmentTarget({ role: 'general', period }); }}
-                            className="ml-auto flex items-center gap-1 rounded-md bg-white px-2 py-1 normal-case text-indigo-600 shadow-sm hover:bg-indigo-50"
+                            className="ml-auto flex items-center gap-1 rounded-btn bg-white px-2 py-1 normal-case text-accent shadow-sm hover:bg-accent-soft"
                           >
-                            <Search size={10} /> 検索
+                            <Search size={12} aria-hidden /> 検索
                           </button>
                         </div>
                         
@@ -1048,11 +1083,11 @@ export default function ShiftManagementPage() {
                                   <button onClick={(e) => handleShowSurveyResults(e, a.user_id, a.teacher_name)} className="font-bold text-slate-700 text-xs hover:underline truncate block">{a.teacher_name}</button>
                                 </div>
                               </div>
-                              <button onClick={() => handleDelete(a.id)} className="text-slate-300 hover:text-red-500"><Trash2 size={12}/></button>
+                              <IconButton size="sm" label={`${a.teacher_name}先生の配置を解除`} onClick={() => handleDelete(a.id)} className="text-slate-400 hover:bg-rose-50 hover:text-rose-600"><Trash2 size={14} aria-hidden /></IconButton>
                             </div>
                           ))}
                           {getGeneralSupport(period).length === 0 && (
-                            <div className="flex-1 flex items-center justify-center text-[10px] text-slate-300 font-bold border-2 border-dashed border-slate-200 rounded-lg">
+                            <div className="flex-1 flex items-center justify-center text-xs text-slate-300 font-bold border-2 border-dashed border-slate-200 rounded-lg">
                               ドラッグして追加
                             </div>
                           )}
@@ -1068,26 +1103,27 @@ export default function ShiftManagementPage() {
         </div>
       </div>
 
-      {assignmentTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/55 p-4" role="dialog" aria-modal="true" aria-labelledby="assignment-search-title">
-          <div className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
-            <div className="flex items-start justify-between border-b border-slate-200 bg-slate-50 p-5">
-              <div>
-                <h2 id="assignment-search-title" className="flex items-center gap-2 text-lg font-black text-slate-800"><UserPlus size={20} className="text-indigo-600" />講師を検索して配置</h2>
-                <p className="mt-1 text-xs font-bold text-slate-500">
-                  {assignmentTarget.period}・{assignmentTarget.role === 'main' ? '主担当' : assignmentTarget.role === 'sub' ? 'サポート' : '全体サポート'}
-                  {assignmentTarget.targetClass ? `／${assignmentTarget.targetClass.target_grade || ''} ${assignmentTarget.targetClass.target_subject || ''} ${assignmentTarget.targetClass.target_detail_subject || ''}` : ''}
-                </p>
+      <Modal
+        open={Boolean(assignmentTarget)}
+        onClose={() => setAssignmentTarget(null)}
+        size="lg"
+        title="講師を検索して配置"
+        description={assignmentTarget ? (
+          <span className="font-bold">
+            {assignmentTarget.period}・{assignmentTarget.role === 'main' ? '主担当' : assignmentTarget.role === 'sub' ? 'サポート' : '全体サポート'}
+            {assignmentTarget.targetClass ? `／${assignmentTarget.targetClass.target_grade || ''} ${assignmentTarget.targetClass.target_subject || ''} ${assignmentTarget.targetClass.target_detail_subject || ''}` : ''}
+          </span>
+        ) : undefined}
+      >
+        {assignmentTarget && (
+          <>
+            <div className="sticky top-0 z-10 -mx-5 -mt-4 mb-3 border-b border-line bg-surface px-5 py-3">
+              <div className="flex items-center gap-2 rounded-input border border-slate-300 bg-white px-3 focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/20">
+                <Search size={17} className="text-slate-400" aria-hidden />
+                <input data-autofocus aria-label="講師を検索" value={assignmentSearch} onChange={event => setAssignmentSearch(event.target.value)} placeholder="氏名、ID、校舎、勤務可能時間で検索" className="min-w-0 flex-1 py-3 text-sm outline-none" />
               </div>
-              <button type="button" onClick={() => setAssignmentTarget(null)} className="rounded-full p-2 text-slate-400 hover:bg-slate-200" aria-label="閉じる"><X size={20} /></button>
             </div>
-            <div className="border-b border-slate-200 p-4">
-              <div className="flex items-center gap-2 rounded-xl border border-slate-300 bg-white px-3 focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-100">
-                <Search size={17} className="text-slate-400" />
-                <input autoFocus value={assignmentSearch} onChange={event => setAssignmentSearch(event.target.value)} placeholder="氏名、ID、校舎、勤務可能時間で検索" className="min-w-0 flex-1 py-3 text-sm outline-none" />
-              </div>
-            </div>
-            <div className="space-y-2 overflow-y-auto p-4">
+            <div className="space-y-2">
               {allTeachers
                 .filter(teacher => teacherMatches(teacher, assignmentSearch))
                 .sort((left, right) => {
@@ -1110,24 +1146,27 @@ export default function ShiftManagementPage() {
                     <div key={teacher.id} className={`flex flex-col gap-3 rounded-xl border p-3 sm:flex-row sm:items-center ${unavailable ? 'border-rose-200 bg-rose-50/60' : isMaybe ? 'border-amber-200 bg-amber-50/60' : 'border-slate-200'}`}>
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
-                          <p className="font-black text-slate-800">{teacherNameOf(teacher)}</p>
-                          {teacher.lifetime_id && <span className="text-[10px] font-bold text-slate-400">{teacher.lifetime_id}</span>}
-                          <span className={`rounded-full px-2 py-0.5 text-[10px] font-black ${unavailable ? 'bg-rose-600 text-white' : isMaybe ? 'bg-amber-500 text-white' : available ? 'bg-emerald-600 text-white' : 'bg-slate-200 text-slate-600'}`}>
+                          <p className="font-bold text-slate-800">{teacherNameOf(teacher)}</p>
+                          {teacher.lifetime_id && <span className="text-xs font-bold text-slate-400">{teacher.lifetime_id}</span>}
+                          <span className={`rounded-full px-2 py-0.5 text-xs font-bold ${unavailable ? 'bg-rose-600 text-white' : isMaybe ? 'bg-amber-500 text-white' : available ? 'bg-emerald-600 text-white' : 'bg-slate-200 text-slate-600'}`}>
                             {unavailable ? '勤務不可' : isMaybe ? '予定終了後なら可能' : available ? '勤務可能' : '未提出'}
                           </span>
-                          {alreadyAssigned > 0 && <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-bold text-indigo-600">配置済 {alreadyAssigned}</span>}
+                          {alreadyAssigned > 0 && <span className="rounded-full bg-accent-soft px-2 py-0.5 text-xs font-bold text-accent">配置済 {alreadyAssigned}</span>}
                         </div>
                         <p className="mt-1 text-xs font-bold text-slate-600">{available ? [available.workplace || available.location, available.time_range, available.note].filter(Boolean).join(' ／ ') : '基本勤務設定・個別希望とも未提出'}</p>
-                        {available?.roles?.length ? <p className="mt-1 text-[10px] font-bold text-slate-400">希望役割: {available.roles.join(' / ')}　{available.source === 'weekly' ? '（基本設定）' : '（個別提出）'}</p> : null}
+                        {available?.roles?.length ? <p className="mt-1 text-xs font-bold text-slate-400">希望役割: {available.roles.join(' / ')}　{available.source === 'weekly' ? '（基本設定）' : '（個別提出）'}</p> : null}
                       </div>
                       <button
                         type="button"
                         onClick={async () => {
-                          if (unavailable && !confirm(`${teacherNameOf(teacher)}先生は勤務不可として申告しています。配置を続けますか？`)) return;
+                          if (unavailable && !(await confirm({
+                            title: `${teacherNameOf(teacher)}先生は勤務不可として申告しています。配置を続けますか？`,
+                            confirmLabel: '配置する',
+                          }))) return;
                           await executeAssign(teacher.id, assignmentTarget.role, assignmentTarget.targetClass, assignmentTarget.period);
                           setAssignmentTarget(null);
                         }}
-                        className={`shrink-0 rounded-lg px-4 py-2 text-xs font-black text-white ${unavailable ? 'bg-rose-600 hover:bg-rose-700' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+                        className={buttonClass(unavailable ? 'danger' : 'secondary', 'sm', 'shrink-0')}
                       >
                         {assignmentTarget.role === 'main' ? 'この先生に変更' : 'この先生を追加'}
                       </button>
@@ -1135,22 +1174,17 @@ export default function ShiftManagementPage() {
                   );
                 })}
             </div>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </Modal>
 
-      {editingShift && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl w-full max-w-lg shadow-xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
-            <div className="bg-slate-800 text-white p-4 flex justify-between items-center">
-              <h2 className="font-bold flex items-center gap-2">シフト編集</h2>
-              <button onClick={() => setEditingShift(null)}><X size={20}/></button>
-            </div>
-            <div className="p-6 space-y-4">
+      <Modal closeOnBackdrop={false} open={Boolean(editingShift)} onClose={() => setEditingShift(null)} title="シフト編集">
+        {editingShift && (
+            <div className="space-y-4">
               <div>
-                <label className="text-xs font-bold text-gray-500">勤務地</label>
+                <label className="text-xs font-bold text-slate-500">勤務地</label>
                 <select
-                  className="w-full p-2 border rounded mt-1 bg-white"
+                  className="w-full min-h-11 p-2 border border-line rounded-input mt-1 bg-white"
                   value={editingShift.target_place || ''}
                   onChange={e => setEditingShift({...editingShift, target_place: e.target.value})}
                 >
@@ -1162,39 +1196,40 @@ export default function ShiftManagementPage() {
                 </select>
               </div>
               <div>
-                <label className="text-xs font-bold text-gray-500">単元</label>
-                <input className="w-full p-2 border rounded mt-1" value={editingShift.unit || ''} onChange={e => setEditingShift({...editingShift, unit: e.target.value})}/>
+                <label className="text-xs font-bold text-slate-500">単元</label>
+                <input className="w-full min-h-11 p-2 border border-line rounded-input mt-1" value={editingShift.unit || ''} onChange={e => setEditingShift({...editingShift, unit: e.target.value})}/>
               </div>
               <div>
-                <label className="text-xs font-bold text-gray-500">Zoomサインインアドレス</label>
-                <input className="w-full p-2 border rounded mt-1 font-mono" value={editingShift.target_signin_address || ''} onChange={e => setEditingShift({...editingShift, target_signin_address: e.target.value})} placeholder="abc@sozogakuen.co.jp"/>
+                <label className="text-xs font-bold text-slate-500">Zoomサインインアドレス</label>
+                <input className="w-full min-h-11 p-2 border border-line rounded-input mt-1 font-mono" value={editingShift.target_signin_address || ''} onChange={e => setEditingShift({...editingShift, target_signin_address: e.target.value})} placeholder="abc@sozogakuen.co.jp"/>
               </div>
               
               <div>
-                <label className="text-xs font-bold text-gray-500 flex justify-between items-center">
+                <label className="text-xs font-bold text-slate-500 flex justify-between items-center">
                   <span>Zoom ID (ミーティングID)</span>
                   <button 
                     onClick={handleManualZoomCreate} 
                     disabled={creatingZoom || !!editingShift.target_meeting_id}
-                    className={`text-[10px] flex items-center gap-1 px-2 py-1 rounded transition-colors ${editingShift.target_meeting_id ? 'bg-green-100 text-green-700 cursor-default' : 'bg-blue-100 text-blue-700 hover:bg-blue-200'}`}
+                    type="button"
+                    className={`text-xs flex items-center gap-1 px-2 py-1 rounded-btn transition-colors ${editingShift.target_meeting_id ? 'bg-emerald-100 text-emerald-700 cursor-default' : 'bg-accent-soft text-accent hover:bg-accent/15'}`}
                   >
-                    {creatingZoom ? <Loader2 size={10} className="animate-spin"/> : <Zap size={10}/>}
+                    {creatingZoom ? <Loader2 size={12} className="animate-spin"/> : <Zap size={12}/>}
                     {editingShift.target_meeting_id ? '発行済み' : 'Zoom URLを自動発行'}
                   </button>
                 </label>
-                <input className="w-full p-2 border rounded mt-1 font-mono" value={editingShift.target_meeting_id || ''} onChange={e => setEditingShift({...editingShift, target_meeting_id: e.target.value})} placeholder="123 456 7890"/>
+                <input className="w-full min-h-11 p-2 border border-line rounded-input mt-1 font-mono" value={editingShift.target_meeting_id || ''} onChange={e => setEditingShift({...editingShift, target_meeting_id: e.target.value})} placeholder="123 456 7890"/>
                 {editingShift.start_url && (
-                  <p className="text-[10px] text-green-600 mt-1 flex items-center gap-1">
+                  <p className="text-xs text-emerald-600 mt-1 flex items-center gap-1">
                     <CheckCircle size={10}/> ホストURL発行済み
                   </p>
                 )}
               </div>
 
-              <div className="rounded-xl border border-violet-100 bg-violet-50 p-3">
-                <label className="flex items-center gap-2 text-xs font-black text-violet-900">
-                  <KeyRound size={14} className="text-violet-600" /> Zoomパスコード
+              <div className="rounded-btn border border-accent/20 bg-accent-soft p-3">
+                <label className="flex items-center gap-2 text-xs font-bold text-slate-800">
+                  <KeyRound size={14} className="text-accent" /> Zoomパスコード
                 </label>
-                <p className="mt-1 text-[11px] font-medium leading-relaxed text-violet-700">
+                <p className="mt-1 text-xs font-medium leading-relaxed text-slate-600">
                   Zoomの会議設定と生徒・講師の参加リンクを同じパスコードに更新します。
                 </p>
                 <div className="mt-2 flex flex-col gap-2 sm:flex-row">
@@ -1202,62 +1237,54 @@ export default function ShiftManagementPage() {
                     type="text"
                     autoComplete="new-password"
                     maxLength={10}
-                    className="min-w-0 flex-1 rounded-lg border border-violet-200 bg-white p-2 font-mono tracking-wider outline-none focus:border-violet-500"
+                    className="min-w-0 flex-1 min-h-11 rounded-input border border-line bg-white p-2 font-mono tracking-wider outline-none focus:border-accent"
                     value={editingShift.target_password || ''}
                     onChange={event => setEditingShift({ ...editingShift, target_password: event.target.value.replace(/\s/g, '') })}
                     placeholder="例: Risha2026"
                   />
-                  <button
-                    type="button"
+                  <Button
+                    variant="secondary"
+                    className="shrink-0"
                     onClick={handleUpdateZoomPasscode}
-                    disabled={updatingPasscode || !normalizeMeetingId(editingShift.target_meeting_id)}
-                    className="inline-flex shrink-0 items-center justify-center gap-1 rounded-lg bg-violet-600 px-3 py-2 text-xs font-black text-white transition-colors hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={!normalizeMeetingId(editingShift.target_meeting_id)}
+                    loading={updatingPasscode}
+                    icon={<KeyRound size={16} aria-hidden />}
                   >
-                    {updatingPasscode ? <Loader2 size={14} className="animate-spin" /> : <KeyRound size={14} />}
                     Zoomに反映して保存
-                  </button>
+                  </Button>
                 </div>
               </div>
 
-              <button onClick={handleUpdate} className="w-full bg-blue-600 text-white py-3 rounded-lg font-bold hover:bg-blue-700 shadow mt-4 flex justify-center items-center gap-2"><Save size={18}/> 保存</button>
+              <Button fullWidth size="lg" className="mt-4" onClick={handleUpdate} icon={<Save size={18} aria-hidden />}>保存</Button>
             </div>
-          </div>
-        </div>
-      )}
+        )}
+      </Modal>
 
-      {isSurveyModalOpen && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
-          <div className="bg-white rounded-3xl w-full max-w-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
-            <div className="bg-slate-800 text-white p-5 shrink-0 flex justify-between items-center">
-              <div>
-                <h3 className="font-bold text-lg flex items-center gap-2">
-                  <BarChart2 size={20}/> アンケート集計
-                </h3>
-                <p className="text-xs opacity-80 mt-1">
-                  対象: <span className="font-bold text-yellow-300 text-sm">{selectedTeacherForResults?.name}</span> 先生
-                </p>
-              </div>
-              <button onClick={() => setIsSurveyModalOpen(false)} className="text-slate-400 hover:text-white transition-colors bg-white/10 p-2 rounded-full"><X size={20}/></button>
-            </div>
-            
-            <div className="p-6 overflow-y-auto custom-scrollbar bg-slate-50 flex-1">
+      <Modal
+        open={isSurveyModalOpen}
+        onClose={() => setIsSurveyModalOpen(false)}
+        size="lg"
+        title="アンケート集計"
+        description={<>対象: <span className="font-bold text-fg">{selectedTeacherForResults?.name}</span> 先生</>}
+      >
+            <div className="-mx-5 -my-4 min-h-full bg-slate-50 px-5 py-4">
               {surveyLoading ? (
-                <div className="flex justify-center py-20"><Loader2 className="animate-spin text-indigo-500" size={30}/></div>
+                <div className="flex justify-center py-20"><Spinner size={30} /></div>
+              ) : surveyError ? (
+                <ErrorState title="アンケート結果を読み込めませんでした" onRetry={() => selectedTeacherForResults && handleShowSurveyResults({ stopPropagation: () => {} } as React.MouseEvent, selectedTeacherForResults.id, selectedTeacherForResults.name)} />
               ) : surveyResults.length === 0 ? (
-                <div className="text-center py-20 text-gray-400 font-bold">
-                  まだ回答データがありません
-                </div>
+                <EmptyState icon={BarChart2} title="まだ回答データがありません" />
               ) : (
                 <div className="space-y-8">
                   {surveyQuestions.map(q => {
                     if (q.type === 'rating') {
                       const { average, total, data } = calculateRatingStats(q.id);
                       return (
-                        <div key={q.id} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100">
+                        <div key={q.id} className="bg-white p-5 rounded-card shadow-sm border border-slate-100">
                           <h4 className="font-bold text-slate-800 mb-4 text-sm">{q.text}</h4>
                           <div className="flex items-center justify-between mb-4">
                             <div>
-                              <span className="text-3xl font-black text-indigo-600">{average}</span>
+                              <span className="text-3xl font-black text-accent">{average}</span>
                               <span className="text-xs text-slate-400 ml-1">/ 5.0</span>
                             </div>
                             <span className="text-xs font-bold bg-slate-100 text-slate-500 px-2 py-1 rounded">回答数: {total}</span>
@@ -1283,13 +1310,13 @@ export default function ShiftManagementPage() {
                       const answers = getTextAnswers(q.id);
                       if (answers.length === 0) return null;
                       return (
-                        <div key={q.id} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100">
+                        <div key={q.id} className="bg-white p-5 rounded-card shadow-sm border border-slate-100">
                           <h4 className="font-bold text-slate-800 mb-3 text-sm">{q.text}</h4>
                           <div className="space-y-3 max-h-60 overflow-y-auto custom-scrollbar pr-2">
                             {answers.map((a: any) => (
                               <div key={a.id} className="bg-slate-50 p-3 rounded-xl text-xs">
                                 <p className="text-slate-700 leading-relaxed mb-2">{a.text}</p>
-                                <div className="flex justify-between text-[10px] text-slate-400 border-t border-slate-200 pt-2">
+                                <div className="flex justify-between text-xs text-slate-400 border-t border-slate-200 pt-2">
                                   <span>{a.date}</span>
                                   <span>{a.subject}</span>
                                 </div>
@@ -1303,15 +1330,15 @@ export default function ShiftManagementPage() {
                 </div>
               )}
             </div>
-          </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 }
 
 // ClassCard (DnD対応・管理者向け・デザイン統一)
 function ClassCard({ info, onDelete, onEdit, onShowResults, onDragOver, onDragLeave, onDrop, onSearchAssign, dragOverCardId, dragOverZone }: any) {
+  const toast = useToast();
+  const confirm = useConfirm();
   const [loading, setLoading] = useState(false);
   const isTarget = dragOverCardId === info.id;
   const isEmerald = info.subject === '理科';
@@ -1333,13 +1360,13 @@ function ClassCard({ info, onDelete, onEdit, onShowResults, onDragOver, onDragLe
     activeRing: 'ring-2 ring-emerald-400',
     btn: hasHostPermission ? 'bg-rose-600 hover:bg-rose-700 text-white shadow-rose-200' : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-200',
   } : {
-    border: 'border-orange-100',
-    headerBg: 'bg-orange-500',
+    border: 'border-amber-100',
+    headerBg: 'bg-amber-500',
     headerText: 'text-white',
     badge: 'bg-white/20 text-white',
-    iconBg: 'bg-orange-500',
-    activeRing: 'ring-2 ring-orange-400',
-    btn: hasHostPermission ? 'bg-rose-600 hover:bg-rose-700 text-white shadow-rose-200' : 'bg-orange-500 hover:bg-orange-600 text-white shadow-orange-200',
+    iconBg: 'bg-amber-500',
+    activeRing: 'ring-2 ring-amber-400',
+    btn: hasHostPermission ? 'bg-rose-600 hover:bg-rose-700 text-white shadow-rose-200' : 'bg-amber-500 hover:bg-amber-600 text-white shadow-amber-200',
   };
 
   const confno = normalizeMeetingId(info.main?.target_meeting_id) || normalizeMeetingId(info.main?.start_url ? info.main.start_url.split('/').pop()?.split('?')[0] : '');
@@ -1361,12 +1388,16 @@ function ClassCard({ info, onDelete, onEdit, onShowResults, onDragOver, onDragLe
     e.stopPropagation();
 
     if (!confno) {
-      alert("ミーティングIDが設定されていません。");
+      toast.error('ミーティングIDが設定されていません。');
       return;
     }
 
     if (hasHostPermission) {
-      if(!confirm(`「${teacherName}」先生としてホストを開始しますか？\n(ログインID: ${loginEmail})`)) return;
+      if (!(await confirm({
+        title: `「${teacherName}」先生としてホストを開始しますか？`,
+        message: `ログインID: ${loginEmail}`,
+        confirmLabel: 'ホスト開始',
+      }))) return;
 
       const popup = window.open('', '_blank');
       if (popup) {
@@ -1399,15 +1430,19 @@ function ClassCard({ info, onDelete, onEdit, onShowResults, onDragOver, onDragLe
         } else {
           if (popup && !popup.closed) popup.close();
           console.error("API Error:", data);
-          alert(`ホスト権限の取得に失敗しました。\n\n理由: ${data.error}${data.detail ? `\n詳細: ${data.detail}` : ''}`);
-          if(confirm("通常参加で開きますか？")) {
+          const joinNormally = await confirm({
+            title: 'ホスト権限を取得できませんでした。通常参加で開きますか？',
+            message: `理由: ${data.error}${data.detail ? `／詳細: ${data.detail}` : ''}`,
+            confirmLabel: '通常参加で開く',
+          });
+          if (joinNormally) {
              launchWebUrl(info.url || `https://zoom.us/j/${confno}`);
           }
         }
       } catch (err) {
         if (popup && !popup.closed) popup.close();
         console.error(err);
-        alert('通信エラーが発生しました。');
+        toast.error('通信エラーが発生しました。もう一度お試しください。');
       } finally {
         setLoading(false);
       }
@@ -1436,14 +1471,14 @@ function ClassCard({ info, onDelete, onEdit, onShowResults, onDragOver, onDragLe
       {/* ヘッダー (先生画面に合わせてデザイン統一) */}
       <div className={`${theme.headerBg} px-3 py-2 relative`}>
         <div className="flex justify-between items-start mb-1">
-          <span className={`text-[10px] font-black px-2 py-0.5 rounded-md ${theme.badge} whitespace-nowrap`}>
+          <span className={`text-[11px] font-bold px-2 py-0.5 rounded-md ${theme.badge} whitespace-nowrap`}>
             {info.grade}/{info.place}
           </span>
           {/* 編集・削除ボタンは管理者のみ */}
           {info.main && (
             <div className="flex gap-1">
-              <button onClick={() => onEdit(info.main)} className="text-white/70 hover:text-white transition-colors"><Settings size={12}/></button>
-              <button onClick={() => onDelete(info.main!.id)} className="text-white/70 hover:text-white transition-colors"><Trash2 size={12}/></button>
+              <button type="button" onClick={() => onEdit(info.main)} aria-label="授業を編集" title="授業を編集" className="rounded p-0.5 text-white/80 hover:bg-white/15 hover:text-white transition-colors"><Settings size={14} aria-hidden /></button>
+              <button type="button" onClick={() => onDelete(info.main!.id)} aria-label="主担当の配置を解除" title="主担当の配置を解除" className="rounded p-0.5 text-white/80 hover:bg-white/15 hover:text-white transition-colors"><Trash2 size={14} aria-hidden /></button>
             </div>
           )}
         </div>
@@ -1453,7 +1488,7 @@ function ClassCard({ info, onDelete, onEdit, onShowResults, onDragOver, onDragLe
         
         {/* スタジオ名表示 */}
         {info.studio && (
-          <div className="flex items-center gap-0.5 text-[9px] bg-black/20 px-1.5 py-0.5 rounded text-white/90 font-bold whitespace-nowrap mt-1 w-max">
+          <div className="flex items-center gap-0.5 text-[11px] bg-black/20 px-1.5 py-0.5 rounded text-white/90 font-bold whitespace-nowrap mt-1 w-max">
             <MapPin size={9}/> {info.studio}
           </div>
         )}
@@ -1462,7 +1497,7 @@ function ClassCard({ info, onDelete, onEdit, onShowResults, onDragOver, onDragLe
       <div className="flex-1 flex flex-col">
         {/* メイン講師エリア */}
         <div 
-          className={`p-2 transition-colors ${isTarget && dragOverZone === 'main' ? 'bg-indigo-50' : 'bg-white'}`}
+          className={`p-2 transition-colors ${isTarget && dragOverZone === 'main' ? 'bg-accent-soft' : 'bg-white'}`}
           onDragOver={(e) => onDragOver(e, info.id, 'main')}
           onDragLeave={onDragLeave}
           onDrop={(e) => onDrop(e, info.main, 'main')}
@@ -1472,15 +1507,15 @@ function ClassCard({ info, onDelete, onEdit, onShowResults, onDragOver, onDragLe
               <User size={14}/>
             </div>
             <div className="min-w-0 flex-1">
-              <div className="text-[8px] text-gray-400 font-bold uppercase tracking-wider mb-0.5">Main</div>
+              <div className="text-[11px] text-slate-400 font-bold mb-0.5">メイン</div>
               <button 
                 onClick={(e) => info.main?.user_id && onShowResults(e, info.main.user_id, info.main.teacher_name)}
-                className="font-bold text-slate-800 text-xs hover:text-indigo-600 hover:underline decoration-indigo-300 text-left flex items-center gap-1 group/link w-full"
+                className="font-bold text-slate-800 text-xs hover:text-accent hover:underline decoration-accent/40 text-left flex items-center gap-1 group/link w-full"
               >
                 <span className="truncate">{info.main?.teacher_name || '未定'}</span>
-                {info.main?.teacher_name && <BarChart2 size={10} className="text-slate-300 group-hover/link:text-indigo-500 shrink-0"/>}
+                {info.main?.teacher_name && <BarChart2 size={10} className="text-slate-300 group-hover/link:text-accent shrink-0"/>}
               </button>
-              <button type="button" onClick={() => onSearchAssign('main')} className="mt-1 flex items-center gap-1 text-[9px] font-bold text-indigo-600 hover:underline">
+              <button type="button" onClick={() => onSearchAssign('main')} className="mt-1 flex items-center gap-1 text-[11px] font-bold text-accent hover:underline">
                 <Search size={9} /> 講師を検索して変更
               </button>
               
@@ -1490,7 +1525,7 @@ function ClassCard({ info, onDelete, onEdit, onShowResults, onDragOver, onDragLe
                   type="button"
                   onClick={handleEnterZoom}
                   disabled={loading}
-                  className={`flex items-center gap-1 text-[8px] font-mono mt-0.5 border rounded px-1 transition-all cursor-pointer group w-full justify-between h-[18px] ${
+                  className={`flex items-center gap-1 text-[11px] font-mono mt-0.5 border rounded px-1 transition-all cursor-pointer group w-full justify-between min-h-[20px] ${
                     hasHostPermission 
                       ? 'bg-rose-50 border-rose-200 text-rose-700 hover:bg-rose-100' 
                       : 'bg-slate-50 border-slate-100 text-slate-500 hover:bg-slate-100'
@@ -1504,7 +1539,7 @@ function ClassCard({ info, onDelete, onEdit, onShowResults, onDragOver, onDragLe
                   {loading ? <Loader2 size={6} className="animate-spin"/> : <Zap size={6} className={hasHostPermission ? "text-rose-500" : "text-slate-400"}/>}
                 </button>
               ) : (
-                <div className="h-[18px] text-[8px] text-slate-300 flex items-center pl-1 border border-transparent">ID未登録</div> 
+                <div className="min-h-[20px] text-[11px] text-slate-400 flex items-center pl-1 border border-transparent">ID未登録</div> 
               )}
             </div>
           </div>
@@ -1512,30 +1547,30 @@ function ClassCard({ info, onDelete, onEdit, onShowResults, onDragOver, onDragLe
 
         {/* サポート講師エリア */}
         <div 
-          className={`px-2 py-1.5 border-t border-slate-100 min-h-[50px] transition-colors ${isTarget && dragOverZone === 'sub' ? 'bg-indigo-50' : 'bg-slate-50/50'}`}
+          className={`px-2 py-1.5 border-t border-slate-100 min-h-[50px] transition-colors ${isTarget && dragOverZone === 'sub' ? 'bg-accent-soft' : 'bg-slate-50/50'}`}
           onDragOver={(e) => onDragOver(e, info.id, 'sub')}
           onDragLeave={onDragLeave}
           onDrop={(e) => onDrop(e, info.main, 'sub')}
         >
           <div className="mb-1 flex items-center justify-between">
-            <span className="text-[8px] text-slate-400 font-bold uppercase tracking-wider">Sub</span>
-            <button type="button" onClick={() => onSearchAssign('sub')} className="flex items-center gap-1 text-[9px] font-bold text-indigo-600 hover:underline"><UserPlus size={9} />検索して追加</button>
+            <span className="text-[11px] text-slate-400 font-bold">サポート</span>
+            <button type="button" onClick={() => onSearchAssign('sub')} className="flex items-center gap-1 text-[11px] font-bold text-accent hover:underline"><UserPlus size={9} />検索して追加</button>
           </div>
           <div className="space-y-1">
             {info.subs.map((sub: any) => (
-              <div key={sub.id} className="flex justify-between items-center text-[10px]">
+              <div key={sub.id} className="flex justify-between items-center text-[11px]">
                 <div className="min-w-0 flex flex-col">
                   <button
                     onClick={(e) => onShowResults(e, sub.user_id, sub.teacher_name)} 
-                    className="text-slate-600 font-medium flex items-center gap-1 hover:text-indigo-600 hover:underline"
+                    className="text-slate-600 font-medium flex items-center gap-1 hover:text-accent hover:underline"
                   >
                     <div className="w-1 h-1 rounded-full bg-slate-300 shrink-0"></div> {sub.teacher_name}
                   </button>
                 </div>
-                <button onClick={() => onDelete(sub.id)} className="text-slate-300 hover:text-red-500 shrink-0 ml-1"><Trash2 size={10}/></button>
+                <button type="button" onClick={() => onDelete(sub.id)} aria-label={`${sub.teacher_name}先生の配置を解除`} title="配置を解除" className="text-slate-400 hover:text-rose-600 shrink-0 ml-1 p-0.5"><Trash2 size={12} aria-hidden /></button>
               </div>
             ))}
-            {info.subs.length === 0 && <div className="text-[9px] text-slate-300 pl-1">-</div>}
+            {info.subs.length === 0 && <div className="text-[11px] text-slate-300 pl-1">-</div>}
           </div>
         </div>
 
@@ -1546,13 +1581,13 @@ function ClassCard({ info, onDelete, onEdit, onShowResults, onDragOver, onDragLe
               type="button" 
               onClick={handleEnterZoom}
               disabled={loading}
-              className={`w-full ${theme.btn} shadow-sm text-[10px] font-bold py-1.5 rounded-lg flex items-center justify-center gap-1 transition-transform active:scale-95`}
+              className={`w-full ${theme.btn} shadow-sm text-[11px] font-bold py-1.5 rounded-lg flex items-center justify-center gap-1 transition-transform active:scale-95`}
             >
               {loading ? <Loader2 size={10} className="animate-spin"/> : hasHostPermission ? <Zap size={10}/> : <Video size={10}/>}
               {loading ? '準備中...' : (hasHostPermission ? 'ホスト開始' : '入室')}
             </button>
           ) : (
-            <div className="w-full bg-slate-100 text-slate-400 text-[10px] font-bold py-1.5 rounded-lg flex items-center justify-center gap-1 cursor-not-allowed">
+            <div className="w-full bg-slate-100 text-slate-400 text-[11px] font-bold py-1.5 rounded-lg flex items-center justify-center gap-1 cursor-not-allowed">
               <Video size={12}/> -
             </div>
           )}

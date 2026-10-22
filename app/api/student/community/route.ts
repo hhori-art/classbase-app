@@ -2,6 +2,8 @@ import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, jsonError, requireRole } from '@/lib/server-auth';
+import { loadSchoolStaffRecipients, notifyStaff } from '@/lib/server/staff-recipients';
+import { COMMUNITY_REPORT_REASONS, isCommunityReportReason } from '@/lib/community-reports';
 
 export const runtime = 'nodejs';
 
@@ -9,6 +11,33 @@ function japanDateKey() {
   return new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit',
   }).format(new Date());
+}
+
+const millisOf = (value: any) => value?.toMillis?.() || value?.toDate?.()?.getTime?.() || (value ? new Date(value).getTime() : 0) || 0;
+const safeIdPart = (value: string) => value.replace(/[\/\s#?]/g, '_').slice(0, 200);
+
+/** 自分が申請中（未承認）の投稿だけを返す。承認済み・非公開にされた投稿は含めない。 */
+export async function GET(request: NextRequest) {
+  try {
+    const user = await getServerUser(request);
+    requireRole(user, ['student']);
+    const snap = await adminDb().collection('community_topics').where('creator_uid', '==', user.uid).limit(30).get();
+    const topics = snap.docs
+      .map(doc => ({ id: doc.id, data: doc.data() || {} }))
+      .filter(item => item.data.is_approved !== true && item.data.archived !== true && item.data.rejected !== true)
+      .map(item => ({
+        id: item.id,
+        title: String(item.data.title || ''),
+        type: item.data.type === 'vote' ? 'vote' : 'thread',
+        options: Array.isArray(item.data.options) ? item.data.options.map(String).slice(0, 5) : [],
+        created_at_ms: millisOf(item.data.created_at),
+      }))
+      .sort((a, b) => b.created_at_ms - a.created_at_ms)
+      .slice(0, 10);
+    return Response.json({ ok: true, topics }, { headers: { 'Cache-Control': 'private, no-store' } });
+  } catch (error) {
+    return jsonError(error);
+  }
 }
 
 export async function POST(request: NextRequest) {
@@ -66,6 +95,63 @@ export async function POST(request: NextRequest) {
 
     const topicId = String(body.topic_id || '');
     if (!topicId) return Response.json({ ok: false, error: 'topic_id is required' }, { status: 400 });
+
+    if (action === 'report') {
+      // 通報は生徒の掲示板だけ。講師の掲示板（audience=teacher）は対象外。
+      if (teacherAudience) return Response.json({ ok: false, error: 'invalid action' }, { status: 400 });
+      const targetType = body.target_type === 'comment' ? 'comment' : body.target_type === 'topic' ? 'topic' : '';
+      const reason = String(body.reason || '');
+      const commentId = targetType === 'comment' ? String(body.comment_id || '').trim() : '';
+      if (!targetType || !isCommunityReportReason(reason) || topicId.includes('/') || commentId.includes('/') || (targetType === 'comment' && !commentId)) {
+        return Response.json({ ok: false, error: 'invalid report' }, { status: 400 });
+      }
+      const topicRef = db.collection(collectionName).doc(topicId);
+      const commentRef = commentId ? topicRef.collection('comments').doc(commentId) : null;
+      const [topicSnap, commentSnap] = await db.getAll(topicRef, ...(commentRef ? [commentRef] : []));
+      const topic = topicSnap.data() || {};
+      if (!topicSnap.exists || topic.is_approved !== true || topic.archived === true || (commentRef && !commentSnap?.exists)) {
+        return Response.json({ ok: false, error: 'report target not found' }, { status: 404 });
+      }
+      const targetId = commentId ? `${topicId}/${commentId}` : topicId;
+      const reportId = safeIdPart(`${user.uid}_${targetType}_${topicId}${commentId ? `_${commentId}` : ''}`);
+      const comment = commentSnap?.data() || {};
+      try {
+        // 同じ生徒が同じ投稿を何度通報しても1件（自動で非表示にはしない。管理者が確認して判断する）。
+        await db.collection('community_reports').doc(reportId).create({
+          reporter_uid: user.uid,
+          reporter_school: user.school || '',
+          target_type: targetType,
+          target_id: targetId,
+          topic_id: topicId,
+          comment_id: commentId || null,
+          target_author_uid: String((commentId ? comment.uid : topic.creator_uid) || ''),
+          target_excerpt: String((commentId ? comment.text : topic.title) || '').slice(0, 200),
+          reason,
+          reason_label: COMMUNITY_REPORT_REASONS[reason],
+          status: 'open',
+          created_at: FieldValue.serverTimestamp(),
+        });
+      } catch (error: any) {
+        if (error?.code === 6 || error?.code === 'already-exists' || /already.exists/i.test(String(error?.message || ''))) {
+          return Response.json({ ok: true, duplicate: true });
+        }
+        throw error;
+      }
+      try {
+        const recipients = await loadSchoolStaffRecipients(user.school || null);
+        await notifyStaff(recipients, {
+          idPrefix: `community_report_${reportId}`,
+          title: '交流掲示板の投稿が通報されました',
+          message: `${COMMUNITY_REPORT_REASONS[reason]}：「${String(topic.title || '').slice(0, 60)}」${commentId ? 'へのコメント' : ''}`,
+          kind: 'community_report',
+          masterLink: '/master/community',
+          extra: { report_id: reportId, topic_id: topicId, comment_id: commentId || null },
+        });
+      } catch (error) {
+        console.error('掲示板の通報の管理者通知に失敗しました', error);
+      }
+      return Response.json({ ok: true, duplicate: false });
+    }
 
     if (action === 'comment') {
       const text = String(body.text || '').trim().slice(0, 1000);

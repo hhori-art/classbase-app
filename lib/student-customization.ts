@@ -360,3 +360,44 @@ export function normalizeStudentAppearance(input: unknown, owned: unknown = []):
     frame,
   };
 }
+
+/**
+ * テーマの差し色と画面の地の色（共通デザイントークン --cb-* の値。「R G B」）。
+ * 生徒画面の全ページでボタン・リンク・カードがテーマに合わせて変わる。
+ */
+const STUDENT_THEME_TOKENS: Record<StudentThemeId, { accent: string; hover: string; soft: string; canvas: string }> = {
+  aurora: { accent: '79 70 229', hover: '67 56 202', soft: '238 242 255', canvas: '240 244 248' },
+  ocean: { accent: '2 132 199', hover: '3 105 161', soft: '240 249 255', canvas: '240 249 255' },
+  forest: { accent: '5 150 105', hover: '4 120 87', soft: '236 253 245', canvas: '236 253 245' },
+  sunset: { accent: '225 29 72', hover: '190 18 60', soft: '255 241 242', canvas: '255 241 242' },
+  mono: { accent: '51 65 85', hover: '30 41 59', soft: '241 245 249', canvas: '241 245 249' },
+  galaxy: { accent: '124 58 237', hover: '109 40 217', soft: '245 243 255', canvas: '238 242 255' },
+  sakura: { accent: '219 39 119', hover: '190 24 93', soft: '253 242 248', canvas: '253 242 248' },
+  gold: { accent: '180 83 9', hover: '146 64 14', soft: '255 251 235', canvas: '255 251 235' },
+  rainbow: { accent: '124 58 237', hover: '109 40 217', soft: '245 243 255', canvas: '245 243 255' },
+  neon: { accent: '8 145 178', hover: '14 116 144', soft: '236 254 255', canvas: '241 245 249' },
+};
+
+const STUDENT_CARD_TOKENS: Record<StudentCardStyle, Record<string, string>> = {
+  soft: { '--cb-radius-card': '24px', '--cb-card-border': '1px', '--cb-card-alpha': '1', '--cb-card-blur': '0px' },
+  glass: { '--cb-radius-card': '24px', '--cb-card-border': '1px', '--cb-card-alpha': '0.75', '--cb-card-blur': '12px', '--cb-line': '255 255 255' },
+  solid: { '--cb-radius-card': '16px', '--cb-card-border': '2px', '--cb-card-alpha': '1', '--cb-card-blur': '0px', '--cb-shadow-card': 'none' },
+};
+
+const STUDENT_DENSITY_TOKENS: Record<StudentDensity, Record<string, string>> = {
+  comfortable: { '--cb-space-card': '20px', '--cb-space-section': '24px' },
+  compact: { '--cb-space-card': '16px', '--cb-space-section': '16px' },
+};
+
+/** 生徒の見た目の設定を、共通デザイントークン（CSS 変数）に変換する。student レイアウトの style に渡す。 */
+export function studentAppearanceCssVars(appearance: StudentAppearance): Record<string, string> {
+  const theme = STUDENT_THEME_TOKENS[appearance.theme] || STUDENT_THEME_TOKENS.aurora;
+  return {
+    '--cb-accent': theme.accent,
+    '--cb-accent-hover': theme.hover,
+    '--cb-accent-soft': theme.soft,
+    '--cb-canvas': theme.canvas,
+    ...STUDENT_CARD_TOKENS[appearance.cardStyle],
+    ...STUDENT_DENSITY_TOKENS[appearance.density],
+  };
+}

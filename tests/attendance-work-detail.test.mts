@@ -24,3 +24,35 @@ test('長時間勤務の休憩不足と最後の休憩を拒否する', () => {
   assert.match(validateAttendanceSegmentCoverage([segment('09:00', '18:00')], start, end), /60分/);
   assert.match(validateAttendanceSegmentCoverage([segment('09:00', '17:00'), segment('17:00', '18:00', 'break')], start, end), /最初または最後/);
 });
+
+test('個別のウイングネットは個別チューター単価、タブレット学習はメンター単価の区分になり、人数は不要', async () => {
+  const { payrollTierForSegment, validateAttendanceSegment } = await import('../lib/attendance-work-detail.ts');
+  const wingnet = { start: '16:00', end: '17:00', type: 'individual', lesson_format: 'individual' as const, individual_level: 'wingnet' as const, school_id: '270' };
+  const tablet = { ...wingnet, individual_level: 'tablet' as const };
+  assert.equal(payrollTierForSegment(wingnet), 'private_tutor');
+  assert.equal(payrollTierForSegment(tablet), 'mentor');
+  assert.equal(validateAttendanceSegment(wingnet), '');
+  assert.match(validateAttendanceSegment({ ...wingnet, individual_level: 'standard' }), /人数/);
+});
+
+test('勤務校舎が創学の授業は創学単価、創学アカデミーは通常の集団授業', async () => {
+  const { payrollTierForSegment } = await import('../lib/attendance-work-detail.ts');
+  const lesson = { start: '17:00', end: '18:00', type: 'lesson', grade: '中1' };
+  assert.equal(payrollTierForSegment({ ...lesson, school_id: '694' }), 'sogaku_lesson');
+  assert.equal(payrollTierForSegment({ ...lesson, school_id: '321' }), 'group_lesson');
+  assert.equal(payrollTierForSegment({ ...lesson, school_id: '170' }), 'group_lesson');
+  // 創学でも事務・サブは通常の単価
+  assert.equal(payrollTierForSegment({ start: '18:00', end: '19:00', type: 'office', office_task: 'grading', school_id: '694' }), 'office');
+});
+
+test('旧勤怠の創学の教室番号・校舎名を創学として読み取り、創学アカデミーと区別する', async () => {
+  const { isSogakuAttendanceSchool, resolveAttendanceSchool } = await import('../lib/attendance-schools.ts');
+  assert.equal(resolveAttendanceSchool('0694'), '創学ゼミ 垂水校');
+  assert.equal(resolveAttendanceSchool('創学ｾﾞﾐ垂水'), '創学ゼミ 垂水校');
+  assert.equal(resolveAttendanceSchool('創学ｵﾝﾗｲﾝ'), '創学ゼミ オンライン校');
+  assert.equal(resolveAttendanceSchool('創学個別姫路'), '創学個別 姫路校');
+  assert.equal(resolveAttendanceSchool('創学アカデミー姫路'), '創学アカデミー 姫路校');
+  assert.equal(isSogakuAttendanceSchool('0696'), true);
+  assert.equal(isSogakuAttendanceSchool('349'), false);
+  assert.equal(isSogakuAttendanceSchool('創学アカデミー 明石校'), false);
+});

@@ -6,6 +6,7 @@ import { extractOvertimeIntervals, normalizeDedicatedSchedule, totalOvertimeMinu
 import { isDedicatedProfile } from '@/lib/employment-category';
 import { getServerUser, jsonError, requireRole } from '@/lib/server-auth';
 import { roundDownTo5Minutes, roundUpTo5Minutes } from '@/lib/attendance-time';
+import { jstDateKey } from '@/lib/date-key';
 
 export const runtime = 'nodejs';
 
@@ -47,6 +48,15 @@ export async function GET(request: NextRequest) {
         const intervals = roundedStart && roundedEnd ? extractOvertimeIntervals(record.date, roundedStart, roundedEnd, schedule) : [];
         return { ...record, overtime_intervals: intervals, overtime_minutes: totalOvertimeMinutes(intervals), overtime_claim: claimByRecord.get(record.id) || null };
       });
+    // 本日の打刻状態は表示中の月に関係なく、全勤務記録から判定する（過去月表示中の二重出勤防止）
+    const todayKey = jstDateKey();
+    const toCurrentRecord = (doc: FirebaseFirestore.QueryDocumentSnapshot) => {
+      const data = doc.data();
+      return { id: doc.id, date: String(data.date || ''), start_time: String(data.start_time || ''), end_time: data.end_time || null, created_at: data.created_at || null };
+    };
+    const byStartDesc = (a: { start_time: string }, b: { start_time: string }) => b.start_time.localeCompare(a.start_time);
+    const activeRecord = recordSnap.docs.filter(doc => !doc.data().end_time).map(toCurrentRecord).sort(byStartDesc)[0] || null;
+    const todayRecord = recordSnap.docs.filter(doc => doc.data().date === todayKey).map(toCurrentRecord).sort(byStartDesc)[0] || null;
     const lessons = lessonSnap.docs
       .map(doc => ({ id: doc.id, ...doc.data() } as Record<string, unknown>))
       .filter(item => belongsToMonth(item.lesson_date, month))
@@ -55,7 +65,7 @@ export async function GET(request: NextRequest) {
       .map(doc => ({ id: doc.id, ...doc.data() } as Record<string, unknown>))
       .filter(item => belongsToMonth(item.expense_date, month))
       .sort((a, b) => String(b.expense_date).localeCompare(String(a.expense_date)));
-    return Response.json({ ok: true, month, schedule, records, overtime_claims: overtimeClaims, lessons, transport }, { headers: { 'Cache-Control': 'no-store' } });
+    return Response.json({ ok: true, month, schedule, today: todayKey, active_record: activeRecord, today_record: todayRecord, records, overtime_claims: overtimeClaims, lessons, transport }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {
     return jsonError(error);
   }

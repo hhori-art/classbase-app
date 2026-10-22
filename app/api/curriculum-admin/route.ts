@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server';
 import { revalidateTag } from 'next/cache';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
-import { getServerUser, jsonError } from '@/lib/server-auth';
+import { getServerUser, isAdminLike, jsonError } from '@/lib/server-auth';
 
 export const runtime = 'nodejs';
 
@@ -105,7 +105,8 @@ const dateMinusDays = (date: string, days: number) => {
 export async function GET(request: NextRequest) {
   try {
     const user = await getServerUser(request);
-    if (!['master', 'admin'].includes(user.role)) throw new Error('forbidden');
+    // 理社講座の管理画面（年間カリキュラム）。管理者は理社講座の管理権限が必要。
+    if (!isAdminLike(user)) throw new Error('forbidden');
 
     const year = Number(request.nextUrl.searchParams.get('year') || new Date().getFullYear());
     const db = adminDb();

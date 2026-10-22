@@ -3,10 +3,12 @@
 import { useState, useEffect, use, useRef } from 'react';
 import { db } from '@/lib/firebase';
 import { doc, getDoc, collection, query, where, getDocs } from 'firebase/firestore';
-import { ArrowLeft, CheckCircle, User, MessageSquare, ExternalLink, RefreshCw, XCircle, Send, Stamp, Plus, ImageIcon } from 'lucide-react';
-import Link from 'next/link';
+import { CheckCircle, User, MessageSquare, ExternalLink, RefreshCw, Send, Stamp, Plus, Inbox } from 'lucide-react';
 import Image from 'next/image';
 import { useAuth } from '@/app/context/AuthContext';
+import {
+  Button, Card, PageHeader, Modal, useToast, ListSkeleton, EmptyState, ErrorState, StatusPill,
+} from '@/app/components/ui';
 
 // デフォルトのスタンプリスト（必要に応じて画像URLを差し替えてください）
 const DEFAULT_STAMPS = [
@@ -18,13 +20,16 @@ const DEFAULT_STAMPS = [
 
 export default function TeacherHomeworkCheckPage({ params }: { params: Promise<{ id: string }> }) {
   const { user } = useAuth();
+  const toast = useToast();
   const { id } = use(params);
   const assignmentId = id;
 
   const [assignment, setAssignment] = useState<any>(null);
   const [submissions, setSubmissions] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  
+  const [loadError, setLoadError] = useState(false);
+  const [sending, setSending] = useState(false);
+
   // 拡大表示用
   const [zoomImage, setZoomImage] = useState<string | null>(null);
   
@@ -44,7 +49,8 @@ export default function TeacherHomeworkCheckPage({ params }: { params: Promise<{
 
   const fetchData = async () => {
     try {
-      // 課題情報の取得
+      setLoadError(false);
+      // 宿題情報の取得
       const assignSnap = await getDoc(doc(db, 'homework_assignments', assignmentId));
       if (!assignSnap.exists()) return;
       setAssignment({ id: assignSnap.id, ...assignSnap.data() });
@@ -67,6 +73,7 @@ export default function TeacherHomeworkCheckPage({ params }: { params: Promise<{
       setSubmissions(list);
     } catch (e) {
       console.error(e);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -102,7 +109,7 @@ export default function TeacherHomeworkCheckPage({ params }: { params: Promise<{
         setCustomStamps(prev => [...prev, { id: `custom_${Date.now()}`, url }]);
         setSelectedStamp(url);
       } catch (err: any) {
-        alert(err?.message || 'スタンプのアップロードに失敗しました');
+        toast.error(err?.message || 'スタンプのアップロードに失敗しました');
       }
     }
   };
@@ -111,6 +118,7 @@ export default function TeacherHomeworkCheckPage({ params }: { params: Promise<{
   const submitCheck = async () => {
     if (!checkModal) return;
 
+    setSending(true);
     try {
       const token = await user?.getIdToken();
       const res = await fetch('/api/teacher/homework', {
@@ -141,7 +149,9 @@ export default function TeacherHomeworkCheckPage({ params }: { params: Promise<{
       setCheckModal(null); // 閉じる
 
     } catch (e) {
-      alert('エラー: ' + e);
+      toast.error('エラー: ' + e);
+    } finally {
+      setSending(false);
     }
   };
 
@@ -152,8 +162,9 @@ export default function TeacherHomeworkCheckPage({ params }: { params: Promise<{
 
   // 再提出実行
   const submitResubmit = async () => {
-    if (!feedbackInput || !feedbackInput.text.trim()) return alert('再提出の理由を入力してください');
-    
+    if (!feedbackInput || !feedbackInput.text.trim()) return toast.error('再提出の理由を入力してください');
+
+    setSending(true);
     try {
       const token = await user?.getIdToken();
       const res = await fetch('/api/teacher/homework', {
@@ -177,264 +188,295 @@ export default function TeacherHomeworkCheckPage({ params }: { params: Promise<{
       setFeedbackInput(null);
 
     } catch (e) {
-      alert('エラー: ' + e);
+      toast.error('エラー: ' + e);
+    } finally {
+      setSending(false);
     }
   };
 
-  if (loading) return <div className="p-10 text-center">読み込み中...</div>;
-  if (!assignment) return <div className="p-10 text-center">課題が見つかりません</div>;
+  const stampButtonClass = (url: string) =>
+    `relative aspect-square overflow-hidden rounded-btn border-2 p-1 transition-colors ${selectedStamp === url ? 'border-success bg-success-soft ring-2 ring-success/30' : 'border-line hover:bg-canvas'}`;
+
+  if (loading) {
+    return (
+      <div className="px-4 py-5 sm:px-6">
+        <div className="mx-auto max-w-6xl"><ListSkeleton rows={4} /></div>
+      </div>
+    );
+  }
+  if (loadError) {
+    return (
+      <div className="px-4 py-5 sm:px-6">
+        <div className="mx-auto max-w-6xl space-y-6">
+          <PageHeader tone="plain" title="提出状況チェック" backHref="/teacher/homework" />
+          <ErrorState onRetry={() => { setLoading(true); fetchData(); }} />
+        </div>
+      </div>
+    );
+  }
+  if (!assignment) {
+    return (
+      <div className="px-4 py-5 sm:px-6">
+        <div className="mx-auto max-w-6xl space-y-6">
+          <PageHeader tone="plain" title="提出状況チェック" backHref="/teacher/homework" />
+          <EmptyState title="宿題が見つかりません" />
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="min-h-screen bg-gray-50 p-6 pb-32 font-sans">
-      <div className="max-w-6xl mx-auto">
-        
+    <div className="px-4 py-5 pb-32 sm:px-6">
+      <div className="mx-auto max-w-6xl space-y-6">
+
         {/* ヘッダー */}
-        <div className="flex items-center justify-between mb-8">
-          <div className="flex items-center gap-4">
-            <Link href="/teacher/homework" className="bg-white p-2 rounded-full shadow text-gray-600">
-              <ArrowLeft size={20} />
-            </Link>
-            <div>
-              <h1 className="text-2xl font-bold text-gray-800">{assignment.title}</h1>
-              <p className="text-sm text-gray-500">提出状況チェック</p>
-            </div>
-          </div>
-          <div className="bg-white px-4 py-2 rounded-lg shadow-sm font-bold text-gray-600">
-            提出数: {submissions.length} 名
-          </div>
-        </div>
+        <PageHeader
+          tone="plain"
+          title={assignment.title}
+          description="提出状況チェック"
+          backHref="/teacher/homework"
+          actions={(
+            <span className="cb-card inline-flex min-h-11 items-center px-4 text-sm font-bold text-fg-muted">
+              提出数: {submissions.length} 名
+            </span>
+          )}
+        />
 
         {/* 提出カード一覧 */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {submissions.map((sub) => (
-            <div key={sub.id} className={`bg-white rounded-2xl shadow-sm border-2 overflow-hidden flex flex-col ${
-              sub.status === 'checked' ? 'border-green-400' :
-              sub.status === 'resubmit' ? 'border-red-400' : 'border-gray-200'
-            }`}>
-              
-              {/* ヘッダー */}
-              <div className="p-3 border-b border-gray-100 flex justify-between items-center bg-gray-50">
-                <div className="font-bold text-gray-800 flex items-center gap-2">
-                  <User size={16} className="text-gray-400"/>
-                  {sub.student_name}
-                </div>
-                <div>
-                  {sub.status === 'checked' && <span className="text-[10px] font-bold bg-green-100 text-green-700 px-2 py-1 rounded-full">合格</span>}
-                  {sub.status === 'resubmit' && <span className="text-[10px] font-bold bg-red-100 text-red-700 px-2 py-1 rounded-full">再提出</span>}
-                  {sub.status === 'submitted' && <span className="text-[10px] font-bold bg-blue-100 text-blue-700 px-2 py-1 rounded-full">未チェック</span>}
-                </div>
-              </div>
+        {submissions.length === 0 ? (
+          <EmptyState icon={Inbox} title="まだ提出はありません" />
+        ) : (
+          <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
+            {submissions.map((sub) => (
+              <Card key={sub.id} padded={false} className={`flex flex-col overflow-hidden border-2 ${
+                sub.status === 'checked' ? 'border-emerald-400' :
+                sub.status === 'resubmit' ? 'border-rose-400' : 'border-line'
+              }`}>
 
-              {/* 画像エリア (スタンプがあれば表示) */}
-              <div className="relative aspect-video bg-gray-100 group">
-                {sub.imageUrl ? (
-                  <>
-                    <Image 
-                      src={sub.imageUrl} 
-                      alt="提出画像" 
-                      fill 
-                      className="object-contain"
-                      unoptimized
-                    />
-                    {/* スタンプ表示 */}
-                    {sub.stamp_url && (
-                      <div className="absolute top-2 right-2 w-16 h-16 rotate-12 drop-shadow-md">
-                        <Image src={sub.stamp_url} alt="Stamp" fill className="object-contain" unoptimized />
-                      </div>
-                    )}
-                    <button 
-                      onClick={() => setZoomImage(sub.imageUrl)}
-                      className="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white font-bold gap-2"
+                {/* ヘッダー */}
+                <div className="flex items-center justify-between border-b border-line bg-canvas p-3">
+                  <div className="flex items-center gap-2 font-bold text-fg">
+                    <User size={16} className="text-slate-400" aria-hidden />
+                    {sub.student_name}
+                  </div>
+                  <div>
+                    {sub.status === 'checked' && <StatusPill tone="success">合格</StatusPill>}
+                    {sub.status === 'resubmit' && <StatusPill tone="danger">再提出</StatusPill>}
+                    {sub.status === 'submitted' && <StatusPill tone="info">未チェック</StatusPill>}
+                  </div>
+                </div>
+
+                {/* 画像エリア (スタンプがあれば表示) */}
+                <div className="group relative aspect-video bg-slate-100">
+                  {sub.imageUrl ? (
+                    <>
+                      <Image
+                        src={sub.imageUrl}
+                        alt="提出画像"
+                        fill
+                        className="object-contain"
+                        unoptimized
+                      />
+                      {/* スタンプ表示 */}
+                      {sub.stamp_url && (
+                        <div className="absolute right-2 top-2 h-16 w-16 rotate-12 drop-shadow-md">
+                          <Image src={sub.stamp_url} alt="スタンプ" fill className="object-contain" unoptimized />
+                        </div>
+                      )}
+                      <button
+                        type="button"
+                        aria-label="画像を拡大"
+                        onClick={() => setZoomImage(sub.imageUrl)}
+                        className="absolute inset-0 flex items-center justify-center gap-2 bg-black/20 font-bold text-white opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
+                      >
+                        <ExternalLink size={24} aria-hidden />
+                      </button>
+                    </>
+                  ) : (
+                    <div className="flex h-full w-full items-center justify-center text-xs text-slate-400">画像なし</div>
+                  )}
+                </div>
+
+                {/* コメント・アクションエリア */}
+                <div className="flex flex-1 flex-col gap-3 p-4">
+                  {sub.comment && (
+                    <div className="relative rounded-input bg-info-soft p-2 text-xs text-slate-700">
+                      <MessageSquare size={12} className="absolute right-2 top-2 text-info/40" aria-hidden />
+                      <span className="mb-1 block font-bold text-info">生徒コメント:</span>
+                      {sub.comment}
+                    </div>
+                  )}
+
+                  {/* 講師のコメント表示 */}
+                  {sub.teacher_comment && (
+                    <div className="rounded-input border border-success/20 bg-success-soft p-2 text-xs text-emerald-800">
+                      <span className="mb-1 flex items-center gap-1 font-bold"><CheckCircle size={12} aria-hidden /> 講師コメント:</span>
+                      {sub.teacher_comment}
+                    </div>
+                  )}
+
+                  {sub.status === 'resubmit' && sub.feedback && (
+                    <div className="rounded-input bg-danger-soft p-2 text-xs text-rose-700">
+                      <span className="mb-1 block font-bold">再提出理由:</span>
+                      {sub.feedback}
+                    </div>
+                  )}
+
+                  <div className="mt-auto grid grid-cols-2 gap-2 pt-2">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => openResubmitModal(sub.id)}
+                      icon={<RefreshCw size={14} aria-hidden />}
+                      className="hover:bg-danger-soft hover:text-danger"
                     >
-                      <ExternalLink size={24}/>
-                    </button>
-                  </>
-                ) : (
-                  <div className="w-full h-full flex items-center justify-center text-gray-400 text-xs">画像なし</div>
-                )}
-              </div>
-
-              {/* コメント・アクションエリア */}
-              <div className="p-4 flex-1 flex flex-col gap-3">
-                {sub.comment && (
-                  <div className="bg-blue-50 p-2 rounded text-xs text-gray-700 relative">
-                     <MessageSquare size={12} className="absolute top-2 right-2 text-blue-200"/>
-                     <span className="font-bold text-blue-400 block mb-1">生徒コメント:</span>
-                     {sub.comment}
+                      再提出
+                    </Button>
+                    <Button
+                      variant={sub.status === 'checked' ? 'secondary' : 'primary'}
+                      size="sm"
+                      onClick={() => openCheckModal(sub)}
+                      icon={<Stamp size={14} aria-hidden />}
+                      className={sub.status === 'checked' ? 'border-success/30 bg-success-soft text-success hover:bg-success-soft' : undefined}
+                    >
+                      {sub.status === 'checked' ? '修正・コメント' : '合格・スタンプ'}
+                    </Button>
                   </div>
-                )}
-
-                {/* 先生のコメント表示 */}
-                {sub.teacher_comment && (
-                  <div className="bg-green-50 p-2 rounded text-xs text-green-800 border border-green-100">
-                    <span className="font-bold block mb-1 flex items-center gap-1"><CheckCircle size={10}/> 先生コメント:</span>
-                    {sub.teacher_comment}
-                  </div>
-                )}
-
-                {sub.status === 'resubmit' && sub.feedback && (
-                  <div className="bg-red-50 p-2 rounded text-xs text-red-700">
-                    <span className="font-bold block mb-1">再提出理由:</span>
-                    {sub.feedback}
-                  </div>
-                )}
-
-                <div className="mt-auto grid grid-cols-2 gap-2 pt-2">
-                  <button 
-                    onClick={() => openResubmitModal(sub.id)}
-                    className="bg-gray-100 text-gray-600 py-2 rounded-lg text-xs font-bold hover:bg-red-50 hover:text-red-600 transition-colors flex items-center justify-center gap-1"
-                  >
-                    <RefreshCw size={14}/> 再提出
-                  </button>
-                  {/* 合格ボタンを更新 */}
-                  <button 
-                    onClick={() => openCheckModal(sub)}
-                    className={`py-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1 ${
-                      sub.status === 'checked' 
-                      ? 'bg-green-100 text-green-700 hover:bg-green-200' 
-                      : 'bg-blue-600 text-white hover:bg-blue-700 shadow-sm'
-                    }`}
-                  >
-                    <Stamp size={14}/> {sub.status === 'checked' ? '修正・コメント' : '合格・スタンプ'}
-                  </button>
                 </div>
-              </div>
-            </div>
-          ))}
-        </div>
+              </Card>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* 画像拡大モーダル */}
-      {zoomImage && (
-        <div className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center p-4" onClick={() => setZoomImage(null)}>
-          <div className="relative w-full max-w-5xl h-[90vh]">
+      <Modal open={!!zoomImage} onClose={() => setZoomImage(null)} title="提出画像" size="lg">
+        {zoomImage && (
+          <div className="relative h-[70vh] w-full">
             <Image src={zoomImage} alt="拡大" fill className="object-contain" unoptimized />
-            <button className="absolute top-4 right-4 text-white bg-gray-800/50 p-2 rounded-full"><XCircle size={32}/></button>
           </div>
-        </div>
-      )}
+        )}
+      </Modal>
 
       {/* ■ 合格・スタンプ付与モーダル */}
-      {checkModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in">
-          <div className="bg-white w-full max-w-2xl rounded-3xl overflow-hidden shadow-2xl flex flex-col md:flex-row max-h-[90vh]">
-            
+      <Modal
+        open={!!checkModal}
+        onClose={() => setCheckModal(null)}
+        title={checkModal ? `${checkModal.student_name} さん` : ''}
+        description="スタンプとコメントを送って合格にします"
+        size="lg"
+        footer={(
+          <>
+            <Button variant="ghost" onClick={() => setCheckModal(null)}>キャンセル</Button>
+            <Button loading={sending} onClick={submitCheck} icon={<Send size={18} aria-hidden />} className="bg-success text-white hover:bg-success/90">
+              送信して合格
+            </Button>
+          </>
+        )}
+      >
+        {checkModal && (
+          <div className="flex flex-col gap-6 md:flex-row">
             {/* 左側：画像プレビューとスタンプ配置イメージ */}
-            <div className="bg-gray-100 md:w-1/2 p-4 flex flex-col items-center justify-center relative min-h-[300px]">
-               <div className="relative w-full h-full min-h-[250px] bg-white rounded-lg shadow-sm overflow-hidden">
-                 <Image src={checkModal.imageUrl} alt="生徒の提出" fill className="object-contain" unoptimized />
-                 {/* 選択中のスタンプをオーバーレイ表示 */}
-                 {selectedStamp && (
-                   <div className="absolute top-4 right-4 w-24 h-24 rotate-12 drop-shadow-lg transition-all animate-in zoom-in">
-                     <Image src={selectedStamp} alt="スタンプ" fill className="object-contain" unoptimized />
-                   </div>
-                 )}
-               </div>
-               <p className="text-xs text-gray-400 mt-2 text-center">※スタンプは右上に表示されます</p>
+            <div className="flex flex-col items-center justify-center rounded-card bg-slate-100 p-4 md:w-1/2">
+              <div className="relative h-full min-h-[250px] w-full overflow-hidden rounded-input bg-surface shadow-sm">
+                <Image src={checkModal.imageUrl} alt="生徒の提出" fill className="object-contain" unoptimized />
+                {/* 選択中のスタンプをオーバーレイ表示 */}
+                {selectedStamp && (
+                  <div className="absolute right-4 top-4 h-24 w-24 rotate-12 drop-shadow-lg">
+                    <Image src={selectedStamp} alt="スタンプ" fill className="object-contain" unoptimized />
+                  </div>
+                )}
+              </div>
+              <p className="mt-2 text-center text-xs text-fg-muted">※スタンプは右上に表示されます</p>
             </div>
 
             {/* 右側：操作パネル */}
-            <div className="md:w-1/2 p-6 flex flex-col bg-white overflow-y-auto">
-              <h3 className="text-xl font-bold text-gray-800 mb-1 flex items-center gap-2">
-                <Stamp className="text-green-500" /> 
-                {checkModal.student_name} さん
-              </h3>
-              <p className="text-sm text-gray-400 mb-6">スタンプとコメントを送って合格にします</p>
-
+            <div className="flex flex-col md:w-1/2">
               {/* スタンプ選択 */}
               <div className="mb-6">
-                <label className="text-xs font-bold text-gray-500 mb-2 block">スタンプを選択</label>
+                <label className="mb-2 block text-xs font-bold text-fg-muted">スタンプを選択</label>
                 <div className="grid grid-cols-4 gap-2">
                   {/* デフォルトスタンプ */}
                   {DEFAULT_STAMPS.map(stamp => (
                     <button
+                      type="button"
                       key={stamp.id}
+                      aria-label={`スタンプ ${stamp.id}`}
+                      aria-pressed={selectedStamp === stamp.url}
                       onClick={() => setSelectedStamp(stamp.url)}
-                      className={`aspect-square rounded-xl border-2 p-1 relative overflow-hidden transition-all ${selectedStamp === stamp.url ? 'border-green-500 bg-green-50 ring-2 ring-green-200' : 'border-gray-100 hover:bg-gray-50'}`}
+                      className={stampButtonClass(stamp.url)}
                     >
                       <Image src={stamp.url} alt={stamp.id} fill className="object-contain p-1" unoptimized />
                     </button>
                   ))}
-                  
+
                   {/* 追加されたスタンプ */}
                   {customStamps.map(stamp => (
                     <button
+                      type="button"
                       key={stamp.id}
+                      aria-label="追加したスタンプ"
+                      aria-pressed={selectedStamp === stamp.url}
                       onClick={() => setSelectedStamp(stamp.url)}
-                      className={`aspect-square rounded-xl border-2 p-1 relative overflow-hidden transition-all ${selectedStamp === stamp.url ? 'border-green-500 bg-green-50 ring-2 ring-green-200' : 'border-gray-100 hover:bg-gray-50'}`}
+                      className={stampButtonClass(stamp.url)}
                     >
                       <Image src={stamp.url} alt={stamp.id} fill className="object-contain p-1" unoptimized />
                     </button>
                   ))}
 
                   {/* スタンプ追加ボタン */}
-                  <button 
+                  <button
+                    type="button"
                     onClick={() => stampInputRef.current?.click()}
-                    className="aspect-square rounded-xl border-2 border-dashed border-gray-300 flex flex-col items-center justify-center text-gray-400 hover:bg-gray-50 hover:border-gray-400 transition-colors"
+                    className="flex aspect-square flex-col items-center justify-center rounded-btn border-2 border-dashed border-slate-300 text-slate-400 transition-colors hover:border-slate-400 hover:bg-canvas"
                   >
-                    <Plus size={20} />
-                    <span className="text-[10px] font-bold">追加</span>
+                    <Plus size={20} aria-hidden />
+                    <span className="text-xs font-bold">追加</span>
                   </button>
                   <input type="file" ref={stampInputRef} onChange={handleAddStamp} className="hidden" accept="image/*" />
                 </div>
               </div>
 
               {/* コメント入力 */}
-              <div className="mb-6 flex-1">
-                <label className="text-xs font-bold text-gray-500 mb-2 block">先生からのコメント (任意)</label>
-                <textarea 
-                  className="w-full h-24 p-3 border border-gray-200 rounded-xl bg-gray-50 focus:bg-white outline-none focus:ring-2 focus:ring-green-200 resize-none text-sm"
+              <div className="flex-1">
+                <label className="mb-2 block text-xs font-bold text-fg-muted">講師からのコメント (任意)</label>
+                <textarea
+                  className="h-24 w-full resize-none rounded-input border border-line bg-surface p-3 text-sm outline-none focus:ring-2 focus:ring-success/30"
                   placeholder="よくできました！この調子で頑張ろう！"
                   value={teacherComment}
                   onChange={(e) => setTeacherComment(e.target.value)}
                 />
               </div>
-
-              {/* アクションボタン */}
-              <div className="flex gap-3 mt-auto">
-                <button 
-                  onClick={() => setCheckModal(null)} 
-                  className="flex-1 py-3 text-gray-500 font-bold hover:bg-gray-100 rounded-xl transition-colors"
-                >
-                  キャンセル
-                </button>
-                <button 
-                  onClick={submitCheck} 
-                  className="flex-[2] py-3 bg-green-500 text-white font-bold rounded-xl hover:bg-green-600 shadow-lg shadow-green-100 flex items-center justify-center gap-2 transform active:scale-95 transition-all"
-                >
-                  <Send size={18} />
-                  送信して合格
-                </button>
-              </div>
             </div>
           </div>
-        </div>
-      )}
+        )}
+      </Modal>
 
       {/* 再提出理由入力モーダル */}
-      {feedbackInput && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-          <div className="bg-white w-full max-w-md rounded-2xl p-6 shadow-xl animate-in zoom-in-95">
-            <h3 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
-              <RefreshCw className="text-red-500"/> 再提出を求める
-            </h3>
-            <p className="text-sm text-gray-500 mb-2">理由を入力して返却してください</p>
-            <textarea 
-              className="w-full h-32 p-3 border border-gray-200 rounded-xl bg-gray-50 focus:bg-white outline-none focus:ring-2 focus:ring-red-200 resize-none text-sm"
-              placeholder="例: 画像がぼやけて読めません。もう一度撮影してください。"
-              value={feedbackInput.text}
-              onChange={(e) => setFeedbackInput({...feedbackInput, text: e.target.value})}
-              autoFocus
-            />
-            <div className="flex justify-end gap-3 mt-4">
-              <button onClick={() => setFeedbackInput(null)} className="px-4 py-2 text-gray-500 font-bold hover:bg-gray-100 rounded-lg">キャンセル</button>
-              <button onClick={submitResubmit} className="px-6 py-2 bg-red-500 text-white font-bold rounded-lg hover:bg-red-600 shadow-md flex items-center gap-2">
-                <Send size={16}/> 送信
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <Modal
+        open={!!feedbackInput}
+        onClose={() => setFeedbackInput(null)}
+        title="再提出を求める"
+        description="理由を入力して返却してください"
+        footer={(
+          <>
+            <Button variant="ghost" onClick={() => setFeedbackInput(null)}>キャンセル</Button>
+            <Button variant="danger" loading={sending} onClick={submitResubmit} icon={<Send size={16} aria-hidden />}>
+              送信
+            </Button>
+          </>
+        )}
+      >
+        {feedbackInput && (
+          <textarea
+            className="h-32 w-full resize-none rounded-input border border-line bg-surface p-3 text-sm outline-none focus:ring-2 focus:ring-danger/30"
+            placeholder="例: 画像がぼやけて読めません。もう一度撮影してください。"
+            value={feedbackInput.text}
+            onChange={(e) => setFeedbackInput({...feedbackInput, text: e.target.value})}
+            autoFocus
+          />
+        )}
+      </Modal>
     </div>
   );
 }

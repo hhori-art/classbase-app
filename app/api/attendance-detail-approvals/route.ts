@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { canManageAttendance, canManageAttendanceSchool, canManageAttendanceSystem, getServerUser, jsonError, type ServerUser } from '@/lib/server-auth';
+import { writeAuditLog } from '@/lib/server/audit-log';
 import {
   attendanceSegmentNeedsSchool,
   normalizeAttendanceSegment,
@@ -9,6 +10,8 @@ import {
   validateAttendanceSegment,
   validateAttendanceSegmentCoverage,
   type AttendanceWorkSegment,
+  individualLevelNeedsRatio,
+  normalizeIndividualLevel,
 } from '@/lib/attendance-work-detail';
 import { getAllQueryDocuments } from '@/lib/server/firestore-pagination';
 import { attendanceSchoolName, isAttendanceSchool, resolveAttendanceSchoolCode } from '@/lib/attendance-schools';
@@ -43,8 +46,8 @@ const normalizeEditedSegment = (value: unknown, id: string): AttendanceWorkSegme
     program: type === 'break' ? 'normal' : segmentProgram(source),
     grade: cleanText(source.grade, 20) || undefined,
     lesson_format: type === 'individual' ? 'individual' : type === 'lesson' ? 'group' : undefined,
-    individual_level: source.individual_level === 'advanced' ? 'advanced' : source.individual_level === 'standard' ? 'standard' : undefined,
-    individual_ratio: ['1:1', '1:2', '1:3'].includes(String(source.individual_ratio || '')) ? source.individual_ratio as '1:1' | '1:2' | '1:3' : undefined,
+    individual_level: normalizeIndividualLevel(source.individual_level),
+    individual_ratio: individualLevelNeedsRatio(source.individual_level) && ['1:1', '1:2', '1:3'].includes(String(source.individual_ratio || '')) ? source.individual_ratio as '1:1' | '1:2' | '1:3' : undefined,
     office_task: cleanText(source.office_task, 60) || undefined,
     school_id: resolveAttendanceSchoolCode(source.school_id) || undefined,
     approval_status: 'pending' as const,
@@ -514,15 +517,26 @@ export async function POST(request: NextRequest) {
       if (!recordId) return Response.json({ ok: false, error: '勤務実績を確認できません。' }, { status: 400 });
       const db = adminDb();
       const ref = db.doc(`work_records/${recordId}`);
+      let deleted: FirebaseFirestore.DocumentData = {};
       await db.runTransaction(async transaction => {
         const snap = await transaction.get(ref);
         if (!snap.exists) throw new Error('work record not found');
         const record = snap.data() || {};
+        deleted = record;
         const profile = record.teacher_id ? (await transaction.get(db.collection('users').doc(String(record.teacher_id)))).data() || {} : {};
         if (!canManageWholeRecord(actor, record, profile)) throw new Error('forbidden');
         if (hasApprovedWork(record)) throw new Error('承認済みの勤務は、先に承認を解除してください。');
         transaction.create(db.collection('attendance_record_edits').doc(), { work_record_id: recordId, teacher_id: record.teacher_id || null, deleted_record: record, edited_by: actor.uid, edited_at: FieldValue.serverTimestamp(), source: 'attendance_manager_delete' });
         transaction.delete(ref);
+      });
+      await writeAuditLog({
+        actor,
+        action: 'attendance_record_delete',
+        target_type: 'work_record',
+        target_id: recordId,
+        target_label: [deleted.teacher_name, deleted.date].filter(Boolean).join(' '),
+        school_id: String(deleted.school_id || ''),
+        details: { teacher_id: deleted.teacher_id || null, date: deleted.date || null },
       });
       return Response.json({ ok: true });
     }
@@ -647,6 +661,14 @@ export async function POST(request: NextRequest) {
           }, { merge: true });
         }
       });
+      await writeAuditLog({
+        actor,
+        action: 'attendance_approve',
+        target_type: 'work_record',
+        target_id: uniqueItems[0]?.recordId || '',
+        target_label: `${approvedCount}件の勤務実績`,
+        details: { count: approvedCount, work_record_ids: Array.from(new Set(uniqueItems.map(item => item.recordId))).slice(0, 30) },
+      });
       return Response.json({ ok: true, updated: approvedCount });
     }
     if (String(body.action || '') === 'edit_clock') {
@@ -714,10 +736,12 @@ export async function POST(request: NextRequest) {
 
     const db = adminDb();
     const ref = db.collection('work_records').doc(recordId);
+    let reviewed: FirebaseFirestore.DocumentData = {};
     await db.runTransaction(async transaction => {
       const snap = await transaction.get(ref);
       if (!snap.exists) throw new Error('work record not found');
       const record = snap.data() || {};
+      reviewed = record;
       const profile = record.teacher_id
         ? (await transaction.get(db.collection('users').doc(String(record.teacher_id)))).data() || {}
         : {};
@@ -753,6 +777,15 @@ export async function POST(request: NextRequest) {
         status: detailStatus === 'approved' ? 'approved' : 'pending',
         updated_at: new Date().toISOString(),
       }, { merge: true });
+    });
+    await writeAuditLog({
+      actor,
+      action: 'attendance_review',
+      target_type: 'work_record',
+      target_id: recordId,
+      target_label: [reviewed.teacher_name, reviewed.date].filter(Boolean).join(' '),
+      school_id: String(reviewed.school_id || ''),
+      details: { segment_id: requestedSegmentId, status },
     });
     return Response.json({ ok: true });
   } catch (error) {

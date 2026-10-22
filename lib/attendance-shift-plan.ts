@@ -1,5 +1,5 @@
 import { normalizeEmploymentCategory, type EmploymentCategory } from '@/lib/employment-category';
-import type { AttendanceWorkSegment } from '@/lib/attendance-work-detail';
+import type { AttendanceWorkSegment, IndividualLevel } from '@/lib/attendance-work-detail';
 
 export const ATTENDANCE_SHIFT_CATEGORIES = ['group', 'individual', 'office'] as const;
 export type AttendanceShiftCategory = typeof ATTENDANCE_SHIFT_CATEGORIES[number];
@@ -22,7 +22,7 @@ export type AttendanceShiftPlan = {
   grade?: string;
   subject?: string;
   individual_ratio?: '1:1' | '1:2' | '1:3';
-  individual_level?: 'standard' | 'advanced';
+  individual_level?: IndividualLevel;
   office_task?: string;
   room?: string;
   note?: string;

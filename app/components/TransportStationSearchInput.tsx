@@ -99,7 +99,7 @@ export default function TransportStationSearchInput({
         <button
           type="button"
           disabled={!transportType}
-          className="flex min-h-[68px] w-full min-w-0 items-start gap-3 rounded-2xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-left text-slate-900 shadow-sm outline-none hover:border-emerald-200 hover:bg-emerald-100 disabled:bg-gray-50 disabled:text-gray-400"
+          className="flex min-h-[68px] w-full min-w-0 items-start gap-3 rounded-input border border-emerald-100 bg-emerald-50 px-4 py-3 text-left text-fg shadow-sm outline-none hover:border-emerald-200 hover:bg-emerald-100 focus-visible:ring-2 focus-visible:ring-accent disabled:bg-slate-50 disabled:text-slate-400"
           title={value}
           onClick={() => {
             setFocused(true);
@@ -109,8 +109,8 @@ export default function TransportStationSearchInput({
         >
           <MapPin size={16} className="mt-4 shrink-0 text-emerald-500" />
           <span className="min-w-0 flex-1">
-            <span className="block text-[10px] font-black leading-none text-emerald-600">選択中</span>
-            <span className="mt-1 block whitespace-normal break-words text-base font-black leading-snug text-slate-900">
+            <span className="block text-xs font-bold leading-none text-emerald-600">選択中</span>
+            <span className="mt-1 block whitespace-normal break-words text-base font-bold leading-snug text-fg">
               {value}
             </span>
           </span>
@@ -122,7 +122,7 @@ export default function TransportStationSearchInput({
             <input
               ref={inputRef}
               type="text"
-              className="min-h-[52px] w-full min-w-0 rounded-2xl border border-slate-200 bg-white px-4 pr-10 text-base font-black text-slate-900 outline-none placeholder:text-sm placeholder:font-bold placeholder:text-slate-400 focus:border-green-400 focus:ring-2 focus:ring-green-100 disabled:bg-gray-50 disabled:text-gray-400"
+              className="min-h-[52px] w-full min-w-0 rounded-input border border-line bg-surface px-4 pr-10 text-base font-bold text-fg outline-none placeholder:text-sm placeholder:font-bold placeholder:text-slate-400 focus:border-accent focus:ring-2 focus:ring-accent/30 disabled:bg-slate-50 disabled:text-slate-400"
               placeholder={transportType ? (value ? '別の駅名を入力して変更' : placeholder) : '先に交通機関を選択'}
               value={searchText}
               disabled={!transportType}
@@ -137,21 +137,21 @@ export default function TransportStationSearchInput({
               onChange={(e) => setSearchText(e.target.value)}
             />
             {loading ? (
-              <Loader2 size={16} className="absolute right-3 top-1/2 -translate-y-1/2 animate-spin text-gray-300" />
+              <Loader2 size={16} className="absolute right-3 top-1/2 -translate-y-1/2 animate-spin text-slate-300" />
             ) : (
-              <MapPin size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-300" />
+              <MapPin size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300" />
             )}
           </div>
           {focused && value && (
-            <div className="rounded-xl bg-emerald-50 px-3 py-2 text-xs font-black leading-snug text-emerald-800 ring-1 ring-emerald-100">
-              現在: <span className="whitespace-normal break-words text-slate-900">{value}</span>
+            <div className="rounded-input bg-emerald-50 px-3 py-2 text-xs font-bold leading-snug text-emerald-800 ring-1 ring-emerald-100">
+              現在: <span className="whitespace-normal break-words text-fg">{value}</span>
             </div>
           )}
         </div>
       )}
       {showList && (
-        <div className="absolute left-0 top-[calc(100%+6px)] z-50 max-h-96 w-[min(42rem,calc(100vw-2rem))] min-w-full overflow-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl">
-          <div className="flex items-center justify-between gap-3 px-2 pb-2 text-[11px] font-black text-slate-400">
+        <div className="absolute left-0 top-[calc(100%+6px)] z-50 max-h-96 w-[min(42rem,calc(100vw-2rem))] min-w-full overflow-auto rounded-card border border-line bg-surface p-2 shadow-2xl">
+          <div className="flex items-center justify-between gap-3 px-2 pb-2 text-xs font-bold text-fg-muted">
             <span>候補から選択してください</span>
             <span>{stations.length}件</span>
           </div>
@@ -166,9 +166,9 @@ export default function TransportStationSearchInput({
                 setSearchText(station.canonical_name);
                 setFocused(false);
               }}
-              className="flex w-full flex-col gap-1.5 rounded-xl px-4 py-3 text-left hover:bg-emerald-50"
+              className="flex min-h-11 w-full flex-col gap-1.5 rounded-btn px-4 py-3 text-left hover:bg-accent-soft"
             >
-              <span className="whitespace-normal break-words text-base font-black leading-snug text-slate-900">
+              <span className="whitespace-normal break-words text-base font-bold leading-snug text-fg">
                 {station.canonical_name}
               </span>
               <div className="flex flex-wrap gap-1.5">
@@ -176,12 +176,12 @@ export default function TransportStationSearchInput({
                   .split(/[\/／,、]/)
                   .filter(Boolean)
                   .map(label => (
-                    <span key={label} className="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-black leading-none text-slate-500">
+                    <span key={label} className="rounded-full bg-slate-100 px-2 py-1 text-xs font-bold leading-none text-slate-500">
                       {label}
                     </span>
                   ))}
                 {station.station_type && (
-                  <span className="rounded-full bg-emerald-50 px-2 py-1 text-[11px] font-black leading-none text-emerald-600">
+                  <span className="rounded-full bg-emerald-50 px-2 py-1 text-xs font-bold leading-none text-emerald-600">
                     {station.station_type}
                   </span>
                 )}
@@ -189,7 +189,7 @@ export default function TransportStationSearchInput({
             </button>
           ))}
           {stations.length > 80 && (
-            <p className="px-3 py-2 text-[11px] font-bold text-slate-400">
+            <p className="px-3 py-2 text-xs font-bold text-fg-muted">
               候補が多いため80件まで表示しています。駅名を入力すると絞り込めます。
             </p>
           )}

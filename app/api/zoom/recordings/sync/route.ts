@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server';
 import { getServerUser, isAdminLike, jsonError } from '@/lib/server-auth';
+import { isAuthorizedCronRequest } from '@/lib/server/cron-auth';
 import { attachRecordingsToBestShifts, recordingShareUrl, speakerViewFile } from '@/lib/zoom-recording-match';
 
 export const runtime = 'nodejs';
@@ -121,6 +122,8 @@ const runRecordingSync = async (input: Record<string, unknown>, source: string) 
 
   let matched = 0;
   let updated = 0;
+  let published = 0;
+  let blocked = 0;
   let skipped = meetings.length - eligibleMeetings.length;
   const reasonCounts: Record<string, number> = {};
   for (const result of syncResult.results) {
@@ -132,6 +135,9 @@ const runRecordingSync = async (input: Record<string, unknown>, source: string) 
     }
 
     matched += 1;
+    const autoPublish = 'autoPublish' in result ? result.autoPublish : null;
+    if (autoPublish?.published) published += 1;
+    else if (autoPublish?.reason === 'issues') blocked += 1;
     if (result.updated) {
       updated += 1;
     } else {
@@ -152,6 +158,8 @@ const runRecordingSync = async (input: Record<string, unknown>, source: string) 
     eligible: eligibleMeetings.length,
     matched,
     updated,
+    published,
+    blocked,
     skipped,
     truncated: recordingResult.truncated,
     page_count: recordingResult.pageCount,
@@ -163,8 +171,8 @@ const runRecordingSync = async (input: Record<string, unknown>, source: string) 
 
 export async function GET(request: NextRequest) {
   try {
-    const cronSecret = process.env.CRON_SECRET;
-    if (!cronSecret || request.headers.get('authorization') !== `Bearer ${cronSecret}`) {
+    // GET は Vercel Cron 専用（Authorization: Bearer ${CRON_SECRET}）。管理者の手動同期は POST。
+    if (!isAuthorizedCronRequest(request)) {
       return Response.json({ ok: false, error: 'unauthorized' }, { status: 401 });
     }
 

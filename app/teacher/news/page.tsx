@@ -1,94 +1,93 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { Bell, ArrowLeft, ChevronRight, Loader2, Calendar } from 'lucide-react';
+import { useCallback, useState, useEffect } from 'react';
+import { Bell, ChevronRight, Calendar } from 'lucide-react';
 import Link from 'next/link';
 import { loadAnnouncements } from '@/lib/client-announcements';
+import { EmptyState, ErrorState, ListSkeleton, PageHeader } from '@/app/components/ui';
+import { formatDate } from '@/lib/format';
 
 // タグ定義
-const LABELS: {[key: string]: { label: string, color: string }} = {
-  important: { label: '重要', color: 'bg-red-50 text-red-600 border-red-200' },
-  event:     { label: 'イベント', color: 'bg-orange-50 text-orange-600 border-orange-200' },
-  info:      { label: 'お知らせ', color: 'bg-blue-50 text-blue-600 border-blue-200' },
-  alert:     { label: '緊急', color: 'bg-yellow-50 text-yellow-700 border-yellow-200' },
+const LABELS: {[key: string]: { label: string, color: string, bar: string }} = {
+  important: { label: '重要', color: 'bg-rose-50 text-rose-700 border-rose-200', bar: 'bg-rose-400' },
+  event:     { label: 'イベント', color: 'bg-amber-50 text-amber-700 border-amber-200', bar: 'bg-amber-400' },
+  info:      { label: 'お知らせ', color: 'bg-sky-50 text-sky-700 border-sky-200', bar: 'bg-sky-400' },
+  alert:     { label: '緊急', color: 'bg-amber-50 text-amber-800 border-amber-300', bar: 'bg-amber-500' },
 };
 
 export default function TeacherNewsPage() {
   const [list, setList] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
 
-  useEffect(() => {
-    const fetchNews = async () => {
-      try {
-        const allData = await loadAnnouncements(50);
+  const fetchNews = useCallback(async () => {
+    setLoading(true);
+    setLoadError(false);
+    try {
+      const allData = await loadAnnouncements(50);
 
-        // ★フィルタリング: 「全員宛」または「先生宛」のみ抽出
-        const myNews = allData.filter((item: any) => 
-          !item.target || item.target === 'all' || item.target === 'teacher'
-        );
+      // ★フィルタリング: 「全員宛」または「講師宛」のみ抽出
+      const myNews = allData.filter((item: any) => 
+        !item.target || item.target === 'all' || item.target === 'teacher'
+      );
 
-        setList(myNews);
-      } catch (error) {
-        console.error(error);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchNews();
+      setList(myNews);
+    } catch (error) {
+      console.error(error);
+      setLoadError(true);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
+  useEffect(() => {
+    fetchNews();
+  }, [fetchNews]);
+
   return (
-    <div className="min-h-screen bg-gray-50 p-6 pb-32 font-sans">
-      <div className="max-w-3xl mx-auto">
+    <div className="px-4 py-5 sm:px-6">
+      <div className="mx-auto max-w-3xl space-y-6">
         
-        {/* ヘッダー */}
-        <div className="flex items-center gap-4 mb-6">
-          <Link href="/teacher" className="bg-white p-2.5 rounded-full shadow-sm border border-gray-100 text-gray-600 hover:bg-gray-50 transition-colors">
-            <ArrowLeft size={20} />
-          </Link>
-          <h1 className="text-xl font-extrabold text-gray-800 flex items-center gap-2">
-            <Bell className="text-green-600" /> 運営からのお知らせ
-          </h1>
-        </div>
+        <PageHeader tone="plain" title="運営からのお知らせ" icon={Bell} backHref="/teacher" />
 
         {/* リスト表示 */}
         <div className="space-y-4">
           {loading ? (
-            <div className="flex justify-center py-12"><Loader2 className="animate-spin text-gray-400"/></div>
+            <ListSkeleton rows={4} />
+          ) : loadError ? (
+            <ErrorState title="お知らせを読み込めませんでした" onRetry={fetchNews} />
           ) : list.length === 0 ? (
-            <div className="text-center py-12 text-gray-400 bg-white rounded-2xl border border-dashed border-gray-200">
-              お知らせはありません
-            </div>
+            <EmptyState icon={Bell} title="お知らせはありません" />
           ) : (
             list.map((item) => {
               const labelKey = item.label || 'info';
               const labelInfo = LABELS[labelKey] || LABELS.info;
+              const date = item.publish_at || item.created_at;
 
               return (
-                <Link key={item.id} href={`/teacher/news/${item.id}`} className="block group">
-                  <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 hover:border-green-200 hover:shadow-md transition-all relative overflow-hidden">
+                <Link key={item.id} href={`/teacher/news/${item.id}`} className="group block rounded-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
+                  <div className="cb-card relative overflow-hidden p-5 transition-shadow hover:shadow-md">
                     
-                    <div className={`absolute left-0 top-0 bottom-0 w-1.5 ${labelInfo.color.split(' ')[0]}`}></div>
+                    <div className={`absolute bottom-0 left-0 top-0 w-1.5 ${labelInfo.bar}`}></div>
 
-                    <div className="flex justify-between items-start mb-2 pl-2">
+                    <div className="mb-2 flex items-start justify-between pl-2">
                       <div className="flex items-center gap-2">
-                        <span className={`text-[10px] px-2 py-0.5 rounded-md font-bold border ${labelInfo.color}`}>
+                        <span className={`rounded-input border px-2 py-0.5 text-xs font-bold ${labelInfo.color}`}>
                           {labelInfo.label}
                         </span>
-                        <span className="text-xs text-gray-400 flex items-center gap-1">
-                          <Calendar size={12}/>
-                          {item.publish_at || item.created_at ? new Date(item.publish_at || item.created_at).toLocaleDateString('ja-JP') : '-'}
+                        <span className="flex items-center gap-1 text-xs text-fg-muted">
+                          <Calendar size={12} aria-hidden />
+                          {date ? formatDate(date, { withYear: true }) || '-' : '-'}
                         </span>
                       </div>
-                      <ChevronRight size={16} className="text-gray-300 group-hover:text-green-600 transition-colors"/>
+                      <ChevronRight size={16} className="text-slate-300 transition-colors group-hover:text-accent" aria-hidden />
                     </div>
 
-                    <h3 className="text-base font-bold text-gray-800 mb-1 pl-2 group-hover:text-green-700 transition-colors line-clamp-1">
+                    <h3 className="mb-1 line-clamp-1 pl-2 text-base font-bold text-fg transition-colors group-hover:text-accent">
                       {item.title}
                     </h3>
                     
-                    <p className="text-xs text-gray-500 pl-2 line-clamp-2 leading-relaxed">
+                    <p className="line-clamp-2 pl-2 text-sm leading-relaxed text-fg-muted">
                       {item.content}
                     </p>
                   </div>

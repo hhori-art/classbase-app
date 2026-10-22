@@ -90,11 +90,11 @@ export default function LastLoginCell({ value }: { value: unknown }) {
 
   return (
     <div className="min-w-[128px]">
-      <span className={`inline-flex rounded-full px-3 py-1 text-[11px] font-black ${className}`}>
+      <span className={`inline-flex rounded-full px-3 py-1 text-[11px] font-bold ${className}`}>
         {formatted.label}
       </span>
       {formatted.detail ? (
-        <p className="mt-1 font-mono text-[10px] font-bold text-slate-400">{formatted.detail}</p>
+        <p className="mt-1 font-mono text-[11px] font-bold text-slate-400">{formatted.detail}</p>
       ) : null}
     </div>
   );

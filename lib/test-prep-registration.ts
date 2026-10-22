@@ -1,7 +1,7 @@
 import { isTestPrepShift } from '@/lib/class-button-settings';
 import { getCourseOptionStableKey } from '@/lib/course-registration-selection';
 import { getCourseSubjectGroup, normalizeCourseText, toAsciiDigits } from '@/lib/course-text';
-import { weekdayFromDateKey } from '@/lib/date-key';
+import { jstSchoolYear, weekdayFromDateKey } from '@/lib/date-key';
 
 export type TestPrepCourseDefinition = {
   id: string;
@@ -19,7 +19,7 @@ export type TestPrepCourseDefinition = {
   is_active: boolean;
 };
 
-const normalizeGrade = (value: unknown) => {
+export const normalizeGrade = (value: unknown) => {
   const raw = toAsciiDigits(String(value || '').normalize('NFKC'));
   if (raw.includes('3')) return '中3';
   if (raw.includes('2')) return '中2';
@@ -76,7 +76,7 @@ export const normalizeTestPrepDefinition = (id: string, value: any): TestPrepCou
     : [grade].filter(Boolean);
   return {
     id,
-    year: Number(value?.year || new Date().getFullYear()),
+    year: Number(value?.year || jstSchoolYear()),
     title: String(value?.title || 'テスト対策').trim(),
     grade,
     subject: String(value?.subject || '').trim(),

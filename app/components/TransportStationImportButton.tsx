@@ -1,7 +1,8 @@
 'use client';
 
 import { useRef, useState } from 'react';
-import { CheckCircle2, Loader2, Upload } from 'lucide-react';
+import { CheckCircle2, Upload } from 'lucide-react';
+import { Button, useConfirm } from '@/app/components/ui';
 import { auth } from '@/lib/firebase';
 import CsvSampleDownload from '@/app/components/CsvSampleDownload';
 
@@ -45,10 +46,16 @@ export default function TransportStationImportButton() {
   const [loading, setLoading] = useState(false);
   const [replaceAll, setReplaceAll] = useState(false);
   const [result, setResult] = useState('');
+  const confirm = useConfirm();
 
   const handleFile = async (file?: File | null) => {
     if (!file) return;
-    if (replaceAll && !confirm('現在の駅名マスタを全削除してから取り込みます。よろしいですか？')) {
+    if (replaceAll && !(await confirm({
+      title: '駅名マスタを全削除して取り込みますか？',
+      message: `現在の駅名マスタを全削除してから「${file.name}」を取り込みます。`,
+      confirmLabel: '全削除して取り込む',
+      tone: 'danger',
+    }))) {
       if (fileRef.current) fileRef.current.value = '';
       return;
     }
@@ -95,31 +102,25 @@ export default function TransportStationImportButton() {
           label="駅名CSV例"
         />
         <input ref={fileRef} type="file" accept=".csv,text/csv" onChange={e => handleFile(e.target.files?.[0])} className="hidden" />
-        <button
-          type="button"
-          onClick={() => fileRef.current?.click()}
-          disabled={loading}
-          className="inline-flex items-center justify-center gap-2 rounded-xl bg-sky-600 px-5 py-3 text-sm font-bold text-white shadow-sm transition-colors hover:bg-sky-700 disabled:opacity-60"
-        >
-          {loading ? <Loader2 size={18} className="animate-spin" /> : <Upload size={18} />}
+        <Button onClick={() => fileRef.current?.click()} loading={loading} icon={<Upload size={18} aria-hidden />}>
           駅名マスタCSV取込
-        </button>
+        </Button>
       </div>
       <label className="inline-flex items-center gap-2 text-xs font-bold text-slate-600">
         <input
           type="checkbox"
           checked={replaceAll}
           onChange={e => setReplaceAll(e.target.checked)}
-          className="h-4 w-4 rounded border-slate-300 text-sky-600"
+          className="h-4 w-4 rounded border-slate-300 accent-rose-600"
         />
         既存の駅名マスタを全て削除してから取り込む
       </label>
-      <p className="rounded-xl bg-gray-50 px-3 py-2 font-mono text-[11px] font-bold text-gray-500">
+      <p className="rounded-btn bg-slate-50 px-3 py-2 font-mono text-xs font-bold text-slate-500">
         交通機関,駅名,別名,路線,種別,備考
       </p>
       {result && (
-        <p className={`flex items-center gap-2 text-xs font-bold ${result.startsWith('失敗') ? 'text-rose-600' : 'text-emerald-600'}`}>
-          {!result.startsWith('失敗') && <CheckCircle2 size={14} />}
+        <p role="status" className={`flex items-center gap-2 text-xs font-bold ${result.startsWith('失敗') ? 'text-rose-600' : 'text-emerald-600'}`}>
+          {!result.startsWith('失敗') && <CheckCircle2 size={14} aria-hidden />}
           {result}
         </p>
       )}

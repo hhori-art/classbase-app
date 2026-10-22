@@ -1,9 +1,10 @@
 import { NextRequest } from 'next/server';
 import { adminDb } from '@/lib/firebase-admin';
-import { getServerUser, jsonError, requireRole } from '@/lib/server-auth';
+import { getServerUser, isAdminLike, jsonError, requireRole } from '@/lib/server-auth';
 import { aggregatePfStudent, pfDateRange } from '@/lib/pf-analytics';
 import { getAllQueryDocuments } from '@/lib/server/firestore-pagination';
 import { unstable_cache } from 'next/cache';
+import { studySummaryForRange } from '@/lib/monoxer-study';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -12,6 +13,14 @@ const clean = (value: unknown) => String(value || '').trim();
 const schoolOf = (data: Record<string, any>) => clean(data.school_id || data.school || data.classroom || data.classroom_name);
 const gradeOf = (data: Record<string, any>) => clean(data.grade || data.target_grade || data.class_grade).normalize('NFKC');
 const nameOf = (data: Record<string, any>) => clean(data.student_name || data.name || data.display_name || data.displayName);
+
+// 受講解除（退塾）・アーカイブ済みの生徒は、確認対象に含めない。
+const INACTIVE_STATUSES = new Set(['withdrawn', 'archived', '解除', '退塾', '退会']);
+const isEnrolledStudent = (data: Record<string, any>) => (
+  !INACTIVE_STATUSES.has(clean(data.account_status).toLowerCase()) &&
+  !INACTIVE_STATUSES.has(clean(data.status).toLowerCase()) &&
+  data.is_active !== false
+);
 
 const rate = (completed: number, total: number) => total ? Math.round((completed / total) * 100) : null;
 
@@ -41,6 +50,8 @@ export async function GET(request: NextRequest) {
   try {
     const actor = await getServerUser(request);
     requireRole(actor, ['master', 'admin', 'teacher', 'parent']);
+    // 管理者は理社講座の管理権限がある場合だけ（勤怠・Booster だけの管理者は対象外）。
+    if (actor.role === 'admin' && !isAdminLike(actor)) throw new Error('forbidden');
     const params = request.nextUrl.searchParams;
     const period = params.get('period') === 'month' ? 'month' : 'week';
     const range = pfDateRange(period, params.get('anchor'));
@@ -49,9 +60,9 @@ export async function GET(request: NextRequest) {
     const db = adminDb();
 
     const parentListedIds = Array.isArray(actor.profile.student_ids) ? actor.profile.student_ids.map(String) : [];
-    const allStudents = actor.role === 'parent'
+    const allStudents = (actor.role === 'parent'
       ? await loadLinkedParentStudents(actor.uid, parentListedIds)
-      : await loadPfStudentRoster();
+      : await loadPfStudentRoster()).filter(isEnrolledStudent);
     let scopedStudents = allStudents;
     let classes: Array<{ key: string; label: string; grade: string; subject: string; school: string }> = [];
 
@@ -148,19 +159,50 @@ export async function GET(request: NextRequest) {
       learningByStudent.get(studentId)!.push(record);
     });
 
-    const students = scopedStudents.map(student => ({
-      id: student.id,
-      student_name: nameOf(student) || '氏名未設定',
-      lifetime_id: clean(student.lifetime_id || student.login_id),
-      grade: gradeOf(student),
-      school: schoolOf(student),
-      day_of_week: clean(student.day_of_week),
-      ...aggregatePfStudent(
+    // Monoxer 宿題回数ログ（累計）の取り込み結果。生徒ごとに1ドキュメントなので、対象の生徒だけ読む。
+    const studyProgress = new Map<string, Record<string, any>>();
+    const scopedIds = scopedStudents.map(student => student.id);
+    for (let offset = 0; offset < scopedIds.length; offset += 300) {
+      const refs = scopedIds.slice(offset, offset + 300).map(id => db.collection('pf_study_progress').doc(id));
+      const snaps = refs.length ? await db.getAll(...refs) : [];
+      snaps.forEach(snap => { if (snap.exists) studyProgress.set(snap.id, snap.data() || {}); });
+    }
+    const studyOf = (studentId: string) => {
+      const progress = studyProgress.get(studentId);
+      const summary = studySummaryForRange(progress, range.start, range.end);
+      // 保護者には、Bookごとの累計と前回の取り込みからの増え方も返す。
+      const books = actor.role === 'parent' && progress?.books
+        ? Object.entries(progress.books as Record<string, any>).map(([bookId, book]) => ({
+            book_id: bookId,
+            name: clean(book?.name) || 'Book',
+            count: Number(book?.count) || 0,
+            gained: progress.previous_books ? Math.max(0, (Number(book?.count) || 0) - (Number(progress.previous_books?.[bookId]?.count) || 0)) : null,
+          })).sort((a, b) => a.name.localeCompare(b.name, 'ja', { numeric: true }))
+        : undefined;
+      return { ...summary, previous_snapshot_date: clean(progress?.previous_snapshot_date) || null, books };
+    };
+
+    const students = scopedStudents.map(student => {
+      const metric = aggregatePfStudent(
         student.id,
         Array.from(attendanceByStudent.get(student.id)?.values() || []),
         learningByStudent.get(student.id) || [],
-      ),
-    })).sort((a, b) => `${a.school}_${a.grade}_${a.student_name}`.localeCompare(`${b.school}_${b.grade}_${b.student_name}`, 'ja', { numeric: true }));
+      );
+      const study = studyOf(student.id);
+      return {
+        id: student.id,
+        student_name: nameOf(student) || '氏名未設定',
+        lifetime_id: clean(student.lifetime_id || student.login_id),
+        grade: gradeOf(student),
+        school: schoolOf(student),
+        day_of_week: clean(student.day_of_week),
+        ...metric,
+        study,
+        // 取り込みがあった期間に宿題の学習回数が増えていなければ要確認。
+        alert_count: metric.alert_count + Number(study.measured && study.period_count === 0),
+      };
+    }).sort((a, b) => `${a.school}_${a.grade}_${a.student_name}`.localeCompare(`${b.school}_${b.grade}_${b.student_name}`, 'ja', { numeric: true }));
+
 
     const totals = students.reduce((sum, student) => ({
       attendanceCompleted: sum.attendanceCompleted + student.attendance_present + student.attendance_late,
@@ -170,7 +212,10 @@ export async function GET(request: NextRequest) {
       quizCompleted: sum.quizCompleted + student.quiz_completed,
       quizTotal: sum.quizTotal + student.quiz_total,
       alerts: sum.alerts + student.alert_count,
-    }), { attendanceCompleted: 0, attendanceTotal: 0, homeworkCompleted: 0, homeworkTotal: 0, quizCompleted: 0, quizTotal: 0, alerts: 0 });
+      studyMeasured: sum.studyMeasured + Number(student.study.measured),
+      studyActive: sum.studyActive + Number(student.study.measured && (student.study.period_count || 0) > 0),
+      studyCount: sum.studyCount + (student.study.period_count || 0),
+    }), { attendanceCompleted: 0, attendanceTotal: 0, homeworkCompleted: 0, homeworkTotal: 0, quizCompleted: 0, quizTotal: 0, alerts: 0, studyMeasured: 0, studyActive: 0, studyCount: 0 });
     const schoolSource = actor.role === 'master'
       ? allStudents
       : actor.role === 'admin'
@@ -193,6 +238,10 @@ export async function GET(request: NextRequest) {
         homework_rate: rate(totals.homeworkCompleted, totals.homeworkTotal),
         quiz_rate: rate(totals.quizCompleted, totals.quizTotal),
         alert_count: totals.alerts,
+        // 宿題（Monoxer学習回数）：期間中に取り込みがあり、前回と比べられた生徒のうち、回数が増えた生徒の割合
+        study_measured_students: totals.studyMeasured,
+        study_active_rate: rate(totals.studyActive, totals.studyMeasured),
+        study_period_count: totals.studyMeasured ? totals.studyCount : null,
       },
     }, { headers: { 'Cache-Control': 'private, no-store' } });
   } catch (error) {

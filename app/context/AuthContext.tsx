@@ -16,6 +16,7 @@ import { AuthRole, isPublicAuthPath, isRoleScopedPath, profileMatchesPath, targe
 import { loadAuthenticatedProfile } from '@/lib/client-auth-profile';
 import { signInWithNetworkRetry } from '@/lib/client-auth-login';
 import { clearCourseRegistrationOptionsCache } from '@/lib/client-course-options';
+import { cleanupThisDevicePushOnLogout } from '@/app/hooks/useWebPush';
 
 export interface UserProfile {
   uid: string;
@@ -332,6 +333,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     clearAuthUiState(true);
 
     try {
+      // この端末の通知登録を外してからサインアウトする（失敗してもログアウトは続ける）。
+      await cleanupThisDevicePushOnLogout();
       await firebaseSignOut(auth);
     } catch (error) {
       console.error('Logout error:', error);
@@ -502,6 +505,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
           window.history.replaceState(null, '', window.location.pathname);
         }
         try {
+          if (currentUser) await cleanupThisDevicePushOnLogout();
           await firebaseSignOut(auth);
         } catch (error) {
           console.error('Forced logout error:', error);
@@ -682,10 +686,10 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   return (
     <AuthContext.Provider value={{ user, profile, loading, connectionIssue, profileMissing, login, logout }}>
       {shouldShowLoading ? (
-        <div className="min-h-[100dvh] bg-gray-50" aria-busy="true" aria-label="">
+        <div className="min-h-[100dvh] bg-slate-50" aria-busy="true" aria-label="">
           {authWaitTooLong ? (
             <div className="flex min-h-[100dvh] flex-col items-center justify-center px-6 text-center">
-              <p className="text-xs leading-6 text-gray-500">
+              <p className="text-xs leading-6 text-slate-500">
                 確認に時間がかかっています。通信またはユーザーデータの取得で止まっている可能性があります。
               </p>
               <button
@@ -707,20 +711,20 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
           ) : null}
         </div>
       ) : connectionIssue && !isAuthScreenPath && !isPublicScreenPath ? (
-        <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 px-6 text-center">
-          <div className="h-12 w-12 rounded-full border-4 border-gray-300 border-t-transparent animate-spin"></div>
-          <p className="mt-4 text-sm font-bold text-gray-600">接続が不安定です</p>
-          <p className="mt-2 text-xs text-gray-400">数秒待ってリロードしてください。</p>
+        <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 px-6 text-center">
+          <div className="h-12 w-12 rounded-full border-4 border-slate-300 border-t-transparent animate-spin"></div>
+          <p className="mt-4 text-sm font-bold text-slate-600">接続が不安定です</p>
+          <p className="mt-2 text-xs text-slate-400">数秒待ってリロードしてください。</p>
           <button onClick={() => window.location.reload()} className="mt-6 px-4 py-2 rounded-lg text-xs font-bold bg-slate-900 text-white hover:bg-slate-800">
             リロード
           </button>
         </div>
       ) : profileMissing && !isAuthScreenPath && !isPublicScreenPath ? (
-        <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 px-6 text-center">
-          <p className="text-sm font-bold text-gray-700">ユーザーデータが見つかりません</p>
-          <p className="mt-2 text-xs text-gray-500">初回登録が未完了、または users/{`{uid}`} が存在しません。</p>
+        <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 px-6 text-center">
+          <p className="text-sm font-bold text-slate-700">ユーザーデータが見つかりません</p>
+          <p className="mt-2 text-xs text-slate-500">初回登録が未完了、または users/{`{uid}`} が存在しません。</p>
           <div className="mt-6 flex gap-3">
-            <button onClick={() => window.location.replace('/?logout=true')} className="px-4 py-2 rounded-lg text-xs font-bold bg-gray-200 hover:bg-gray-300">
+            <button onClick={() => window.location.replace('/?logout=true')} className="px-4 py-2 rounded-lg text-xs font-bold bg-slate-200 hover:bg-slate-300">
               ログアウト
             </button>
             <button onClick={() => window.location.reload()} className="px-4 py-2 rounded-lg text-xs font-bold bg-slate-900 text-white hover:bg-slate-800">

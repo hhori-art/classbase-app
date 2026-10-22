@@ -3,11 +3,16 @@
 import { useState, useEffect } from 'react';
 import { auth, db } from '@/lib/firebase';
 import { collection, addDoc, query, orderBy, getDocs, updateDoc, doc, deleteDoc, serverTimestamp, limit, where } from 'firebase/firestore';
-import { Plus, CheckCircle, StopCircle, Loader2, FileText, X, Trash2, Calendar, BookOpen, Users, UserPlus, GraduationCap, Check, Pencil } from 'lucide-react';
+import { reportAuditLog } from '@/app/components/master/audit-log-client';
+import { Plus, CheckCircle, StopCircle, ClipboardList, X, Trash2, Calendar, BookOpen, Users, UserPlus, GraduationCap, Check, Pencil } from 'lucide-react';
 import CourseRegistrationCalendar from '@/app/components/CourseRegistrationCalendar';
 import { enrichCourseOptionsWithShifts } from '@/lib/course-registration-match';
 import { isThirdCourseTerm } from '@/lib/course-registration-rules';
 import { loadCourseRegistrationOptions } from '@/lib/client-course-options';
+import AdminPageHeader from '@/app/components/master/AdminPageHeader';
+import { jstDateKey } from '@/lib/date-key';
+import { formatDate } from '@/lib/format';
+import { Button, ButtonLink, EmptyState, ErrorState, IconButton, ListSkeleton, Modal, Skeleton, useConfirm, useToast } from '@/app/components/ui';
 
 // デフォルトの科目リスト
 const DEFAULT_SUBJECTS = ['英語', '数学', '国語', '理科', '社会'];
@@ -43,6 +48,9 @@ export default function AdminRegistrationTasksPage() {
   const [requests, setRequests] = useState<any[]>([]);
   const [courseOptions, setCourseOptions] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
+  const toast = useToast();
+  const confirm = useConfirm();
   
   // 作成モーダル用ステート
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -66,6 +74,7 @@ export default function AdminRegistrationTasksPage() {
   });
 
   const fetchRequests = async () => {
+    setLoadError('');
     try {
       const shiftRange = courseYearDateRange(currentCourseYear());
       const [snap, optionSnap, curriculumSnap, shiftSnap] = await Promise.all([
@@ -101,6 +110,7 @@ export default function AdminRegistrationTasksPage() {
       }
     } catch (e) {
       console.error(e);
+      setLoadError('登録依頼を読み込めませんでした。通信状態を確認して、もう一度お試しください。');
     } finally {
       setLoading(false);
     }
@@ -112,9 +122,8 @@ export default function AdminRegistrationTasksPage() {
 
   // 作成ボタン押下（モーダルを開く）
   const openCreateModal = (title: string, type: string) => {
-    const d = new Date();
-    d.setDate(d.getDate() + 7); // デフォルト1週間後
-    const defaultDeadline = d.toISOString().split('T')[0];
+    // デフォルト1週間後（日本時間の日付）
+    const defaultDeadline = jstDateKey(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
 
     setEditingRequestId('');
     setFormData({
@@ -125,7 +134,7 @@ export default function AdminRegistrationTasksPage() {
       newSubject: '',
       targetAudience: type === 'course_registration' ? 'grade' : 'all',
       targetGrades: [],
-      periodStart: new Date().toISOString().split('T')[0],
+      periodStart: jstDateKey(),
       periodEnd: defaultDeadline,
       termFilter: 'all',
       monthFilter: 'all',
@@ -206,7 +215,7 @@ export default function AdminRegistrationTasksPage() {
   const visibleCourseOptions = () => Object.values(groupedCourseOptions()).flat() as any[];
 
   const selectAutoCourseTerm = () => {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = jstDateKey();
     const terms = Array.from(courseOptions.reduce((map: Map<string, any[]>, option: any) => {
       const key = `${option.year || ''}_${option.term || option.term_label || ''}`;
       if (!key.replace(/_/g, '').trim()) return map;
@@ -258,11 +267,11 @@ export default function AdminRegistrationTasksPage() {
     const registrationStart = items
       .map((option: any) => String(option.registration_opens_at || '').slice(0, 10))
       .filter(Boolean)
-      .sort()[0] || new Date().toISOString().slice(0, 10);
+      .sort()[0] || jstDateKey();
     const fallbackEnd = (() => {
       const d = new Date(`${registrationStart}T00:00:00+09:00`);
       d.setDate(d.getDate() + 14);
-      return d.toISOString().slice(0, 10);
+      return jstDateKey(d);
     })();
     const registrationEnd = termStartDate && termStartDate >= registrationStart ? termStartDate : fallbackEnd;
 
@@ -316,14 +325,14 @@ export default function AdminRegistrationTasksPage() {
 
   // 実際にFirestoreに保存
   const handleSave = async () => {
-    if (!formData.title || !formData.deadline) return alert('タイトルと期限は必須です');
+    if (!formData.title || !formData.deadline) return toast.error('タイトルと期限は必須です');
     if (formData.type === 'course_registration') {
-      if (!formData.periodStart || !formData.periodEnd) return alert('登録期間を入力してください');
-      if (formData.periodEnd < formData.periodStart) return alert('登録終了日は開始日以降にしてください');
-      if (formData.targetGrades.length === 0) return alert('受講講座登録は送信する学年を選択してください');
-      if (formData.courseOptionIds.length === 0) return alert('カリキュラムから講座を選択してください');
-    } else if (formData.subjects.length === 0) return alert('科目を少なくとも1つ設定してください');
-    if (formData.targetAudience === 'grade' && formData.targetGrades.length === 0) return alert('対象の学年を選択してください');
+      if (!formData.periodStart || !formData.periodEnd) return toast.error('登録期間を入力してください');
+      if (formData.periodEnd < formData.periodStart) return toast.error('登録終了日は開始日以降にしてください');
+      if (formData.targetGrades.length === 0) return toast.error('受講講座登録は送信する学年を選択してください');
+      if (formData.courseOptionIds.length === 0) return toast.error('カリキュラムから講座を選択してください');
+    } else if (formData.subjects.length === 0) return toast.error('科目を少なくとも1つ設定してください');
+    if (formData.targetAudience === 'grade' && formData.targetGrades.length === 0) return toast.error('対象の学年を選択してください');
 
     setCreating(true);
     try {
@@ -366,10 +375,10 @@ export default function AdminRegistrationTasksPage() {
       await fetchRequests();
       setIsModalOpen(false);
       setEditingRequestId('');
-      alert(editingRequestId ? '表示する講座を更新しました' : '募集を開始しました');
+      toast.success(editingRequestId ? '表示する講座を更新しました' : '募集を開始しました');
     } catch (e) {
       console.error(e);
-      alert('作成に失敗しました');
+      toast.error(editingRequestId ? '更新できませんでした。もう一度お試しください。' : '作成できませんでした。もう一度お試しください。');
     } finally {
       setCreating(false);
     }
@@ -382,133 +391,141 @@ export default function AdminRegistrationTasksPage() {
       fetchRequests();
     } catch (e) {
       console.error(e);
+      toast.error(currentStatus ? '停止できませんでした。もう一度お試しください。' : '再開できませんでした。もう一度お試しください。');
     }
   };
 
   // 削除機能
   const handleDelete = async (id: string) => {
-    if (!confirm('本当にこの募集を削除しますか？\n（すでに回答した生徒がいる場合、そのデータとの紐付けが失われる可能性があります）')) return;
-    
+    const target = requests.find(req => req.id === id);
+    const ok = await confirm({
+      title: `「${target?.title || 'この募集'}」を削除しますか？`,
+      message: 'すでに回答した生徒がいる場合、そのデータとの紐付けが失われる可能性があります。',
+      confirmLabel: '削除する',
+      tone: 'danger',
+    });
+    if (!ok) return;
+
     try {
       await deleteDoc(doc(db, 'registration_requests', id));
       setRequests(prev => prev.filter(req => req.id !== id));
+      void reportAuditLog({ action: 'registration_task_delete', target_type: 'registration_request', target_id: id, target_label: String(target?.title || '') });
     } catch (e) {
       console.error(e);
-      alert('削除に失敗しました');
+      toast.error('削除できませんでした。もう一度お試しください。');
     }
   };
 
   // ターゲット表示用のヘルパー関数
   const getTargetLabel = (req: any) => {
-    if (req.target_audience === 'new_only') return <span className="bg-orange-100 text-orange-700 px-2 py-0.5 rounded text-[10px] font-bold">未登録のみ</span>;
-    if (req.target_audience === 'grade') return <span className="bg-blue-100 text-blue-700 px-2 py-0.5 rounded text-[10px] font-bold">{req.target_grades?.join(', ')}のみ</span>;
-    return <span className="bg-gray-100 text-gray-600 px-2 py-0.5 rounded text-[10px] font-bold">全員</span>;
+    if (req.target_audience === 'new_only') return <span className="bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full text-xs font-bold">未登録のみ</span>;
+    if (req.target_audience === 'grade') return <span className="bg-sky-100 text-sky-700 px-2 py-0.5 rounded-full text-xs font-bold">{req.target_grades?.join(', ')}のみ</span>;
+    return <span className="bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full text-xs font-bold">全員</span>;
   };
 
-  if (loading) return <div className="p-10 flex justify-center"><Loader2 className="animate-spin text-gray-400"/></div>;
+  if (loading) return (
+    <div className="space-y-6">
+      <AdminPageHeader />
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">{[0, 1, 2].map(index => <Skeleton key={index} className="h-28" />)}</div>
+      <ListSkeleton rows={4} />
+    </div>
+  );
 
   return (
-    <div className="p-8 max-w-5xl mx-auto font-sans text-gray-800">
-      <div className="flex items-center gap-3 mb-8">
-        <div className="p-3 bg-indigo-100 text-indigo-600 rounded-xl">
-          <FileText size={24} />
-        </div>
-        <h1 className="text-2xl font-extrabold">登録依頼の管理</h1>
-      </div>
+    <div className="font-sans text-slate-800">
+      <AdminPageHeader />
 
       {/* 作成ボタンエリア */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-10">
         <button 
           onClick={() => openCreateModal('初回受講科目登録', 'initial')}
-          className="bg-white border-2 border-indigo-100 hover:border-indigo-500 text-indigo-700 p-6 rounded-2xl shadow-sm hover:shadow-md transition-all text-left group"
+          className="bg-white border-2 border-accent/20 hover:border-accent text-accent p-6 rounded-card shadow-sm hover:shadow-md transition-all text-left group"
         >
           <div className="flex items-center justify-between mb-2">
             <span className="font-bold text-lg">初回受講科目登録</span>
-            <div className="bg-indigo-50 p-2 rounded-full group-hover:bg-indigo-600 group-hover:text-white transition-colors">
-              <Plus size={20}/>
+            <div className="bg-accent-soft p-2 rounded-full group-hover:bg-accent group-hover:text-accent-ink transition-colors">
+              <Plus size={20} aria-hidden/>
             </div>
           </div>
-          <p className="text-xs text-gray-400 font-bold">新入生向け / 科目選択のみ</p>
+          <p className="text-xs text-slate-400 font-bold">新入生向け / 科目選択のみ</p>
         </button>
 
         <button 
           onClick={openAutoCourseRegistrationModal}
-          className="bg-white border-2 border-amber-100 hover:border-amber-500 text-amber-700 p-6 rounded-2xl shadow-sm hover:shadow-md transition-all text-left group"
+          className="bg-white border-2 border-amber-100 hover:border-amber-500 text-amber-700 p-6 rounded-card shadow-sm hover:shadow-md transition-all text-left group"
         >
           <div className="flex items-center justify-between mb-2">
             <span className="font-bold text-lg">受講講座登録</span>
             <div className="bg-amber-50 p-2 rounded-full group-hover:bg-amber-600 group-hover:text-white transition-colors">
-              <Plus size={20}/>
+              <Plus size={20} aria-hidden/>
             </div>
           </div>
-          <p className="text-xs text-gray-400 font-bold">年間カリキュラム・授業予定から自動作成 / 保護者向け</p>
+          <p className="text-xs text-slate-400 font-bold">年間カリキュラム・授業予定から自動作成 / 保護者向け</p>
         </button>
 
         <button 
           onClick={() => openCreateModal('定期テスト対策 希望科目', 'test')}
-          className="bg-white border-2 border-pink-100 hover:border-pink-500 text-pink-700 p-6 rounded-2xl shadow-sm hover:shadow-md transition-all text-left group"
+          className="bg-white border-2 border-pink-100 hover:border-pink-500 text-pink-700 p-6 rounded-card shadow-sm hover:shadow-md transition-all text-left group"
         >
           <div className="flex items-center justify-between mb-2">
             <span className="font-bold text-lg">テスト対策 希望調査</span>
             <div className="bg-pink-50 p-2 rounded-full group-hover:bg-pink-600 group-hover:text-white transition-colors">
-              <Plus size={20}/>
+              <Plus size={20} aria-hidden/>
             </div>
           </div>
-          <p className="text-xs text-gray-400 font-bold">テスト前用 / 追加科目希望など</p>
+          <p className="text-xs text-slate-400 font-bold">テスト前用 / 追加科目希望など</p>
         </button>
       </div>
 
       {/* リスト表示エリア */}
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
-        <div className="bg-gray-50 px-6 py-4 border-b border-gray-100">
-          <h2 className="text-sm font-bold text-gray-500">作成履歴</h2>
+      <div className="bg-white rounded-card shadow-sm border border-line overflow-hidden">
+        <div className="bg-slate-50 px-6 py-4 border-b border-slate-100">
+          <h2 className="text-sm font-bold text-slate-500">作成履歴</h2>
         </div>
-        {requests.length === 0 ? (
-          <div className="p-10 text-center text-gray-400 text-sm font-bold">まだ登録依頼はありません</div>
+        {loadError ? (
+          <ErrorState className="m-4" message={loadError} onRetry={() => { setLoading(true); fetchRequests(); }} />
+        ) : requests.length === 0 ? (
+          <EmptyState className="m-4" icon={ClipboardList} title="まだ登録依頼はありません" description="上のボタンから最初の登録依頼を作成できます。" />
         ) : (
-          <div className="divide-y divide-gray-50">
+          <div className="divide-y divide-slate-50">
             {requests.map(req => (
-              <div key={req.id} className="p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:bg-gray-50/50 transition-colors">
+              <div key={req.id} className="p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:bg-slate-50/50 transition-colors">
                 <div>
-                  <div className="flex items-center gap-3 mb-1">
-                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${req.is_active ? 'bg-green-100 text-green-700 border border-green-200' : 'bg-gray-100 text-gray-500 border border-gray-200'}`}>
+                  <div className="flex flex-wrap items-center gap-3 mb-1">
+                    <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${req.is_active ? 'bg-emerald-100 text-emerald-700 border border-emerald-200' : 'bg-slate-100 text-slate-500 border border-slate-200'}`}>
                       {req.is_active ? '募集中' : '停止中'}
                     </span>
-                    <h3 className="font-bold text-gray-800">{req.title}</h3>
+                    <h3 className="font-bold text-slate-800">{req.title}</h3>
                     {/* ターゲットバッジ表示 */}
                     {getTargetLabel(req)}
                   </div>
-                  <div className="flex items-center gap-4 text-xs text-gray-400 font-medium pl-1">
-                    <span>作成: {req.created_at?.toDate().toLocaleDateString()}</span>
-                    <span className="flex items-center gap-1"><Calendar size={12}/> 期限: {req.deadline}</span>
-                    <span className="flex items-center gap-1"><BookOpen size={12}/> {req.request_kind === 'course_registration' ? `講座: ${req.course_option_ids?.length || 0}個` : `科目: ${req.subjects?.length || 5}個`}</span>
-                    {req.period_start && <span>登録期間: {req.period_start} - {req.period_end}</span>}
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500 font-medium pl-1">
+                    <span>作成: {req.created_at?.toDate ? formatDate(req.created_at, { withYear: true }) : ''}</span>
+                    <span className="flex items-center gap-1"><Calendar size={12} aria-hidden/> 期限: {req.deadline ? (formatDate(req.deadline, { withYear: true }) || req.deadline) : '-'}</span>
+                    <span className="flex items-center gap-1"><BookOpen size={12} aria-hidden/> {req.request_kind === 'course_registration' ? `講座: ${req.course_option_ids?.length || 0}個` : `科目: ${req.subjects?.length || 5}個`}</span>
+                    {req.period_start && <span>登録期間: {formatDate(req.period_start, { withYear: true }) || req.period_start} 〜 {formatDate(req.period_end, { withYear: true }) || req.period_end}</span>}
                   </div>
                 </div>
                 
                 {/* 操作ボタンエリア */}
-                <div className="flex items-center gap-3">
+                <div className="flex flex-wrap items-center gap-2">
                   {(req.request_kind === 'course_registration' || req.type === 'course_registration') && (
-                    <button
-                      onClick={() => openEditCourseRegistrationModal(req)}
-                      className="flex items-center gap-2 rounded-lg border border-blue-200 bg-white px-4 py-2 text-xs font-bold text-blue-600 transition-all hover:bg-blue-50"
-                    >
-                      <Pencil size={15}/>表示講座を編集
-                    </button>
+                    <Button variant="secondary" size="sm" onClick={() => openEditCourseRegistrationModal(req)} icon={<Pencil size={15} aria-hidden/>}>
+                      表示講座を編集
+                    </Button>
                   )}
-                  <button 
+                  <Button
+                    variant={req.is_active ? 'ghost' : 'secondary'}
+                    size="sm"
                     onClick={() => toggleStatus(req.id, req.is_active)}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all border ${req.is_active ? 'bg-white border-red-200 text-red-500 hover:bg-red-50' : 'bg-white border-green-200 text-green-600 hover:bg-green-50'}`}
+                    icon={req.is_active ? <StopCircle size={16} aria-hidden/> : <CheckCircle size={16} aria-hidden/>}
+                    className={req.is_active ? 'text-rose-600 hover:bg-rose-50' : undefined}
                   >
-                    {req.is_active ? <><StopCircle size={16}/> 停止する</> : <><CheckCircle size={16}/> 再開する</>}
-                  </button>
-                  <button 
-                    onClick={() => handleDelete(req.id)}
-                    className="flex items-center justify-center p-2 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
-                    title="削除する"
-                  >
-                    <Trash2 size={18}/>
-                  </button>
+                    {req.is_active ? '停止する' : '再開する'}
+                  </Button>
+                  <IconButton label={`「${req.title}」を削除する`} onClick={() => handleDelete(req.id)} className="text-slate-400 hover:bg-rose-50 hover:text-rose-600">
+                    <Trash2 size={18} aria-hidden/>
+                  </IconButton>
                 </div>
               </div>
             ))}
@@ -517,38 +534,44 @@ export default function AdminRegistrationTasksPage() {
       </div>
 
       {/* 設定モーダル */}
-      {isModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white w-full max-w-6xl rounded-2xl shadow-xl overflow-hidden animate-in zoom-in-95 flex flex-col max-h-[88vh]">
-            <div className="bg-gray-50 px-6 py-4 border-b border-gray-100 flex justify-between items-center shrink-0">
-              <h2 className="font-bold text-gray-700">{editingRequestId ? '表示する講座の編集' : '募集内容の設定'}</h2>
-              <button onClick={() => { setIsModalOpen(false); setEditingRequestId(''); }}><X size={20} className="text-gray-400 hover:text-gray-600"/></button>
-            </div>
-            
-            <div className="p-6 space-y-6 overflow-y-auto">
+      <Modal closeOnBackdrop={false}
+        open={isModalOpen}
+        onClose={() => { setIsModalOpen(false); setEditingRequestId(''); }}
+        size="xl"
+        title={editingRequestId ? '表示する講座の編集' : '募集内容の設定'}
+        footer={(
+          <>
+            <Button variant="ghost" size="lg" className="sm:min-w-40" onClick={() => { setIsModalOpen(false); setEditingRequestId(''); }}>キャンセル</Button>
+            <Button size="lg" className="sm:min-w-40" onClick={handleSave} loading={creating}>
+              {creating ? (editingRequestId ? '更新中...' : '作成中...') : (editingRequestId ? '表示講座を更新する' : '募集を開始する')}
+            </Button>
+          </>
+        )}
+      >
+            <div className="space-y-6">
               
               {/* タイトル設定 */}
               <div>
-                <label className="block text-xs font-bold text-gray-500 mb-1">タイトル</label>
+                <label className="block text-xs font-bold text-slate-500 mb-1">タイトル</label>
                 <input 
                   type="text" 
                   value={formData.title} 
                   onChange={e => setFormData({...formData, title: e.target.value})}
-                  className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl font-bold text-gray-700 focus:ring-2 focus:ring-indigo-500 outline-none"
+                  className="w-full min-h-11 p-3 bg-slate-50 border border-line rounded-input font-bold text-slate-700 focus:ring-2 focus:ring-accent/30 outline-none"
                 />
               </div>
 
               {/* ★追加: 送信対象の設定 */}
               <div>
-                <label className="block text-xs font-bold text-gray-500 mb-2">送信対象</label>
+                <label className="block text-xs font-bold text-slate-500 mb-2">送信対象</label>
                 <div className="grid grid-cols-3 gap-2">
                   <button 
                     disabled={formData.type === 'course_registration'}
                     onClick={() => setFormData({...formData, targetAudience: 'all'})}
-                    className={`p-3 rounded-xl border-2 flex flex-col items-center gap-1 transition-all ${
+                    className={`p-3 rounded-btn border-2 flex flex-col items-center gap-1 transition-all ${
                       formData.targetAudience === 'all' 
-                        ? 'border-indigo-500 bg-indigo-50 text-indigo-700' 
-                        : 'border-gray-100 text-gray-400 hover:bg-gray-50'
+                        ? 'border-accent bg-accent-soft text-accent' 
+                        : 'border-slate-100 text-slate-400 hover:bg-slate-50'
                     } ${formData.type === 'course_registration' ? 'cursor-not-allowed opacity-40' : ''}`}
                   >
                     <Users size={20}/>
@@ -557,10 +580,10 @@ export default function AdminRegistrationTasksPage() {
                   <button 
                     disabled={formData.type === 'course_registration'}
                     onClick={() => setFormData({...formData, targetAudience: 'new_only'})}
-                    className={`p-3 rounded-xl border-2 flex flex-col items-center gap-1 transition-all ${
+                    className={`p-3 rounded-btn border-2 flex flex-col items-center gap-1 transition-all ${
                       formData.targetAudience === 'new_only' 
-                        ? 'border-orange-500 bg-orange-50 text-orange-700' 
-                        : 'border-gray-100 text-gray-400 hover:bg-gray-50'
+                        ? 'border-amber-500 bg-amber-50 text-amber-700' 
+                        : 'border-slate-100 text-slate-400 hover:bg-slate-50'
                     } ${formData.type === 'course_registration' ? 'cursor-not-allowed opacity-40' : ''}`}
                   >
                     <UserPlus size={20}/>
@@ -568,10 +591,10 @@ export default function AdminRegistrationTasksPage() {
                   </button>
                   <button 
                     onClick={() => setFormData({...formData, targetAudience: 'grade'})}
-                    className={`p-3 rounded-xl border-2 flex flex-col items-center gap-1 transition-all ${
+                    className={`p-3 rounded-btn border-2 flex flex-col items-center gap-1 transition-all ${
                       formData.targetAudience === 'grade' 
-                        ? 'border-blue-500 bg-blue-50 text-blue-700' 
-                        : 'border-gray-100 text-gray-400 hover:bg-gray-50'
+                        ? 'border-sky-500 bg-sky-50 text-sky-700' 
+                        : 'border-slate-100 text-slate-400 hover:bg-slate-50'
                     }`}
                   >
                     <GraduationCap size={20}/>
@@ -581,8 +604,8 @@ export default function AdminRegistrationTasksPage() {
 
                 {/* 学年指定時の詳細選択 */}
                 {(formData.targetAudience === 'grade' || formData.type === 'course_registration') && (
-                  <div className="mt-3 p-3 bg-blue-50/50 rounded-xl border border-blue-100 animate-in fade-in slide-in-from-top-2">
-                    <p className="text-[10px] font-bold text-blue-400 mb-2">
+                  <div className="mt-3 p-3 bg-sky-50/50 rounded-btn border border-sky-100 animate-in fade-in slide-in-from-top-2">
+                    <p className="text-xs font-bold text-sky-700 mb-2">
                       {formData.type === 'course_registration' ? '登録依頼を送信する学年を選択してください' : '対象学年を選択してください（複数可）'}
                     </p>
                     <div className="flex flex-wrap gap-2">
@@ -590,10 +613,11 @@ export default function AdminRegistrationTasksPage() {
                         <button
                           key={grade}
                           onClick={() => toggleGrade(grade)}
-                          className={`px-3 py-1.5 rounded-lg text-xs font-bold border-2 transition-all flex items-center gap-1 ${
+                          aria-pressed={formData.targetGrades.includes(grade)}
+                          className={`min-h-9 px-3 py-1.5 rounded-btn text-xs font-bold border-2 transition-all flex items-center gap-1 ${
                             formData.targetGrades.includes(grade)
-                              ? 'bg-blue-500 text-white border-blue-500'
-                              : 'bg-white text-gray-500 border-gray-200'
+                              ? 'bg-accent text-accent-ink border-accent'
+                              : 'bg-white text-slate-500 border-slate-200'
                           }`}
                         >
                           {formData.targetGrades.includes(grade) && <Check size={12} strokeWidth={4} />}
@@ -607,12 +631,12 @@ export default function AdminRegistrationTasksPage() {
 
               {/* 期限設定 */}
               <div>
-                <label className="block text-xs font-bold text-gray-500 mb-1">募集期限</label>
+                <label className="block text-xs font-bold text-slate-500 mb-1">募集期限</label>
                 <input 
                   type="date" 
                   value={formData.deadline} 
                   onChange={e => setFormData({...formData, deadline: e.target.value})}
-                  className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl font-bold text-gray-700 focus:ring-2 focus:ring-indigo-500 outline-none"
+                  className="w-full min-h-11 p-3 bg-slate-50 border border-line rounded-input font-bold text-slate-700 focus:ring-2 focus:ring-accent/30 outline-none"
                 />
               </div>
 
@@ -620,47 +644,47 @@ export default function AdminRegistrationTasksPage() {
                 <div className="space-y-5">
                   <div className="grid gap-3 sm:grid-cols-2">
                     <div>
-                      <label className="block text-xs font-bold text-gray-500 mb-1">登録開始日</label>
+                      <label className="block text-xs font-bold text-slate-500 mb-1">登録開始日</label>
                       <input
                         type="date"
                         value={formData.periodStart}
                         onChange={e => setFormData({...formData, periodStart: e.target.value})}
-                        className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl font-bold text-gray-700 focus:ring-2 focus:ring-indigo-500 outline-none"
+                        className="w-full min-h-11 p-3 bg-slate-50 border border-line rounded-input font-bold text-slate-700 focus:ring-2 focus:ring-accent/30 outline-none"
                       />
                     </div>
                     <div>
-                      <label className="block text-xs font-bold text-gray-500 mb-1">登録終了日</label>
+                      <label className="block text-xs font-bold text-slate-500 mb-1">登録終了日</label>
                       <input
                         type="date"
                         value={formData.periodEnd}
                         onChange={e => setFormData({...formData, periodEnd: e.target.value, deadline: e.target.value})}
-                        className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl font-bold text-gray-700 focus:ring-2 focus:ring-indigo-500 outline-none"
+                        className="w-full min-h-11 p-3 bg-slate-50 border border-line rounded-input font-bold text-slate-700 focus:ring-2 focus:ring-accent/30 outline-none"
                       />
                     </div>
                   </div>
                   <div>
-                    <div className="mb-3 rounded-2xl border border-cyan-100 bg-cyan-50 p-4">
+                    <div className="mb-3 rounded-card border border-line bg-slate-50 p-4">
                       <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                         <div>
-                          <p className="text-xs font-black text-cyan-700">カリキュラム管理との紐づけ</p>
-                          <p className="mt-1 text-[11px] font-bold text-cyan-700/70">タームで絞ると、そのタームの講座だけを登録依頼に含められます。</p>
+                          <p className="text-xs font-bold text-slate-700">カリキュラム管理との紐づけ</p>
+                          <p className="mt-1 text-xs font-medium text-slate-500">タームで絞ると、そのタームの講座だけを登録依頼に含められます。</p>
                         </div>
-                        <a href="/master/curriculum" className="rounded-xl bg-white px-3 py-2 text-xs font-black text-cyan-700 shadow-sm ring-1 ring-cyan-100 hover:bg-cyan-50">カリキュラム管理</a>
+                        <ButtonLink href="/master/curriculum" variant="secondary" size="sm">カリキュラム管理</ButtonLink>
                       </div>
                       <select
                         value={formData.termFilter}
                         onChange={e => setFormData(prev => ({ ...prev, termFilter: e.target.value, courseOptionIds: [] }))}
-                        className="w-full rounded-xl border border-cyan-100 bg-white px-3 py-2 text-sm font-black text-slate-700 outline-none"
+                        className="w-full min-h-10 rounded-input border border-line bg-white px-3 py-2 text-sm font-bold text-slate-700 outline-none"
                       >
                         <option value="all">すべてのターム</option>
                         {courseTerms.map((term: any) => <option key={term.key} value={term.key}>{term.label}</option>)}
                       </select>
                       <div className="mt-3">
-                        <p className="mb-2 text-[11px] font-black text-cyan-700">実施月で絞り込み</p>
+                        <p className="mb-2 text-xs font-bold text-slate-700">実施月で絞り込み</p>
                         <select
                           value={formData.monthFilter}
                           onChange={e => setFormData(prev => ({ ...prev, monthFilter: e.target.value, courseOptionIds: [] }))}
-                          className="w-full rounded-xl border border-cyan-100 bg-white px-3 py-2 text-sm font-black text-slate-700 outline-none"
+                          className="w-full min-h-10 rounded-input border border-line bg-white px-3 py-2 text-sm font-bold text-slate-700 outline-none"
                         >
                           <option value="all">すべての月</option>
                           {courseMonths.map(month => <option key={month} value={month}>{month}</option>)}
@@ -669,30 +693,26 @@ export default function AdminRegistrationTasksPage() {
                     </div>
                     <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
                       <div>
-                        <label className="block text-xs font-bold text-gray-500">CSV登録済みカリキュラム</label>
-                        <p className="mt-1 text-[11px] font-bold text-gray-400">年間カリキュラム・講師配置と連動し、曜日・時限ごとに受講候補を表示します。</p>
+                        <label className="block text-xs font-bold text-slate-500">CSV登録済みカリキュラム</label>
+                        <p className="mt-1 text-xs font-medium text-slate-500">年間カリキュラム・講師配置と連動し、曜日・時限ごとに受講候補を表示します。</p>
                       </div>
-                      <button
-                        type="button"
+                      <Button
+                        variant="secondary"
+                        size="sm"
                         onClick={() => setFormData(prev => ({
                           ...prev,
                           courseOptionIds: visibleCourseOptions().map((option: any) => option.id),
                         }))}
-                        className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-black text-amber-700 hover:bg-amber-100"
                       >
                         表示中をすべて選択
-                      </button>
+                      </Button>
                     </div>
                     {formData.targetGrades.length === 0 ? (
-                      <div className="rounded-xl border-2 border-dashed border-blue-200 bg-blue-50 p-6 text-center text-sm font-bold text-blue-500">
-                        先に送信する学年を選択してください
-                      </div>
+                      <EmptyState icon={GraduationCap} title="先に送信する学年を選択してください" />
                     ) : courseOptions.length === 0 ? (
-                      <div className="rounded-xl border-2 border-dashed border-gray-200 p-6 text-center text-sm font-bold text-gray-400">
-                        まだカリキュラムCSVが取り込まれていません
-                      </div>
+                      <EmptyState icon={BookOpen} title="まだカリキュラムCSVが取り込まれていません" description="カリキュラム管理からCSVを取り込むと、ここに講座が表示されます。" />
                     ) : (
-                      <div className="max-h-[52vh] overflow-y-auto rounded-xl border border-gray-100 bg-gray-50 p-3">
+                      <div className="max-h-[52vh] overflow-y-auto rounded-btn border border-line bg-slate-50 p-3">
                         <div className="space-y-5">
                           {(Object.entries(groupedCourseOptions()) as [string, any[]][]).map(([key, items]) => {
                             const [year, term, grade, month] = key.split('_');
@@ -701,17 +721,18 @@ export default function AdminRegistrationTasksPage() {
                             const courseMatchedCount = items.filter(item => item.shift_match_status === 'course_matched').length;
                             const unmatchedCount = items.filter(item => item.shift_match_status === 'unmatched').length;
                             return (
-                              <section key={key} className="rounded-2xl bg-white p-4 shadow-sm">
+                              <section key={key} className="rounded-card bg-white p-4 shadow-sm">
                                 <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                                   <div>
-                                    <h3 className="text-sm font-black text-gray-800">{year} / {term} / {grade} / {month}</h3>
-                                    <p className="text-[11px] font-bold text-gray-400">{items.length}件中 {selectedCount}件選択中</p>
-                                    <p className="mt-1 text-[10px] font-bold text-gray-400">
+                                    <h3 className="text-sm font-bold text-slate-800">{year} / {term} / {grade} / {month}</h3>
+                                    <p className="text-xs font-bold text-slate-500">{items.length}件中 {selectedCount}件選択中</p>
+                                    <p className="mt-1 text-xs font-medium text-slate-500">
                                       単元一致 {matchedCount}件 / 講座名一致 {courseMatchedCount}件 / 未配置 {unmatchedCount}件
                                     </p>
                                   </div>
-                                  <button
-                                    type="button"
+                                  <Button
+                                    variant="secondary"
+                                    size="sm"
                                     onClick={() => setFormData(prev => {
                                       const ids = items.map(item => item.id);
                                       const allSelected = ids.every(id => prev.courseOptionIds.includes(id));
@@ -722,10 +743,9 @@ export default function AdminRegistrationTasksPage() {
                                           : Array.from(new Set([...prev.courseOptionIds, ...ids])),
                                       };
                                     })}
-                                    className="rounded-xl bg-gray-100 px-3 py-2 text-xs font-black text-gray-600 hover:bg-gray-200"
                                   >
                                     {selectedCount === items.length ? 'この表を解除' : 'この表を選択'}
-                                  </button>
+                                  </Button>
                                 </div>
                                 <CourseRegistrationCalendar
                                   options={items}
@@ -739,12 +759,12 @@ export default function AdminRegistrationTasksPage() {
                         </div>
                       </div>
                     )}
-                    <p className="mt-2 text-[11px] font-bold text-gray-400">{formData.courseOptionIds.length}件選択中</p>
+                    <p className="mt-2 text-xs font-bold text-slate-500">{formData.courseOptionIds.length}件選択中</p>
                   </div>
                 </div>
               ) : (
               <div>
-                <label className="block text-xs font-bold text-gray-500 mb-2">選択肢（科目）の設定</label>
+                <label className="block text-xs font-bold text-slate-500 mb-2">選択肢（科目）の設定</label>
                 <div className="flex gap-2 mb-3">
                   <input 
                     type="text" 
@@ -757,32 +777,24 @@ export default function AdminRegistrationTasksPage() {
                         addSubject();
                       }
                     }}
-                    className="flex-1 p-2 bg-white border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
+                    aria-label="追加する科目"
+                    className="flex-1 min-h-10 px-3 py-2 bg-white border border-line rounded-input text-sm focus:ring-2 focus:ring-accent/30 outline-none"
                   />
-                  <button onClick={addSubject} className="bg-indigo-600 text-white p-2 rounded-lg hover:bg-indigo-700"><Plus size={18}/></button>
+                  <IconButton label="科目を追加" variant="primary" onClick={addSubject}><Plus size={18} aria-hidden/></IconButton>
                 </div>
                 
                 <div className="flex flex-wrap gap-2">
                   {formData.subjects.map(sub => (
-                    <div key={sub} className="bg-gray-100 text-gray-700 px-3 py-1.5 rounded-lg text-sm font-bold flex items-center gap-2">
+                    <div key={sub} className="bg-slate-100 text-slate-700 px-3 py-1.5 rounded-btn text-sm font-bold flex items-center gap-2">
                       {sub}
-                      <button onClick={() => removeSubject(sub)} className="text-gray-400 hover:text-red-500"><X size={14}/></button>
+                      <button type="button" onClick={() => removeSubject(sub)} aria-label={`${sub}を外す`} className="text-slate-400 hover:text-rose-500"><X size={14} aria-hidden/></button>
                     </div>
                   ))}
                 </div>
               </div>
               )}
             </div>
-
-            <div className="p-6 bg-gray-50 border-t border-gray-100 flex gap-3 shrink-0">
-              <button onClick={() => { setIsModalOpen(false); setEditingRequestId(''); }} className="flex-1 py-3 text-gray-500 font-bold hover:bg-gray-100 rounded-xl transition-colors">キャンセル</button>
-              <button onClick={handleSave} disabled={creating} className="flex-1 bg-indigo-600 text-white font-bold py-3 rounded-xl hover:bg-indigo-700 disabled:opacity-50 transition-colors shadow-lg shadow-indigo-200">
-                {creating ? (editingRequestId ? '更新中...' : '作成中...') : (editingRequestId ? '表示講座を更新する' : '募集を開始する')}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 }

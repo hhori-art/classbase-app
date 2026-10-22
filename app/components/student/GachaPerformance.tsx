@@ -6,6 +6,7 @@ import { GACHA_RATE_SCALE, type PublicGacha } from '@/lib/rewards';
 import type { SoundEffectType } from '@/lib/sound';
 import RewardVisual from '@/app/components/rewards/RewardVisual';
 import { findRewardPreset } from '@/lib/reward-presets';
+import { Button } from '@/app/components/ui';
 
 export type GachaDrawResult = {
   result: 'win' | 'miss';
@@ -129,7 +130,7 @@ export default function GachaPerformance({ gacha, result, badgeText, play, onClo
       {stage === 'open' && <div className="gx-flash" />}
 
       {result && stage !== 'reveal' && (
-        <button onClick={skip} className="gx-skip">スキップ</button>
+        <button type="button" onClick={skip} className="gx-skip">スキップ</button>
       )}
 
       {(stage === 'spin' || stage === 'drop' || stage === 'ready' || stage === 'open') && (
@@ -181,13 +182,13 @@ export default function GachaPerformance({ gacha, result, badgeText, play, onClo
             </div>
           )}
           <div className={`gx-card gx-card-${tier}`}>
-            <button onClick={onClose} className="gx-close" aria-label="閉じる"><X size={18} /></button>
+            <button type="button" onClick={onClose} className="gx-close" aria-label="閉じる" title="閉じる"><X size={18} aria-hidden /></button>
             <p className={`gx-tier-label gx-tier-label-${tier}`}>{TIER_LABEL[tier]}</p>
             {result.result === 'win' && result.reward ? (
               <>
                 <div className="gx-prize">
                   {result.reward.preset_id ? (
-                    <RewardVisual presetId={result.reward.preset_id} className="h-full w-full overflow-hidden rounded-[28px]" />
+                    <RewardVisual presetId={result.reward.preset_id} className="h-full w-full overflow-hidden rounded-hero" />
                   ) : result.reward.image_url ? (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img src={result.reward.image_url} alt="" />
@@ -196,9 +197,9 @@ export default function GachaPerformance({ gacha, result, badgeText, play, onClo
                   {tier !== 'normal' && <span className="gx-sparkle gx-sparkle-2">✦</span>}
                   {tier === 'legendary' && <span className="gx-sparkle gx-sparkle-3">✦</span>}
                 </div>
-                <h2 className="text-2xl font-black text-slate-800">{result.reward.name}</h2>
-                <p className="mt-2 flex items-center justify-center gap-1 text-xs font-bold text-slate-500">
-                  {result.reward.kind === 'digital' ? <><Download size={13} />「もらった景品」からダウンロードできます</>
+                <h2 className="text-2xl font-black text-fg">{result.reward.name}</h2>
+                <p className="mt-2 flex items-center justify-center gap-1 text-xs font-medium text-fg-muted">
+                  {result.reward.kind === 'digital' ? <><Download size={13} aria-hidden />「もらった景品」からダウンロードできます</>
                     : result.reward.kind === 'cosmetic' ? (findRewardPreset(result.reward.preset_id)?.category === 'badge' ? 'トロフィーの「バッジ」から装備できます' : '設定画面の「見た目」から使えます')
                     : '先生からのお渡しを待ってね。「もらった景品」で状況を確認できます'}
                 </p>
@@ -206,14 +207,14 @@ export default function GachaPerformance({ gacha, result, badgeText, play, onClo
             ) : (
               <>
                 <div className="my-4 text-6xl gx-float">🥚</div>
-                <h2 className="text-xl font-black text-slate-700">ざんねん…また挑戦してね！</h2>
+                <h2 className="text-xl font-black text-fg">ざんねん…また挑戦してね！</h2>
                 {result.refund > 0 && (
-                  <p className="gx-refund"><Coins size={16} />{result.refund}コインが戻ってきた！</p>
+                  <p className="gx-refund"><Coins size={16} aria-hidden />{result.refund}コインが戻ってきた！</p>
                 )}
               </>
             )}
-            {badgeText && <p className="mt-3 rounded-xl bg-violet-50 p-2 text-xs font-black text-violet-700 whitespace-pre-line">{badgeText}</p>}
-            <button onClick={onClose} className="mt-6 w-full rounded-2xl bg-slate-900 py-3 font-black text-white active:scale-95">閉じる</button>
+            {badgeText && <p className="mt-3 rounded-btn bg-accent-soft p-2 text-xs font-bold text-accent whitespace-pre-line">{badgeText}</p>}
+            <Button onClick={onClose} size="lg" fullWidth className="mt-6 active:scale-95">閉じる</Button>
           </div>
         </>
       )}
@@ -227,7 +228,7 @@ const GACHA_CSS = `
 .gx-tier-rare .gx-backdrop { background: radial-gradient(circle at 50% 40%, #92400e 0%, #1c1917 70%); }
 .gx-tier-legendary .gx-backdrop { background: radial-gradient(circle at 50% 40%, #7e22ce 0%, #0f172a 75%); animation: gx-hue 3s linear infinite; }
 .gx-tier-miss .gx-backdrop { background: radial-gradient(circle at 50% 40%, #334155 0%, #0f172a 70%); }
-.gx-skip { position: absolute; top: calc(16px + env(safe-area-inset-top, 0px)); right: 16px; z-index: 5; border-radius: 9999px; background: rgba(255,255,255,.15); color: #fff; font-weight: 900; font-size: 12px; padding: 8px 14px; }
+.gx-skip { position: absolute; top: calc(16px + env(safe-area-inset-top, 0px)); right: 16px; z-index: 5; min-height: 44px; border-radius: 9999px; background: rgba(255,255,255,.15); color: #fff; font-weight: 700; font-size: 13px; padding: 8px 16px; }
 .gx-stage { position: relative; z-index: 2; display: flex; flex-direction: column; align-items: center; }
 .gx-machine { width: 220px; display: flex; flex-direction: column; align-items: center; }
 .gx-dome { position: relative; width: 200px; height: 170px; border-radius: 100px 100px 24px 24px; background: rgba(255,255,255,.12); border: 6px solid rgba(255,255,255,.55); overflow: hidden; box-shadow: inset 0 -20px 40px rgba(0,0,0,.25); }
@@ -272,7 +273,8 @@ const GACHA_CSS = `
 .gx-card { position: relative; z-index: 4; width: 100%; max-width: 360px; border-radius: 32px; background: #fff; padding: 28px 24px 24px; text-align: center; box-shadow: 0 30px 80px rgba(0,0,0,.5); animation: gx-pop .6s cubic-bezier(.2,.9,.3,1.4) both; }
 .gx-card-rare { box-shadow: 0 0 0 4px #facc15, 0 0 60px rgba(250,204,21,.6), 0 30px 80px rgba(0,0,0,.5); }
 .gx-card-legendary { box-shadow: 0 0 0 4px #e879f9, 0 0 80px rgba(217,70,239,.7), 0 30px 80px rgba(0,0,0,.5); }
-.gx-close { position: absolute; right: 14px; top: 14px; border-radius: 9999px; padding: 6px; color: #94a3b8; }
+.gx-close { position: absolute; right: 10px; top: 10px; display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; border-radius: 9999px; color: #94a3b8; }
+.gx-close:hover { background: #f1f5f9; color: #475569; }
 .gx-tier-label { display: inline-block; border-radius: 9999px; padding: 4px 14px; font-weight: 900; font-size: 15px; letter-spacing: .08em; }
 .gx-tier-label-miss { background: #f1f5f9; color: #64748b; }
 .gx-tier-label-normal { background: #dbeafe; color: #1d4ed8; }

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { adminAuth, adminDb } from '@/lib/firebase-admin';
 import { consumeRateLimit, getClientIp, requestFingerprint } from '@/lib/server/password-recovery';
+import { verifyExistingFirebasePassword } from '@/lib/server/firebase-password-check';
 
 export const runtime = 'nodejs';
 
@@ -61,24 +62,6 @@ function pickUserDoc(docs: FirebaseFirestore.QueryDocumentSnapshot[], password: 
 
 function isAdminRole(role: unknown) {
   return ADMIN_ROLE_ALIASES.includes(String(role || '').toLowerCase());
-}
-
-async function verifyExistingFirebasePassword(email: string, password: string) {
-  const apiKey = String(process.env.NEXT_PUBLIC_FIREBASE_API_KEY || '').trim();
-  if (!apiKey) throw new Error('firebase-api-key-missing');
-  const response = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(apiKey)}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password, returnSecureToken: true }),
-    signal: AbortSignal.timeout(10_000),
-  });
-  const result = await response.json().catch(() => ({}));
-  if (response.ok && result?.localId) return true;
-  const reason = String(result?.error?.message || '');
-  if (['INVALID_LOGIN_CREDENTIALS', 'INVALID_PASSWORD', 'EMAIL_NOT_FOUND'].some(code => reason.includes(code))) return false;
-  if (reason.includes('USER_DISABLED')) throw new Error('account-inactive');
-  if (reason.includes('TOO_MANY_ATTEMPTS')) throw new Error('too-many-attempts');
-  throw new Error(`firebase-password-check-failed:${reason || response.status}`);
 }
 
 export async function POST(req: Request) {

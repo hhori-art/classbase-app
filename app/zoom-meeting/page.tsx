@@ -6,6 +6,7 @@ import { useSearchParams } from 'next/navigation';
 import { auth } from '@/lib/firebase';
 import { onAuthStateChanged, type User } from 'firebase/auth';
 import { ArrowLeft, ExternalLink, Loader2, MonitorPlay } from 'lucide-react';
+import { jstDateKey } from '@/lib/date-key';
 
 declare global {
   interface Window {
@@ -164,7 +165,8 @@ export default function ZoomMeetingPage() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
           body: JSON.stringify({
-            target_date: new Date().toISOString().slice(0, 10),
+            // 参加日は日本時間で記録する（UTCだと0〜9時の参加が前日扱いになる）
+            target_date: jstDateKey(),
             class_id: classId || meetingNumber,
             source: 'zoom_meeting_sdk',
           }),
@@ -193,41 +195,41 @@ export default function ZoomMeetingPage() {
   return (
     <div className="min-h-screen bg-slate-950 text-white">
       <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
-        <Link href="/student" className="inline-flex items-center gap-2 rounded-xl bg-white/10 px-3 py-2 text-sm font-black text-white">
-          <ArrowLeft size={16} /> 戻る
+        <Link href="/student" className="inline-flex min-h-11 items-center gap-2 rounded-btn bg-white/10 px-3 text-sm font-bold text-white hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white">
+          <ArrowLeft size={16} aria-hidden /> 戻る
         </Link>
         <div className="min-w-0 text-center">
-          <p className="truncate text-sm font-black">Zoom授業</p>
-          <p className="text-xs font-bold text-white/50">{status}</p>
+          <h1 className="truncate text-sm font-bold">Zoom授業</h1>
+          <p className="text-xs text-white/60" aria-live="polite">{status}</p>
         </div>
-        <a href={fallbackUrl} className="inline-flex items-center gap-2 rounded-xl bg-white px-3 py-2 text-sm font-black text-slate-950">
-          <ExternalLink size={16} /> 外部
+        <a href={fallbackUrl} className="inline-flex min-h-11 items-center gap-2 rounded-btn bg-white px-3 text-sm font-bold text-slate-950 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white">
+          <ExternalLink size={16} aria-hidden /> 外部で開く
         </a>
       </div>
 
       {error && (
-        <div className="mx-auto mt-4 max-w-3xl rounded-2xl border border-amber-300/30 bg-amber-400/10 p-4 text-sm font-bold text-amber-100">
+        <div role="alert" className="mx-4 mt-4 max-w-3xl rounded-card border border-amber-300/30 bg-amber-400/10 p-4 text-sm font-bold text-amber-100 sm:mx-auto">
           <p>{error}</p>
-          <p className="mt-2 text-xs text-amber-100/80">
+          <p className="mt-2 text-xs font-normal text-amber-100/80">
             Meeting SDKの認証情報が未設定、またはZoom側でMeeting SDK埋め込みが有効になっていない可能性があります。
           </p>
-          <a href={fallbackUrl} className="mt-4 inline-flex items-center gap-2 rounded-xl bg-white px-4 py-3 text-sm font-black text-slate-950">
-            <ExternalLink size={16} /> Zoomを外部で開く
+          <a href={fallbackUrl} className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-btn bg-white px-4 text-sm font-bold text-slate-950 hover:bg-slate-100">
+            <ExternalLink size={16} aria-hidden /> Zoomを外部で開く
           </a>
         </div>
       )}
 
       <div className="relative h-[calc(100vh-65px)]">
         {joining && (
-          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-slate-950">
-            <Loader2 className="animate-spin text-sky-300" size={36} />
-            <p className="text-sm font-black text-white/70">{status}</p>
+          <div role="status" className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-slate-950">
+            <Loader2 className="animate-spin text-sky-300" size={36} aria-hidden />
+            <p className="text-sm font-bold text-white/70">{status}</p>
           </div>
         )}
         {!meetingNumber ? (
           <div className="flex h-full flex-col items-center justify-center gap-3 text-white/60">
-            <MonitorPlay size={48} />
-            <p className="text-sm font-black">ミーティングIDが見つかりません</p>
+            <MonitorPlay size={48} aria-hidden />
+            <p className="text-sm font-bold">ミーティングIDが見つかりません</p>
           </div>
         ) : (
           <div ref={rootRef} id="meetingSDKElement" className="h-full w-full bg-slate-900" />

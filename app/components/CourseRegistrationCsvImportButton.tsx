@@ -1,7 +1,8 @@
 'use client';
 
 import { useRef, useState } from 'react';
-import { CheckCircle2, FileUp, Loader2, Search } from 'lucide-react';
+import { CheckCircle2, FileUp, Search } from 'lucide-react';
+import { Button, useConfirm } from '@/app/components/ui';
 import { auth } from '@/lib/firebase';
 import CsvSampleDownload from '@/app/components/CsvSampleDownload';
 
@@ -91,6 +92,7 @@ export default function CourseRegistrationCsvImportButton() {
   const [year, setYear] = useState('2026');
   const [term, setTerm] = useState('term2');
   const [result, setResult] = useState<ImportResult | null>(null);
+  const confirm = useConfirm();
 
   const importCsv = async (file: File, dryRun = false) => {
     setLoading(true);
@@ -125,9 +127,14 @@ export default function CourseRegistrationCsvImportButton() {
     }
   };
 
-  const handleFile = (file?: File | null, dryRun = false) => {
+  const handleFile = async (file?: File | null, dryRun = false) => {
     if (!file) return;
-    if (!dryRun && !window.confirm('CSVの内容で現在の受講講座登録を上書きします。CSVで講座欄が空の生徒は受講講座登録がクリアされます。実行しますか？')) {
+    if (!dryRun && !(await confirm({
+      title: `${year}年度の受講講座登録を「${file.name}」で上書きしますか？`,
+      message: 'CSVの内容で現在の受講講座登録を上書きします。CSVで講座欄が空の生徒は受講講座登録がクリアされます。',
+      confirmLabel: '上書きする',
+      tone: 'danger',
+    }))) {
       if (fileRef.current) fileRef.current.value = '';
       return;
     }
@@ -152,7 +159,8 @@ export default function CourseRegistrationCsvImportButton() {
         <select
           value={encoding}
           onChange={event => setEncoding(event.target.value as 'utf-8' | 'shift-jis')}
-          className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-black text-slate-700 outline-none focus:ring-2 focus:ring-indigo-100"
+          aria-label="文字コード"
+          className="min-h-11 rounded-input border border-line bg-white px-3 py-2 text-sm font-bold text-slate-700 outline-none focus:ring-2 focus:ring-accent"
           disabled={loading}
         >
           <option value="utf-8">UTF-8</option>
@@ -161,14 +169,16 @@ export default function CourseRegistrationCsvImportButton() {
         <input
           value={year}
           onChange={event => setYear(event.target.value)}
+          aria-label="年度"
           inputMode="numeric"
-          className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-black text-slate-700 outline-none focus:ring-2 focus:ring-indigo-100"
+          className="min-h-11 rounded-input border border-line bg-white px-3 py-2 text-sm font-bold text-slate-700 outline-none focus:ring-2 focus:ring-accent"
           disabled={loading}
         />
         <select
           value={term}
           onChange={event => setTerm(event.target.value)}
-          className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-black text-slate-700 outline-none focus:ring-2 focus:ring-indigo-100"
+          aria-label="期"
+          className="min-h-11 rounded-input border border-line bg-white px-3 py-2 text-sm font-bold text-slate-700 outline-none focus:ring-2 focus:ring-accent"
           disabled={loading}
         >
           <option value="term1">第1期</option>
@@ -185,33 +195,27 @@ export default function CourseRegistrationCsvImportButton() {
           rows={sampleRows}
           label="CSV例"
         />
-        <button
-          type="button"
-          onClick={() => fileRef.current?.click()}
-          disabled={loading}
-          className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 py-3 text-sm font-black text-white shadow-sm transition-colors hover:bg-indigo-700 disabled:opacity-60"
-        >
-          {loading ? <Loader2 size={18} className="animate-spin" /> : <FileUp size={18} />}
+        <Button onClick={() => fileRef.current?.click()} loading={loading} icon={<FileUp size={18} aria-hidden />}>
           CSVを選択して上書き
-        </button>
+        </Button>
       </div>
 
-      <div className="rounded-2xl border border-slate-100 bg-slate-50 p-3 text-[11px] font-bold text-slate-500">
+      <div className="rounded-btn border border-slate-100 bg-slate-50 p-3 text-xs font-bold text-slate-500">
         <p>読み取り対象: id（先頭見出しが空欄のMemberMaster形式も対応）, name, grade, 次期月〜次期土（空の場合は月〜土、2p月〜2p土）</p>
         <p>例: 「1限:中3生物Ⅱ, 2限:中3公民②Ⅱ」を、指定した年度・期の講師配置由来の講座候補に照合します。</p>
-        <p className="mt-1 font-black text-indigo-700">上書き仕様: CSVに載っている生徒は現在の受講講座登録をCSV内容に置き換えます。講座欄が空の行は登録をクリアします。</p>
+        <p className="mt-1 font-bold text-accent">上書き仕様: CSVに載っている生徒は現在の受講講座登録をCSV内容に置き換えます。講座欄が空の行は登録をクリアします。</p>
       </div>
 
       {result && (
-        <div className={`rounded-2xl border p-3 text-xs font-bold ${
+        <div role="status" className={`rounded-btn border p-3 text-xs font-bold ${
           result.ok === false ? 'border-rose-100 bg-rose-50 text-rose-700' : 'border-emerald-100 bg-emerald-50 text-emerald-700'
         }`}>
           {result.ok === false ? (
             <p>{result.error || '取り込みに失敗しました'}</p>
           ) : (
             <div className="space-y-2">
-              <p className="flex items-center gap-2 text-sm font-black">
-                <CheckCircle2 size={16} />
+              <p className="flex items-center gap-2 text-sm font-bold">
+                <CheckCircle2 size={16} aria-hidden />
                 {result.imported || 0}件をCSV内容で上書きしました
               </p>
               <p>
@@ -219,12 +223,12 @@ export default function CourseRegistrationCsvImportButton() {
                 {problemCount > 0 ? ` / 確認必要: ${problemCount}` : ''}
               </p>
               {problemCount > 0 && (
-                <details className="rounded-xl bg-white/70 p-2 text-slate-600">
-                  <summary className="flex cursor-pointer items-center gap-1 font-black text-amber-700">
-                    <Search size={14} />
+                <details className="rounded-btn bg-white/70 p-2 text-slate-600">
+                  <summary className="flex cursor-pointer items-center gap-1 font-bold text-amber-700">
+                    <Search size={14} aria-hidden />
                     確認が必要な先頭データ
                   </summary>
-                  <div className="mt-2 max-h-48 space-y-1 overflow-auto font-mono text-[10px]">
+                  <div className="mt-2 max-h-48 space-y-1 overflow-auto font-mono text-xs">
                     {(result.results || [])
                       .filter(item => item.status !== 'matched')
                       .slice(0, 30)

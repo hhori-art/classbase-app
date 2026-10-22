@@ -138,34 +138,33 @@ export default function TeacherWorkMenu({ isInternalNetwork }: Props) {
 
   const getColorClasses = (color: string) => {
     const map: {[key: string]: { bg: string, text: string, border: string, hover: string }} = {
-      teal:   { bg: 'bg-teal-50',   text: 'text-teal-600',   border: 'border-teal-100',   hover: 'group-hover:bg-teal-100' },
-      green:  { bg: 'bg-green-50',  text: 'text-green-600',  border: 'border-green-100',  hover: 'group-hover:bg-green-100' },
-      blue:   { bg: 'bg-blue-50',   text: 'text-blue-600',   border: 'border-blue-100',   hover: 'group-hover:bg-blue-100' },
-      orange: { bg: 'bg-orange-50', text: 'text-orange-600', border: 'border-orange-100', hover: 'group-hover:bg-orange-100' },
-      purple: { bg: 'bg-purple-50', text: 'text-purple-600', border: 'border-purple-100', hover: 'group-hover:bg-purple-100' },
-      indigo: { bg: 'bg-indigo-50', text: 'text-indigo-600', border: 'border-indigo-100', hover: 'group-hover:bg-indigo-100' },
-      yellow: { bg: 'bg-yellow-50', text: 'text-yellow-600', border: 'border-yellow-100', hover: 'group-hover:bg-yellow-100' },
-      red:    { bg: 'bg-red-50',    text: 'text-red-600',    border: 'border-red-100',    hover: 'group-hover:bg-red-100' },
+      teal:   { bg: 'bg-teal-50',    text: 'text-teal-600',    border: 'border-teal-100',    hover: 'group-hover:bg-teal-100' },
+      green:  { bg: 'bg-emerald-50', text: 'text-emerald-600', border: 'border-emerald-100', hover: 'group-hover:bg-emerald-100' },
+      blue:   { bg: 'bg-sky-50',     text: 'text-sky-600',     border: 'border-sky-100',     hover: 'group-hover:bg-sky-100' },
+      orange: { bg: 'bg-amber-50',   text: 'text-amber-600',   border: 'border-amber-100',   hover: 'group-hover:bg-amber-100' },
+      purple: { bg: 'bg-violet-50',  text: 'text-violet-600',  border: 'border-violet-100',  hover: 'group-hover:bg-violet-100' },
+      indigo: { bg: 'bg-indigo-50',  text: 'text-indigo-600',  border: 'border-indigo-100',  hover: 'group-hover:bg-indigo-100' },
+      yellow: { bg: 'bg-amber-50',   text: 'text-amber-600',   border: 'border-amber-100',   hover: 'group-hover:bg-amber-100' },
+      red:    { bg: 'bg-rose-50',    text: 'text-rose-600',    border: 'border-rose-100',    hover: 'group-hover:bg-rose-100' },
     };
     return map[color] || map.blue;
   };
 
   return (
-    <div className="p-4 sm:p-6 lg:p-8 space-y-6 animate-in fade-in duration-300 pb-24">
+    <div className="space-y-6 px-4 py-5 sm:px-6">
       
       {/* プロフィールカード */}
-      <div className="bg-gradient-to-br from-gray-800 to-gray-900 p-6 rounded-[28px] shadow-lg text-white relative overflow-hidden">
-        <div className="absolute top-0 right-0 w-40 h-40 bg-white/5 rounded-full blur-3xl -translate-y-10 translate-x-10"></div>
-        <div className="flex items-center gap-5 relative z-10">
-          <div className="w-16 h-16 bg-white/10 backdrop-blur-md rounded-2xl flex items-center justify-center text-3xl font-bold shadow-inner border border-white/10">
+      <div className="relative overflow-hidden rounded-hero bg-gradient-to-br from-slate-800 to-slate-900 p-6 text-white shadow-card">
+        <div className="relative flex items-center gap-5">
+          <div className="flex h-16 w-16 items-center justify-center rounded-card border border-white/10 bg-white/10 text-3xl font-bold">
             {profile?.name?.charAt(0) || 'T'}
           </div>
           <div>
-            <p className="text-xs font-bold opacity-60 mb-1">お疲れ様です</p>
-            <h1 className="text-2xl font-extrabold tracking-tight leading-none mb-2">{profile?.name} 先生</h1>
+            <p className="mb-1 text-xs font-bold opacity-70">お疲れ様です</p>
+            <h1 className="mb-2 text-2xl font-black leading-none tracking-tight">{profile?.name} さん</h1>
             <div className="flex items-center gap-2">
-              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border flex items-center gap-1 ${isInternalNetwork ? 'bg-green-500/20 text-green-300 border-green-500/30' : 'bg-orange-500/20 text-orange-300 border-orange-500/30'}`}>
-                <span className={`w-1.5 h-1.5 rounded-full ${isInternalNetwork ? 'bg-green-400' : 'bg-orange-400'} animate-pulse`}></span>
+              <span className={`flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-bold ${isInternalNetwork ? 'border-emerald-500/30 bg-emerald-500/20 text-emerald-300' : 'border-amber-500/30 bg-amber-500/20 text-amber-300'}`}>
+                <span className={`h-1.5 w-1.5 rounded-full ${isInternalNetwork ? 'bg-emerald-400' : 'bg-amber-400'} motion-safe:animate-pulse`}></span>
                 {isInternalNetwork ? '社内ネットワーク接続中' : '社外ネットワーク接続中'}
               </span>
             </div>
@@ -175,16 +174,16 @@ export default function TeacherWorkMenu({ isInternalNetwork }: Props) {
 
       {/* メニューグリッド */}
       <div>
-        <h2 className="text-sm font-bold text-gray-500 mb-3 px-1">業務メニュー</h2>
+        <h2 className="mb-3 px-1 text-sm font-bold text-fg-muted">業務メニュー</h2>
         
         {!isInternalNetwork && (
-          <div className="mb-4 bg-orange-50 border border-orange-100 rounded-xl p-3 flex items-center gap-2 text-xs text-orange-800">
-            <AlertTriangle size={16} />
-            <span>社外ネットワークからのアクセスため、個人情報を含む機能は制限されています。</span>
+          <div className="mb-4 flex items-center gap-2 rounded-card border border-amber-100 bg-amber-50 p-3 text-sm text-amber-800">
+            <AlertTriangle size={16} className="shrink-0" aria-hidden />
+            <span>社外ネットワークからのアクセスのため、個人情報を含む機能は制限されています。</span>
           </div>
         )}
 
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 lg:grid-cols-4">
           {menuItems.map((item, idx) => {
             const styles = getColorClasses(item.color);
             // 制限対象 かつ 社外ネットワーク の場合にロックする
@@ -194,49 +193,49 @@ export default function TeacherWorkMenu({ isInternalNetwork }: Props) {
               <Link 
                 key={idx} 
                 href={isLocked ? '#' : item.href} 
+                aria-disabled={isLocked || undefined}
                 className={`
-                  relative group no-underline
-                  flex flex-col items-center justify-center text-center
-                  bg-white border-2 
-                  rounded-3xl p-4 aspect-[4/3]
-                  shadow-sm 
-                  transition-all duration-200
+                  group relative no-underline
+                  flex aspect-[4/3] flex-col items-center justify-center text-center
+                  rounded-card border-2 bg-surface p-4
+                  shadow-sm transition-shadow
+                  focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent
                   ${isLocked 
-                    ? 'border-gray-100 bg-gray-50 cursor-not-allowed grayscale opacity-60' 
-                    : `${styles.border} hover:shadow-md active:scale-[0.98]`
+                    ? 'cursor-not-allowed border-line bg-canvas opacity-60 grayscale' 
+                    : `${styles.border} hover:shadow-md`
                   }
                 `}
                 onClick={(e) => { if(isLocked) e.preventDefault(); }}
               >
                 {/* アイコン */}
                 <div className={`
-                  mb-3 p-3 rounded-2xl transition-colors duration-300 relative
-                  ${isLocked ? 'bg-gray-200 text-gray-400' : `${styles.bg} ${styles.text} ${styles.hover}`}
-                  ${!isLocked && item.animate ? 'animate-pulse' : ''}
+                  relative mb-3 rounded-card p-3 transition-colors
+                  ${isLocked ? 'bg-slate-200 text-slate-400' : `${styles.bg} ${styles.text} ${styles.hover}`}
+                  ${!isLocked && item.animate ? 'motion-safe:animate-pulse' : ''}
                 `}>
                   {item.icon}
                   
                   {/* ロックアイコンのオーバーレイ */}
                   {isLocked && (
-                    <div className="absolute inset-0 flex items-center justify-center bg-black/10 rounded-2xl">
-                      <Lock size={16} className="text-gray-600" />
+                    <div className="absolute inset-0 flex items-center justify-center rounded-card bg-black/10">
+                      <Lock size={16} className="text-slate-600" aria-hidden />
                     </div>
                   )}
                 </div>
 
                 {/* タイトル */}
-                <span className={`text-sm font-black leading-tight ${isLocked ? 'text-gray-400' : 'text-gray-700'}`}>
+                <span className={`text-sm font-bold leading-tight ${isLocked ? 'text-slate-400' : 'text-fg'}`}>
                   {item.title}
                 </span>
                 
                 {/* 説明文 */}
-                <span className="text-[10px] font-bold text-gray-400 mt-1">
+                <span className="mt-1 text-xs font-bold text-fg-muted">
                   {isLocked ? '社内アクセス限定' : item.desc}
                 </span>
 
                 {/* バッジ */}
                 {!isLocked && item.badge && (
-                  <span className="absolute top-3 right-3 bg-red-500 text-white text-[10px] font-black min-w-[20px] h-5 px-1.5 rounded-full flex items-center justify-center border-2 border-white shadow-sm z-10">
+                  <span className="absolute right-3 top-3 z-10 flex h-5 min-w-[20px] items-center justify-center rounded-full border-2 border-white bg-danger px-1.5 text-xs font-bold text-white shadow-sm">
                     {item.badge}
                   </span>
                 )}

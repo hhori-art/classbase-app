@@ -1,7 +1,8 @@
 'use client';
 
 import { useRef, useState } from 'react';
-import { Upload, Loader2, CheckCircle2, Link2 } from 'lucide-react';
+import { Upload, CheckCircle2, Link2 } from 'lucide-react';
+import { Button } from '@/app/components/ui';
 import { auth } from '@/lib/firebase';
 import CsvSampleDownload from '@/app/components/CsvSampleDownload';
 import { clearCourseRegistrationOptionsCache } from '@/lib/client-course-options';
@@ -120,45 +121,35 @@ export default function AnnualScheduleImportButton({ type, label, sample, sample
         <input
           value={year}
           onChange={e => setYear(e.target.value)}
-          className="w-full rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-sm font-bold outline-none focus:ring-2 focus:ring-teal-100 sm:w-28"
+          aria-label="年度"
+          className="min-h-11 w-full rounded-input border border-line bg-slate-50 px-3 py-2 text-sm font-bold outline-none focus:ring-2 focus:ring-accent sm:w-28"
           inputMode="numeric"
         />
         <input ref={fileRef} type="file" accept=".csv,text/csv" onChange={e => handleFile(e.target.files?.[0])} className="hidden" />
-        <button
-          type="button"
-          onClick={() => fileRef.current?.click()}
-          disabled={loading}
-          className="inline-flex items-center justify-center gap-2 rounded-xl bg-slate-900 px-5 py-3 text-sm font-bold text-white shadow-sm transition-colors hover:bg-slate-800 disabled:opacity-60"
-        >
-          {loading ? <Loader2 size={18} className="animate-spin" /> : <Upload size={18} />}
+        <Button onClick={() => fileRef.current?.click()} loading={loading} icon={<Upload size={18} aria-hidden />}>
           {label}
-        </button>
+        </Button>
       </div>
-      <div className="rounded-2xl border border-slate-100 bg-slate-50 p-3">
-        <p className="mb-2 text-[11px] font-black text-slate-500">GoogleシートURLから取り込む</p>
+      <div className="rounded-btn border border-slate-100 bg-slate-50 p-3">
+        <p className="mb-2 text-xs font-bold text-slate-500">GoogleシートURLから取り込む</p>
         <div className="flex flex-col gap-2 sm:flex-row">
           <input
             value={sheetUrl}
             onChange={e => setSheetUrl(e.target.value)}
             placeholder="https://docs.google.com/spreadsheets/d/.../edit?gid=..."
-            className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold outline-none focus:ring-2 focus:ring-teal-100"
+            aria-label="GoogleシートURL"
+            className="min-h-10 min-w-0 flex-1 rounded-input border border-line bg-white px-3 py-2 text-xs font-bold outline-none focus:ring-2 focus:ring-accent"
           />
-          <button
-            type="button"
-            onClick={handleSheetUrl}
-            disabled={loading}
-            className="inline-flex items-center justify-center gap-2 rounded-xl border border-teal-200 bg-white px-4 py-2 text-xs font-black text-teal-700 hover:bg-teal-50 disabled:opacity-60"
-          >
-            {loading ? <Loader2 size={15} className="animate-spin" /> : <Link2 size={15} />}
+          <Button variant="secondary" size="sm" onClick={handleSheetUrl} loading={loading} icon={<Link2 size={15} aria-hidden />}>
             URL読込
-          </button>
+          </Button>
         </div>
-        <p className="mt-2 text-[10px] font-bold text-slate-400">同じ年度の旧データは上書きされます。非公開シートは直接取得できません。共有設定を「リンクを知っている全員が閲覧可」にするか、CSVで保存して取り込んでください。</p>
+        <p className="mt-2 text-xs font-bold text-slate-400">同じ年度の旧データは上書きされます。非公開シートは直接取得できません。共有設定を「リンクを知っている全員が閲覧可」にするか、CSVで保存して取り込んでください。</p>
       </div>
-      <p className="rounded-xl bg-gray-50 px-3 py-2 font-mono text-[11px] font-bold text-gray-500">{sample}</p>
+      <p className="rounded-btn bg-slate-50 px-3 py-2 font-mono text-xs font-bold text-slate-500">{sample}</p>
       {result && (
-        <p className={`flex items-center gap-2 text-xs font-bold ${result.startsWith('失敗') ? 'text-rose-600' : 'text-emerald-600'}`}>
-          {!result.startsWith('失敗') && <CheckCircle2 size={14} />}
+        <p role="status" className={`flex items-center gap-2 text-xs font-bold ${result.startsWith('失敗') ? 'text-rose-600' : 'text-emerald-600'}`}>
+          {!result.startsWith('失敗') && <CheckCircle2 size={14} aria-hidden />}
           {result}
         </p>
       )}

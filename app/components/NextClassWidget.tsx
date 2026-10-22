@@ -1,257 +1,203 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs, orderBy, limit } from 'firebase/firestore';
-import { CalendarClock, Video, Loader2, BookOpen } from 'lucide-react';
+import { collection, query, where, getDocs, limit } from 'firebase/firestore';
+import { CalendarClock, Video, BookOpen, MonitorPlay } from 'lucide-react';
+import { useAuth } from '@/app/context/AuthContext';
+import { Button, EmptyState, ErrorState, Skeleton, useConfirm, useToast } from '@/app/components/ui';
+import { formatDate, jstDateKey } from '@/lib/format';
+import {
+  NEXT_CLASS_LOOKAHEAD_DAYS,
+  isValidZoomSigninAddress,
+  nextClassDateKeys,
+  pickNextClasses,
+  type NextClassShift,
+} from '@/lib/next-class';
+import { launchZoomUrl, prepareZoomWindow, requestZoomHostStart } from '@/lib/zoom-host-start';
 
-type ShiftAssignment = {
-  id: string;
-  target_date: string;
-  note?: string;
-  target_grade?: string;
-  target_subject?: string;
-  target_meeting_id?: string;
-  unit?: string;
-  teacher_name?: string;
-  user_id?: string;
-};
+const normalizeMeetingId = (value?: string | null) => String(value || '').normalize('NFKC').replace(/[^\d]/g, '');
 
-// --- ヘルパー関数 ---
-const toHalfWidth = (str: string) => !str ? '' : str.replace(/[！-～]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0)).replace(/　/g, ' ');
-
-// 名前マッチングロジック
-const isNameMatch = (shiftName: string | undefined, profileName: string) => {
-  if (!shiftName || !profileName) return false;
-  const s = shiftName.replace(/[ 　]/g, '');
-  const p = profileName.replace(/[ 　]/g, '');
-  return s.includes(p);
-};
-
-// 日本時間を取得
-const getJSTNow = () => {
-  return new Date(Date.now() + 9 * 60 * 60 * 1000);
-};
-
-const getJSTDateStr = (offsetDays: number = 0) => {
-  const d = getJSTNow();
-  d.setUTCDate(d.getUTCDate() + offsetDays);
-  return d.toISOString().split('T')[0];
-};
-
-// ★追加: 日付の表記ゆれ（2026/3/2, 2026-3-2 など）を "2026-03-02" に統一する関数
-const normalizeDateStr = (raw: string) => {
-  if (!raw) return '';
-  // 1. スラッシュをハイフンに変換
-  let s = raw.replace(/\//g, '-');
-  // 2. ゼロ埋め（例: 2026-3-2 -> 2026-03-02）
-  const parts = s.split('-');
-  if (parts.length === 3) {
-    const y = parts[0];
-    const m = parts[1].padStart(2, '0');
-    const d = parts[2].padStart(2, '0');
-    return `${y}-${m}-${d}`;
-  }
-  return s;
-};
-
-// 授業が「これから（未終了）」かどうかを判定する
-const isUpcomingClass = (normalizedTargetDate: string, note?: string) => {
-  const todayStr = getJSTDateStr(0);
-  
-  // 表記ゆれを無くした状態で比較するため、過去の授業は確実に弾かれます
-  if (normalizedTargetDate > todayStr) return true;
-  if (normalizedTargetDate < todayStr) return false;
-
-  // 今日の授業の場合、時間をチェックする
-  if (!note) return true; 
-
-  const timeMatches = note.match(/([0-9]{1,2})[:：]([0-9]{2})/g);
-  if (!timeMatches || timeMatches.length === 0) return true; 
-
-  let endTimeStr = timeMatches[timeMatches.length - 1].replace('：', ':');
-  if (endTimeStr.length === 4) endTimeStr = '0' + endTimeStr; 
-
-  const now = getJSTNow();
-  const currentHH = now.getUTCHours().toString().padStart(2, '0');
-  const currentMM = now.getUTCMinutes().toString().padStart(2, '0');
-  const currentTimeStr = `${currentHH}:${currentMM}`;
-
-  return endTimeStr >= currentTimeStr;
-};
+const jstNowHHMM = () => new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+}).format(new Date());
 
 export default function NextClassWidget({ profile }: { profile: any }) {
-  const [nextClasses, setNextClasses] = useState<ShiftAssignment[]>([]);
+  const { user } = useAuth();
+  const toast = useToast();
+  const confirm = useConfirm();
+  const [nextClasses, setNextClasses] = useState<NextClassShift[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [startingId, setStartingId] = useState('');
+
+  const userId = String(user?.uid || profile?.uid || profile?.id || '');
 
   useEffect(() => {
+    let cancelled = false;
     const fetchNext = async () => {
-      if (!profile) {
+      if (!userId) {
         setLoading(false);
         return;
       }
-
-      const userId = profile.id || profile.uid;
-      const userName = profile.student_name || profile.name || '';
-
+      setLoading(true);
+      setLoadError(false);
       try {
-        const todayStr = getJSTDateStr(0);      
-        const tomorrowStr = getJSTDateStr(1);   
-
-        const shiftsMap = new Map<string, ShiftAssignment>();
-        const promises = [];
-
-        if (userId) {
-          const idCandidates = Array.from(new Set([userId, toHalfWidth(userId)])).filter(Boolean);
-          if (idCandidates.length > 0) {
-            promises.push(
-              getDocs(query(
-                collection(db, 'shift_assignments'), 
-                where('user_id', 'in', idCandidates),
-                where('target_date', '>=', todayStr),
-                orderBy('target_date', 'asc'),
-                limit(100)
-              ))
-            );
-          }
-        }
-
-        promises.push(
-          getDocs(query(
-            collection(db, 'shift_assignments'),
-            where('target_date', '==', todayStr),
-            limit(200)
-          ))
-        );
-
-        promises.push(
-          getDocs(query(
-            collection(db, 'shift_assignments'),
-            where('target_date', '>=', tomorrowStr),
-            orderBy('target_date', 'asc'),
-            limit(100)
-          ))
-        );
-
-        const results = await Promise.all(promises);
-
-        results.forEach(snap => {
-          snap.docs.forEach(doc => {
-            const data = doc.data() as Omit<ShiftAssignment, 'id'>;
-            
-            if (shiftsMap.has(doc.id)) return;
-
-            const isIdMatched = data.user_id === userId;
-            const isNameMatched = isNameMatch(data.teacher_name, userName);
-
-            if (isIdMatched || isNameMatched) {
-              // ★ 取得した日付の表記ゆれをここで一律綺麗にする
-              const normalizedDate = normalizeDateStr(data.target_date);
-              
-              if (isUpcomingClass(normalizedDate, data.note)) {
-                // 綺麗な日付でデータを上書きして保存する
-                shiftsMap.set(doc.id, { ...data, id: doc.id, target_date: normalizedDate });
-              }
-            }
-          });
-        });
-
-        // ソート (日付 > 時間帯)
-        const futureShifts = Array.from(shiftsMap.values()).sort((a, b) => {
-          if (a.target_date !== b.target_date) return a.target_date.localeCompare(b.target_date);
-          return (a.note || '').localeCompare(b.note || '');
-        });
-
-        if (futureShifts.length > 0) {
-          const nearestDate = futureShifts[0].target_date;
-          // 直近の日付の授業のみを表示
-          const todaysClasses = futureShifts.filter(s => s.target_date === nearestDate);
-          setNextClasses(todaysClasses);
-        } else {
-          setNextClasses([]);
-        }
-
-      } catch (e) {
-        console.error("❌ NextClass fetch error:", e);
+        const today = jstDateKey();
+        // 自分の配置だけを、今日（JST）から一定期間に限って読む（他の講師の配置は読まない）。
+        const snap = await getDocs(query(
+          collection(db, 'shift_assignments'),
+          where('user_id', '==', userId),
+          where('target_date', 'in', nextClassDateKeys(today)),
+          limit(60),
+        ));
+        const shifts = snap.docs.map(item => ({ id: item.id, ...item.data() } as NextClassShift));
+        if (!cancelled) setNextClasses(pickNextClasses(shifts, userId, today, jstNowHHMM()));
+      } catch (error) {
+        console.error('NextClass fetch error:', error);
+        if (!cancelled) setLoadError(true);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
-
     fetchNext();
-  }, [profile]);
+    return () => { cancelled = true; };
+  }, [userId, reloadKey]);
 
   if (loading) {
+    return <Skeleton className="mb-6 h-[88px] w-full rounded-card" />;
+  }
+
+  if (loadError) {
     return (
-      <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-200 flex items-center justify-center h-[88px] animate-pulse">
-        <Loader2 className="animate-spin text-indigo-300" />
-      </div>
+      <ErrorState
+        className="mb-6"
+        title="次回担当授業を読み込めませんでした"
+        onRetry={() => setReloadKey(key => key + 1)}
+      />
     );
   }
 
-  // データがない場合は非表示
-  if (nextClasses.length === 0) return null; 
+  if (nextClasses.length === 0) {
+    return (
+      <EmptyState
+        className="mb-6"
+        icon={CalendarClock}
+        title="次回担当授業はありません"
+        description={`今日から${NEXT_CLASS_LOOKAHEAD_DAYS}日以内に、あなたが担当する授業は登録されていません。`}
+      />
+    );
+  }
 
   const firstClass = nextClasses[0];
-  const isToday = firstClass.target_date === getJSTDateStr(0);
+  const isToday = firstClass.target_date === jstDateKey();
+  const myName = profile?.student_name || profile?.name || '講師';
 
-  const handleJoin = (meetingId?: string) => {
-     if (!meetingId) return alert("ミーティングIDが未設定です");
-     const confno = toHalfWidth(meetingId).replace(/[^0-9]/g, '');
-     window.open(`zoommtg://zoom.us/join?confno=${confno}`, '_self');
+  const handleJoin = (cls: NextClassShift) => {
+    const confno = normalizeMeetingId(cls.target_meeting_id);
+    if (!confno) { toast.error('ミーティングIDが未設定です'); return; }
+    const params = new URLSearchParams({ confno });
+    if (cls.target_password) params.set('pwd', String(cls.target_password).normalize('NFKC').trim());
+    window.open(`zoommtg://zoom.us/join?${params.toString()}`, '_self');
+  };
+
+  // 講師ホームの授業カードと同じ ZAK によるホスト開始。API が「今日の自分の授業」かを確認する。
+  const handleHostStart = async (cls: NextClassShift) => {
+    const confno = normalizeMeetingId(cls.target_meeting_id);
+    const email = String(cls.target_signin_address || '').trim();
+    if (!confno || !user) { toast.error('ミーティングIDが未設定です'); return; }
+    const popup = prepareZoomWindow();
+    setStartingId(cls.id);
+    try {
+      const token = await user.getIdToken();
+      const result = await requestZoomHostStart({ token, email, meetingId: confno, shiftId: cls.id, name: myName });
+      if (result.ok) {
+        launchZoomUrl(result.url, popup);
+        return;
+      }
+      if (popup && !popup.closed) popup.close();
+      const joinNormally = await confirm({
+        title: 'ホスト権限の取得に失敗しました',
+        message: <span className="whitespace-pre-line">{`理由: ${result.error}${result.detail ? `\n詳細: ${result.detail}` : ''}\n参加者として開きますか？`}</span>,
+        confirmLabel: '参加者として開く',
+      });
+      if (joinNormally) handleJoin(cls);
+    } catch (error) {
+      if (popup && !popup.closed) popup.close();
+      console.error(error);
+      toast.error('通信エラーが発生しました。');
+    } finally {
+      setStartingId('');
+    }
   };
 
   return (
-    <div className="bg-gradient-to-r from-indigo-600 to-violet-600 rounded-2xl p-4 text-white shadow-lg relative overflow-hidden group mb-6">
-      <div className="absolute top-0 right-0 w-32 h-32 bg-white/10 rounded-full blur-2xl -mr-10 -mt-10 pointer-events-none"></div>
-      <div className="absolute bottom-0 left-10 w-24 h-24 bg-indigo-400/20 rounded-full blur-xl mb-[-2rem] pointer-events-none"></div>
-      
-      <div className="relative z-10">
-        <div className="flex items-center gap-3 mb-3 border-b border-white/10 pb-2">
-          <div className="bg-white/20 p-2 rounded-lg backdrop-blur-sm shadow-inner shrink-0">
-            <CalendarClock size={20} className="text-indigo-50" />
+    <div className="relative mb-6 overflow-hidden rounded-hero bg-accent p-4 text-accent-ink shadow-card">
+      <div className="relative">
+        <div className="mb-3 flex items-center gap-3 border-b border-white/15 pb-2">
+          <div className="shrink-0 rounded-btn bg-white/20 p-2">
+            <CalendarClock size={20} aria-hidden />
           </div>
-          <div className="flex items-center gap-3">
-             <span className="text-sm font-bold tracking-wider text-indigo-100">次回担当授業</span>
-             {/* 表記ゆれを綺麗にしたので、常に YYYY/MM/DD と美しく表示されます */}
-             <span className="text-lg font-black">{firstClass.target_date.replace(/-/g, '/')}</span>
-             {isToday && (
-                <span className="bg-rose-500 text-white px-2 py-0.5 rounded text-[10px] font-bold animate-pulse shadow-sm">TODAY</span>
-              )}
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className="text-sm font-bold opacity-85">次回担当授業</span>
+            <span className="text-lg font-bold">{formatDate(firstClass.target_date, { withWeekday: true })}</span>
+            {isToday && (
+              <span className="rounded-full bg-danger px-2 py-0.5 text-xs font-bold text-white shadow-sm">今日</span>
+            )}
           </div>
         </div>
 
         <div className="flex flex-col gap-2">
-          {nextClasses.map((cls) => (
-            <div key={cls.id} className="bg-white/10 rounded-xl p-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border border-white/5 backdrop-blur-sm hover:bg-white/20 transition-colors">
-              <div className="flex items-start gap-3 overflow-hidden">
-                <div className="bg-black/30 text-xs font-bold px-2 py-1 rounded-md whitespace-nowrap shrink-0 mt-0.5">
-                  {cls.note?.match(/【.*?】/)?.[0] || '時間未定'}
-                </div>
-                
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2 text-sm font-bold mb-0.5">
-                     <span>{cls.target_grade}</span>
-                     <span className="opacity-50">|</span>
-                     <span>{cls.target_subject}</span>
+          {nextClasses.map((cls) => {
+            const hasMeeting = Boolean(normalizeMeetingId(cls.target_meeting_id));
+            // ホスト開始は当日の授業のみ（ZAK は当日の配置でしか発行されない）。
+            const canHostStart = hasMeeting && isToday && isValidZoomSigninAddress(cls.target_signin_address);
+            return (
+              <div key={cls.id} className="flex flex-col justify-between gap-3 rounded-card border border-white/10 bg-white/10 p-3 sm:flex-row sm:items-center">
+                <div className="flex items-start gap-3 overflow-hidden">
+                  <div className="mt-0.5 shrink-0 whitespace-nowrap rounded-input bg-black/25 px-2 py-1 text-xs font-bold">
+                    {cls.note?.match(/【.*?】/)?.[0] || '時間未定'}
                   </div>
-                  <div className="text-xs text-indigo-100 flex items-center gap-1 truncate">
-                    <BookOpen size={10} className="shrink-0 opacity-70"/>
-                    <span className="truncate">{cls.unit || '単元設定なし'}</span>
+                  <div className="min-w-0">
+                    <div className="mb-0.5 flex items-center gap-2 text-sm font-bold">
+                      <span>{cls.target_grade}</span>
+                      <span className="opacity-50">|</span>
+                      <span>{cls.target_subject}</span>
+                    </div>
+                    <div className="flex items-center gap-1 truncate text-xs opacity-85">
+                      <BookOpen size={12} className="shrink-0 opacity-70" aria-hidden />
+                      <span className="truncate">{cls.unit || '単元設定なし'}</span>
+                    </div>
                   </div>
                 </div>
-              </div>
 
-              {cls.target_meeting_id && (
-                <button 
-                  onClick={() => handleJoin(cls.target_meeting_id)}
-                  className="bg-white text-indigo-700 hover:bg-indigo-50 px-3 py-1.5 rounded-lg font-bold text-xs transition-all shadow-sm flex items-center justify-center gap-1.5 shrink-0 active:scale-95 whitespace-nowrap sm:w-auto w-full"
-                >
-                  <Video size={12} /> 入室
-                </button>
-              )}
-            </div>
-          ))}
+                {hasMeeting && (
+                  <div className="flex w-full shrink-0 flex-col gap-2 sm:w-auto sm:flex-row">
+                    {canHostStart && (
+                      <Button
+                        onClick={() => handleHostStart(cls)}
+                        loading={startingId === cls.id}
+                        icon={<MonitorPlay size={16} aria-hidden />}
+                        className="w-full !bg-white !text-accent hover:!bg-accent-soft sm:w-auto"
+                      >
+                        ホストで開始
+                      </Button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => handleJoin(cls)}
+                      className={canHostStart
+                        ? 'flex min-h-11 w-full items-center justify-center gap-1.5 whitespace-nowrap rounded-btn border border-white/40 px-4 text-sm font-bold text-accent-ink transition-colors hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white sm:w-auto'
+                        : 'flex min-h-11 w-full items-center justify-center gap-1.5 whitespace-nowrap rounded-btn bg-white px-4 text-sm font-bold text-accent shadow-sm transition-colors hover:bg-accent-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white sm:w-auto'}
+                    >
+                      <Video size={16} aria-hidden /> 参加
+                    </button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>

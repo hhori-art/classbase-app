@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import { NextRequest } from 'next/server';
 import { adminDb } from '@/lib/firebase-admin';
-import { getServerUser, isAdminLike, requireRole } from '@/lib/server-auth';
+import { getServerUser, jsonError, requireScienceSocialStaff } from '@/lib/server-auth';
+import { consumeRateLimit } from '@/lib/server/password-recovery';
 import OpenAI from 'openai';
 
 function getOpenAIClient() {
@@ -20,7 +21,11 @@ const DEFAULT_BATCH_SIZE = 10;
 export async function POST(req: NextRequest) {
   try {
     const user = await getServerUser(req);
-    if (!isAdminLike(user)) requireRole(user, ['teacher']);
+    requireScienceSocialStaff(user);
+    // 全生徒を対象にAI分析を回す処理のため、1人あたりの実行回数を制限する（外部AIの費用・負荷対策）。
+    if (!(await consumeRateLimit(`analyze_risk_hour_${user.uid}`, 10, 60 * 60 * 1000))) {
+      return NextResponse.json({ ok: false, error: 'rate-limit' }, { status: 429 });
+    }
 
     const { batchSize = DEFAULT_BATCH_SIZE } = await req.json();
     const db = adminDb();
@@ -176,6 +181,9 @@ export async function POST(req: NextRequest) {
     });
 
   } catch (error: any) {
+    const message = String(error?.message || '');
+    const code = String(error?.code || '');
+    if (['missing-token', 'forbidden', 'profile-not-found'].includes(message) || code.startsWith('auth/')) return jsonError(error);
     console.error('API Error:', error);
     return NextResponse.json({ error: error.message }, { status: 500 });
   }

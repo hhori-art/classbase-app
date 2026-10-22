@@ -1,4 +1,4 @@
-import { attendanceProgramMatches, normalizeAttendanceSegment } from './attendance-work-detail';
+import { attendanceProgramMatches, individualLevelNeedsRatio, normalizeAttendanceSegment } from './attendance-work-detail';
 import { intervalMinutes, mapWorkTypeToPayrollCategory, normalizePayrollName, normalizePersonCode, type RegularAttendanceInterval } from './attendance-payroll';
 
 export type AttendanceInsightSource = 'combined' | 'system' | 'external';
@@ -108,7 +108,7 @@ function buildSystemIntervals(records: any[], profiles: Map<string, any>, progra
       .map((segment: any): InsightInterval => {
         const category = mapWorkTypeToPayrollCategory(segment.type) || 'other';
         const detailComplete = segment.type === 'individual'
-          ? Boolean(segment.grade && segment.individual_level && segment.individual_ratio)
+          ? Boolean(segment.grade && segment.individual_level && (!individualLevelNeedsRatio(segment.individual_level) || segment.individual_ratio))
           : segment.type === 'lesson' || segment.type === 'breakthrough_lesson'
             ? Boolean(segment.grade)
             : segment.type === 'office' || segment.type === 'breakthrough_office'

@@ -1,6 +1,9 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "fluid": true,
+  "regions": [
+    "hnd1"
+  ],
   "functions": {
     "app/api/**/*.ts": {
       "maxDuration": 60

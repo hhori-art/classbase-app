@@ -3,6 +3,7 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { canManageSchool, getServerUser, isAdminLike, jsonError } from '@/lib/server-auth';
 import { writeLearningEvent } from '@/lib/events';
+import { writeAuditLog } from '@/lib/server/audit-log';
 
 export const runtime = 'nodejs';
 
@@ -87,6 +88,21 @@ export async function POST(request: NextRequest) {
       school: String(updates.school_id || student.school_id || student.school || ''),
       metadata: { action },
     });
+    if (action !== 'relations') {
+      await writeAuditLog({
+        actor,
+        action: 'student_lifecycle',
+        target_type: 'user',
+        target_id: userId,
+        target_label: String(student.student_name || student.name || student.lifetime_id || ''),
+        school_id: String(updates.school_id || student.school_id || student.school || ''),
+        details: {
+          lifecycle_action: action,
+          ...(action === 'transfer' ? { previous_school_id: student.school_id || student.school || null, school_id: updates.school_id } : {}),
+          ...(action === 'withdraw' ? { enrollment_cancel_month: updates.enrollment_cancel_month } : {}),
+        },
+      });
+    }
 
     return Response.json({ ok: true, updates, event_id: eventId });
   } catch (error) {

@@ -3,6 +3,7 @@ import { revalidateTag } from 'next/cache';
 import { NextRequest } from 'next/server';
 import { adminDb } from '@/lib/firebase-admin';
 import { canManageAttendanceSystem, getServerUser, jsonError } from '@/lib/server-auth';
+import { writeAuditLog } from '@/lib/server/audit-log';
 import { TRANSPORT_TYPE_OPTIONS, normalizeTransportStation, transportStationDocId } from '@/lib/transport-fares';
 
 export const runtime = 'nodejs';
@@ -136,6 +137,14 @@ export async function POST(request: NextRequest) {
     imported = validRows.length;
     aliasDocs = docs.length - validRows.length;
     revalidateTag('transport-masters');
+
+    // 取込1回につき1件（件数だけ。行の内容は残さない）。
+    await writeAuditLog({
+      actor: user,
+      action: 'transport_stations_import',
+      target_type: 'transport_stations',
+      details: { imported_count: imported, alias_doc_count: aliasDocs, deleted_count: deleted, skipped_count: invalidRows.length, replace_all: replaceAll },
+    });
 
     return Response.json({
       ok: true,

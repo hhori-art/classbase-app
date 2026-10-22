@@ -3,6 +3,7 @@ import { NextResponse } from 'next/server';
 import { NextRequest } from 'next/server';
 import { adminAuth, adminDb } from '@/lib/firebase-admin';
 import { canManageSchool, getServerUser, jsonError, requireMaster, ServerUser } from '@/lib/server-auth';
+import { writeAuditLog } from '@/lib/server/audit-log';
 import { generateInitialPassword } from '@/lib/password';
 import {
   findAccountProfileDocs,
@@ -144,8 +145,17 @@ export async function DELETE(request: NextRequest) {
 
     // A) 個別削除
     if (targetId) {
-      await getTargetUserOrThrow(targetId, actor);
+      const target: Record<string, any> = await getTargetUserOrThrow(targetId, actor);
       await deleteUserData(targetId);
+      await writeAuditLog({
+        actor,
+        action: 'account_delete',
+        target_type: 'user',
+        target_id: targetId,
+        target_label: String(target.name || target.student_name || target.teacher_name || target.lifetime_id || ''),
+        school_id: String(target.school_id || target.school || ''),
+        details: { target_role: String(target.role || '') },
+      });
       return NextResponse.json({ success: true, message: '削除しました' });
     }
 
@@ -162,6 +172,14 @@ export async function DELETE(request: NextRequest) {
     // 同時実行数を制限して削除
     await runWithConcurrency(userIds, CONCURRENCY, async (id) => {
       await deleteUserData(id);
+    });
+    await writeAuditLog({
+      actor,
+      action: 'account_delete',
+      target_type: 'user_bulk',
+      target_id: 'students',
+      target_label: `生徒 ${userIds.length}件の一括削除`,
+      details: { count: userIds.length, user_ids: userIds.slice(0, 30) },
     });
 
     return NextResponse.json({

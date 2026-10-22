@@ -64,9 +64,9 @@ export default function RecoveryEmailSettings({ currentEmail, verified, compact 
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="font-black text-slate-800">再設定用メール</h3>
+            <h3 className="font-bold text-slate-800">再設定用メール</h3>
             {verified && currentEmail && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-1 text-[11px] font-black text-emerald-700">
+              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-1 text-[11px] font-bold text-emerald-700">
                 <CheckCircle2 size={13} /> 確認済み
               </span>
             )}
@@ -99,7 +99,7 @@ export default function RecoveryEmailSettings({ currentEmail, verified, compact 
           type="button"
           onClick={sendVerification}
           disabled={saving || !email}
-          className="flex shrink-0 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 py-3 text-sm font-black text-white hover:bg-indigo-700 disabled:opacity-50"
+          className="flex shrink-0 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 py-3 text-sm font-bold text-white hover:bg-indigo-700 disabled:opacity-50"
         >
           {saving && <Loader2 size={16} className="animate-spin" />}
           {verified && email === currentEmail ? '変更する' : '確認メールを送る'}

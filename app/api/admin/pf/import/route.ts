@@ -2,14 +2,18 @@ import crypto from 'crypto';
 import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
-import { getServerUser, jsonError, requireRole } from '@/lib/server-auth';
+import { getServerUser, isAdminLike, jsonError, requireRole } from '@/lib/server-auth';
+import { writeAuditLog } from '@/lib/server/audit-log';
 import { learningCompleted, normalizePfHeader, numericScore, parsePfCsv, type PfLearningKind } from '@/lib/pf-analytics';
 import { getAllQueryDocuments } from '@/lib/server/firestore-pagination';
 import { jstDateKey, weekdayFromDateKey } from '@/lib/date-key';
+import { collectMonoxerStudy, mergeStudySnapshot, monoxerStudyColumns, normalizeStudentNumber } from '@/lib/monoxer-study';
 
 export const runtime = 'nodejs';
 
 const MAX_CSV_BYTES = 8 * 1024 * 1024;
+// 宿題回数ログ（生徒 × Book の累計）は1万行を超えるので、行数の上限は大きめにする。
+const MAX_CSV_ROWS = 50_001;
 const clean = (value: unknown) => String(value || '').trim();
 const schoolOf = (data: Record<string, any>) => clean(data.school_id || data.school || data.classroom || data.classroom_name);
 const nameOf = (data: Record<string, any>) => clean(data.student_name || data.name || data.display_name || data.displayName).replace(/[\s　]/g, '');
@@ -51,17 +55,25 @@ export async function POST(request: NextRequest) {
   try {
     const actor = await getServerUser(request);
     requireRole(actor, ['master', 'admin']);
+    if (!isAdminLike(actor)) throw new Error('forbidden');
     const body = await request.json();
     const csvText = String(body.csv_text || '');
     if (!csvText || Buffer.byteLength(csvText, 'utf8') > MAX_CSV_BYTES) {
       return Response.json({ ok: false, error: 'CSVは8MB以下にしてください。' }, { status: 413 });
     }
     const rows = parsePfCsv(csvText);
-    if (rows.length > 10_001) {
-      return Response.json({ ok: false, error: 'CSVはヘッダーを含め10,001行以内にしてください。' }, { status: 413 });
+    if (rows.length > MAX_CSV_ROWS) {
+      return Response.json({ ok: false, error: 'CSVはヘッダーを含め50,001行以内にしてください。' }, { status: 413 });
     }
     if (rows.some(row => row.length > 100 || row.some(cell => Buffer.byteLength(String(cell || ''), 'utf8') > 4_000))) {
       return Response.json({ ok: false, error: 'CSVの列数またはセルの文字数が上限を超えています。' }, { status: 400 });
+    }
+    const studyHeaderIndex = rows.slice(0, 12).findIndex(row => monoxerStudyColumns(row) !== null);
+    if (studyHeaderIndex >= 0) {
+      return await importStudyCounts(actor, body, rows, studyHeaderIndex);
+    }
+    if (rows.length > 10_001) {
+      return Response.json({ ok: false, error: 'CSVはヘッダーを含め10,001行以内にしてください。' }, { status: 413 });
     }
     const headerIndex = rows.slice(0, 12).findIndex(row => {
       const headers = row.map(normalizePfHeader);
@@ -184,8 +196,148 @@ export async function POST(request: NextRequest) {
       created_at: FieldValue.serverTimestamp(),
     });
 
+    await writeAuditLog({
+      actor,
+      action: 'pf_import',
+      target_type: 'pf_import',
+      target_id: importId,
+      target_label: clean(body.file_name).slice(0, 240),
+      details: { kind: clean(body.kind || 'auto'), target_date: fallbackDate, imported_count: imported, unmatched_count: unmatched, forbidden_school_count: forbiddenSchool },
+    });
+
     return Response.json({ ok: true, import_id: importId, imported, unmatched, forbidden_school: forbiddenSchool, warnings });
   } catch (error) {
     return jsonError(error);
   }
+}
+
+/**
+ * Monoxer「宿題回数ログ」（生徒 × Book の累計学習回数）の取り込み。
+ * 生徒番号（= 生涯番号）だけで照合し、生徒ごとに pf_study_progress/{生徒ID} へ累計と、前回からの増えた回数を残す。
+ */
+async function importStudyCounts(
+  actor: Awaited<ReturnType<typeof getServerUser>>,
+  body: Record<string, any>,
+  rows: string[][],
+  headerIndex: number,
+) {
+  const columns = monoxerStudyColumns(rows[headerIndex])!;
+  const { students: csvStudents, invalidRows } = collectMonoxerStudy(rows, headerIndex, columns);
+  const snapshotDate = weekdayFromDateKey(body.target_date) ? String(body.target_date) : jstDateKey();
+  if (snapshotDate > jstDateKey()) {
+    return Response.json({ ok: false, error: '出力日に未来の日付は指定できません。' }, { status: 400 });
+  }
+
+  const db = adminDb();
+  const studentDocs = await getAllQueryDocuments(db.collection('users').where('role', '==', 'student'));
+  const byNumber = new Map<string, any[]>();
+  studentDocs.forEach(doc => {
+    const student = { id: doc.id, ...doc.data() } as any;
+    const number = normalizeStudentNumber(idOf(student));
+    if (number) byNumber.set(number, [...(byNumber.get(number) || []), student]);
+  });
+  const allowedSchools = actor.role === 'master'
+    ? null
+    : new Set([...(actor.school_ids || []), actor.school].map(clean).filter(Boolean));
+  if (actor.role === 'admin' && (!allowedSchools || allowedSchools.size === 0)) throw new Error('forbidden');
+
+  const importId = crypto.randomUUID();
+  const matched: Array<{ student: any; books: Record<string, any> }> = [];
+  let unmatched = 0;
+  let duplicated = 0;
+  let forbiddenSchool = 0;
+  const unmatchedSamples: string[] = [];
+  csvStudents.forEach(entry => {
+    const candidates = byNumber.get(entry.studentNumber) || [];
+    if (candidates.length !== 1) {
+      if (candidates.length > 1) duplicated++; else unmatched++;
+      if (unmatchedSamples.length < 8) unmatchedSamples.push(`${entry.studentNumber}${entry.displayName ? `（${entry.displayName}）` : ''}${candidates.length > 1 ? '：同じ生涯番号の生徒が複数います' : ''}`);
+      return;
+    }
+    const student = candidates[0];
+    if (allowedSchools && !allowedSchools.has(schoolOf(student))) {
+      forbiddenSchool++;
+      return;
+    }
+    matched.push({ student, books: entry.books });
+  });
+
+  let imported = 0;
+  let skippedOlder = 0;
+  for (let offset = 0; offset < matched.length; offset += 300) {
+    const chunk = matched.slice(offset, offset + 300);
+    const refs = chunk.map(item => db.collection('pf_study_progress').doc(item.student.id));
+    const snapshots = refs.length ? await db.getAll(...refs) : [];
+    const batch = db.batch();
+    chunk.forEach((item, index) => {
+      const previous = snapshots[index]?.exists ? snapshots[index].data() || {} : null;
+      const merged = mergeStudySnapshot(previous, { date: snapshotDate, books: item.books, importId });
+      if (!merged) {
+        skippedOlder++;
+        return;
+      }
+      batch.set(refs[index], {
+        student_id: item.student.id,
+        lifetime_id: idOf(item.student),
+        student_name: clean(item.student.student_name || item.student.name),
+        school_id: schoolOf(item.student),
+        grade: clean(item.student.grade),
+        ...merged,
+        source: 'monoxer_study_csv',
+        source_file_name: clean(body.file_name).slice(0, 240),
+        import_id: importId,
+        imported_by: actor.uid,
+        updated_at: FieldValue.serverTimestamp(),
+      });
+      imported++;
+    });
+    await batch.commit();
+  }
+
+  const warnings = [
+    ...(unmatchedSamples.length ? [`アプリに登録されていない生徒番号（例）：${unmatchedSamples.join('、')}`] : []),
+    ...(skippedOlder ? [`${skippedOlder}名は、この日付より新しい取り込みがあるため更新していません。`] : []),
+    ...(invalidRows ? [`${invalidRows}行は生徒番号・Book ID・学習回数が読み取れないため飛ばしました。`] : []),
+  ];
+  await db.collection('pf_import_logs').doc(importId).set({
+    file_name: clean(body.file_name).slice(0, 240),
+    kind: 'monoxer_study_counts',
+    target_date: snapshotDate,
+    csv_students: csvStudents.size,
+    imported,
+    unmatched,
+    duplicated,
+    forbidden_school: forbiddenSchool,
+    skipped_older: skippedOlder,
+    invalid_rows: invalidRows,
+    actor_id: actor.uid,
+    actor_role: actor.role,
+    created_at: FieldValue.serverTimestamp(),
+  });
+  await writeAuditLog({
+    actor,
+    action: 'pf_import',
+    target_type: 'pf_import',
+    target_id: importId,
+    target_label: clean(body.file_name).slice(0, 240),
+    details: {
+      kind: 'monoxer_study_counts', target_date: snapshotDate, csv_student_count: csvStudents.size, imported_count: imported,
+      unmatched_count: unmatched, duplicated_count: duplicated, forbidden_school_count: forbiddenSchool,
+      skipped_older_count: skippedOlder, invalid_row_count: invalidRows,
+    },
+  });
+  return Response.json({
+    ok: true,
+    mode: 'study_counts',
+    import_id: importId,
+    snapshot_date: snapshotDate,
+    csv_students: csvStudents.size,
+    imported,
+    unmatched,
+    duplicated,
+    forbidden_school: forbiddenSchool,
+    skipped_older: skippedOlder,
+    invalid_rows: invalidRows,
+    warnings,
+  });
 }

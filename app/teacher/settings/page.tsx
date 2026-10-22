@@ -8,20 +8,26 @@ import { signInWithEmailAndPassword } from 'firebase/auth';
 import { doc, updateDoc } from 'firebase/firestore';
 import { 
   User, Lock, LogOut, ChevronRight, 
-  Save, Loader2, Shield, Bell, Type, 
+  Save, Bell, Type, 
   Smartphone, Download, Share, PlusSquare, HelpCircle, Briefcase, Check
 } from 'lucide-react';
+import { Button, Card, PageHeader, SectionTitle, useConfirm, useToast } from '@/app/components/ui';
 import LineLinkPanel from '@/app/components/LineLinkPanel';
+import PushNotificationToggle from '@/app/components/PushNotificationToggle';
 import RecoveryEmailSettings from '@/app/components/RecoveryEmailSettings';
+import SignedInPasswordHelp, { displayLoginId } from '@/app/components/SignedInPasswordHelp';
 
+// 実際に送信側（/api/admin/notifications の種類 shift / announcements）が読む設定だけを出す。
+// 「生徒からの連絡」は通知の仕組みがないため表示しない。
 const NOTIFICATION_ITEMS = [
-  { key: 'notification_shift', label: 'シフト提出のリマインド' },
-  { key: 'notification_student', label: '生徒からの連絡' },
-  { key: 'notification_admin', label: '運営からのお知らせ' },
+  { key: 'notification_shift', label: 'シフト提出のお願い', description: '管理者が送る「シフト・勤怠」の通知' },
+  { key: 'notification_admin', label: '運営からのお知らせ', description: '管理者が送るお知らせ' },
 ] as const;
 
 export default function TeacherSettingsPage() {
   const { user, profile, logout } = useAuth();
+  const toast = useToast();
+  const confirm = useConfirm();
   
   const [textSize, setTextSize] = useState('normal'); 
 
@@ -29,13 +35,11 @@ export default function TeacherSettingsPage() {
   const [name, setName] = useState('');
   const [settings, setSettings] = useState({
     notification_shift: true,
-    notification_student: true,
     notification_admin: true,
     sound_bgm: false,
   });
 
   const [loading, setLoading] = useState(false);
-  const [message, setMessage] = useState<{type: 'success'|'error', text: string} | null>(null);
   const [hasChanges, setHasChanges] = useState(false);
 
   // パスワード関連
@@ -99,7 +103,6 @@ export default function TeacherSettingsPage() {
           in_app: true,
           line: profile?.notification_preferences?.line !== false,
           shift: settings.notification_shift,
-          student_contact: settings.notification_student,
           announcements: settings.notification_admin,
         },
         updated_at: new Date().toISOString()
@@ -128,12 +131,12 @@ export default function TeacherSettingsPage() {
   };
 
   const showMessage = (type: 'success'|'error', text: string) => {
-    setMessage({ type, text });
-    setTimeout(() => setMessage(null), 5000);
+    if (type === 'success') toast.success(text);
+    else toast.error(text);
   };
 
   const handleChangePassword = async () => {
-    if (!newPassword || newPassword !== confirmPassword) return showMessage('error', 'パスワード不一致');
+    if (!newPassword || newPassword !== confirmPassword) return showMessage('error', '新しいパスワードと確認用が一致しません');
     if (newPassword.length < 6) return showMessage('error', 'パスワードは6文字以上で入力してください');
     if (!user) return showMessage('error', 'ログイン情報を確認できません');
     setLoading(true);
@@ -157,95 +160,89 @@ export default function TeacherSettingsPage() {
   };
 
   const handleLogout = async () => {
-    if (!confirm('ログアウトしますか？')) return;
+    const ok = await confirm({ title: 'ログアウトしますか？', confirmLabel: 'ログアウト' });
+    if (!ok) return;
     await logout();
   };
 
-  return (
-    <div className="min-h-screen bg-[#F0F4F8] p-4 sm:p-6 lg:p-8 font-sans transition-all pb-32">
-      <div className="max-w-xl mx-auto space-y-8">
-        
-        {/* ヘッダー */}
-        <div className="flex items-center gap-4">
-          <h1 className="text-2xl font-extrabold text-gray-800 flex items-center gap-2">
-            <Briefcase className="text-indigo-600"/> 設定・アカウント
-          </h1>
-        </div>
+  const inputClass = 'w-full rounded-input border border-line bg-canvas p-3 text-sm font-bold text-fg focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20';
+  const readonlyClass = 'w-full rounded-input border border-line bg-canvas p-3 text-sm font-bold text-fg';
 
-        <Link href="/manual" className="flex min-h-12 items-center justify-between rounded-2xl border border-indigo-200 bg-indigo-50 px-5 py-3 text-sm font-black text-indigo-800">
-          講師・職員向け操作マニュアル <ChevronRight size={19} />
+  return (
+    <div className="px-4 py-5 sm:px-6">
+      <div className="mx-auto max-w-xl space-y-6">
+        
+        <PageHeader tone="plain" title="設定・アカウント" icon={Briefcase} />
+
+        <Link href="/manual" className="flex min-h-12 items-center justify-between rounded-card border border-accent/30 bg-accent-soft px-5 py-3 text-sm font-bold text-accent">
+          講師・職員向け操作マニュアル <ChevronRight size={19} aria-hidden />
         </Link>
 
-        {message && (
-          <div className={`p-4 rounded-2xl font-bold flex items-center gap-3 shadow-sm ${message.type === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-            <Shield size={20}/> {message.text}
-          </div>
-        )}
-
         {profile?.isFirstLogin === true && (
-          <div className="rounded-2xl border-2 border-amber-300 bg-amber-50 p-4 text-sm font-black leading-relaxed text-amber-900">
+          <div role="alert" className="rounded-card border-2 border-amber-300 bg-amber-50 p-4 text-sm font-bold leading-relaxed text-amber-900">
             初回ログインのため、新しいパスワードを設定してください。変更が完了すると通常画面を利用できます。
           </div>
         )}
 
         {/* --- 0. アプリインストール (PWA) --- */}
         {!isStandalone && (
-          <section className="bg-gradient-to-br from-indigo-600 to-purple-700 p-6 rounded-3xl shadow-lg text-white relative overflow-hidden">
-            <div className="absolute top-0 right-0 w-32 h-32 bg-white/10 rounded-full blur-3xl transform translate-x-10 -translate-y-10"></div>
-            
-            <h2 className="text-lg font-black flex items-center gap-2 mb-2 relative z-10">
-              <Smartphone size={24}/> アプリとして使う
+          <section className="relative overflow-hidden rounded-hero bg-accent p-6 text-accent-ink shadow-card">
+            <h2 className="mb-2 flex items-center gap-2 text-lg font-bold">
+              <Smartphone size={24} aria-hidden /> アプリとして使う
             </h2>
-            <p className="text-sm font-bold opacity-90 mb-6 relative z-10 leading-relaxed">
+            <p className="mb-6 text-sm font-bold leading-relaxed opacity-90">
               ホーム画面に追加すると、<br/>全画面表示でスムーズに業務を行えます。
             </p>
 
             {deferredPrompt ? (
               <button 
+                type="button"
                 onClick={handleInstallClick}
-                className="relative z-10 w-full bg-white text-indigo-600 py-3 rounded-xl font-black shadow-lg flex items-center justify-center gap-2 active:scale-95 transition-transform"
+                className="flex min-h-12 w-full items-center justify-center gap-2 rounded-btn bg-white py-3 font-bold text-accent shadow-sm transition-colors hover:bg-accent-soft"
               >
-                <Download size={20}/> 追加する
+                <Download size={20} aria-hidden /> 追加する
               </button>
             ) : (
-              <div className="relative z-10">
+              <div>
                  {!showManual ? (
                    <button 
+                     type="button"
                      onClick={() => setShowManual(true)}
-                     className="w-full bg-white/20 border border-white/30 text-white py-3 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-white/30 transition-all text-sm"
+                     className="flex min-h-11 w-full items-center justify-center gap-2 rounded-btn border border-white/30 bg-white/20 py-3 text-sm font-bold text-white transition-colors hover:bg-white/30"
                    >
-                     <HelpCircle size={18}/> 追加方法を見る
+                     <HelpCircle size={18} aria-hidden /> 追加方法を見る
                    </button>
                  ) : (
-                   <div className="bg-white/10 backdrop-blur-md p-4 rounded-xl border border-white/20 animate-in fade-in">
-                     <p className="font-bold mb-3 flex items-center gap-2 text-sm">
+                   <div className="rounded-card border border-white/20 bg-white/10 p-4">
+                     <p className="mb-3 flex items-center gap-2 text-sm font-bold">
                        {isIos ? 'iPhone・iPadの手順' : 'ブラウザメニューの手順'}
                      </p>
                      
                      {isIos ? (
-                       <ol className="space-y-2 text-xs font-bold opacity-90">
+                       <ol className="space-y-2 text-sm font-bold opacity-90">
                          <li className="flex items-center gap-2">
-                           <span className="bg-white text-indigo-600 w-5 h-5 rounded-full flex items-center justify-center shrink-0 text-[10px]">1</span>
-                           <span>画面下の <Share size={14} className="inline mx-1"/> (共有) をタップ</span>
+                           <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white text-xs text-accent">1</span>
+                           <span>画面下の <Share size={14} className="mx-1 inline" aria-hidden /> (共有) をタップ</span>
                          </li>
                          <li className="flex items-center gap-2">
-                           <span className="bg-white text-indigo-600 w-5 h-5 rounded-full flex items-center justify-center shrink-0 text-[10px]">2</span>
-                           <span>「ホーム画面に追加」<PlusSquare size={14} className="inline mx-1"/> をタップ</span>
+                           <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white text-xs text-accent">2</span>
+                           <span>「ホーム画面に追加」<PlusSquare size={14} className="mx-1 inline" aria-hidden /> をタップ</span>
                          </li>
                          <li className="flex items-center gap-2">
-                           <span className="bg-white text-indigo-600 w-5 h-5 rounded-full flex items-center justify-center shrink-0 text-[10px]">3</span>
+                           <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white text-xs text-accent">3</span>
                            <span>右上の「追加」をタップ</span>
                          </li>
                        </ol>
                      ) : (
-                       <div className="text-xs font-bold opacity-90">
+                       <div className="text-sm font-bold opacity-90">
                          ブラウザメニューから「ホーム画面に追加」を選択してください。
                        </div>
                      )}
                      
                      <button 
+                       type="button"
                        onClick={() => setShowManual(false)} 
-                       className="mt-3 w-full bg-white/20 py-2 rounded-lg text-xs font-bold hover:bg-white/30"
+                       className="mt-3 min-h-10 w-full rounded-btn bg-white/20 text-sm font-bold hover:bg-white/30"
                      >
                        閉じる
                      </button>
@@ -257,122 +254,138 @@ export default function TeacherSettingsPage() {
         )}
 
         {isStandalone && (
-           <div className="bg-blue-50 text-blue-600 p-3 rounded-2xl text-center font-bold text-xs flex items-center justify-center gap-2 border border-blue-100">
-             <Check size={16}/> アプリとして使用中
+           <div className="flex items-center justify-center gap-2 rounded-card border border-sky-100 bg-sky-50 p-3 text-center text-xs font-bold text-sky-700">
+             <Check size={16} aria-hidden /> アプリとして使用中
            </div>
         )}
 
         {/* --- 1. 文字サイズ設定 --- */}
-        <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
-          <h2 className="text-sm font-extrabold text-gray-500 uppercase tracking-wider mb-4 flex items-center gap-2">
-            <Type size={18}/> 表示設定
-          </h2>
-          <div className="flex bg-gray-100 p-1 rounded-xl">
+        <Card>
+          <SectionTitle icon={Type} title="表示設定" />
+          <div className="flex rounded-btn bg-slate-100 p-1" role="group" aria-label="文字サイズ">
             <button 
+              type="button"
+              aria-pressed={textSize === 'normal'}
               onClick={() => handleTextSizeChange('normal')} 
-              className={`flex-1 py-2.5 rounded-lg text-xs font-bold transition-all ${textSize === 'normal' ? 'bg-white shadow-sm text-gray-800' : 'text-gray-400'}`}
+              className={`min-h-10 flex-1 rounded-btn text-xs font-bold transition-colors ${textSize === 'normal' ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted'}`}
             >
               標準
             </button>
             <button 
+              type="button"
+              aria-pressed={textSize === 'large'}
               onClick={() => handleTextSizeChange('large')} 
-              className={`flex-1 py-2.5 rounded-lg text-sm font-bold transition-all ${textSize === 'large' ? 'bg-white shadow-sm text-gray-800' : 'text-gray-400'}`}
+              className={`min-h-10 flex-1 rounded-btn text-sm font-bold transition-colors ${textSize === 'large' ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted'}`}
             >
               拡大
             </button>
           </div>
-        </section>
+        </Card>
 
         {/* --- 2. プロフィール設定 (表示のみ) --- */}
-        <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
-          <h2 className="text-sm font-extrabold text-gray-500 uppercase tracking-wider mb-4 flex items-center gap-2">
-            <User size={18}/> プロフィール
-          </h2>
+        <Card>
+          <SectionTitle icon={User} title="プロフィール" />
           <div className="space-y-4">
             <div>
-              <label className="block text-xs font-bold text-gray-400 mb-2">表示名</label>
-              <div className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold text-gray-700 text-sm">
+              <p className="mb-2 block text-xs font-bold text-fg-muted">表示名</p>
+              <div className={readonlyClass}>
                 {name}
               </div>
             </div>
             
             <div>
-              <label className="block text-xs font-bold text-gray-400 mb-2">ログインID</label>
-              <div className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl font-bold text-gray-700 text-sm font-mono tracking-wide">
-                {user?.email?.replace('@sozogakuen.co.jp', '')}
+              <p className="mb-2 block text-xs font-bold text-fg-muted">ログインID</p>
+              <div className={`${readonlyClass} font-mono tracking-wide`}>
+                {displayLoginId(profile, user?.email)}
               </div>
             </div>
           </div>
-        </section>
+        </Card>
 
         <LineLinkPanel
           role="teacher"
           lineUserId={profile?.line_user_id}
-          description="連携すると、授業当日のリマインドやシフト提出のお願いなどをLINEで受け取ることができます。"
+          description="連携すると、管理者からのシフト提出のお願いやお知らせをLINEでも受け取れます。"
         />
 
+        <PushNotificationToggle />
+
         {/* --- 3. 通知設定 --- */}
-        <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
-          <h2 className="text-sm font-extrabold text-gray-500 uppercase tracking-wider mb-4 flex items-center gap-2">
-            <Bell size={18}/> アプリ内通知設定
-          </h2>
-          <div className="space-y-4">
+        <Card>
+          <SectionTitle icon={Bell} title="通知の受け取り" description="オフにした種類は、アプリ内・LINE・メールのいずれでも届かなくなります。" />
+          <div className="space-y-2">
             {NOTIFICATION_ITEMS.map((item) => (
-              <div key={item.key} className="flex items-center justify-between">
-                <span className="font-bold text-gray-700 text-sm">{item.label}</span>
+              <div key={item.key} className="flex min-h-11 items-center justify-between gap-3">
+                <span id={`setting-${item.key}`} className="text-sm font-bold text-fg">
+                  {item.label}
+                  <span className="block text-xs font-medium text-fg-muted">{item.description}</span>
+                </span>
                 <button 
+                  type="button"
+                  role="switch"
+                  aria-checked={settings[item.key]}
+                  aria-labelledby={`setting-${item.key}`}
                   onClick={() => handleChange(item.key, !settings[item.key])}
-                  className={`w-11 h-6 rounded-full p-1 transition-colors duration-300 flex items-center ${settings[item.key] ? 'bg-indigo-500' : 'bg-gray-200'}`}
+                  className="inline-flex h-11 shrink-0 items-center rounded-full px-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                 >
-                  <div className={`w-4 h-4 bg-white rounded-full shadow-sm transition-transform duration-300 ${settings[item.key] ? 'translate-x-5' : 'translate-x-0'}`} />
+                  <span className={`flex h-6 w-11 items-center rounded-full p-1 transition-colors ${settings[item.key] ? 'bg-accent' : 'bg-slate-200'}`}>
+                    <span className={`h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${settings[item.key] ? 'translate-x-5' : 'translate-x-0'}`} />
+                  </span>
                 </button>
               </div>
             ))}
           </div>
-        </section>
+        </Card>
 
         {/* --- 保存ボタン --- */}
-        <div className="sticky bottom-24 z-20">
-          <button 
+        <div className="sticky bottom-[calc(4.5rem+env(safe-area-inset-bottom))] z-20">
+          <Button
+            size="lg"
+            fullWidth
             onClick={handleSaveSettings}
-            disabled={loading}
-            className={`w-full py-4 rounded-2xl font-black text-sm shadow-xl flex items-center justify-center gap-2 transition-all transform ${hasChanges ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white hover:scale-[1.02] active:scale-95 shadow-indigo-200' : 'bg-gray-200 text-gray-400'}`}
+            loading={loading}
+            disabled={!hasChanges && !loading}
+            icon={<Save size={18} aria-hidden />}
+            className="shadow-card"
           >
-            {loading ? <Loader2 className="animate-spin" size={18}/> : <Save size={18}/>} 
             {hasChanges ? '変更を保存する' : '保存済み'}
-          </button>
+          </Button>
         </div>
 
         {/* --- 4. セキュリティ --- */}
-        <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
-          <h2 className="text-sm font-extrabold text-gray-500 uppercase tracking-wider mb-2 flex items-center gap-2">
-            <Lock size={18}/> セキュリティ
-          </h2>
+        <Card>
+          <SectionTitle icon={Lock} title="セキュリティ" className="mb-2" />
+          <SignedInPasswordHelp
+            loginId={displayLoginId(profile, user?.email)}
+            hasVerifiedRecoveryEmail={Boolean(profile?.recovery_email && profile?.recovery_email_verified_at)}
+            audience="teacher"
+          />
           {!isPasswordExpanded ? (
-            <button onClick={() => setIsPasswordExpanded(true)} className="w-full py-3 text-left font-bold text-gray-500 hover:text-gray-800 flex items-center justify-between text-sm"><span>パスワードを変更する</span><ChevronRight size={16}/></button>
+            <button type="button" onClick={() => setIsPasswordExpanded(true)} className="mt-2 flex min-h-11 w-full items-center justify-between py-3 text-left text-sm font-bold text-fg-muted hover:text-fg"><span>パスワードを変更する（今のパスワードは不要）</span><ChevronRight size={16} aria-hidden /></button>
           ) : (
-            <div className="space-y-3 mt-3 animate-in fade-in">
-              <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="w-full p-3 bg-gray-50 rounded-xl font-bold text-sm" placeholder="新しいパスワード" />
-              <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className="w-full p-3 bg-gray-50 rounded-xl font-bold text-sm" placeholder="確認用" />
+            <div className="mt-3 space-y-3">
+              <p className="text-xs font-medium text-fg-muted">新しいパスワード（6文字以上）を2回入力してください。今のパスワードは入力しなくて大丈夫です。</p>
+              <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className={inputClass} placeholder="新しいパスワード" aria-label="新しいパスワード" autoComplete="new-password" />
+              <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className={inputClass} placeholder="確認用" aria-label="新しいパスワード（確認用）" autoComplete="new-password" />
               <div className="flex justify-end gap-2">
-                <button onClick={() => setIsPasswordExpanded(false)} className="px-4 py-2 text-gray-400 font-bold text-xs">キャンセル</button>
-                <button onClick={handleChangePassword} className="bg-gray-800 text-white px-5 py-2 rounded-xl font-bold text-xs">変更</button>
+                <Button variant="ghost" size="sm" onClick={() => setIsPasswordExpanded(false)}>キャンセル</Button>
+                <Button variant="secondary" size="sm" onClick={handleChangePassword} loading={loading}>変更</Button>
               </div>
             </div>
           )}
-          <div className="mt-5 border-t border-gray-100 pt-5">
+          <div className="mt-5 border-t border-line pt-5">
             <RecoveryEmailSettings
               currentEmail={profile?.recovery_email}
               verified={Boolean(profile?.recovery_email_verified_at)}
               compact
             />
           </div>
-        </section>
+        </Card>
 
-        <div className="pt-4 pb-10">
-           <button onClick={handleLogout} className="w-full bg-white border-2 border-red-50 text-red-400 py-3 rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-red-50 text-sm transition-colors">
-             <LogOut size={18}/> ログアウト
-           </button>
+        <div className="pb-10 pt-4">
+           <Button variant="secondary" fullWidth onClick={handleLogout} icon={<LogOut size={18} aria-hidden />} className="!text-rose-600 hover:!bg-rose-50">
+             ログアウト
+           </Button>
         </div>
 
       </div>

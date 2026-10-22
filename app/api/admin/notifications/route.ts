@@ -6,10 +6,12 @@ import { getNotificationSettings, roleLineEnabled } from '@/lib/line';
 import { canManageAttendance, canManageAttendanceSchool, canManageSchool, getServerUser, isAdminLike, jsonError } from '@/lib/server-auth';
 import { writeLearningEvent } from '@/lib/events';
 import { jstDateKey } from '@/lib/date-key';
+import { pushLine, sendEmail, stableEmailIdempotencyKey, stableLineRetryKey, userAllows, type NotifyChannel } from '@/lib/server/notify-channels';
+import { queuePushToUsers } from '@/lib/server/web-push';
 
 export const runtime = 'nodejs';
 
-type Channel = 'in_app' | 'line' | 'email';
+type Channel = NotifyChannel;
 const ALLOWED_CHANNELS = new Set<Channel>(['in_app', 'line', 'email']);
 const ALLOWED_ROLE_INPUTS = new Set(['student', 'teacher', 'parent', 'guardian', 'admin', 'master']);
 const ALLOWED_KINDS = new Set(['attendance', 'class_start', 'homework', 'announcements', 'registration', 'shift', 'substitution', 'system']);
@@ -41,74 +43,6 @@ function roleKindEnabled(settings: Awaited<ReturnType<typeof getNotificationSett
   if (kind === 'homework') return settings.homework_enabled;
   if (kind === 'announcements') return settings.announcements_enabled;
   return true;
-}
-
-function userAllows(data: FirebaseFirestore.DocumentData, channel: Channel, kind: string) {
-  const prefs = data.notification_preferences || {};
-  if (channel === 'line' && prefs.line === false) return false;
-  if (channel === 'email' && prefs.email === false) return false;
-  if (channel === 'in_app' && prefs.in_app === false) return false;
-  if (kind && prefs[kind] === false) return false;
-  return true;
-}
-
-function stableLineRetryKey(...parts: string[]) {
-  const hex = crypto.createHash('sha256').update(parts.join('\u0000')).digest('hex').slice(0, 32).split('');
-  hex[12] = '4';
-  hex[16] = ['8', '9', 'a', 'b'][Number.parseInt(hex[16], 16) % 4];
-  return `${hex.slice(0, 8).join('')}-${hex.slice(8, 12).join('')}-${hex.slice(12, 16).join('')}-${hex.slice(16, 20).join('')}-${hex.slice(20).join('')}`;
-}
-
-function stableEmailIdempotencyKey(...parts: string[]) {
-  return `classbase-${crypto.createHash('sha256').update(parts.join('\u0000')).digest('hex')}`;
-}
-
-async function pushLine(lineUserId: string, text: string, retryKey: string) {
-  const token = process.env.LINE_CHANNEL_ACCESS_TOKEN;
-  if (!token) return { ok: false, error: 'line-token-missing' };
-
-  try {
-    const res = await fetch('https://api.line.me/v2/bot/message/push', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-        'X-Line-Retry-Key': retryKey,
-      },
-      body: JSON.stringify({
-        to: lineUserId,
-        messages: [{ type: 'text', text }],
-      }),
-    });
-
-    if (res.status === 409 && res.headers.get('X-Line-Accepted-Request-Id')) {
-      return { ok: true, duplicate: true };
-    }
-    if (!res.ok) {
-      const errorText = await res.text().catch(() => '');
-      return { ok: false, error: errorText || `line-${res.status}` };
-    }
-    return { ok: true };
-  } catch {
-    return { ok: false, error: 'line-network-error' };
-  }
-}
-
-async function sendEmail(email: string, title: string, message: string, idempotencyKey: string) {
-  const apiKey = String(process.env.RESEND_API_KEY || '').trim();
-  const from = String(process.env.RESEND_FROM_EMAIL || '').trim();
-  if (!apiKey || !from) return { ok: false, error: 'email-config-missing' };
-  try {
-    const res = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
-      body: JSON.stringify({ from, to: [email], subject: title, text: message }),
-    });
-    if (!res.ok) return { ok: false, error: `email-${res.status}` };
-    return { ok: true };
-  } catch {
-    return { ok: false, error: 'email-network-error' };
-  }
 }
 
 export async function POST(request: NextRequest) {
@@ -261,6 +195,7 @@ export async function POST(request: NextRequest) {
       claimedCampaignRef = campaignRef;
     }
 
+    const pushTargetsByRole: Record<string, string[]> = {};
     if (!retryingCampaign && channels.includes('in_app') && settings.in_app_enabled && roleKindEnabled(settings, kind)) {
       for (const target of targets) {
         if (!userAllows(target.data, 'in_app', kind)) {
@@ -279,12 +214,19 @@ export async function POST(request: NextRequest) {
           created_at: FieldValue.serverTimestamp(),
         });
         inAppCount++;
+        (pushTargetsByRole[target.role] ||= []).push(target.id);
         batchCount++;
         if (batchCount >= 400) await commit();
       }
     }
 
     await commit();
+
+    // アプリ内通知を書いた相手の端末にも知らせる（本文は画面で確認してもらう）。
+    for (const [role, ids] of Object.entries(pushTargetsByRole)) {
+      const base = role === 'admin' ? '/master' : `/${role}`;
+      queuePushToUsers(ids, { title, body: '新しい通知があります。アプリで確認してください。', link: `${base}/notifications` }, { kind });
+    }
 
     if (channels.includes('email') && settings.email_enabled && roleKindEnabled(settings, kind)) {
       const eligible = targets.filter(target => {

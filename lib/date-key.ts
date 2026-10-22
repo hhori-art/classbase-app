@@ -17,3 +17,10 @@ export const weekdayFromDateKey = (value: unknown) => {
 
   return WEEKDAYS[date.getUTCDay()];
 };
+
+/** 日本時間の年度（4月はじまり）。例: 2027-03-31 → 2026、2027-04-01 → 2027。 */
+export const jstSchoolYear = (date = new Date()) => {
+  const key = jstDateKey(date);
+  const year = Number(key.slice(0, 4));
+  return Number(key.slice(5, 7)) >= 4 ? year : year - 1;
+};

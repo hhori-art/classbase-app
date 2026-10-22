@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { NextRequest } from 'next/server';
 import { adminBucket } from '@/lib/firebase-admin';
-import { getServerUser, jsonError, requireRole } from '@/lib/server-auth';
+import { getServerUser, jsonError, requireScienceSocialStaff } from '@/lib/server-auth';
 
 export const runtime = 'nodejs';
 
@@ -15,7 +15,7 @@ const EXTENSIONS: Record<string, string> = {
 export async function POST(request: NextRequest) {
   try {
     const user = await getServerUser(request);
-    requireRole(user, ['teacher', 'admin', 'master']);
+    requireScienceSocialStaff(user);
     const form = await request.formData();
     const fields = Object.fromEntries(form.entries());
     const image = fields.image;

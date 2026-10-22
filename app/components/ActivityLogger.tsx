@@ -2,6 +2,7 @@
 
 import { useEffect } from 'react';
 import { auth } from '@/lib/firebase';
+import { jstDateKey } from '@/lib/date-key';
 
 type ActivityLoggerProps = {
   uid?: string;
@@ -13,7 +14,7 @@ export default function ActivityLogger({ uid, onRewardApplied }: ActivityLoggerP
     if (!uid) return;
 
     const logActivity = async () => {
-      const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+      const today = jstDateKey(); // YYYY-MM-DD（日本時間）
       const lastLogKey = `last_logged_date_${uid}`;
       const sessionSyncKey = `daily_login_synced_${uid}_${today}`;
 

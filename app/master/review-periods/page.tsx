@@ -1,56 +1,53 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { CalendarDays, ChevronDown, ChevronUp, FileUp, Pencil, Plus, Save, Trash2, X } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { BookOpenCheck, CalendarDays } from 'lucide-react';
+import AdminPageHeader from '@/app/components/master/AdminPageHeader';
+import AdminTabs from '@/app/components/master/AdminTabs';
 import { useAuth } from '@/app/context/AuthContext';
+import ReviewPeriodsPanel from '@/app/components/master/test-prep/ReviewPeriodsPanel';
+import TestPrepCoursesPanel from '@/app/components/master/test-prep/TestPrepCoursesPanel';
 
-type Item = { id?: string; date: string; subject: string; unit: string; grade: string; time: string; lesson: string; level: string };
-type Period = { id: string; name: string; start_date: string; end_date: string; subjects: string[]; items: Item[]; status: string };
-const emptyItem = (): Item => ({ date: '', subject: '理科', unit: '', grade: '全学年', time: '', lesson: '1時間目', level: '通常' });
+type Tab = 'periods' | 'courses';
 
-function parseCsv(text: string): Item[] {
-  const rows = text.replace(/^\uFEFF/, '').split(/\r?\n/).filter(Boolean).map(line => line.split(',').map(cell => cell.trim().replace(/^"|"$/g, '')));
-  if (!rows.length) return [];
-  const header = rows[0];
-  const find = (...names: string[]) => header.findIndex(value => names.includes(value));
-  const indexes = { date: find('日付', 'date'), subject: find('科目', 'subject'), unit: find('単元', 'unit'), grade: find('学年', 'grade'), time: find('時間', '時間帯', 'time'), lesson: find('時間目', 'lesson'), level: find('区分', 'コース', 'level') };
-  if (indexes.date < 0 || indexes.subject < 0 || indexes.unit < 0) throw new Error('CSVには「日付・科目・単元」の列が必要です。');
-  return rows.slice(1).map(row => ({ date: row[indexes.date] || '', subject: row[indexes.subject] || '', unit: row[indexes.unit] || '', grade: indexes.grade >= 0 ? row[indexes.grade] || '全学年' : '全学年', time: indexes.time >= 0 ? row[indexes.time] || '' : '', lesson: indexes.lesson >= 0 ? row[indexes.lesson] || '' : '', level: indexes.level >= 0 ? row[indexes.level] || '通常' : '通常' })).filter(item => item.date || item.unit);
-}
+const TABS: { key: Tab; label: string; description: string; icon: typeof CalendarDays }[] = [
+  { key: 'periods', label: '期間と実施単元', description: '復習期間・日ごとの単元', icon: CalendarDays },
+  { key: 'courses', label: '対策講座の受講登録', description: '講座・受付期間・対象学年', icon: BookOpenCheck },
+];
 
-export default function ReviewPeriodsAdminPage() {
-  const { user } = useAuth();
-  const [periods, setPeriods] = useState<Period[]>([]);
-  const [form, setForm] = useState({ id: '', name: '', start_date: '', end_date: '', items: [emptyItem()] as Item[] });
-  const [busy, setBusy] = useState(false);
-  const [expanded, setExpanded] = useState('');
-  const formRef = useRef<HTMLElement>(null);
-  const token = useCallback(() => user?.getIdToken(), [user]);
-  const load = useCallback(async () => { if (!user) return; const res = await fetch('/api/review-periods', { headers: { Authorization: `Bearer ${await token()}` } }); const data = await res.json(); if (res.ok) setPeriods(data.periods || []); }, [token, user]);
-  useEffect(() => { void load(); }, [load]);
-  const groupedCount = useMemo(() => new Set(form.items.map(item => item.date).filter(Boolean)).size, [form.items]);
-  const save = async () => {
-    if (!user || busy) return; setBusy(true);
-    try { const res = await fetch('/api/review-periods', { method: 'POST', headers: { Authorization: `Bearer ${await token()}`, 'Content-Type': 'application/json' }, body: JSON.stringify(form) }); const data = await res.json(); if (!res.ok) throw new Error(data.error); setForm({ id: '', name: '', start_date: '', end_date: '', items: [emptyItem()] }); await load(); alert(form.id ? '復習期間を更新しました。' : '復習期間を保存しました。'); } catch (error) { alert(error instanceof Error ? error.message : '保存に失敗しました。'); } finally { setBusy(false); }
+/** テスト対策と復習期間は同じものなので、期間・単元と受講登録の設定を1画面にまとめる。 */
+export default function TestPrepAdminPage() {
+  const { profile } = useAuth();
+  const [tab, setTab] = useState<Tab>('periods');
+  // 対策講座の設定APIはマスター専用なので、マスター以外にはタブを出さない（権限は広げない）。
+  const canManageCourses = profile?.role === 'master';
+  const visibleTabs = TABS.filter(item => item.key !== 'courses' || canManageCourses);
+  const activeTab: Tab = tab === 'courses' && !canManageCourses ? 'periods' : tab;
+
+  useEffect(() => {
+    const requested = new URLSearchParams(window.location.search).get('tab');
+    if (requested === 'courses' || requested === 'periods') setTab(requested);
+  }, []);
+
+  const selectTab = (next: Tab) => {
+    setTab(next);
+    const url = new URL(window.location.href);
+    url.searchParams.set('tab', next);
+    window.history.replaceState(null, '', url.toString());
   };
-  const archive = async (id: string) => { if (!confirm('この復習期間を終了しますか？')) return; try { const res = await fetch('/api/review-periods', { method: 'POST', headers: { Authorization: `Bearer ${await token()}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'archive', id }) }); const data = await res.json(); if (!res.ok) throw new Error(data.error); await load(); } catch (error) { alert(error instanceof Error ? error.message : '復習期間を終了できませんでした。'); } };
-  const importCsv = async (file?: File) => { if (!file) return; try { const items = parseCsv(await file.text()); setForm(current => ({ ...current, items })); } catch (error) { alert(error instanceof Error ? error.message : 'CSVを読み込めませんでした。'); } };
-  const editPeriod = (period: Period) => {
-    setForm({ id: period.id, name: period.name, start_date: period.start_date, end_date: period.end_date, items: period.items.map(item => ({ ...item })) });
-    window.setTimeout(() => formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
-  };
-  const cancelEdit = () => setForm({ id: '', name: '', start_date: '', end_date: '', items: [emptyItem()] });
 
-  return <main className="space-y-6 pb-16">
-    <header className="rounded-3xl bg-gradient-to-r from-emerald-600 to-teal-600 p-6 text-white shadow-lg"><div className="flex items-center gap-3"><CalendarDays size={30}/><div><h1 className="text-2xl font-black">復習期間・受講単元設定</h1><p className="mt-1 text-sm font-bold text-emerald-50">期間と実施単元を登録し、生徒の曜日・単元選択につなげます。</p></div></div></header>
-    <section ref={formRef} className="scroll-mt-4 rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-100">
-      {form.id&&<div className="mb-4 flex items-center justify-between rounded-2xl bg-amber-50 p-3 text-sm font-black text-amber-800"><span>「{form.name}」を編集中です</span><button onClick={cancelEdit} className="flex items-center gap-1 rounded-xl bg-white px-3 py-2 text-slate-600"><X size={15}/>編集をやめる</button></div>}
-      <div className="grid gap-3 md:grid-cols-3"><label className="text-xs font-black text-slate-500">期間名<input className="mt-1 w-full rounded-xl border p-3 text-sm" value={form.name} onChange={e => setForm({...form, name:e.target.value})} placeholder="例：秋期復習講座"/></label><label className="text-xs font-black text-slate-500">開始日<input type="date" className="mt-1 w-full rounded-xl border p-3 text-sm" value={form.start_date} onChange={e => setForm({...form, start_date:e.target.value})}/></label><label className="text-xs font-black text-slate-500">終了日<input type="date" className="mt-1 w-full rounded-xl border p-3 text-sm" value={form.end_date} onChange={e => setForm({...form, end_date:e.target.value})}/></label></div>
-      <div className="mt-5 flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-black text-slate-800">実施日・科目・単元</h2><p className="text-xs font-bold text-slate-400">{form.items.length}講座・{groupedCount}日分</p></div><div className="flex gap-2"><label className="cursor-pointer rounded-xl bg-slate-100 px-4 py-2 text-sm font-black text-slate-700"><FileUp className="mr-2 inline" size={16}/>CSV取込<input type="file" accept=".csv,text/csv" className="hidden" onChange={e => void importCsv(e.target.files?.[0])}/></label><button onClick={() => setForm(current => ({...current, items:[...current.items, emptyItem()]}))} className="rounded-xl bg-emerald-50 px-4 py-2 text-sm font-black text-emerald-700"><Plus className="mr-1 inline" size={16}/>行追加</button></div></div>
-      <p className="mt-2 rounded-xl bg-blue-50 p-3 text-xs font-bold text-blue-700">CSV列：日付, 科目, 単元（必須）／学年, 時間目, 区分, 時間（任意）。日付は YYYY-MM-DD、科目は「理科」または「社会」です。</p>
-      <div className="mt-3 space-y-2">{form.items.map((item,index)=><div key={index} className="grid gap-2 rounded-2xl bg-slate-50 p-3 md:grid-cols-[140px_86px_1fr_82px_92px_92px_120px_36px]"><input type="date" className="rounded-lg border p-2 text-sm" value={item.date} onChange={e=>setForm(current=>({...current,items:current.items.map((v,i)=>i===index?{...v,date:e.target.value}:v)}))}/><select className="rounded-lg border p-2 text-sm font-bold" value={item.subject} onChange={e=>setForm(current=>({...current,items:current.items.map((v,i)=>i===index?{...v,subject:e.target.value}:v)}))}><option>理科</option><option>社会</option></select><input className="rounded-lg border p-2 text-sm" value={item.unit} placeholder="単元名" onChange={e=>setForm(current=>({...current,items:current.items.map((v,i)=>i===index?{...v,unit:e.target.value}:v)}))}/><input className="rounded-lg border p-2 text-sm" value={item.grade} placeholder="中2" onChange={e=>setForm(current=>({...current,items:current.items.map((v,i)=>i===index?{...v,grade:e.target.value}:v)}))}/><input className="rounded-lg border p-2 text-sm" value={item.lesson} placeholder="1時間目" onChange={e=>setForm(current=>({...current,items:current.items.map((v,i)=>i===index?{...v,lesson:e.target.value}:v)}))}/><input className="rounded-lg border p-2 text-sm" value={item.level} placeholder="通常/標準" onChange={e=>setForm(current=>({...current,items:current.items.map((v,i)=>i===index?{...v,level:e.target.value}:v)}))}/><input className="rounded-lg border p-2 text-sm" value={item.time} placeholder="16:50〜18:00" onChange={e=>setForm(current=>({...current,items:current.items.map((v,i)=>i===index?{...v,time:e.target.value}:v)}))}/><button aria-label="行を削除" onClick={()=>setForm(current=>({...current,items:current.items.filter((_,i)=>i!==index)}))} className="text-slate-400 hover:text-red-500"><Trash2 size={18}/></button></div>)}</div>
-      <button disabled={busy} onClick={save} className="mt-5 w-full rounded-2xl bg-emerald-600 py-3 font-black text-white shadow-md disabled:opacity-50"><Save className="mr-2 inline" size={18}/>{busy?'保存中…':form.id?'変更を保存':'復習期間を保存'}</button>
-    </section>
-    <section><h2 className="mb-3 text-lg font-black text-slate-800">登録済みの復習期間</h2><div className="grid gap-3">{periods.map(period=>{const isExpanded=expanded===period.id;return <article key={period.id} className={`rounded-2xl bg-white p-5 shadow-sm ring-1 ${period.status==='archived'?'opacity-60 ring-slate-100':'ring-emerald-100'}`}><div className="flex flex-wrap justify-between gap-3"><div><h3 className="font-black text-slate-900">{period.name}</h3><p className="mt-1 text-sm font-bold text-slate-500">{period.start_date} 〜 {period.end_date}</p></div><div className="flex items-center gap-2">{period.status!=='archived'&&<><button onClick={()=>editPeriod(period)} className="flex items-center gap-1 rounded-xl bg-blue-50 px-3 py-2 text-xs font-black text-blue-700"><Pencil size={14}/>編集</button><button onClick={()=>void archive(period.id)} className="rounded-xl bg-red-50 px-3 py-2 text-xs font-black text-red-600">終了</button></>}</div></div><div className="mt-3 flex flex-wrap gap-2">{period.subjects.map(subject=><span key={subject} className={`rounded-full px-3 py-1 text-xs font-black ${subject==='理科'?'bg-emerald-100 text-emerald-700':'bg-orange-100 text-orange-700'}`}>{subject}</span>)}<span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-black text-slate-600">{period.items.length}講座</span></div><button onClick={()=>setExpanded(isExpanded?'':period.id)} className="mt-3 flex w-full items-center justify-center gap-1 rounded-xl border border-slate-200 py-2 text-xs font-black text-slate-600">{isExpanded?<><ChevronUp size={15}/>内容を閉じる</>:<><ChevronDown size={15}/>内容を確認</>}</button>{isExpanded&&<div className="mt-3 max-h-96 overflow-auto rounded-xl border border-slate-100"><table className="w-full min-w-[700px] text-left text-xs"><thead className="sticky top-0 bg-slate-100 text-slate-600"><tr><th className="p-2">日付</th><th className="p-2">学年</th><th className="p-2">科目</th><th className="p-2">時限</th><th className="p-2">区分</th><th className="p-2">単元</th></tr></thead><tbody>{period.items.map((item,index)=><tr key={item.id||`${item.date}-${index}`} className="border-t border-slate-100"><td className="p-2 font-bold">{item.date}</td><td className="p-2">{item.grade}</td><td className="p-2">{item.subject}</td><td className="p-2">{item.lesson||'—'}</td><td className="p-2">{item.level||'通常'}</td><td className="p-2 font-bold text-slate-800">{item.unit}</td></tr>)}</tbody></table></div>}</article>})}</div></section>
-  </main>;
+  return (
+    <div className="space-y-5 pb-16">
+      <AdminPageHeader description="テスト対策の期間と実施単元、生徒が受講登録する対策講座をまとめて設定します。" />
+      {visibleTabs.length > 1 && (
+        <AdminTabs
+          tabs={visibleTabs.map(item => ({ id: item.key, label: item.label, icon: item.icon }))}
+          value={activeTab}
+          onChange={selectTab}
+          ariaLabel="テスト対策の設定"
+        />
+      )}
+      {activeTab === 'periods' ? <ReviewPeriodsPanel /> : <TestPrepCoursesPanel />}
+    </div>
+  );
 }

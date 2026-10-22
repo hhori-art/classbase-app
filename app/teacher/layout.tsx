@@ -1,6 +1,7 @@
 'use client';
 
 import TeacherBottomNav from '@/app/components/TeacherBottomNav';
+import StaffIdleTimeout from '@/app/components/StaffIdleTimeout';
 import { useEffect } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { useAuth } from '@/app/context/AuthContext';
@@ -27,20 +28,21 @@ export default function TeacherLayout({ children }: { children: React.ReactNode 
 
   useEffect(() => {
     if (loading || !profile || canOpenPath) return;
-    router.replace(dedicatedScienceSocial ? '/teacher/school-students' : '/teacher/attendance');
+    router.replace(dedicatedScienceSocial ? '/teacher/school-students' : isDedicatedProfile(profile) ? '/teacher/attendance/dedicated' : '/teacher/attendance');
   }, [canOpenPath, dedicatedScienceSocial, loading, profile, router]);
 
-  if (!canOpenPath) return <div className="min-h-screen bg-slate-50" aria-busy="true" />;
+  if (!canOpenPath) return <div data-portal="teacher" className="min-h-screen bg-canvas" aria-busy="true" />;
 
   return (
-    <div className="min-h-screen bg-[#F0F4F8]">
-      {/* メインコンテンツ (ボトムナビの高さ分だけ下に余白を確保) */}
-      <div className={`${isStudentPreview ? '' : isShiftManagementPath ? 'w-full pb-[calc(7.5rem+env(safe-area-inset-bottom))]' : 'mx-auto max-w-5xl pb-[calc(7.5rem+env(safe-area-inset-bottom))]'} min-h-screen relative`}>
+    <div data-portal="teacher" className="min-h-screen bg-canvas text-fg">
+      {/* メインコンテンツ（下部ナビ 4.5rem の分だけ下に余白を確保） */}
+      <div className={`${isStudentPreview ? '' : isShiftManagementPath ? 'w-full pb-[calc(10rem+env(safe-area-inset-bottom))]' : 'mx-auto max-w-5xl pb-[calc(10rem+env(safe-area-inset-bottom))]'} relative min-h-screen`}>
         {children}
       </div>
-      
-      {/* 常に表示されるボトムナビ */}
+
+      {/* 常に表示される下部ナビ */}
       {!isStudentPreview && <TeacherBottomNav />}
+      <StaffIdleTimeout />
     </div>
   );
 }

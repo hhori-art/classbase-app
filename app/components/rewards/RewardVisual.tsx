@@ -47,9 +47,9 @@ export default function RewardVisual({ presetId, imageUrl, alt = '', className =
   const preset = findRewardPreset(presetId);
   if (!preset) {
     return (
-      <div className={`flex items-center justify-center overflow-hidden bg-gray-50 ${className}`}>
+      <div className={`flex items-center justify-center overflow-hidden bg-slate-50 ${className}`}>
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        {imageUrl ? <img src={imageUrl} alt={alt} className="h-full w-full object-cover" /> : <Package className="text-gray-300" size={compact ? 18 : 36} />}
+        {imageUrl ? <img src={imageUrl} alt={alt} className="h-full w-full object-cover" /> : <Package className="text-slate-300" size={compact ? 18 : 36} />}
       </div>
     );
   }
@@ -92,7 +92,7 @@ export default function RewardVisual({ presetId, imageUrl, alt = '', className =
   if (preset.category === 'title') {
     return (
       <div className={`flex items-center justify-center bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 ${className}`}>
-        <span className={`rounded-full bg-white/90 font-black text-indigo-700 shadow ${compact ? 'px-1.5 text-[8px]' : 'px-3 py-1 text-sm'}`}>
+        <span className={`rounded-full bg-white/90 font-bold text-indigo-700 shadow ${compact ? 'px-1.5 text-[8px]' : 'px-3 py-1 text-sm'}`}>
           {compact ? '称号' : presetTitleText(preset.id)}
         </span>
       </div>

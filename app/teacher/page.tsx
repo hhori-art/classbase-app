@@ -7,6 +7,7 @@ import { collection, query, where, getDocs, getCountFromServer } from 'firebase/
 import TeacherDashboard from '@/app/components/TeacherDashboard';
 import { jstDateKey } from '@/lib/date-key';
 import { selectDisplayShiftAssignments } from '@/lib/shift-assignment-display';
+import { ErrorState, ListSkeleton, Skeleton } from '@/app/components/ui';
 
 export default function TeacherPage() {
   const { user, profile, loading } = useAuth();
@@ -20,6 +21,8 @@ export default function TeacherPage() {
   const [allAssignments, setAllAssignments] = useState<any[]>([]); 
   const [pendingCount, setPendingCount] = useState(0);
   const [dataLoading, setDataLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
 
   // 基準日（デフォルトは今日）
   const [currentDate, setCurrentDate] = useState(jstDateKey());
@@ -29,6 +32,7 @@ export default function TeacherPage() {
 
     const fetchData = async () => {
       setDataLoading(true);
+      setLoadError(false);
       try {
         // 1. 取得対象の日付リストを作成
         const targetDates = [currentDate];
@@ -70,13 +74,14 @@ export default function TeacherPage() {
 
       } catch (e) {
         console.error('Teacher Data Fetch Error:', e);
+        setLoadError(true);
       } finally {
         setDataLoading(false);
       }
     };
 
     fetchData();
-  }, [user, profile, currentDate, viewMode]);
+  }, [user, profile, currentDate, viewMode, reloadKey]);
 
   // 権限チェック
   useEffect(() => {
@@ -88,10 +93,24 @@ export default function TeacherPage() {
 
   // ローディング中
   if (loading || dataLoading) {
-    return <div className="min-h-[100dvh] bg-slate-50" aria-busy="true" />;
+    return (
+      <div className="space-y-4 px-4 py-5 sm:px-6" aria-busy="true">
+        <Skeleton className="h-8 w-48" />
+        <Skeleton className="h-32 w-full rounded-card" />
+        <ListSkeleton rows={3} />
+      </div>
+    );
   }
 
   if (!user) return null;
+
+  if (loadError) {
+    return (
+      <div className="px-4 py-5 sm:px-6">
+        <ErrorState title="授業予定を読み込めませんでした" onRetry={() => setReloadKey(key => key + 1)} />
+      </div>
+    );
+  }
 
   return (
     <TeacherDashboard 

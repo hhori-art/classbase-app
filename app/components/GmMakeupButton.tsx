@@ -22,7 +22,7 @@ export default function GmMakeupButton({
   if (!enabled) return null;
 
   return (
-    <a href={href} className="inline-flex min-h-[48px] items-center justify-center rounded-2xl bg-indigo-600 px-5 py-3 text-sm font-black text-white shadow-sm hover:bg-indigo-700">
+    <a href={href} className="inline-flex min-h-[48px] items-center justify-center rounded-2xl bg-indigo-600 px-5 py-3 text-sm font-bold text-white shadow-sm hover:bg-indigo-700">
       {label}
     </a>
   );

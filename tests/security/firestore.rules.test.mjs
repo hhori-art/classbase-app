@@ -221,7 +221,7 @@ test('講師は従来どおり自分の通知設定を保存できる', async ()
   }));
 });
 
-test('講師の基本勤務設定は本人だけが変更でき、masterは配置確認できる', async () => {
+test('講師の基本勤務設定は講師が直接書き込めず（APIで保存）、本人とmasterは読める', async () => {
   const ownRef = doc(env.authenticatedContext('teacher-1').firestore(), 'teacher_availability_profiles/teacher-1');
   const value = {
     teacher_id: 'teacher-1',
@@ -230,9 +230,13 @@ test('講師の基本勤務設定は本人だけが変更でき、masterは配�
     weekdays: { mon: { status: 'available', start_time: '19:00', end_time: '22:00' } },
     created_at: '2026-09-25T00:00:00.000Z',
   };
-  await assertSucceeds(setDoc(ownRef, value));
-  await assertSucceeds(updateDoc(ownRef, { weekdays: { mon: { status: 'unavailable', commitment_type: 'university', commitment_end_time: '19:00' } } }));
+  await assertFails(setDoc(ownRef, value));
+  await env.withSecurityRulesDisabled(context => setDoc(doc(context.firestore(), 'teacher_availability_profiles/teacher-1'), value));
+  await assertFails(updateDoc(ownRef, { weekdays: { mon: { status: 'unavailable', commitment_type: 'university', commitment_end_time: '19:00' } } }));
   await assertFails(updateDoc(ownRef, { teacher_id: 'teacher-2' }));
+  await assertFails(deleteDoc(ownRef));
+  await assertFails(setDoc(doc(env.authenticatedContext('teacher-2').firestore(), 'teacher_availability_profiles/teacher-1'), { ...value, teacher_id: 'teacher-2' }));
+  await assertSucceeds(getDoc(ownRef));
   await assertFails(getDoc(doc(env.authenticatedContext('teacher-2').firestore(), 'teacher_availability_profiles/teacher-1')));
   await assertSucceeds(getDoc(doc(env.authenticatedContext('master-1').firestore(), 'teacher_availability_profiles/teacher-1')));
 });

@@ -2,11 +2,12 @@
 
 import { useMemo, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { Download, Loader2, Printer, X } from 'lucide-react';
+import { Download, FileSpreadsheet, Loader2, Printer, X } from 'lucide-react';
 import {
-  buildGuidePages, DEFAULT_GUIDE_PRINT_OPTIONS, GUIDE_PRINT_CSS,
-  type GuideAccount, type GuideOrder, type GuidePrintOptions,
+  applyRosterNames, buildGuidePages, DEFAULT_GUIDE_PRINT_OPTIONS, GUIDE_PAGE_MARGIN_MM, GUIDE_PRINT_CSS, matchRosterNames, parseRosterTable, rosterKeyOf,
+  type GuideAccount, type GuideOrder, type GuidePrintOptions, type RosterMatch,
 } from './guide-model';
+import { useToast } from '@/app/components/ui/feedback';
 import { ChecklistPage, ParentGuidePage, ParentPlaceholderPage, StaffGuidePage, StudentGuidePage } from './GuidePages';
 
 const ORDER_LABELS: Record<GuideOrder, { label: string; description: string }> = {
@@ -15,6 +16,16 @@ const ORDER_LABELS: Record<GuideOrder, { label: string; description: string }> =
   'student-only': { label: '生徒用だけ', description: '' },
   'parent-only': { label: '保護者用だけ', description: '' },
 };
+
+/** CSV ファイルを UTF-8 で読み、文字化けする場合は Shift_JIS（Excel 保存）として読み直す。 */
+async function readRosterFile(file: File) {
+  const buffer = await file.arrayBuffer();
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buffer);
+  } catch {
+    return new TextDecoder('shift_jis').decode(buffer);
+  }
+}
 
 const safeFileName = (value: string) => value.replace(/[\\/:*?"<>|\u0000-\u001F]/g, '_').trim().slice(0, 80) || 'account';
 
@@ -31,13 +42,44 @@ type Props = {
 
 /** ID書面の印刷プレビュー（body 直下に表示し、印刷時は書面だけを出力する）。 */
 export default function AccountGuidePrintView({ accounts, loginUrl, title, onClose, notice, initialOptions }: Props) {
+  const toast = useToast();
   const [options, setOptions] = useState<GuidePrintOptions>({ ...DEFAULT_GUIDE_PRINT_OPTIONS, ...initialOptions });
   const [pdfProgress, setPdfProgress] = useState<{ current: number; total: number } | null>(null);
-  const pages = useMemo(() => buildGuidePages(accounts, options), [accounts, options]);
-  const studentCount = accounts.filter(account => account.kind === 'student').length;
-  const parentCount = accounts.filter(account => (account.kind === 'student' && account.parent.status === 'issued') || account.kind === 'parent').length;
-  const hasStudents = studentCount > 0;
-  const total = accounts.length;
+  // 名簿（氏名）は画面のメモリ上だけで使い、保存・送信しない。閉じると消える。
+  const [rosterOpen, setRosterOpen] = useState(false);
+  const [rosterText, setRosterText] = useState('');
+  const [roster, setRoster] = useState<RosterMatch | null>(null);
+  const [skipUnnamed, setSkipUnnamed] = useState(false);
+  const printAccounts = useMemo(() => {
+    if (!roster) return accounts;
+    const named = applyRosterNames(accounts, roster.names);
+    if (!skipUnnamed) return named;
+    const missing = new Set(roster.missing);
+    return named.filter(account => account.kind === 'staff' || !missing.has(rosterKeyOf(account)));
+  }, [accounts, roster, skipUnnamed]);
+  const pages = useMemo(() => buildGuidePages(printAccounts, options), [printAccounts, options]);
+
+  const applyRoster = (source: string) => {
+    const result = matchRosterNames(parseRosterTable(source), accounts);
+    setRoster(result);
+    if (result.matched === 0) toast.error('名簿の中に、書面の生徒IDと一致する行が見つかりませんでした。「生徒ID」と「氏名」の列があるか確認してください。');
+  };
+  const loadRosterFile = async (file: File | undefined) => {
+    if (!file) return;
+    const source = await readRosterFile(file);
+    setRosterText('');
+    applyRoster(source);
+  };
+  const clearRoster = () => {
+    setRoster(null);
+    setRosterText('');
+    setSkipUnnamed(false);
+  };
+  const studentCount = printAccounts.filter(account => account.kind === 'student').length;
+  const parentCount = printAccounts.filter(account => (account.kind === 'student' && account.parent.status === 'issued') || account.kind === 'parent').length;
+  const hasStudents = accounts.some(account => account.kind === 'student');
+  const rosterTargetCount = accounts.filter(account => account.kind !== 'staff').length;
+  const total = printAccounts.length;
 
   const exportPdfs = async () => {
     if (pdfProgress) return;
@@ -62,9 +104,15 @@ export default function AccountGuidePrintView({ accounts, loginUrl, title, onClo
         for (let index = 0; index < groupPages.length; index++) {
           // 画面外の書面も描画されるよう content-visibility を一時的に解除する。
           groupPages[index].style.contentVisibility = 'visible';
-          const canvas = await html2canvas(groupPages[index], { scale: 2, useCORS: true, backgroundColor: '#ffffff', logging: false });
+          // html2canvas は zoom に対応しないため、実寸（A4）の書面を撮ってPDFの余白内に縮小して置く。
+          const sheet = groupPages[index].querySelector<HTMLElement>('.guide-sheet') || groupPages[index];
+          sheet.style.zoom = '1';
+          const canvas = await html2canvas(sheet, { scale: 2, useCORS: true, backgroundColor: '#ffffff', logging: false });
+          sheet.style.zoom = '';
           if (index > 0) pdf.addPage();
-          pdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, 210, 297, undefined, 'FAST');
+          const width = 210 - GUIDE_PAGE_MARGIN_MM * 2;
+          const height = width * (297 / 210);
+          pdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', GUIDE_PAGE_MARGIN_MM, (297 - height) / 2, width, height, undefined, 'FAST');
           groupPages[index].style.contentVisibility = '';
         }
         const baseName = safeFileName(String(groupPages[0].dataset.pdfName || 'account').replace(/_(生徒用|保護者用|講師用|管理者用)$/, ''));
@@ -84,10 +132,17 @@ export default function AccountGuidePrintView({ accounts, loginUrl, title, onClo
       anchor.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (error: any) {
-      alert(`PDFの作成に失敗しました。\n${error?.message || error}`);
+      toast.error(`PDFの作成に失敗しました。${error?.message || error}`);
     } finally {
       setPdfProgress(null);
     }
+  };
+
+  // ロゴ画像の読み込みが終わってから印刷する（未読込のまま印刷すると空白になるため）。
+  const printNow = async () => {
+    const images = Array.from(document.querySelectorAll<HTMLImageElement>('#guide-print-root .guide-page img'));
+    await Promise.all(images.map(image => image.complete ? Promise.resolve() : image.decode().catch(() => undefined)));
+    window.print();
   };
 
   if (typeof document === 'undefined') return null;
@@ -108,7 +163,7 @@ export default function AccountGuidePrintView({ accounts, loginUrl, title, onClo
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <button onClick={() => window.print()} className="flex items-center gap-2 rounded-xl bg-indigo-600 px-6 py-2.5 text-sm font-black text-white hover:bg-indigo-700">
+            <button onClick={() => void printNow()} className="flex items-center gap-2 rounded-xl bg-indigo-600 px-6 py-2.5 text-sm font-black text-white hover:bg-indigo-700">
               <Printer size={18} />印刷する
             </button>
             <button onClick={() => void exportPdfs()} disabled={Boolean(pdfProgress)} className="flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-black text-white hover:bg-emerald-700 disabled:cursor-wait disabled:opacity-60">
@@ -138,8 +193,56 @@ export default function AccountGuidePrintView({ accounts, loginUrl, title, onClo
             <input type="checkbox" checked={options.checklist} onChange={event => setOptions(prev => ({ ...prev, checklist: event.target.checked }))} className="h-4 w-4 accent-amber-600" />
             先頭に配布チェック表を付ける
           </label>
-          <span className="text-[11px] font-bold text-slate-400">印刷設定は「A4・縦・余白なし・倍率100%」にしてください。</span>
+          {rosterTargetCount > 0 && (
+            <button onClick={() => setRosterOpen(open => !open)} className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-black ${roster ? 'bg-emerald-600 text-white' : 'bg-emerald-50 text-emerald-800 hover:bg-emerald-100'}`}>
+              <FileSpreadsheet size={14} />{roster ? `名簿の氏名を差し込み中（${roster.matched}/${rosterTargetCount}名）` : '名簿から氏名を差し込む'}
+            </button>
+          )}
+          <span className="text-[11px] font-bold text-slate-400">用紙はA4・縦。印刷設定は変えずにそのまま印刷できます。</span>
         </div>
+        {rosterOpen && rosterTargetCount > 0 && (
+          <div className="space-y-3 border-t border-slate-100 bg-emerald-50/40 px-4 py-3">
+            <p className="text-xs font-bold leading-5 text-slate-600">
+              手元の名簿（スプレッドシート）の<b>生徒ID</b>と照らし合わせて、書面の氏名だけを差し替えます。
+              名簿はこの画面の中だけで使い、<b>サーバーには送信・保存しません</b>（閉じると消えます）。
+              1行目に「生徒ID」「氏名」（または「姓」「名」）の見出しを付けてください。
+            </p>
+            <div className="flex flex-col gap-2 lg:flex-row lg:items-start">
+              <textarea
+                value={rosterText}
+                onChange={event => setRosterText(event.target.value)}
+                placeholder={'スプレッドシートの範囲をコピーして貼り付け\n生徒ID\t氏名\n22220001\t山田 太郎'}
+                rows={3}
+                className="min-h-[72px] flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2 font-mono text-xs outline-none focus:border-emerald-400"
+              />
+              <div className="flex shrink-0 flex-wrap gap-2">
+                <button onClick={() => applyRoster(rosterText)} disabled={!rosterText.trim()} className="rounded-xl bg-emerald-600 px-4 py-2 text-xs font-black text-white hover:bg-emerald-700 disabled:opacity-40">貼り付けた名簿を反映</button>
+                <label className="cursor-pointer rounded-xl border border-emerald-200 bg-white px-4 py-2 text-xs font-black text-emerald-700 hover:bg-emerald-50">
+                  CSVファイルを選ぶ
+                  <input type="file" accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values" className="hidden" onChange={event => { void loadRosterFile(event.target.files?.[0]); event.target.value = ''; }} />
+                </label>
+                {roster && <button onClick={clearRoster} className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-black text-slate-600 hover:bg-slate-50">差し込みをやめる</button>}
+              </div>
+            </div>
+            {roster && (
+              <div className="space-y-2 text-xs font-bold">
+                <p className={roster.missing.length ? 'text-amber-700' : 'text-emerald-700'}>
+                  {rosterTargetCount}名中 {roster.matched}名の氏名を差し込みました。
+                  {roster.missing.length > 0 && <> 名簿に見つからない生徒ID：{roster.missing.slice(0, 12).join('、')}{roster.missing.length > 12 && ` ほか${roster.missing.length - 12}名`}</>}
+                </p>
+                {roster.matched > 0 && (
+                  <p className="text-slate-500">確認：{Array.from(roster.names.entries()).slice(0, 3).map(([id, name]) => `${id} → ${name}`).join(' ／ ')}</p>
+                )}
+                {roster.missing.length > 0 && (
+                  <label className="flex w-fit cursor-pointer items-center gap-2 text-amber-800">
+                    <input type="checkbox" checked={skipUnnamed} onChange={event => setSkipUnnamed(event.target.checked)} className="h-4 w-4 accent-amber-600" />
+                    名簿に見つからない生徒は印刷しない
+                  </label>
+                )}
+              </div>
+            )}
+          </div>
+        )}
         {notice && <div className="border-t border-slate-100 px-4 py-3">{notice}</div>}
       </div>
 

@@ -1,12 +1,33 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { CalendarClock, CheckCircle2, Loader2, TrendingUp } from 'lucide-react';
+import { BookOpenCheck, CalendarClock, CheckCircle2, ClipboardList, Languages, Megaphone, TrendingUp } from 'lucide-react';
 import EikenCalendar from '@/app/components/eiken/EikenCalendar';
+import ChildSwitcher, { pickChildId } from '@/app/components/parent/ChildSwitcher';
+import { Card, EmptyState, ErrorState, PageHeader, SectionTitle, Skeleton } from '@/app/components/ui';
+import { useAuth } from '@/app/context/AuthContext';
 import { useEikenApi } from '@/app/eiken/useEikenApi';
+import { formatDate, formatDateTime } from '@/lib/format';
+import { TERMS } from '@/lib/glossary';
+
+/** 確認テストの技能タグ（教材側で自由に付けるコード）を保護者向けの言葉にする。知らないタグはそのまま出す。 */
+const SKILL_LABELS: Record<string, string> = {
+  general: '総合',
+  vocabulary: '語彙', vocab: '語彙', word: '語彙', words: '語彙',
+  idiom: '熟語', idioms: '熟語',
+  grammar: '文法',
+  reading: 'リーディング',
+  listening: 'リスニング',
+  writing: 'ライティング',
+  speaking: 'スピーキング',
+  interview: '面接',
+  conversation: '会話',
+};
+const skillLabel = (skill: string) => SKILL_LABELS[skill.trim().toLowerCase()] || skill;
 
 export default function EikenParentPage() {
   const api = useEikenApi();
+  const { user } = useAuth();
   const [data, setData] = useState<any>(null);
   const [selectedStudentId, setSelectedStudentId] = useState('');
   const [loading, setLoading] = useState(true);
@@ -17,6 +38,15 @@ export default function EikenParentPage() {
     setError('');
     try {
       const result = await api<any>(`/api/eiken/dashboard${studentId ? `?student_id=${encodeURIComponent(studentId)}` : ''}`);
+      // 最初は、保護者画面で最後に選んだお子さまを表示する。
+      if (!studentId) {
+        const ids = Array.isArray(result.students) ? result.students.map((student: any) => String(student.id)) : [];
+        const preferred = pickChildId(user?.uid, ids, result.selected_student_id || '');
+        if (preferred && preferred !== result.selected_student_id) {
+          await load(preferred);
+          return;
+        }
+      }
       setData(result);
       setSelectedStudentId(result.selected_student_id || '');
     } catch (loadError) {
@@ -24,126 +54,130 @@ export default function EikenParentPage() {
     } finally {
       setLoading(false);
     }
-  }, [api]);
+  }, [api, user?.uid]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  if (loading) return <main className="flex min-h-[60vh] items-center justify-center"><Loader2 className="animate-spin text-emerald-600" /></main>;
-
   const dashboard = data?.dashboard;
   const latestQuiz = dashboard?.quiz_results?.[0];
   const importantTasks = (dashboard?.today_tasks || []).filter((task: any) => task.is_required !== false);
+  const students: { id: string; name?: string }[] = Array.isArray(data?.students) ? data.students.map((student: any) => ({ id: String(student.id), name: student.name })) : [];
+  const studentName = students.find(student => student.id === selectedStudentId)?.name;
 
   return (
-    <main className="mx-auto max-w-5xl px-4 py-8">
-      <div className="mb-7 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-        <div>
-          <p className="text-sm font-bold text-emerald-700">保護者ページ</p>
-          <h1 className="mt-1 text-2xl font-black">Boosterの取り組み状況</h1>
-          <p className="mt-1 text-sm text-slate-500">今週の様子と次の予定を確認できます。</p>
+    <main className="mx-auto max-w-5xl space-y-section px-4 py-6 pb-16">
+      <PageHeader
+        tone="hero"
+        icon={Languages}
+        eyebrow="保護者ページ"
+        title="Boosterの取り組み状況"
+        description={`${studentName ? `${studentName}さんの` : ''}今週の様子と次の予定を確認できます。`}
+      />
+
+      <ChildSwitcher options={students} value={selectedStudentId} onChange={id => load(id)} />
+
+      {loading ? (
+        <div className="space-y-4" role="status" aria-label="読み込み中">
+          <div className="grid gap-4 sm:grid-cols-3">{[0, 1, 2].map(index => <Skeleton key={index} className="h-32 w-full rounded-card" />)}</div>
+          <Skeleton className="h-48 w-full rounded-card" />
         </div>
-        {data?.students?.length > 1 && (
-          <label className="text-sm font-bold">
-            お子さま
-            <select
-              value={selectedStudentId}
-              onChange={event => load(event.target.value)}
-              className="ml-2 rounded-lg border border-slate-300 bg-white px-3 py-2"
-            >
-              {data.students.map((student: any) => <option key={student.id} value={student.id}>{student.name}</option>)}
-            </select>
-          </label>
-        )}
-      </div>
-
-      {error && <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm font-bold text-red-700">{error}</div>}
-      {!dashboard && !error && <div className="border-y border-slate-200 bg-white py-10 text-center text-sm text-slate-500">英検対策講座の受講情報がありません。</div>}
-
-      {dashboard && (
+      ) : error ? (
+        <ErrorState message={error} onRetry={() => load(selectedStudentId || undefined)} />
+      ) : !dashboard ? (
+        <EmptyState icon={Languages} title="英検対策講座の受講情報がありません" description="受講登録が済むと、ここに取り組み状況が表示されます。" />
+      ) : (
         <>
-          <section className="grid gap-4 sm:grid-cols-3">
-            <div className="border-t-4 border-emerald-500 bg-white p-5 shadow-sm">
-              <CheckCircle2 className="text-emerald-600" size={22} />
-              <p className="mt-3 text-xs font-bold text-slate-500">講座の進捗</p>
-              <p className="mt-1 text-3xl font-black">{dashboard.progress_summary?.completion_rate || 0}%</p>
-            </div>
-            <div className="border-t-4 border-indigo-500 bg-white p-5 shadow-sm">
-              <TrendingUp className="text-indigo-600" size={22} />
-              <p className="mt-3 text-xs font-bold text-slate-500">完了した学習</p>
-              <p className="mt-1 text-3xl font-black">{dashboard.progress_summary?.completed_count || 0}<span className="ml-1 text-sm">件</span></p>
-            </div>
-            <div className="border-t-4 border-amber-500 bg-white p-5 shadow-sm">
-              <p className="text-xs font-bold text-slate-500">最新の確認テスト</p>
-              <p className="mt-4 text-3xl font-black">{latestQuiz?.percentage ?? '--'}<span className="ml-1 text-sm">%</span></p>
-            </div>
+          <section className="grid gap-4 sm:grid-cols-3" aria-label="取り組みのまとめ">
+            <Card>
+              <span className="flex h-9 w-9 items-center justify-center rounded-btn bg-accent-soft text-accent"><CheckCircle2 size={18} aria-hidden /></span>
+              <p className="mt-3 text-sm font-bold text-fg-muted">講座の進捗</p>
+              <p className="mt-1 text-3xl font-black tabular-nums text-fg">{dashboard.progress_summary?.completion_rate || 0}<span className="ml-1 text-sm font-bold text-fg-muted">%</span></p>
+            </Card>
+            <Card>
+              <span className="flex h-9 w-9 items-center justify-center rounded-btn bg-info-soft text-info"><TrendingUp size={18} aria-hidden /></span>
+              <p className="mt-3 text-sm font-bold text-fg-muted">完了した学習</p>
+              <p className="mt-1 text-3xl font-black tabular-nums text-fg">{dashboard.progress_summary?.completed_count || 0}<span className="ml-1 text-sm font-bold text-fg-muted">件</span></p>
+            </Card>
+            <Card>
+              <span className="flex h-9 w-9 items-center justify-center rounded-btn bg-warning-soft text-warning"><ClipboardList size={18} aria-hidden /></span>
+              <p className="mt-3 text-sm font-bold text-fg-muted">最新の確認テスト</p>
+              <p className="mt-1 text-3xl font-black tabular-nums text-fg">{latestQuiz?.percentage ?? '--'}<span className="ml-1 text-sm font-bold text-fg-muted">%</span></p>
+            </Card>
           </section>
 
-          <section className="mt-9">
-            <h2 className="font-black">次に取り組む内容</h2>
-            <div className="mt-3 divide-y divide-slate-200 border-y border-slate-200 bg-white">
-              {importantTasks.map((task: any) => (
-                <div key={task.id} className="px-4 py-4">
-                  <p className="font-bold">{task.title}</p>
-                  <p className="mt-1 text-xs text-slate-500">目安 {task.estimated_minutes || '--'}分</p>
-                </div>
-              ))}
-              {!importantTasks.length && <p className="px-4 py-6 text-center text-sm text-slate-500">現在、優先して取り組む課題はありません。</p>}
-            </div>
-          </section>
+          <Card>
+            <SectionTitle icon={BookOpenCheck} title="次に取り組む内容" />
+            {importantTasks.length ? (
+              <ul className="divide-y divide-line">
+                {importantTasks.map((task: any) => (
+                  <li key={task.id} className="py-3 first:pt-0 last:pb-0">
+                    <p className="font-bold text-fg">{task.title}</p>
+                    <p className="mt-1 text-sm text-fg-muted">目安 {task.estimated_minutes || '--'}分</p>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <EmptyState icon={BookOpenCheck} title="現在、優先して取り組む学習はありません" />
+            )}
+          </Card>
 
-          <section className="mt-9">
-            <h2 className="font-black">確認テストの推移</h2>
-            <div className="mt-3 overflow-x-auto border-y border-slate-200 bg-white">
-              <table className="w-full min-w-[520px] text-left text-sm">
-                <thead className="bg-slate-50 text-xs text-slate-500"><tr><th className="px-4 py-3">受験日</th><th className="px-4 py-3">結果</th><th className="px-4 py-3">技能別</th></tr></thead>
-                <tbody className="divide-y divide-slate-200">
-                  {(dashboard.quiz_results || []).map((result: any) => (
-                    <tr key={result.id}>
-                      <td className="px-4 py-3">{result.submitted_at ? new Date(result.submitted_at).toLocaleDateString('ja-JP') : '-'}</td>
-                      <td className="px-4 py-3 font-black">{result.percentage}%</td>
-                      <td className="px-4 py-3 text-xs">{Object.entries(result.skill_scores || {}).map(([skill, score]) => `${skill}: ${score}%`).join(' / ') || '-'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {!dashboard.quiz_results?.length && <p className="py-6 text-center text-sm text-slate-500">確認テストの受験後、結果の推移が表示されます。</p>}
-            </div>
-          </section>
+          <Card>
+            <SectionTitle icon={TrendingUp} title="確認テストの推移" />
+            {dashboard.quiz_results?.length ? (
+              <div className="-mx-1 overflow-x-auto px-1">
+                <table className="w-full min-w-[520px] text-left text-sm">
+                  <thead className="border-b border-line text-xs text-fg-muted"><tr><th className="px-3 py-2 font-bold">受験日</th><th className="px-3 py-2 font-bold">結果</th><th className="px-3 py-2 font-bold">技能別</th></tr></thead>
+                  <tbody className="divide-y divide-line">
+                    {(dashboard.quiz_results || []).map((result: any) => (
+                      <tr key={result.id}>
+                        <td className="px-3 py-3">{formatDate(result.submitted_at, { withYear: true }) || '-'}</td>
+                        <td className="px-3 py-3 font-bold tabular-nums">{result.percentage}%</td>
+                        <td className="px-3 py-3 text-sm text-fg-muted">{Object.entries(result.skill_scores || {}).map(([skill, score]) => `${skillLabel(skill)}：${score}%`).join(' / ') || '-'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <EmptyState icon={ClipboardList} title="確認テストの結果はまだありません" description="確認テストの受験後、結果の推移が表示されます。" />
+            )}
+          </Card>
 
-          <section className="mt-9">
-            <div className="mb-3 flex items-center gap-2">
-              <CalendarClock className="text-emerald-600" size={20} />
-              <h2 className="font-black">次回のLIVE授業</h2>
-            </div>
-            <div className="divide-y divide-slate-200 border-y border-slate-200 bg-white">
-              {(dashboard.upcoming_lessons || []).slice(0, 3).map((lesson: any) => (
-                <div key={lesson.id} className="px-4 py-4">
-                  <p className="font-bold">{lesson.title}</p>
-                  <p className="mt-1 text-sm text-slate-500">
-                    {lesson.start_at ? new Intl.DateTimeFormat('ja-JP', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(lesson.start_at)) : lesson.lesson_date}
-                  </p>
-                </div>
-              ))}
-              {!dashboard.upcoming_lessons?.length && <p className="px-4 py-6 text-center text-sm text-slate-500">現在、予定されているLIVE授業はありません。</p>}
-            </div>
-          </section>
+          <Card>
+            <SectionTitle icon={CalendarClock} title="次回のLIVE授業" />
+            {dashboard.upcoming_lessons?.length ? (
+              <ul className="divide-y divide-line">
+                {(dashboard.upcoming_lessons || []).slice(0, 3).map((lesson: any) => (
+                  <li key={lesson.id} className="py-3 first:pt-0 last:pb-0">
+                    <p className="font-bold text-fg">{lesson.title}</p>
+                    <p className="mt-1 text-sm text-fg-muted">{lesson.start_at ? formatDateTime(lesson.start_at, { withYear: true }) : formatDate(lesson.lesson_date, { withYear: true })}</p>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <EmptyState icon={CalendarClock} title="現在、予定されているLIVE授業はありません" />
+            )}
+          </Card>
 
-          <div className="mt-9"><EikenCalendar events={dashboard.calendar_events || []} /></div>
+          <EikenCalendar events={dashboard.calendar_events || []} />
 
-          <section className="mt-9">
-            <h2 className="font-black">お知らせ</h2>
-            <div className="mt-3 divide-y divide-slate-200 border-y border-slate-200 bg-white">
-              {(dashboard.announcements || []).map((item: any) => (
-                <article key={item.id} className="px-4 py-4">
-                  <h3 className="font-bold">{item.title}</h3>
-                  <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-slate-600">{item.body}</p>
-                </article>
-              ))}
-              {!dashboard.announcements?.length && <p className="px-4 py-6 text-center text-sm text-slate-500">新しいお知らせはありません。</p>}
-            </div>
-          </section>
+          <Card>
+            <SectionTitle icon={Megaphone} title={TERMS.news} />
+            {dashboard.announcements?.length ? (
+              <ul className="divide-y divide-line">
+                {(dashboard.announcements || []).map((item: any) => (
+                  <li key={item.id} className="py-3 first:pt-0 last:pb-0">
+                    <h3 className="font-bold text-fg">{item.title}</h3>
+                    <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-fg-muted">{item.body}</p>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <EmptyState icon={Megaphone} title="新しいお知らせはありません" />
+            )}
+          </Card>
         </>
       )}
     </main>

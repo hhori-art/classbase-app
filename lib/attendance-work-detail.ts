@@ -1,3 +1,5 @@
+import { isSogakuAttendanceSchool } from './attendance-schools';
+
 export const ATTENDANCE_PROGRAMS = ['normal', 'science_social', 'breakthrough'] as const;
 export type AttendanceProgram = typeof ATTENDANCE_PROGRAMS[number];
 
@@ -26,6 +28,34 @@ export const OFFICE_TASK_OPTIONS = [
   { value: 'other', label: 'その他の事務' },
 ] as const;
 
+export type IndividualLevel = 'standard' | 'advanced' | 'wingnet' | 'tablet';
+
+/** 個別授業の種類。ウイングネット・タブレット学習は人数を問わず、それぞれ個別チューター単価・メンター単価で計算する。 */
+export const INDIVIDUAL_LEVEL_OPTIONS: ReadonlyArray<{ value: IndividualLevel; label: string; short: string }> = [
+  { value: 'standard', label: '個別通常', short: '個別通常' },
+  { value: 'advanced', label: '個別中受・高', short: '個別中受・高' },
+  { value: 'wingnet', label: '個別ウイングネット（個別チューター単価）', short: 'ウイングネット' },
+  { value: 'tablet', label: '個別タブレット学習（メンター単価）', short: 'タブレット学習' },
+];
+
+export const normalizeIndividualLevel = (value: unknown): IndividualLevel | undefined =>
+  INDIVIDUAL_LEVEL_OPTIONS.some(option => option.value === value) ? value as IndividualLevel : undefined;
+
+/** 指導人数（1対1〜1対3）を選ぶ必要がある種類か。 */
+export const individualLevelNeedsRatio = (level: unknown) => level === 'standard' || level === 'advanced';
+
+export const individualLevelLabel = (level: unknown) =>
+  INDIVIDUAL_LEVEL_OPTIONS.find(option => option.value === level)?.short || '';
+
+const PAYROLL_TIER_LABELS: Record<string, string> = {
+  group_lesson: '集団授業', sogaku_lesson: '創学授業（分給）', sub_staff: 'サブスタッフ', office: '事務', training_1: '研修',
+  individual_1: '個別通常 1対1', individual_2: '個別通常 1対2', individual_3: '個別通常 1対3',
+  individual_4: '個別中受・高 1対1', individual_5: '個別中受・高 1対2', individual_6: '個別中受・高 1対3',
+  private_tutor: '個別チューター単価', mentor: 'メンター単価',
+};
+
+export const payrollTierLabel = (tier: unknown) => PAYROLL_TIER_LABELS[String(tier || '')] || String(tier || '');
+
 export type AttendanceWorkSegment = {
   id?: string;
   start: string;
@@ -36,7 +66,7 @@ export type AttendanceWorkSegment = {
   program?: AttendanceProgram;
   grade?: string;
   lesson_format?: 'group' | 'individual';
-  individual_level?: 'standard' | 'advanced';
+  individual_level?: IndividualLevel;
   individual_ratio?: '1:1' | '1:2' | '1:3';
   office_task?: string;
   payroll_tier?: string;
@@ -60,9 +90,13 @@ export function payrollTierForSegment(segment: Partial<AttendanceWorkSegment>) {
   if (segment.type === 'break') return null;
   if (segment.type === 'support' || segment.type === 'interview') return 'sub_staff';
   if (segment.type === 'individual' || segment.lesson_format === 'individual') {
+    if (segment.individual_level === 'wingnet') return 'private_tutor';
+    if (segment.individual_level === 'tablet') return 'mentor';
     const ratioIndex = segment.individual_ratio === '1:2' ? 2 : segment.individual_ratio === '1:3' ? 3 : 1;
     return `individual_${segment.individual_level === 'advanced' ? ratioIndex + 3 : ratioIndex}`;
   }
+  // 創学（創学ゼミ・創学個別）での授業は創学単価（分給）。創学アカデミーは対象外。
+  if (segment.type === 'lesson' && isSogakuAttendanceSchool(segment.school_id)) return 'sogaku_lesson';
   if (segment.type === 'lesson' || segment.type === 'breakthrough' || segment.type === 'breakthrough_lesson') return 'group_lesson';
   if (segment.office_task === 'training') return 'training_1';
   return 'office';
@@ -98,8 +132,8 @@ export function validateAttendanceSegment(segment: AttendanceWorkSegment) {
     if (!segment.grade) return '授業をした学年を選択してください。';
   }
   if (segment.type === 'individual') {
-    if (!segment.individual_level) return '個別指導の単価区分を選択してください。';
-    if (!segment.individual_ratio) return '個別指導の人数（1対1〜1対3）を選択してください。';
+    if (!segment.individual_level) return '個別指導の種類（単価区分）を選択してください。';
+    if (individualLevelNeedsRatio(segment.individual_level) && !segment.individual_ratio) return '個別指導の人数（1対1〜1対3）を選択してください。';
   }
   if (segment.type === 'office' && !segment.office_task) return '事務の内容を選択してください。';
   if ((segment.type === 'other' || segment.office_task === 'other') && !String(segment.note || '').trim()) return '「その他」の具体的な内容を入力してください。';

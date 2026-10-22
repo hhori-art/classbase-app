@@ -1,7 +1,6 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import Link from 'next/link';
 import { auth, db } from '@/lib/firebase';
 import {
   collection,
@@ -10,23 +9,24 @@ import {
   query,
 } from 'firebase/firestore';
 import {
-  ArrowLeft,
   BookOpen,
   Check,
   Download,
-  FileText,
   FileUp,
-  Loader2,
   Plus,
   Save,
   Search,
   Sparkles,
   Trash2,
 } from 'lucide-react';
+import AdminPageHeader from '@/app/components/master/AdminPageHeader';
+import { Button, ButtonLink, EmptyState, ErrorState, IconButton, ListSkeleton, useConfirm, useToast } from '@/app/components/ui';
+import { formatDate } from '@/lib/format';
+import { cn } from '@/lib/cn';
 
 const SUBJECT_CATEGORIES = {
-  science: { label: '理科', items: ['物理', '化学', '生物', '地学'], color: 'bg-purple-100 text-purple-700' },
-  society: { label: '社会', items: ['地理', '歴史', '公民'], color: 'bg-orange-100 text-orange-700' },
+  science: { label: '理科', items: ['物理', '化学', '生物', '地学'], color: 'bg-sky-100 text-sky-700' },
+  society: { label: '社会', items: ['地理', '歴史', '公民'], color: 'bg-amber-100 text-amber-700' },
   japanese: { label: '国語', items: ['漢字', '語句', '古文単語', '文法'], color: 'bg-rose-100 text-rose-700' },
 };
 
@@ -102,7 +102,7 @@ function badgeStyle(subject?: string) {
 
 function dateLabel(value: SlideItem['created_at']) {
   const date = value?.toDate?.();
-  return date ? date.toLocaleDateString('ja-JP') : '日時不明';
+  return date ? formatDate(date, { withYear: true }) : '日時不明';
 }
 
 function formatBytes(value?: number) {
@@ -287,10 +287,13 @@ function inferPptxMeta(file: File, catalog: CurriculumItem[], fallback: {
 }
 
 export default function SlideManagerPage() {
+  const toast = useToast();
+  const confirm = useConfirm();
   const [slides, setSlides] = useState<SlideItem[]>([]);
   const [units, setUnits] = useState<any[]>([]);
   const [curriculumCatalog, setCurriculumCatalog] = useState<CurriculumItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [generatingId, setGeneratingId] = useState<string | null>(null);
@@ -319,6 +322,7 @@ export default function SlideManagerPage() {
 
   const fetchData = async () => {
     setLoading(true);
+    setLoadError(false);
     try {
       const [slideSnap, unitSnap] = await Promise.all([
         getDocs(query(collection(db, 'lesson_slides'), orderBy('created_at', 'desc'))).catch(() => ({ docs: [] as any[] })),
@@ -338,7 +342,7 @@ export default function SlideManagerPage() {
       setCurriculumCatalog(catalog);
     } catch (e) {
       console.error(e);
-      alert('教材データの取得に失敗しました');
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -413,7 +417,10 @@ export default function SlideManagerPage() {
 
   const handleManualSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!unitName || !content || !subject) return alert('全ての項目を入力してください');
+    if (!unitName || !content || !subject) {
+      toast.error('単元名と本文を入力してください。');
+      return;
+    }
 
     setSubmitting(true);
     try {
@@ -436,24 +443,33 @@ export default function SlideManagerPage() {
       const data = await readJsonResponse(res);
       if (!res.ok || !data.ok) throw new Error(data.error || '登録に失敗しました');
 
-      alert('単元を登録しました');
+      toast.success('単元を登録しました。');
       setUnitName('');
       setContent('');
       await fetchData();
     } catch (e: any) {
       console.error(e);
-      alert(`登録失敗: ${e.message || e}`);
+      toast.error(`登録できませんでした：${e.message || e}`);
     } finally {
       setSubmitting(false);
     }
   };
 
   const handlePptxUpload = async () => {
-    if (pendingPptx.length === 0) return alert('PPTXファイルを選択してください');
+    if (pendingPptx.length === 0) {
+      toast.error('PPTXファイルを選択してください。');
+      return;
+    }
     const invalid = pendingPptx.find(item => !item.unitName.trim() || !item.grade || !item.subject);
-    if (invalid) return alert(`${invalid.file.name} の学年・科目・単元名を確認してください`);
+    if (invalid) {
+      toast.error(`${invalid.file.name} の学年・科目・単元名を確認してください。`);
+      return;
+    }
     const user = auth.currentUser;
-    if (!user) return alert('ログイン状態を確認できません');
+    if (!user) {
+      toast.error('ログイン状態を確認できません。');
+      return;
+    }
 
     setUploading(true);
     setPendingPptx(prev => prev.map(item => ({ ...item, uploadStatus: 'queued', uploadMessage: '' })));
@@ -518,23 +534,31 @@ export default function SlideManagerPage() {
 
       const success = results.filter(r => r.ok).length;
       const failed = results.filter(r => !r.ok);
-      alert([
-        `${success}件のPPTXを教材として登録しました。`,
-        failed.length ? `失敗: ${failed.length}件\n${failed.slice(0, 5).map(r => `・${r.file}: ${r.message}`).join('\n')}` : '',
-      ].filter(Boolean).join('\n\n'));
+      if (success > 0) toast.success(`${success}件のPPTXを教材として登録しました。`);
+      if (failed.length) {
+        toast.error(`${failed.length}件の登録に失敗しました：${failed.slice(0, 3).map(r => `${r.file}（${r.message}）`).join('／')}${failed.length > 3 ? ' ほか' : ''}`);
+      }
       setPendingPptx(failed.length ? pendingPptx.filter(item => failed.some(f => f.file === item.file.name)) : []);
       setContent('');
       await fetchData();
     } catch (e: any) {
-      alert(`アップロードに失敗しました: ${e.message || e}`);
+      console.error(e);
+      toast.error(`アップロードできませんでした：${e.message || e}`);
     } finally {
       setUploading(false);
     }
   };
 
   const handleGenerateQuestions = async (slide: SlideItem) => {
-    if (!slide.content) return alert('問題作成に使える本文がありません');
-    if (!confirm(`「${slide.unit_name}」からAIクエスト問題を作成しますか？`)) return;
+    if (!slide.content) {
+      toast.error('問題作成に使える本文がありません。');
+      return;
+    }
+    if (!(await confirm({
+      title: `「${slide.unit_name}」からAIクエスト問題を作成しますか？`,
+      message: '最大60問を作成して、AIクエスト問題として追加保存します。',
+      confirmLabel: '作成する',
+    }))) return;
 
     setGeneratingId(slide.id);
     try {
@@ -553,18 +577,27 @@ export default function SlideManagerPage() {
       if (!res.ok || !data.ok || !Number(data.saved_count)) {
         throw new Error(data.error || '問題が生成されませんでした');
       }
-      alert(`${data.saved_count}問をAIクエスト問題として追加保存しました`);
+      toast.success(`${data.saved_count}問をAIクエスト問題として追加保存しました。`);
     } catch (e: any) {
-      alert(`問題作成に失敗しました: ${e.message || e}`);
+      console.error(e);
+      toast.error(`問題を作成できませんでした：${e.message || e}`);
     } finally {
       setGeneratingId(null);
     }
   };
 
   const handleDeleteSlide = async (slide: SlideItem) => {
-    if (!confirm(`「${slide.unit_name || slide.file_name || 'PPT'}」を削除しますか？\nPPTファイル・AIクエスト単元・このPPTから作成した問題と解答履歴も削除されます。元に戻せません。`)) return;
+    if (!(await confirm({
+      title: `「${slide.unit_name || slide.file_name || 'スライド'}」を削除しますか？`,
+      message: 'スライドのファイル・AIクエスト単元・このスライドから作成した問題と解答履歴も削除されます。元に戻せません。',
+      confirmLabel: '削除する',
+      tone: 'danger',
+    }))) return;
     const user = auth.currentUser;
-    if (!user) return alert('ログイン状態を確認できません');
+    if (!user) {
+      toast.error('ログイン状態を確認できません。');
+      return;
+    }
 
     setDeletingId(slide.id);
     try {
@@ -580,9 +613,10 @@ export default function SlideManagerPage() {
       if (slide.learning_unit_id) {
         setUnits(prev => prev.filter(unit => unit.id !== slide.learning_unit_id));
       }
-      alert(`PPTを削除しました。\n削除した問題: ${data.deleted_quizzes || 0}問`);
+      toast.success(`スライドを削除しました（削除した問題：${data.deleted_quizzes || 0}問）。`);
     } catch (e: any) {
-      alert(`削除に失敗しました: ${e.message || e}`);
+      console.error(e);
+      toast.error(`削除できませんでした：${e.message || e}`);
     } finally {
       setDeletingId(null);
     }
@@ -590,7 +624,10 @@ export default function SlideManagerPage() {
 
   const handleDownload = async (slide: SlideItem) => {
     const user = auth.currentUser;
-    if (!user) return alert('ログイン状態を確認できません');
+    if (!user) {
+      toast.error('ログイン状態を確認できません。');
+      return;
+    }
     try {
       const token = await user.getIdToken();
       const res = await fetch(`/api/slides/${slide.id}/download`, {
@@ -600,12 +637,18 @@ export default function SlideManagerPage() {
       if (!res.ok || !data.ok) throw new Error(data.error || 'download-failed');
       window.open(data.url, '_blank', 'noopener,noreferrer');
     } catch (e: any) {
-      alert(`ダウンロードURLの取得に失敗しました: ${e.message || e}`);
+      console.error(e);
+      toast.error(`ダウンロードできませんでした：${e.message || e}`);
     }
   };
 
-  const handleDeleteUnit = async (id: string) => {
-    if (!confirm('この単元を削除しますか？')) return;
+  const handleDeleteUnit = async (id: string, name?: string) => {
+    if (!(await confirm({
+      title: name ? `「${name}」を削除しますか？` : 'この単元を削除しますか？',
+      message: 'AIクエスト単元リストから削除します。',
+      confirmLabel: '削除する',
+      tone: 'danger',
+    }))) return;
     try {
       const token = await auth.currentUser?.getIdToken();
       if (!token) throw new Error('ログイン状態を確認できません');
@@ -618,35 +661,26 @@ export default function SlideManagerPage() {
       if (!res.ok || !data.ok) throw new Error(data.error || '削除に失敗しました');
       setUnits(prev => prev.filter(u => u.id !== id));
     } catch (e: any) {
-      alert(`削除に失敗しました: ${e.message || e}`);
+      console.error(e);
+      toast.error(`削除できませんでした：${e.message || e}`);
     }
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 p-4 sm:p-8">
-      <div className="max-w-7xl mx-auto">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
-          <div className="flex items-center gap-4">
-            <Link href="/master/imports" className="bg-white p-3 rounded-full shadow hover:bg-gray-100">
-              <ArrowLeft size={20} />
-            </Link>
-            <div>
-              <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
-                <FileText className="text-indigo-600" /> 授業PPT・AIクエスト教材管理
-              </h1>
-              <p className="text-xs text-gray-500 mt-1">PPTXを読み取り、講師配布用ファイルとAIクエスト用単元を同時に管理します。</p>
-            </div>
-          </div>
-          <Link href="/teacher/slides" className="bg-white border border-indigo-100 text-indigo-700 px-4 py-2 rounded-xl text-sm font-bold flex items-center gap-2 hover:bg-indigo-50">
-            <BookOpen size={16} /> 講師表示を確認
-          </Link>
-        </div>
+    <div>
+      <div>
+        <AdminPageHeader
+          description="PPTXを読み取り、講師配布用ファイルとAIクエスト用単元を同時に管理します。"
+          actions={<ButtonLink href="/teacher/slides" variant="secondary" icon={<BookOpen size={16} aria-hidden />}>
+            講師表示を確認
+          </ButtonLink>}
+        />
 
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
           <div className="space-y-6">
-            <section className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
-              <h2 className="font-bold text-gray-700 mb-5 flex items-center gap-2">
-                <FileUp className="bg-indigo-100 text-indigo-600 rounded p-1" size={22} />
+            <section className="bg-surface p-6 rounded-card shadow-sm border border-line">
+              <h2 className="font-bold text-slate-700 mb-5 flex items-center gap-2">
+                <FileUp className="rounded-btn bg-accent-soft p-1 text-accent" size={22} aria-hidden />
                 PPTXアップロード
               </h2>
               <div className="space-y-5">
@@ -669,12 +703,12 @@ export default function SlideManagerPage() {
                   setTags={setTags}
                 />
 
-                <label className="block border-2 border-dashed border-indigo-200 bg-indigo-50/40 rounded-2xl p-5 text-center cursor-pointer hover:bg-indigo-50">
-                  <FileUp className="mx-auto text-indigo-500 mb-2" size={30} />
-                  <p className="text-sm font-bold text-gray-700">
+                <label className="block border-2 border-dashed border-accent/30 bg-accent-soft/40 rounded-card p-5 text-center cursor-pointer hover:bg-accent-soft">
+                  <FileUp className="mx-auto mb-2 text-accent" size={30} aria-hidden />
+                  <p className="text-sm font-bold text-slate-700">
                     {pendingPptx.length > 0 ? `${pendingPptx.length}件のPPTXを選択中` : 'PPTXファイルをまとめて選択'}
                   </p>
-                  <p className="text-[11px] text-gray-400 mt-1">PowerPoint形式 .pptx のみ対応。ファイル名をカリキュラムと照合します。</p>
+                  <p className="text-xs text-slate-400 mt-1">PowerPoint形式 .pptx のみ対応。ファイル名をカリキュラムと照合します。</p>
                   <input
                     type="file"
                     multiple
@@ -688,26 +722,26 @@ export default function SlideManagerPage() {
                 </label>
 
                 {uploadProgress && (
-                  <div className="rounded-2xl border border-indigo-100 bg-white p-4 space-y-3">
+                  <div className="rounded-card border border-line bg-surface p-4 space-y-3">
                     <div className="flex items-center justify-between text-xs font-bold">
-                      <span className="text-gray-600">読み込み進捗</span>
-                      <span className="text-indigo-700">
+                      <span className="text-slate-600">読み込み進捗</span>
+                      <span className="text-accent">
                         {uploadProgress.completed} / {uploadProgress.total}件
                       </span>
                     </div>
-                    <div className="h-2.5 rounded-full bg-gray-100 overflow-hidden">
+                    <div className="h-2.5 rounded-full bg-slate-100 overflow-hidden">
                       <div
-                        className="h-full bg-indigo-600 transition-all"
+                        className="h-full bg-accent transition-all"
                         style={{ width: `${uploadProgress.total ? Math.round((uploadProgress.completed / uploadProgress.total) * 100) : 0}%` }}
                       />
                     </div>
-                    <div className="grid grid-cols-3 gap-2 text-center text-[11px] font-bold">
-                      <div className="rounded-lg bg-emerald-50 text-emerald-700 py-2">成功 {uploadProgress.success}</div>
-                      <div className="rounded-lg bg-red-50 text-red-600 py-2">失敗 {uploadProgress.failed}</div>
-                      <div className="rounded-lg bg-indigo-50 text-indigo-700 py-2">処理中 {uploadProgress.active.length}</div>
+                    <div className="grid grid-cols-3 gap-2 text-center text-xs font-bold">
+                      <div className="rounded-btn bg-emerald-50 text-emerald-700 py-2">成功 {uploadProgress.success}</div>
+                      <div className="rounded-btn bg-rose-50 text-rose-700 py-2">失敗 {uploadProgress.failed}</div>
+                      <div className="rounded-btn bg-sky-50 text-sky-700 py-2">処理中 {uploadProgress.active.length}</div>
                     </div>
                     {uploadProgress.active.length > 0 && (
-                      <p className="text-[11px] text-gray-500 truncate">
+                      <p className="text-xs text-slate-500 truncate">
                         読み込み中: {uploadProgress.active.join('、')}
                       </p>
                     )}
@@ -717,61 +751,61 @@ export default function SlideManagerPage() {
                 {pendingPptx.length > 0 && (
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
-                      <p className="text-xs font-bold text-gray-500">アップロード予定ファイル</p>
-                      <button type="button" onClick={() => setPendingPptx([])} className="text-xs font-bold text-red-500 hover:text-red-600">
+                      <p className="text-xs font-bold text-slate-500">アップロード予定ファイル</p>
+                      <Button size="sm" variant="ghost" onClick={() => setPendingPptx([])} className="text-rose-600">
                         全てクリア
-                      </button>
+                      </Button>
                     </div>
                     <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
                       {pendingPptx.map(item => (
-                        <div key={item.id} className="rounded-2xl border border-gray-100 bg-gray-50 p-3 space-y-3">
+                        <div key={item.id} className="rounded-card border border-slate-100 bg-slate-50 p-3 space-y-3">
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
-                              <p className="text-sm font-bold text-gray-800 truncate">{item.file.name}</p>
-                              <p className={`text-[11px] mt-1 font-bold ${item.matchScore > 0 ? 'text-emerald-600' : 'text-amber-600'}`}>
+                              <p className="text-sm font-bold text-slate-800 truncate">{item.file.name}</p>
+                              <p className={`text-xs mt-1 font-bold ${item.matchScore > 0 ? 'text-emerald-600' : 'text-amber-700'}`}>
                                 {item.matchScore > 0 ? `一致候補: ${item.matchLabel}` : 'カリキュラム一致候補なし'}
                               </p>
                               {item.uploadStatus && item.uploadStatus !== 'queued' && (
-                                <p className={`text-[11px] mt-1 font-bold ${
+                                <p className={`text-xs mt-1 font-bold ${
                                   item.uploadStatus === 'success' ? 'text-emerald-600' :
-                                  item.uploadStatus === 'failed' ? 'text-red-600' :
-                                  'text-indigo-600'
+                                  item.uploadStatus === 'failed' ? 'text-rose-600' :
+                                  'text-sky-700'
                                 }`}>
-                                  {item.uploadStatus === 'uploading' ? '読み込み中...' : item.uploadMessage}
+                                  {item.uploadStatus === 'uploading' ? '読み込み中' : item.uploadMessage}
                                 </p>
                               )}
                             </div>
-                            <button type="button" onClick={() => setPendingPptx(prev => prev.filter(p => p.id !== item.id))} className="p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50">
-                              <Trash2 size={15} />
-                            </button>
+                            <IconButton label="選択から外す" size="sm" onClick={() => setPendingPptx(prev => prev.filter(p => p.id !== item.id))} className="text-slate-400 hover:bg-rose-50 hover:text-rose-600">
+                              <Trash2 size={15} aria-hidden />
+                            </IconButton>
                           </div>
 
                           <input
                             value={item.unitName}
                             onChange={e => updatePending(item.id, { unitName: e.target.value })}
-                            className="w-full p-2 border border-gray-200 rounded-lg text-xs font-bold bg-white"
+                            className="w-full min-h-10 p-2 border border-line rounded-input text-xs font-bold bg-surface"
                             placeholder="単元名"
                           />
                           <div className="grid grid-cols-2 gap-2">
                             <select
                               value={item.grade}
                               onChange={e => updatePending(item.id, { grade: e.target.value })}
-                              className="p-2 border border-gray-200 rounded-lg text-xs font-bold bg-white"
+                              className="min-h-10 p-2 border border-line rounded-input text-xs font-bold bg-surface"
                             >
                               {['中1', '中2', '中3'].map(g => <option key={g} value={g}>{g}</option>)}
                             </select>
                             <select
                               value={item.subject}
                               onChange={e => updatePending(item.id, { subject: e.target.value, category: categoryFromSubject(e.target.value) })}
-                              className="p-2 border border-gray-200 rounded-lg text-xs font-bold bg-white"
+                              className="min-h-10 p-2 border border-line rounded-input text-xs font-bold bg-surface"
                             >
                               {Object.values(SUBJECT_CATEGORIES).flatMap(c => c.items).map(s => <option key={s} value={s}>{s}</option>)}
                             </select>
                           </div>
                           <div className="grid grid-cols-3 gap-2">
-                            <input value={item.year} onChange={e => updatePending(item.id, { year: e.target.value })} className="p-2 border border-gray-200 rounded-lg text-xs font-bold bg-white" placeholder="年度" />
-                            <input value={item.month} onChange={e => updatePending(item.id, { month: e.target.value })} className="p-2 border border-gray-200 rounded-lg text-xs font-bold bg-white" placeholder="月" />
-                            <input value={item.term} onChange={e => updatePending(item.id, { term: e.target.value })} className="p-2 border border-gray-200 rounded-lg text-xs font-bold bg-white" placeholder="ターム" />
+                            <input value={item.year} onChange={e => updatePending(item.id, { year: e.target.value })} className="min-h-10 p-2 border border-line rounded-input text-xs font-bold bg-surface" placeholder="年度" />
+                            <input value={item.month} onChange={e => updatePending(item.id, { month: e.target.value })} className="min-h-10 p-2 border border-line rounded-input text-xs font-bold bg-surface" placeholder="月" />
+                            <input value={item.term} onChange={e => updatePending(item.id, { term: e.target.value })} className="min-h-10 p-2 border border-line rounded-input text-xs font-bold bg-surface" placeholder="ターム" />
                           </div>
                         </div>
                       ))}
@@ -779,52 +813,55 @@ export default function SlideManagerPage() {
                   </div>
                 )}
 
-                <button
-                  type="button"
+                <Button
+                  size="lg"
+                  fullWidth
                   onClick={handlePptxUpload}
                   disabled={uploading}
-                  className="w-full bg-indigo-600 text-white py-3.5 rounded-xl font-bold hover:bg-indigo-700 transition-all flex justify-center items-center gap-2 shadow-lg shadow-indigo-200 disabled:opacity-50"
+                  loading={uploading}
+                  icon={<FileUp size={20} aria-hidden />}
                 >
-                  {uploading ? <Loader2 className="animate-spin" size={20}/> : <FileUp size={20}/>}
                   {uploading ? 'PPTXを読み込み中' : 'PPTXを一括登録してAIクエストへ連携'}
-                </button>
+                </Button>
               </div>
             </section>
 
-            <section className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
-              <h2 className="font-bold text-gray-700 mb-5 flex items-center gap-2">
-                <Plus className="bg-slate-100 text-slate-600 rounded p-1" size={22} />
+            <section className="bg-surface p-6 rounded-card shadow-sm border border-line">
+              <h2 className="font-bold text-slate-700 mb-5 flex items-center gap-2">
+                <Plus className="rounded-btn bg-slate-100 p-1 text-slate-600" size={22} aria-hidden />
                 テキスト単元の手動登録
               </h2>
               <form onSubmit={handleManualSubmit} className="space-y-5">
                 <textarea
                   value={content}
                   onChange={e => setContent(e.target.value)}
-                  className="w-full h-40 p-3 border border-gray-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-200 outline-none resize-none"
+                  className="w-full h-40 p-3 border border-line rounded-input text-sm focus:ring-2 focus:ring-accent/30 outline-none resize-none"
                   placeholder="PPTXを使わず、スライド内容や教材本文を直接登録する場合はこちらに入力します。"
                 />
-                <button
+                <Button
                   type="submit"
+                  variant="secondary"
+                  fullWidth
                   disabled={submitting}
-                  className="w-full bg-slate-800 text-white py-3 rounded-xl font-bold hover:bg-slate-900 transition-all flex justify-center items-center gap-2 disabled:opacity-50"
+                  loading={submitting}
+                  icon={<Save size={20} aria-hidden />}
                 >
-                  {submitting ? <Loader2 className="animate-spin" size={20}/> : <Save size={20}/>}
                   手動単元として登録
-                </button>
+                </Button>
               </form>
             </section>
           </div>
 
           <div className="xl:col-span-2 space-y-6">
-            <section className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100">
+            <section className="bg-surface p-5 rounded-card shadow-sm border border-line">
               <div className="flex flex-col lg:flex-row gap-3">
                 <div className="relative flex-1">
-                  <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                  <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" aria-hidden />
                   <input
                     value={search}
                     onChange={e => setSearch(e.target.value)}
                     placeholder="単元名・科目・ターム・ファイル名で検索"
-                    className="w-full pl-9 pr-3 py-2.5 border border-gray-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-100"
+                    className="min-h-11 w-full pl-9 pr-3 py-2.5 border border-line rounded-input text-sm outline-none focus:ring-2 focus:ring-accent/30"
                   />
                 </div>
                 <FilterSelect value={filterGrade} onChange={setFilterGrade} options={['中1', '中2', '中3']} label="学年" />
@@ -836,57 +873,64 @@ export default function SlideManagerPage() {
             <section>
               <div className="flex items-end justify-between mb-3">
                 <div>
-                  <h2 className="font-bold text-gray-700">登録済み授業PPT</h2>
-                  <p className="text-xs text-gray-400">{filteredSlides.length}件表示 / 全{slides.length}件</p>
+                  <h2 className="font-bold text-slate-700">登録済みの授業スライド</h2>
+                  <p className="text-xs text-slate-400">{filteredSlides.length}件表示 / 全{slides.length}件</p>
                 </div>
               </div>
 
               {loading ? (
-                <div className="text-center py-20 bg-white rounded-2xl"><Loader2 className="animate-spin inline text-indigo-400"/></div>
+                <ListSkeleton rows={4} />
+              ) : loadError ? (
+                <ErrorState title="教材データを読み込めませんでした" onRetry={fetchData} />
               ) : filteredSlides.length === 0 ? (
-                <div className="text-gray-400 text-center py-20 bg-white rounded-2xl border border-dashed border-gray-200">
-                  条件に合うPPTがありません
-                </div>
+                <EmptyState
+                  title={slides.length === 0 ? '授業スライドはまだありません' : '条件に合うスライドがありません'}
+                  description={slides.length === 0 ? '左の「PPTXアップロード」から登録してください。' : '検索語や絞り込みを変えてください。'}
+                />
               ) : (
                 <div className="grid grid-cols-1 gap-3">
                   {filteredSlides.map(slide => (
-                    <div key={slide.id} className="bg-white p-5 rounded-xl border border-gray-100 shadow-sm hover:border-indigo-200 transition-all">
+                    <div key={slide.id} className="bg-surface p-5 rounded-card border border-line shadow-sm transition-all hover:border-accent/40">
                       <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-4">
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-2 mb-2">
-                            <span className="text-xs font-bold bg-gray-100 text-gray-600 px-2 py-1 rounded">{slide.grade}</span>
-                            <span className={`text-xs font-bold px-2 py-1 rounded ${badgeStyle(slide.subject)}`}>{slide.subject}</span>
-                            {slide.year && <span className="text-xs font-bold bg-blue-50 text-blue-700 px-2 py-1 rounded">{slide.year}</span>}
-                            {slide.term && <span className="text-xs font-bold bg-amber-50 text-amber-700 px-2 py-1 rounded">{slide.term}</span>}
-                            {slide.month && <span className="text-xs font-bold bg-emerald-50 text-emerald-700 px-2 py-1 rounded">{slide.month}</span>}
-                            <span className="text-[10px] text-gray-400">{dateLabel(slide.created_at)}</span>
+                            <span className="text-xs font-bold bg-slate-100 text-slate-600 px-2 py-1 rounded-btn">{slide.grade}</span>
+                            <span className={`text-xs font-bold px-2 py-1 rounded-btn ${badgeStyle(slide.subject)}`}>{slide.subject}</span>
+                            {slide.year && <span className="text-xs font-bold bg-sky-50 text-sky-700 px-2 py-1 rounded-btn">{slide.year}</span>}
+                            {slide.term && <span className="text-xs font-bold bg-amber-50 text-amber-700 px-2 py-1 rounded-btn">{slide.term}</span>}
+                            {slide.month && <span className="text-xs font-bold bg-emerald-50 text-emerald-700 px-2 py-1 rounded-btn">{slide.month}</span>}
+                            <span className="text-xs text-slate-400">{dateLabel(slide.created_at)}</span>
                           </div>
-                          <h3 className="font-bold text-lg text-gray-800 mb-1 truncate">{slide.unit_name}</h3>
-                          <p className="text-xs text-gray-500 mb-2">
+                          <h3 className="font-bold text-lg text-slate-800 mb-1 truncate">{slide.unit_name}</h3>
+                          <p className="text-xs text-slate-500 mb-2">
                             {slide.file_name || 'PPTXファイル'} {formatBytes(slide.file_size)} {slide.slide_count ? `/ ${slide.slide_count}枚` : ''}
                           </p>
-                          <p className="text-xs text-gray-500 line-clamp-2 bg-gray-50 p-2 rounded max-w-3xl">{slide.content}</p>
+                          <p className="text-xs text-slate-500 line-clamp-2 bg-slate-50 p-2 rounded-btn max-w-3xl">{slide.content}</p>
                         </div>
                         <div className="flex lg:flex-col gap-2 shrink-0">
-                          <button onClick={() => handleDownload(slide)} className="px-3 py-2 rounded-lg bg-slate-100 text-slate-700 text-xs font-bold flex items-center gap-1 hover:bg-slate-200">
-                            <Download size={14}/> ダウンロード
-                          </button>
-                          <button
+                          <Button size="sm" variant="secondary" onClick={() => handleDownload(slide)} icon={<Download size={14} aria-hidden />}>
+                            ダウンロード
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="secondary"
                             onClick={() => handleGenerateQuestions(slide)}
                             disabled={generatingId === slide.id}
-                            className="px-3 py-2 rounded-lg bg-indigo-600 text-white text-xs font-bold flex items-center gap-1 hover:bg-indigo-700 disabled:opacity-50"
+                            loading={generatingId === slide.id}
+                            icon={<Sparkles size={14} aria-hidden />}
                           >
-                            {generatingId === slide.id ? <Loader2 size={14} className="animate-spin"/> : <Sparkles size={14}/>}
                             AI問題作成
-                          </button>
-                          <button
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="danger"
                             onClick={() => handleDeleteSlide(slide)}
                             disabled={deletingId === slide.id}
-                            className="px-3 py-2 rounded-lg bg-red-50 text-red-600 text-xs font-bold flex items-center gap-1 hover:bg-red-100 disabled:opacity-50"
+                            loading={deletingId === slide.id}
+                            icon={<Trash2 size={14} aria-hidden />}
                           >
-                            {deletingId === slide.id ? <Loader2 size={14} className="animate-spin"/> : <Trash2 size={14}/>}
                             削除
-                          </button>
+                          </Button>
                         </div>
                       </div>
                     </div>
@@ -896,22 +940,25 @@ export default function SlideManagerPage() {
             </section>
 
             <section>
-              <h2 className="font-bold text-gray-700 mb-3">AIクエスト単元リスト</h2>
+              <h2 className="font-bold text-slate-700 mb-3">AIクエスト単元リスト</h2>
+              {!loading && !loadError && units.length === 0 && (
+                <EmptyState title="AIクエスト単元はまだありません" description="スライドの登録や手動登録で追加されます。" />
+              )}
               <div className="grid grid-cols-1 gap-3">
                 {units.slice(0, 30).map(unit => (
-                  <div key={unit.id} className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm flex justify-between items-start group">
+                  <div key={unit.id} className="bg-surface p-4 rounded-card border border-line shadow-sm flex justify-between items-start gap-3">
                     <div>
                       <div className="flex items-center gap-2 mb-1">
-                        <span className="text-xs font-bold bg-gray-100 text-gray-600 px-2 py-1 rounded">{unit.grade}</span>
-                        <span className={`text-xs font-bold px-2 py-1 rounded ${badgeStyle(unit.subject)}`}>{unit.subject}</span>
-                        {unit.source_type === 'pptx' && <span className="text-xs font-bold bg-indigo-50 text-indigo-700 px-2 py-1 rounded">PPTX連携</span>}
+                        <span className="text-xs font-bold bg-slate-100 text-slate-600 px-2 py-1 rounded-btn">{unit.grade}</span>
+                        <span className={`text-xs font-bold px-2 py-1 rounded-btn ${badgeStyle(unit.subject)}`}>{unit.subject}</span>
+                        {unit.source_type === 'pptx' && <span className="text-xs font-bold bg-accent-soft text-accent px-2 py-1 rounded-btn">PPTX連携</span>}
                       </div>
-                      <h3 className="font-bold text-gray-800">{unit.unit_name}</h3>
-                      <p className="text-xs text-gray-500 line-clamp-1">{unit.content}</p>
+                      <h3 className="font-bold text-slate-800">{unit.unit_name}</h3>
+                      <p className="text-xs text-slate-500 line-clamp-1">{unit.content}</p>
                     </div>
-                    <button onClick={() => handleDeleteUnit(unit.id)} className="p-2 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors opacity-0 group-hover:opacity-100">
-                      <Trash2 size={16}/>
-                    </button>
+                    <IconButton label="単元を削除" size="sm" onClick={() => handleDeleteUnit(unit.id, unit.unit_name)} className="text-slate-400 hover:bg-rose-50 hover:text-rose-600">
+                      <Trash2 size={16} aria-hidden />
+                    </IconButton>
                   </div>
                 ))}
               </div>
@@ -944,19 +991,19 @@ function MetaFields(props: {
   return (
     <>
       <div>
-        <label className="block text-xs font-bold text-gray-400 mb-2">対象学年</label>
-        <div className="flex bg-gray-100 p-1 rounded-lg">
+        <label className="block text-xs font-bold text-slate-500 mb-2">対象学年</label>
+        <div className="flex bg-slate-100 p-1 rounded-btn">
           {['中1','中2','中3'].map(g => (
-            <button key={g} type="button" onClick={() => props.setGrade(g)} className={`flex-1 py-2 text-sm font-bold rounded-md transition-all ${props.grade === g ? 'bg-white shadow text-indigo-600' : 'text-gray-400 hover:text-gray-600'}`}>{g}</button>
+            <button key={g} type="button" onClick={() => props.setGrade(g)} className={cn('flex-1 min-h-10 py-2 text-sm font-bold rounded-btn transition-all', props.grade === g ? 'bg-surface shadow text-accent' : 'text-slate-500 hover:text-slate-700')}>{g}</button>
           ))}
         </div>
       </div>
 
       <div>
-        <label className="block text-xs font-bold text-gray-400 mb-2">教科カテゴリー</label>
+        <label className="block text-xs font-bold text-slate-500 mb-2">教科カテゴリー</label>
         <div className="grid grid-cols-3 gap-2">
           {(Object.entries(SUBJECT_CATEGORIES) as [CategoryKey, typeof SUBJECT_CATEGORIES[CategoryKey]][]).map(([key, data]) => (
-            <button key={key} type="button" onClick={() => props.handleCategoryChange(key)} className={`py-2 rounded-lg text-sm font-bold border-2 transition-all ${props.selectedCategory === key ? `border-transparent ${data.color} ring-2 ring-offset-1 ring-gray-200` : 'border-gray-100 bg-white text-gray-500 hover:border-gray-200'}`}>
+            <button key={key} type="button" onClick={() => props.handleCategoryChange(key)} className={cn('min-h-10 py-2 rounded-btn text-sm font-bold border-2 transition-all', props.selectedCategory === key ? `border-transparent ${data.color} ring-2 ring-offset-1 ring-slate-200` : 'border-slate-100 bg-surface text-slate-500 hover:border-slate-200')}>
               {data.label}
             </button>
           ))}
@@ -964,20 +1011,20 @@ function MetaFields(props: {
       </div>
 
       <div>
-        <label className="block text-xs font-bold text-gray-400 mb-2">詳細分野</label>
+        <label className="block text-xs font-bold text-slate-500 mb-2">詳細分野</label>
         <div className="flex flex-wrap gap-2">
           {SUBJECT_CATEGORIES[props.selectedCategory].items.map(item => (
-            <button key={item} type="button" onClick={() => props.setSubject(item)} className={`px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 transition-all ${props.subject === item ? 'bg-gray-800 text-white shadow-md' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}>
+            <button key={item} type="button" onClick={() => props.setSubject(item)} className={cn('min-h-10 px-4 py-2 rounded-btn text-sm font-bold flex items-center gap-2 transition-all', props.subject === item ? 'bg-accent text-accent-ink shadow-md' : 'bg-slate-100 text-slate-600 hover:bg-slate-200')}>
               {item}
-              {props.subject === item && <Check size={14}/>}
+              {props.subject === item && <Check size={14} aria-hidden />}
             </button>
           ))}
         </div>
       </div>
 
       <div>
-        <label className="block text-xs font-bold text-gray-400 mb-1">単元名</label>
-        <input value={props.unitName} onChange={e => props.setUnitName(e.target.value)} className="w-full p-3 border border-gray-200 rounded-xl font-bold focus:ring-2 focus:ring-indigo-200 outline-none" placeholder="例: 歴史A 第1講" />
+        <label className="block text-xs font-bold text-slate-500 mb-1">単元名</label>
+        <input value={props.unitName} onChange={e => props.setUnitName(e.target.value)} className="w-full min-h-11 p-3 border border-line rounded-input font-bold focus:ring-2 focus:ring-accent/30 outline-none" placeholder="例: 歴史A 第1講" />
       </div>
 
       <div className="grid grid-cols-3 gap-2">
@@ -993,15 +1040,15 @@ function MetaFields(props: {
 function TextField({ label, value, onChange, placeholder }: { label: string; value: string; onChange: (value: string) => void; placeholder?: string }) {
   return (
     <label className="block">
-      <span className="block text-xs font-bold text-gray-400 mb-1">{label}</span>
-      <input value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} className="w-full p-2.5 border border-gray-200 rounded-xl text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-100" />
+      <span className="block text-xs font-bold text-slate-500 mb-1">{label}</span>
+      <input value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} className="w-full min-h-10 p-2.5 border border-line rounded-input text-sm font-bold outline-none focus:ring-2 focus:ring-accent/30" />
     </label>
   );
 }
 
 function FilterSelect({ value, onChange, options, label }: { value: string; onChange: (value: string) => void; options: string[]; label: string }) {
   return (
-    <select value={value} onChange={e => onChange(e.target.value)} className="px-3 py-2.5 border border-gray-200 rounded-xl text-sm font-bold bg-white text-gray-700 outline-none">
+    <select value={value} onChange={e => onChange(e.target.value)} className="min-h-11 px-3 py-2.5 border border-line rounded-input text-sm font-bold bg-surface text-slate-700 outline-none">
       <option value="all">{label}: 全て</option>
       {options.map(option => <option key={option} value={option}>{option}</option>)}
     </select>
