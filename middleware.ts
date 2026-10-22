@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import { isProbePath } from '@/lib/security-probe';
 
 function getClientIp(request: NextRequest) {
   // Vercel が付与するヘッダーを優先し、一般的なProxyヘッダーへフォールバックする。
@@ -38,6 +39,12 @@ function parseAllowedIps(envValue: string | undefined) {
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
+  if (pathname !== '/api/security/probe' && isProbePath(pathname)) {
+    const headers = new Headers(request.headers);
+    headers.set('x-probe-path', pathname);
+    return NextResponse.rewrite(new URL('/api/security/probe', request.url), { request: { headers } });
+  }
+
   // 403ページは必ず許可（ループ防止にもなる）
   if (pathname === '/403') return NextResponse.next();
 
@@ -72,5 +79,10 @@ export function middleware(request: NextRequest) {
 export const config = {
   // 公開静的ファイルは Function を起動せず CDN から配信する。
   // 画面と API は従来どおり対象にし、診断環境の全体 IP 制限も維持する。
-  matcher: ['/((?!_next/static|_next/image|favicon.ico|.*\\.[^/]+$).*)'],
+  // 拡張子付きの不審なアクセス（.php など）も監視のため対象にする（実在する静的ファイルの拡張子は含めない）。
+  matcher: [
+    '/((?!_next/static|_next/image|favicon.ico|.*\\.[^/]+$).*)',
+    '/((?:.*)\\.(?:php\\d?|phtml|asp|aspx|jsp|cgi|pl|env|ini|sql|bak|old|swp|git|svn|htaccess|htpasswd|DS_Store)(?:/.*)?)',
+    '/(wp-admin|wp-login|wp-content|wp-includes|xmlrpc|phpmyadmin|cgi-bin|\\.git|\\.env)(.*)',
+  ],
 };

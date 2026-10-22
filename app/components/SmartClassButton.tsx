@@ -120,7 +120,8 @@ export default function SmartClassButton({ profile, period, startTime, endTime, 
         />
       );
     }
-    // 生徒：参加ボタンが出ていないときは、受講登録か今日の授業への振替へ案内する。
+    // 生徒：自分の授業の参加ボタンが出ていないときは、今日の振替（同じ時限・同じ学年の授業から選んで参加）と受講登録へ案内する。
+    // 今日の振替は、振替の画面の表示設定（allowBetaTransfer）に関係なく出す。ほかの日の振替の画面へのリンクだけ表示設定に従う。
     return (
       <>
         <EmptyState
@@ -130,17 +131,22 @@ export default function SmartClassButton({ profile, period, startTime, endTime, 
           className="w-full bg-surface/70"
           action={(
             <div className="flex w-full max-w-sm flex-col items-stretch gap-2">
-              <ButtonLink href="/student/change-request" icon={<ClipboardEdit size={16} aria-hidden />} className="no-underline">
+              {!scheduleMissing && (
+                <>
+                  <Button icon={<Repeat size={16} aria-hidden />} onClick={() => setTransferOpen(true)}>
+                    当日の振替はこちら
+                  </Button>
+                  <p className="text-xs text-fg-muted">
+                    <Phrase>今日のこの時間の授業から選ぶと、その場で参加ボタンが出ます</Phrase>
+                  </p>
+                </>
+              )}
+              <ButtonLink href="/student/change-request" variant="secondary" icon={<ClipboardEdit size={16} aria-hidden />} className="mt-1 no-underline">
                 受講講座を登録・変更する
               </ButtonLink>
               <p className="text-xs text-fg-muted">
                 <Phrase>受講登録がまだの場合は、ここから登録すると参加ボタンが出ます</Phrase>
               </p>
-              {allowBetaTransfer && !scheduleMissing && (
-                <Button variant="secondary" icon={<Repeat size={16} aria-hidden />} onClick={() => setTransferOpen(true)} className="mt-1">
-                  振替で参加する（ここから選ぶ）
-                </Button>
-              )}
               {allowBetaTransfer && (
                 <Link href="/student/absence?mode=transfer" className="mt-1 text-xs font-bold text-accent underline underline-offset-2">
                   ほかの日の振替はこちら
@@ -149,14 +155,12 @@ export default function SmartClassButton({ profile, period, startTime, endTime, 
             </div>
           )}
         />
-        {allowBetaTransfer && (
-          <TodayTransferModal
-            open={transferOpen}
-            onClose={() => setTransferOpen(false)}
-            period={period}
-            onRegistered={() => setReloadKey(value => value + 1)}
-          />
-        )}
+        <TodayTransferModal
+          open={transferOpen}
+          onClose={() => setTransferOpen(false)}
+          period={period}
+          onRegistered={() => setReloadKey(value => value + 1)}
+        />
       </>
     );
   }

@@ -95,10 +95,13 @@ export default function NextClassWidget({ profile }: { profile: any }) {
   const myName = profile?.student_name || profile?.name || '講師';
 
   const handleJoin = (cls: NextClassShift) => {
-    const confno = normalizeMeetingId(cls.target_meeting_id);
+    // 合併された授業は、合併先の会議に参加者として入る。
+    const merged = Boolean(cls.merge_host_shift_id && cls.merge_meeting_id);
+    const confno = normalizeMeetingId(merged ? cls.merge_meeting_id : cls.target_meeting_id);
     if (!confno) { toast.error('ミーティングIDが未設定です'); return; }
     const params = new URLSearchParams({ confno });
-    if (cls.target_password) params.set('pwd', String(cls.target_password).normalize('NFKC').trim());
+    const password = merged ? cls.merge_password : cls.target_password;
+    if (password) params.set('pwd', String(password).normalize('NFKC').trim());
     window.open(`zoommtg://zoom.us/join?${params.toString()}`, '_self');
   };
 
@@ -150,9 +153,10 @@ export default function NextClassWidget({ profile }: { profile: any }) {
 
         <div className="flex flex-col gap-2">
           {nextClasses.map((cls) => {
-            const hasMeeting = Boolean(normalizeMeetingId(cls.target_meeting_id));
-            // ホスト開始は当日の授業のみ（ZAK は当日の配置でしか発行されない）。
-            const canHostStart = hasMeeting && isToday && isValidZoomSigninAddress(cls.target_signin_address);
+            const merged = Boolean(cls.merge_host_shift_id && cls.merge_meeting_id);
+            const hasMeeting = Boolean(normalizeMeetingId(merged ? cls.merge_meeting_id : cls.target_meeting_id));
+            // ホスト開始は当日の授業のみ（ZAK は当日の配置でしか発行されない）。合併された授業は合併先が開始する。
+            const canHostStart = !merged && hasMeeting && isToday && isValidZoomSigninAddress(cls.target_signin_address);
             return (
               <div key={cls.id} className="flex flex-col justify-between gap-3 rounded-card border border-white/10 bg-white/10 p-3 sm:flex-row sm:items-center">
                 <div className="flex items-start gap-3 overflow-hidden">
@@ -169,6 +173,7 @@ export default function NextClassWidget({ profile }: { profile: any }) {
                       <BookOpen size={12} className="shrink-0 opacity-70" aria-hidden />
                       <span className="truncate">{cls.unit || '単元設定なし'}</span>
                     </div>
+                    {merged && <p className="mt-1 text-xs font-bold opacity-90">合併：{cls.merge_host_label || '合併先の授業'}に集約（参加者として入ります）</p>}
                   </div>
                 </div>
 
@@ -191,7 +196,7 @@ export default function NextClassWidget({ profile }: { profile: any }) {
                         ? 'flex min-h-11 w-full items-center justify-center gap-1.5 whitespace-nowrap rounded-btn border border-white/40 px-4 text-sm font-bold text-accent-ink transition-colors hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white sm:w-auto'
                         : 'flex min-h-11 w-full items-center justify-center gap-1.5 whitespace-nowrap rounded-btn bg-white px-4 text-sm font-bold text-accent shadow-sm transition-colors hover:bg-accent-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white sm:w-auto'}
                     >
-                      <Video size={16} aria-hidden /> 参加
+                      <Video size={16} aria-hidden /> {merged ? '合併先に参加' : '参加'}
                     </button>
                   </div>
                 )}

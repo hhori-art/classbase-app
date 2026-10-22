@@ -13,6 +13,30 @@
     {
       "path": "/api/zoom/recordings/sync?days=3&max_meetings=100",
       "schedule": "0 1 * * *"
+    },
+    {
+      "path": "/api/security/monitor",
+      "schedule": "0 22 * * *"
+    },
+    {
+      "path": "/api/cron/work-detail-reminders",
+      "schedule": "0 23 * * *"
+    },
+    {
+      "path": "/api/cron/missed-class?slot=1",
+      "schedule": "0 11 * * *"
+    },
+    {
+      "path": "/api/cron/missed-class?slot=2",
+      "schedule": "0 12 * * *"
+    },
+    {
+      "path": "/api/cron/missed-class?slot=3",
+      "schedule": "0 13 * * *"
+    },
+    {
+      "path": "/api/cron/transfer-reminders",
+      "schedule": "0 9 * * *"
     }
   ]
 }

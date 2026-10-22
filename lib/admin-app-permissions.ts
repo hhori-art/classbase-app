@@ -37,6 +37,8 @@ const MASTER_ONLY_ADMIN_PATHS = [
   '/master/requests',
   '/master/inbox',
   '/master/audit-logs',
+  // 講師の授業の評価にあたるため、マスターだけ。
+  '/master/lesson-language',
 ] as const;
 
 export const ADMIN_APP_LABELS: Record<AdminAppId, string> = {

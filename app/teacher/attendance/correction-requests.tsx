@@ -22,6 +22,7 @@ export type CorrectionRequest = {
   request_type?: string;
   target_date?: string | null;
   requested_start_time?: string | null;
+  has_invalid_time?: boolean;
   requested_end_time?: string | null;
   reason?: string;
   status: string;
@@ -208,6 +209,7 @@ export function CorrectionRequestList({ requests, loading, error, onRetry, onReo
                 <p className="mt-1 text-xs font-bold text-fg">{formatDateTimeLabel(request.requested_end_time)}</p>
               </div>
             </div>
+            {request.has_invalid_time && <p className="mt-3 rounded-input bg-warning-soft px-3 py-2 text-xs font-bold text-warning">申請の時刻を読み取れませんでした。お手数ですが、もう一度申請してください。</p>}
             {request.reason && <p className="mt-3 text-xs font-medium leading-relaxed text-fg-muted">理由: {request.reason}</p>}
             {request.review_note ? (
               <div className={`mt-2 rounded-input p-3 text-xs font-bold leading-relaxed ${request.status === 'rejected' ? 'bg-danger-soft text-rose-700' : 'bg-surface text-fg'}`}>

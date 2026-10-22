@@ -1,10 +1,11 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { hasAdminAppPermission } from '@/lib/admin-app-permissions';
 import { auth, db } from '@/lib/firebase';
 import { collection, query, where, getDocs, addDoc, deleteDoc, doc, updateDoc, orderBy, limit, getDoc } from 'firebase/firestore';
 import { reportAuditLog } from '@/app/components/master/audit-log-client';
-import { Trash2, Video, Save, Loader2, Link as LinkIcon, Users, MapPin, User, GripVertical, CheckCircle, HelpCircle, Clock, KeyRound, Zap, BarChart2, X, Settings, AlertTriangle, Bell, XCircle, ClipboardCheck, Search, ChevronDown, ChevronUp, CalendarClock, UserPlus } from 'lucide-react';
+import { Trash2, Video, Save, Loader2, Link as LinkIcon, Users, MapPin, User, GripVertical, CheckCircle, HelpCircle, Clock, KeyRound, Zap, BarChart2, X, Settings, AlertTriangle, Bell, XCircle, ClipboardCheck, Search, ChevronDown, ChevronUp, CalendarClock, UserPlus, GitMerge } from 'lucide-react';
 import { usePathname } from 'next/navigation';
 import ShiftImportButton from '@/app/components/ShiftImportButton';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, CartesianGrid } from 'recharts';
@@ -105,6 +106,8 @@ export default function ShiftManagementPage() {
   const pathname = usePathname();
   const teacherSurface = pathname.startsWith('/teacher/');
   const { user, profile } = useAuth();
+  // 授業の合併は、マスターと理社講座の管理者だけが使える（専任の承認者は使わない）。
+  const canMergeShifts = Boolean(profile && hasAdminAppPermission(profile.role, profile, 'science_social'));
   const toast = useToast();
   const confirm = useConfirm();
   const schoolAdminReadOnly = isConfigurableAdminRole(profile?.role) && profile?.role !== 'master';
@@ -795,6 +798,8 @@ export default function ShiftManagementPage() {
           title={teacherSurface ? 'シフト配置・提出確認' : undefined}
           backHref={teacherSurface ? '/teacher/attendance-approvals' : undefined}
           actions={<>
+            {/* 同じ内容の授業を1つの Zoom に集約する（授業の合併）。 */}
+            {!teacherSurface && canMergeShifts && <ButtonLink href={`/master/shifts/merge`} variant="secondary" icon={<GitMerge size={16} aria-hidden />}>授業の合併</ButtonLink>}
             <Button
               variant="secondary"
               onClick={() => setToolsOpen(previous => !previous)}

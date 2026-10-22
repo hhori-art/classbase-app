@@ -1,7 +1,10 @@
 import type { QueryDocumentSnapshot } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { autoPublishShiftRecording } from '@/lib/server/recording-auto-publish';
+import { checkTranscriptForAttachedRecording, transcriptFileOf } from '@/lib/server/lesson-transcript-check';
 import { MIN_MEETING_MINUTES, MIN_RECORDING_MINUTES, meetingExcessMinutes, meetingTrimOptions } from '@/lib/recording-publish-rules';
+
+const transcriptFileId = (recording: any) => String(transcriptFileOf(recording)?.id || '');
 
 type ShiftCandidateDoc = {
   docSnap: QueryDocumentSnapshot;
@@ -495,7 +498,10 @@ function periodCandidates(recording: any, match: ReturnType<typeof findBestShift
   return overlapping.length > 0 ? overlapping : match.candidates;
 }
 
-async function attachPlans(plans: RecordingAttachmentPlan[], source: string) {
+/** 一括の取り込み（日次同期・管理画面の取得）で1回に確認する文字起こしの上限。残りは次回の同期か Zoom の通知で確認する。 */
+const TRANSCRIPT_CHECKS_PER_SYNC = 25;
+
+async function attachPlans(plans: RecordingAttachmentPlan[], source: string, transcriptBudget?: { remaining: number }) {
   const results = [];
   // 授業の録画にする区間を先に処理し、候補だけの区間はそのあとに足す。
   const ordered = [...plans].sort((a, b) => Number(b.options.role === 'primary') - Number(a.options.role === 'primary'));
@@ -506,6 +512,19 @@ async function attachPlans(plans: RecordingAttachmentPlan[], source: string) {
     const match = best ? { ...plan.match, best } : plan.match;
     const result = await attachRecordingWithMatch(plan.segment, source, match, plan.options);
     if (best && 'patch' in result && result.patch) latest.set(shiftKey(best.docSnap), { ...best.data, ...result.patch });
+    // 授業の録画にした区間に文字起こしがあれば、授業の発言チェックをする（失敗しても録画の処理は止めない）。
+    if (best && plan.options.role === 'primary' && result.updated && (!transcriptBudget || transcriptBudget.remaining > 0)) {
+      const transcript = await checkTranscriptForAttachedRecording({
+        shiftRef: best.docSnap.ref,
+        shift: latest.get(shiftKey(best.docSnap)) || best.data,
+        recording: plan.segment,
+      }).catch(error => {
+        console.warn('[lesson-language] transcript check failed', best.docSnap.ref?.id, error?.message);
+        return null;
+      });
+      if (transcript?.checked && transcriptBudget) transcriptBudget.remaining -= 1;
+      if (transcript?.checked) latest.set(shiftKey(best.docSnap), { ...(latest.get(shiftKey(best.docSnap)) || best.data), transcript_check_file_id: String(transcriptFileId(plan.segment)) });
+    }
     results.push(result);
   }
   return results;
@@ -558,6 +577,7 @@ export async function attachRecordingsToBestShifts(recordings: any[], source: st
   }
 
   const results = [];
+  const transcriptBudget = { remaining: TRANSCRIPT_CHECKS_PER_SYNC };
   for (const meeting of recordings) {
     const entries = splitRecordingBySegment(meeting).map(segment => {
       const meetingId = recordingMeetingId(segment);
@@ -565,7 +585,7 @@ export async function attachRecordingsToBestShifts(recordings: any[], source: st
       const docs = meetingId && targetDate ? (shiftsByDateAndMeeting.get(`${targetDate}:${meetingId}`) || []) : [];
       return { segment, match: findBestShiftFromDocs(segment, docs) };
     });
-    results.push(...await attachPlans(planRecordingAttachments(entries), source));
+    results.push(...await attachPlans(planRecordingAttachments(entries), source, transcriptBudget));
   }
 
   return {

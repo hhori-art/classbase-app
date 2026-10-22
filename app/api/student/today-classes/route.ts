@@ -47,8 +47,9 @@ const resolveStudentZoomUrl = async (shift: any) => {
     const officialJoinUrl = await fetchOfficialZoomJoinUrl(meetingId);
     if (!officialJoinUrl) return existingUrl;
     if (shift.id && !shift._schedule_fallback) {
+      // 合併された授業は合併先の参加URLなので、自分の参加URL（target_join_url）ではなく写しの項目へ保存する。
       await adminDb().collection('shift_assignments').doc(String(shift.id)).set({
-        target_join_url: officialJoinUrl,
+        [shift.merge_meeting_id ? 'merge_join_url' : 'target_join_url']: officialJoinUrl,
         zoom_join_url_updated_at: FieldValue.serverTimestamp(),
       }, { merge: true });
     }

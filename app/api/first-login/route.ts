@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { adminAuth, adminDb } from '@/lib/firebase-admin';
 import { consumeRateLimit, getClientIp, releaseRateLimit, requestFingerprint } from '@/lib/server/password-recovery';
 import { verifyExistingFirebasePassword } from '@/lib/server/firebase-password-check';
+import { monitorLoginResponses } from '@/lib/server/security-login-monitor';
 
 export const runtime = 'nodejs';
 
@@ -115,7 +116,7 @@ function pickSeedDoc(docs: FirebaseFirestore.QueryDocumentSnapshot[], password: 
   return docs[0] || null;
 }
 
-export async function POST(req: Request) {
+async function handleFirstLogin(req: Request) {
   try {
     const body = (await req.json()) as Partial<Body>;
     const lifetimeIdRaw = body.lifetimeId;
@@ -216,3 +217,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: `server-error:${err?.message || 'unknown'}` }, { status: 500 });
   }
 }
+
+// ログインの失敗・回数制限での拒否を、攻撃の監視（lib/server/security-events.ts）に記録する。
+export const POST = monitorLoginResponses(handleFirstLogin, body => body.lifetimeId);

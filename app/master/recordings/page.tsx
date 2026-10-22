@@ -58,6 +58,10 @@ type ShiftData = {
   recording_group_meeting?: 'before' | 'after' | null;
   /** 集会と授業が1つの録画につながっているときの切り取り位置の候補。 */
   recording_meeting_trim_options?: MeetingTrimOptions | null;
+  /** 授業の合併：合併された側は合併先の録画を使う。 */
+  merge_host_shift_id?: string;
+  merge_host_label?: string;
+  merge_audiences?: Array<{ shift_id: string; grade: string; subject: string; detail_subject: string }>;
 };
 
 const MEETING_POSITION_LABELS = { before: '授業の前', after: '授業の後' } as const;
@@ -81,6 +85,7 @@ const STATE_TONES: Record<RecordingUploadState, string> = {
   pending: 'bg-amber-50 text-amber-800 ring-amber-200',
   waiting: 'bg-sky-50 text-sky-700 ring-sky-200',
   missing: 'bg-amber-100 text-amber-900 ring-amber-300',
+  merged: 'bg-indigo-50 text-indigo-700 ring-indigo-200',
 };
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -114,6 +119,8 @@ function deriveState(shift: ShiftData, period: string, published: PublishedData 
     if (published.status === 'stopped') return 'stopped';
     return published.is_replacement ? 'replaced' : 'published';
   }
+  // 合併された授業は、合併先の録画をこのクラスの生徒も見る（このクラス用の録画はない）。
+  if (shift.merge_host_shift_id) return 'merged';
   if (shift.recording_publish_mode === 'stopped') return 'stopped';
   if (shift.recording_status === 'blocked') return 'blocked';
   if (shift.target_recording_url) return 'pending';
@@ -283,6 +290,7 @@ export default function RecordingAdminPage() {
     }),
     original_shift_id: shift.id,
     period,
+    merge_audiences: Array.isArray(shift.merge_audiences) ? shift.merge_audiences : [],
     status: 'published',
     trim_start_seconds: Number(shift.target_recording_trim_start_seconds || 0),
     trim_end_seconds: shift.target_recording_trim_end_seconds ? Number(shift.target_recording_trim_end_seconds) : null,
@@ -571,6 +579,7 @@ function StatusRow({ row, busy, onPreview, onStop, onResume, onPublish, onReplac
           )}
           {row.state === 'stopped' && published?.stopped_reason && <p className="mt-1 text-xs font-bold text-slate-500">停止理由：{published.stopped_reason}</p>}
           {row.state === 'replaced' && published?.replacement_reason && <p className="mt-1 text-xs font-bold text-emerald-800">差し替え理由：{published.replacement_reason}</p>}
+          {row.state === 'merged' && <p className="mt-1 text-xs font-bold text-indigo-800">授業の合併で「{shift.merge_host_label || '合併先の授業'}」に集約しています。合併先の録画を、このクラスの生徒も見られます。</p>}
           {row.state === 'missing' && <p className="mt-1 text-xs font-bold text-amber-800">授業後に録画が届いていません。Zoomの録画設定と会議IDを確認するか、「差し替え」で別の録画を設定してください。</p>}
         </div>
       </div>

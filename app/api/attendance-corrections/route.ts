@@ -1,4 +1,5 @@
 import { NextRequest } from 'next/server';
+import { notifyCorrectionResult } from '@/lib/server/auto-notifications';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { canManageAttendance, canManageAttendanceSchool, getServerUser, jsonError, requireRole } from '@/lib/server-auth';
@@ -16,6 +17,8 @@ import { attendanceDateKey, ensureAttendanceRangeWithinDate, ensureAttendanceTim
 const toDateKey = (value?: string | null) => {
   return attendanceDateKey(value);
 };
+
+const jstDateKeyOf = (date: Date) => new Date(date.getTime() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
 const isIsoLikeDate = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value);
 
@@ -53,6 +56,20 @@ const normalizeLegacyFiveMinuteTime = (value?: string | null) => {
   date.setSeconds(0, 0);
   date.setMinutes(Math.floor(date.getMinutes() / 5) * 5);
   return date.toISOString();
+};
+
+/**
+ * 一覧表示用。Firestoreのタイムスタンプも受け付け、読めない値は null にする
+ * （1件のデータが壊れていても、一覧全体をエラーにしない）。
+ */
+const listFiveMinuteTime = (value: unknown) => {
+  if (value === null || value === undefined || value === '') return { value: null as string | null, invalid: false };
+  const raw = typeof (value as any)?.toDate === 'function' ? (value as any).toDate().toISOString() : String(value);
+  try {
+    return { value: normalizeLegacyFiveMinuteTime(raw) || null, invalid: false };
+  } catch {
+    return { value: null, invalid: true };
+  }
 };
 
 const workRecordSchool = (record: Record<string, any>) => {
@@ -382,6 +399,14 @@ export async function POST(request: NextRequest) {
         work_record_id: reviewedInfo?.work_record_id || null,
       },
     });
+    // 申請した講師へ結果を知らせる（通知の設定でオフにできる）。失敗しても承認・差し戻しは成功のまま。
+    await notifyCorrectionResult({
+      requestId,
+      teacherId: String(reviewedInfo?.teacher_id || ''),
+      status: status === 'approved' ? 'approved' : 'rejected',
+      targetDate: reviewedInfo?.target_date || null,
+      reviewNote: String(body.review_note || ''),
+    }).catch(error => console.error('attendance correction result notification failed', error));
 
     return Response.json({ ok: true, event_id: eventId });
   } catch (error) {
@@ -430,6 +455,9 @@ export async function GET(request: NextRequest) {
       const effectiveSchoolId = workRecordSchool(linkedRecords.get(recordId) || {}) || resolveAttendanceSchoolCode(data.school_id);
       const created = data.created_at;
       const reviewed = data.reviewed_at;
+      const requestedStart = listFiveMinuteTime(data.requested_start_time);
+      const requestedEnd = listFiveMinuteTime(data.requested_end_time);
+      if (requestedStart.invalid || requestedEnd.invalid) console.warn('[attendance-corrections] invalid requested time', doc.id);
       return {
         id: doc.id,
         ...data,
@@ -437,12 +465,15 @@ export async function GET(request: NextRequest) {
         current_start_time: linkedRecords.get(recordId)?.start_time || null,
         current_end_time: linkedRecords.get(recordId)?.end_time || null,
         current_teacher_name: linkedRecords.get(recordId)?.teacher_name || null,
-        requested_start_time: normalizeLegacyFiveMinuteTime(data.requested_start_time),
-        requested_end_time: normalizeLegacyFiveMinuteTime(data.requested_end_time),
+        requested_start_time: requestedStart.value,
+        requested_end_time: requestedEnd.value,
+        // 申請の時刻が読めないとき。画面で「時刻を確認できません」と出し、差し戻しで直してもらう。
+        has_invalid_time: requestedStart.invalid || requestedEnd.invalid,
         school_id: effectiveSchoolId || data.school_id || null,
         school_name: correctionSchoolName(effectiveSchoolId) || data.school_name || null,
         created_at: created?.toDate ? created.toDate().toISOString() : created || null,
         reviewed_at: reviewed?.toDate ? reviewed.toDate().toISOString() : reviewed || null,
+        target_date: typeof data.target_date?.toDate === 'function' ? jstDateKeyOf(data.target_date.toDate()) : data.target_date || null,
       };
     }).filter((item: any) => {
       if (!month) return true;

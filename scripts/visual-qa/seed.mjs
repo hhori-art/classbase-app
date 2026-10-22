@@ -520,6 +520,73 @@ w.set(col('monthly_schedules').doc('vqa-sched-2'), {
 });
 void thisMonth;
 
+// ---- 専任の勤怠（時間外の予定・実施報告・講習期間） -------------------------------------------------
+const T_DED2 = 'vqa-teacher-dedicated-2';
+w.set(col('users').doc(T_DED), {
+  prescribed_work_start: '13:50', prescribed_work_end: '22:20', prescribed_break_minutes: 60, prescribed_work_days: [1, 2, 3, 4, 5, 6],
+  job_grade: 4, dedicated_division: 'group_online', dedicated_baseline_type: 'group',
+}, { merge: true });
+w.set(col('users').doc(T_DED2), {
+  role: 'teacher', name: '松本 健太', displayName: '松本 健太', teacher_name: '松本 健太', ...school,
+  employment_category: 'dedicated', attendance_school_manager: false, enabled_programs: [],
+  prescribed_work_start: '13:50', prescribed_work_end: '22:20', prescribed_break_minutes: 60, prescribed_work_days: [1, 2, 3, 4, 5, 6],
+  job_grade: 3, dedicated_division: 'group_online', dedicated_baseline_type: 'group',
+  status: 'active', account_status: 'active', isFirstLogin: false, visual_qa_seed: true, updated_at: Timestamp.now(),
+}, { merge: true });
+[[-6, '12:20', '22:20'], [-5, '13:45', '23:05'], [-3, '13:50', '22:20'], [-2, '11:00', '22:20']].forEach(([offset, start, end]) => {
+  const date = addDays(today, offset);
+  w.set(col('work_records').doc(`vqa-ded2-${date}`), {
+    teacher_id: T_DED2, teacher_name: '松本 健太', ...school, date, start_time: iso(date, start), end_time: iso(date, end),
+    status: 'pending', attendance_kind: 'normal', created_at: iso(date, start),
+  });
+});
+const planDoc = (id, user, date, start, end, status, source, reason) => w.set(col('dedicated_overtime_plans').doc(id), {
+  user_id: user, user_name: user === T_DED2 ? '松本 健太' : teacherName(T_DED), school_id: '112', date, start, end, break_minutes: 0,
+  minutes: (Number(end.slice(0, 2)) * 60 + Number(end.slice(3))) - (Number(start.slice(0, 2)) * 60 + Number(start.slice(3))),
+  night_minutes: 0, day_off: false, reason, source, late: false, warnings: [], status, submitted_by: user, submitted_by_system: false,
+  submitted_at: ts(addDays(date, -3)), updated_at: ts(addDays(date, -3)),
+});
+planDoc('vqa-plan-1', T_DED2, addDays(today, -6), '12:20', '13:20', 'approved', 'bulk', '保護者会の準備');
+planDoc('vqa-plan-2', T_DED2, addDays(today, -2), '11:00', '12:30', 'approved', 'individual', '三者面談');
+planDoc('vqa-plan-3', T_DED2, addDays(today, 5), '12:20', '13:20', 'pending', 'individual', '教室会議（所管：集団指導部）');
+planDoc('vqa-plan-4', T_DED2, addDays(today, 30), '12:50', '13:20', 'pending', 'bulk', '授業準備');
+w.set(col('dedicated_overtime_reports').doc(`${T_DED2}_${addDays(today, -5)}`), {
+  user_id: T_DED2, user_name: '松本 健太', school_id: '112', date: addDays(today, -5), actual_minutes: 45, planned_minutes: 0, night_minutes: 45,
+  actual_start: '13:50', actual_end: '23:05', reason: '保護者対応が長引いたため', details: '中3 進路相談', status: 'pending', review_note: '',
+  submitted_at: ts(addDays(today, -4)), updated_at: ts(addDays(today, -4)),
+});
+w.set(col('dedicated_transport_claims').doc('vqa-transport-1'), {
+  user_id: T_DED2, user_name: '松本 健太', school_id: '112', expense_date: addDays(today, -3), from: '本部', to: '大久保校', amount: 640, reason: '他校舎での授業', details: '', status: 'pending',
+  submitted_at: ts(addDays(today, -3)), updated_at: ts(addDays(today, -3)),
+});
+const seasonStart = addDays(today, -20);
+const seasonEnd = addDays(today, 20);
+w.set(col('settings').doc('dedicated_seasons'), {
+  seasons: [{
+    id: 'vqa_season', name: '検証用 冬期講習',
+    periods: { group_online: { start: seasonStart, end: seasonEnd }, individual: { start: seasonStart, end: seasonEnd }, junior_exam: { start: seasonStart, end: seasonEnd } },
+    excluded: { start: addDays(today, 8), end: addDays(today, 10) }, per_day_minutes: 203, baselines: { hq_group: 3271, hq_academy: 3383 },
+    courses: [
+      { id: 'c1', section: '集団', grade: '中1・中2', name: '数学', minutes: 55 },
+      { id: 'c2', section: '集団', grade: '中1・中2', name: '理科', minutes: 65 },
+      { id: 'c3', section: '集団', grade: '中3', name: '英語', minutes: 70 },
+      { id: 'c4', section: '私学', grade: '小6', name: '算数', minutes: 110 },
+    ],
+    rates: { grade5plus: 1500, grade3to4: 400, grade1to2: 250 }, deduct_overtime_for_grade4_or_below: true,
+  }],
+});
+[[-6, 'c3', 3, 'approved'], [-5, 'c1', 2, 'pending'], [-3, 'c2', 2, 'pending']].forEach(([offset, course, count, status], index) => {
+  const minutes = { c1: 55, c2: 65, c3: 70, c4: 110 }[course] * count;
+  const label = { c1: '集団 中1・中2 数学', c2: '集団 中1・中2 理科', c3: '集団 中3 英語', c4: '私学 小6 算数' }[course];
+  for (const user of [T_DED, T_DED2]) {
+    w.set(col('dedicated_season_lessons').doc(`vqa-season-${user}-${index}`), {
+      user_id: user, user_name: user === T_DED2 ? '松本 健太' : teacherName(T_DED), school_id: '112', season_id: 'vqa_season', date: addDays(today, offset),
+      course_id: course, course_label: label, count, minutes, school_name: SCHOOL_NAME, status, review_note: '',
+      submitted_at: ts(addDays(today, offset)), updated_at: ts(addDays(today, offset)),
+    });
+  }
+});
+
 const total = await w.commit();
 fs.writeFileSync(visualAccountsPath, `${JSON.stringify({ generated_at: new Date().toISOString(), accounts: visualAccounts }, null, 2)}\n`, { mode: 0o600 });
 console.log(`[visual-qa seed] wrote ${total} documents for school 112 (today=${today}, ${todayWeekday}) to the local emulators.`);

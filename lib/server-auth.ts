@@ -4,6 +4,7 @@ import { canManageAdminApp } from '@/lib/admin-app-access';
 import { isDedicatedAttendanceApproverProfile, isDedicatedProfile } from '@/lib/employment-category';
 import { attendanceSchoolName, resolveAttendanceSchoolCode } from '@/lib/attendance-schools';
 import { hasScienceSocialProgram } from '@/lib/teacher-programs';
+import { recordSecurityEvent } from '@/lib/server/security-events';
 
 export type AppRole = 'student' | 'teacher' | 'master' | 'admin' | 'parent' | 'attendance_admin';
 
@@ -34,10 +35,18 @@ export async function getServerUser(request: NextRequest): Promise<ServerUser> {
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
 
   if (!token) {
+    recordSecurityEvent({ kind: 'unauthorized', request });
     throw new Error('missing-token');
   }
 
-  const decoded = await adminAuth().verifyIdToken(token, true);
+  let decoded;
+  try {
+    decoded = await adminAuth().verifyIdToken(token, true);
+  } catch (error) {
+    // 期限切れ・取り消し・偽造などのトークン。監視の集計に入れてから、従来どおり失敗させる。
+    recordSecurityEvent({ kind: 'unauthorized', request });
+    throw error;
+  }
   const profileSnap = await adminDb().collection('users').doc(decoded.uid).get();
 
   if (!profileSnap.exists) {

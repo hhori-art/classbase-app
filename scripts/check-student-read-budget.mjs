@@ -137,7 +137,25 @@ const limits = {
   // +2: パスワード再設定の依頼（「メールが使えない」）。対応待ち一覧（lib/server/admin-inbox.ts、マスター専用）の
   // 依頼の新しい順40件と、依頼を受けた時に保護者の校舎を最初のお子さま1件から求める読取
   // （lib/server/password-recovery-notify.ts）。ログイン画面の依頼と管理者の対応待ちでだけ実行され、生徒画面には影響しない。
-  serverFirestoreReads: 401,
+  // +2: 攻撃の監視ジョブ（lib/server/security-monitor.ts）。しきい値以上の IP・アカウントの集計（1日あたり最大20件）と、
+  // 期間内の管理操作の監査ログ（最大200件）。Vercel Cron から1日1回（有料プラン後は5分ごと）だけ実行され、
+  // 利用者の画面からは呼ばれない。出来事の記録（lib/server/security-events.ts）は increment の書き込みだけで読まない。
+  // +4: 自動の通知（lib/server/auto-notifications.ts）。授業の未参加（毎晩1回）：受講登録の生徒ID（select・最大5000件）と
+  // 今日の参加記録（select）。生徒ごとの時間割は既存の buildStudentTimetable（講師配置・年間予定は共有キャッシュ）を使う。
+  // 勤務詳細の未登録（毎朝1回）：前日〜3日前の勤務記録。打刻修正の結果：承認・差し戻しの時に申請した講師1人のプロフィール。
+  // いずれも Vercel Cron か管理者の承認操作のときだけで、生徒・保護者の画面からは呼ばれない。
+  // +6: 自動の通知の追加分（lib/server/auto-notifications.ts）。授業の未参加を時限ごと（開始10分後）にしたための
+  // 実行記録1件と今日の講師配置（何限の授業に参加したかの判定、select）、打刻忘れで「申請中の打刻修正」（最大500件・select）、
+  // 振替の未選択で欠席連絡（2〜7日前の範囲だけ）。いずれも Vercel Cron（1日数回）だけで、利用者の画面からは呼ばれない。
+  // +2: 授業の発言チェック（lib/server/lesson-transcript-check.ts・/api/admin/lesson-language）。言葉の設定1件と、
+  // マスターが結果の画面を開いたときのチェック結果（直近30日・最大400件）。文字起こしの取り込みは録画を付けたときだけで、
+  // 生徒・保護者の画面からは呼ばれない。
+  // +26: 専任の勤怠の作り直し（/api/dedicated-attendance・/api/admin/dedicated-attendance・lib/server/dedicated-attendance.ts）。
+  // 時間外の予定（D05/D06）・実施報告（D07）・月の報告書（D08）・講習の授業を足し、本人の画面は本人の申請だけ（user_id で絞る）、
+  // 承認者の画面は表示中の月の範囲と承認待ちだけを読む。旧 /api/admin/dedicated-claims（5件）は削除した。
+  // いずれも専任と承認者の操作のときだけで、生徒・保護者の画面からは呼ばれない。
+  // +2: 専任の手続きの案内（runDedicatedReportReminders）。毎朝の Vercel Cron で、月初1〜3日と20日だけ専任の一覧と前の月の報告書を読む。
+  serverFirestoreReads: 443,
 };
 const exceeded = Object.entries(limits).filter(([key, max]) => usage[key] > max);
 

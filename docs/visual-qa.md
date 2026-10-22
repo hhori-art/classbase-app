@@ -27,7 +27,7 @@ npm run qa:visual
 when they are not running, runs `security:accounts` + `qa:visual:seed`, captures, and stops what it
 started. Stopping sends SIGINT, so the emulators export their data to `.security-emulator-data`
 (the same `--export-on-exit` behaviour as `npm run security:start`). Other options: `--role student|parent|teacher|teacher-dedicated|master`,
-`--only /student/homework` (exact path), `--width 375`, `--headful`.
+`--only /student/homework` (exact path), `--width 375`, `--headful`, `--click '<css selector>'` (click an element after the page settles, then capture — e.g. to check a modal).
 
 Output goes to `.visual-qa/<run>/` (git ignored):
 

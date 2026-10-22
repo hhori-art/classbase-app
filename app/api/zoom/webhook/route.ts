@@ -2,6 +2,7 @@
 import { NextResponse } from 'next/server';
 import crypto from 'crypto';
 import { attachRecordingToBestShift } from '@/lib/zoom-recording-match';
+import { recordSecurityEvent } from '@/lib/server/security-events';
 
 function verifyZoomWebhook(rawBody: string, request: Request) {
   const secret = process.env.ZOOM_WEBHOOK_SECRET || '';
@@ -36,6 +37,7 @@ export async function POST(request: Request) {
 
     // URL validationも含め、Zoom署名を確認する前に共有秘密で応答しない。
     if (!verifyZoomWebhook(rawBody, request)) {
+      recordSecurityEvent({ kind: 'webhook_signature', request });
       return NextResponse.json({ error: 'invalid-signature' }, { status: 401 });
     }
 
@@ -62,14 +64,15 @@ export async function POST(request: Request) {
       });
     }
 
-    // --- 3. 録画完了イベントの処理 ---
-    if (body.event === 'recording.completed') {
+    // --- 3. 録画完了・文字起こし完了イベントの処理 ---
+    // 文字起こし（audio_transcript）は録画より後に届くことがあるので、その通知でも照合し直す（授業の発言チェックが動く）。
+    if (body.event === 'recording.completed' || body.event === 'recording.transcript_completed') {
       const payload = body.payload?.object;
       if (!payload || typeof payload !== 'object') {
         return NextResponse.json({ error: 'invalid-recording-payload' }, { status: 400 });
       }
       const result = await attachRecordingToBestShift(payload, 'zoom_webhook');
-      console.info('[zoom-webhook] recording.completed', {
+      console.info(`[zoom-webhook] ${body.event}`, {
         meetingId: result.meetingId,
         targetDate: result.targetDate,
         updated: result.updated,

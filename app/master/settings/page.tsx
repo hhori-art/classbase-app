@@ -120,6 +120,13 @@ const DEFAULT_NOTIFICATION_SETTINGS = {
   class_start_enabled: true,
   homework_enabled: true,
   announcements_enabled: true,
+  missed_class_enabled: true,
+  work_detail_reminder_enabled: true,
+  correction_result_enabled: true,
+  missed_class_summary_enabled: true,
+  clock_out_missing_enabled: true,
+  transfer_reminder_enabled: true,
+  dedicated_report_reminder_enabled: true,
   student_line_enabled: true,
   parent_line_enabled: true,
   teacher_line_enabled: true,
@@ -898,6 +905,13 @@ export default function SettingsPage() {
                     { key: 'class_start_enabled', label: '授業開始通知', description: '授業前リマインドの配信を許可します。' },
                     { key: 'homework_enabled', label: '宿題通知', description: '宿題・提出期限の配信を許可します。' },
                     { key: 'announcements_enabled', label: 'お知らせ通知', description: '管理者のお知らせ配信を許可します。' },
+                    { key: 'missed_class_enabled', label: '授業の未参加通知', description: '各時限の開始から10分たっても、欠席連絡なしで参加していない生徒と保護者へ知らせます（時間どおりに送るには定期実行の設定が必要です）。' },
+                    { key: 'missed_class_summary_enabled', label: '未参加のまとめ（管理者向け）', description: 'その日の最後の時限のあと、校舎ごとの未参加の一覧を、校舎の理社講座の管理者とマスターへ1通にまとめて送ります。' },
+                    { key: 'transfer_reminder_enabled', label: '振替の未選択通知', description: '欠席したのに振替を選んでいない生徒と保護者へ、欠席の2日後と7日後の夕方（18時台）に知らせます。' },
+                    { key: 'work_detail_reminder_enabled', label: '勤務詳細の未登録通知', description: '退勤したのに勤務の詳細が入っていない講師へ、翌朝（8時台）と3日後に知らせます。専任は対象外です。' },
+                    { key: 'correction_result_enabled', label: '打刻修正の結果通知', description: '打刻修正が承認・差し戻しされたとき、申請した講師へすぐに知らせます。' },
+                    { key: 'clock_out_missing_enabled', label: '打刻忘れ（退勤なし）通知', description: '出勤したまま退勤の打刻がない職員へ、翌朝（8時台）に打刻修正の申請を案内します。' },
+                    { key: 'dedicated_report_reminder_enabled', label: '専任の月の報告書・一括申請の通知', description: '専任へ、月初（1〜3日の朝）に前の月の時間外報告書（D08）の提出を、校舎の承認者へ毎月20日の朝に翌月の時間外の一括申請（D05）を知らせます。' },
                   ]}
                   values={notificationSettings}
                   onChange={handleNotificationChange}

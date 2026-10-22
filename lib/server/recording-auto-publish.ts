@@ -83,6 +83,8 @@ export async function autoPublishShiftRecording(input: {
     zoom_recording_files: Array.isArray(recording.recording_files) ? recording.recording_files : [],
     recording_meeting_id: String(shift.target_meeting_id || ''),
     recording_duration_seconds: Number.isFinite(startMs) && Number.isFinite(endMs) ? Math.max(0, Math.round((endMs - startMs) / 1000)) : 0,
+    // 合併された授業の学年・科目（合併先の録画をその生徒も見られるようにする）。
+    merge_audiences: Array.isArray(shift.merge_audiences) ? shift.merge_audiences : [],
     trim_start_seconds: Number(shift.target_recording_trim_start_seconds || 0),
     trim_end_seconds: shift.target_recording_trim_end_seconds ? Number(shift.target_recording_trim_end_seconds) : null,
     source: 'zoom_auto',

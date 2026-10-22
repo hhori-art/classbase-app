@@ -59,7 +59,9 @@ export const periodFromShift = (shift: any) => {
   return 0;
 };
 
+// 授業の合併（lib/shift-merge.ts）：合併された講師配置は、合併先の会議IDを使う（生徒の参加ボタンを1つにまとめる）。
 export const getShiftMeetingId = (shift: any) => normalizeZoomMeetingId(
+  shift.merge_meeting_id ||
   shift.target_meeting_id ||
   shift.meeting_id ||
   shift.zoom_meeting_id ||
@@ -75,6 +77,7 @@ export const getShiftMeetingId = (shift: any) => normalizeZoomMeetingId(
 export const getShiftJoinUrl = (shift: any) => {
   const meetingId = getShiftMeetingId(shift);
   const candidates = [
+    shift.merge_join_url,
     shift.target_join_url,
     shift.zoom_join_url,
     shift.target_url,

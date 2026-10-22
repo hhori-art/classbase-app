@@ -98,7 +98,8 @@ test('セキュリティ用環境変数は架空プロジェクトだけを参�
 
 test('API共通認証はトークン欠落を401へ変換する', () => {
   const source = fs.readFileSync('lib/server-auth.ts', 'utf8');
-  assert.match(source, /if \(!token\)\s*\{\s*throw new Error\('missing-token'\)/);
+  // 攻撃の監視へ記録してから 401 にする（記録は書き込みだけで、応答は変えない）。
+  assert.match(source, /if \(!token\)\s*\{\s*recordSecurityEvent\(\{ kind: 'unauthorized', request \}\);\s*throw new Error\('missing-token'\)/);
   assert.match(source, /message === 'missing-token' \|\|/);
   assert.match(source, /authenticationExpired \? 401/);
 });

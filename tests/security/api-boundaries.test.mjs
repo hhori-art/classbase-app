@@ -18,7 +18,7 @@ const master = { role: 'master', school: '999', email: 'master@example.test' };
 function harness({ profiles = {}, documents = {}, identity = { uid: 'actor', email: 'actor@example.test' }, env = {}, authUsers = {}, fetch: fetchImpl, overrides = {}, now } = {}) {
   const data = new Map(Object.entries({ ...Object.fromEntries(Object.entries(profiles).map(([id, value]) => [`users/${id}`, value])), ...documents }));
   const storageBlobs = new Map();
-  const writes = []; const authWrites = []; const verifications = []; const calls = []; const rateLimitReleases = [];
+  const writes = []; const authWrites = []; const verifications = []; const calls = []; const rateLimitReleases = []; const securityEvents = [];
   const snapshot = key => ({ id: key.split('/').at(-1), exists: data.has(key), data: () => data.get(key), ref: reference(key) });
   function reference(key) {
     return {
@@ -95,6 +95,16 @@ function harness({ profiles = {}, documents = {}, identity = { uid: 'actor', ema
       consumeRateLimit: async () => true,
       releaseRateLimit: async key => { rateLimitReleases.push(key); },
     },
+    // 攻撃の監視の記録（本物は Firestore へ increment で書く）。テストでは一覧に積むだけにして、業務データの書き込みと分ける。
+    '@/lib/server/security-events': {
+      SECURITY_EVENT_KINDS: ['login_failed', 'rate_limited', 'unauthorized', 'probe', 'webhook_signature'],
+      SECURITY_EVENT_LABELS: { login_failed: 'ログインの失敗', rate_limited: '回数制限による拒否', unauthorized: 'ログインなし', probe: '脆弱性探り', webhook_signature: '署名違い' },
+      SECURITY_DAYS_COLLECTION: 'security_monitor_days',
+      SECURITY_SUBJECTS_SUBCOLLECTION: 'subjects',
+      cleanSecurityText: (value, max) => String(value ?? '').trim().slice(0, max),
+      securityEventIp: () => '203.0.113.10',
+      recordSecurityEvent: input => { securityEvents.push({ kind: input.kind, account: input.account || '', path: input.path || '' }); },
+    },
     '@ai-sdk/openai': { openai: Object.assign(model => model, { chat: model => model }) },
     ai: { convertToCoreMessages: messages => messages, streamText: input => { calls.push(input); return { toDataStreamResponse: () => new Response('stream'), toUIMessageStreamResponse: () => new Response('stream') }; } },
     'next/cache': { unstable_cache: fn => fn, revalidateTag: tag => calls.push(`revalidate:${tag}`) },
@@ -123,7 +133,7 @@ function harness({ profiles = {}, documents = {}, identity = { uid: 'actor', ema
     vm.runInNewContext(code, context, { filename });
     return module.exports;
   }
-  return { load, data, writes, authWrites, calls, verifications, auth, db, rateLimitReleases };
+  return { load, data, writes, authWrites, calls, verifications, auth, db, rateLimitReleases, securityEvents };
 }
 const request = (url, body, token = 'valid', method = 'POST') => new NextRequest(`https://security.test${url}`, { method, headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, ...(method === 'GET' ? {} : { body: JSON.stringify(body) }) });
 const actor = { uid: 'actor', ...admin, profile: admin };
@@ -675,6 +685,32 @@ test('attendance correction identifies a science-social clock-in as its workplac
   assert.equal(items.length, 1);
   assert.equal(items[0].school_id, 'science_social');
   assert.equal(items[0].school_name, '理社講座');
+});
+
+test('one malformed correction request does not break the correction list', async () => {
+  const h = harness({
+    profiles: { actor: master, target: teacher },
+    documents: {
+      'attendance_correction_requests/broken': {
+        teacher_id: 'target', school_id: '112', target_date: '2026-10-06', status: 'pending',
+        requested_start_time: 'not-a-time', requested_end_time: '2026-10-06T11:05:00.000Z',
+      },
+      'attendance_correction_requests/good': {
+        teacher_id: 'target', school_id: '112', target_date: '2026-10-07', status: 'pending',
+        requested_start_time: '2026-10-07T10:05:00.000Z', requested_end_time: '2026-10-07T11:05:00.000Z',
+      },
+    },
+  });
+  const response = await h.load('app/api/attendance-corrections/route.ts').GET(
+    request('/api/attendance-corrections?scope=admin&month=2026-10', null, 'valid', 'GET')
+  );
+  assert.equal(response.status, 200);
+  const items = (await response.json()).requests;
+  assert.equal(items.length, 2);
+  const broken = items.find(item => item.id === 'broken');
+  assert.equal(broken.has_invalid_time, true);
+  assert.equal(broken.requested_start_time, null);
+  assert.equal(items.find(item => item.id === 'good').has_invalid_time, false);
 });
 
 test('teacher attendance history remains visible while the composite index is unavailable', () => {
@@ -2275,22 +2311,75 @@ test('recording playback exchanges OAuth download for a trusted signed Zoom URL 
     { Authorization: 'Bearer fixture' },
   ), /untrusted/);
 });
-test('school claim review rejects foreign schools before any batch write', async () => {
+test('dedicated review rejects foreign schools before any batch write', async () => {
   const manager = { ...teacher, employment_category: 'dedicated', attendance_school_manager: true };
   for (const [school, status] of [['999', 403], ['112', 200]]) {
-    const h = harness({ profiles: { actor: manager, target: { ...teacher, school_id: school } }, documents: { 'dedicated_transport_claims/claim': { user_id: 'target', expense_date: '2026-09-01', status: 'pending' } } });
-    assert.equal((await h.load('app/api/admin/dedicated-claims/route.ts').POST(request('/api/admin/dedicated-claims', { kind: 'transport', id: 'claim', status: 'approved' }))).status, status);
+    const h = harness({ profiles: { actor: manager, target: { ...teacher, school_id: school, employment_category: 'dedicated' } }, documents: { 'dedicated_transport_claims/claim': { user_id: 'target', expense_date: '2026-09-01', status: 'pending' } } });
+    const response = await h.load('app/api/admin/dedicated-attendance/route.ts').POST(request('/api/admin/dedicated-attendance', { action: 'review', items: [{ kind: 'transport', id: 'claim' }], status: 'approved' }));
+    assert.equal(response.status, status);
     if (status === 403) assert.equal(h.writes.length, 0);
+    else assert.equal(h.data.get('dedicated_transport_claims/claim').status, 'approved');
   }
 });
-test('school claim listings exclude other school records', async () => {
+test('dedicated listings and queues exclude other school staff', async () => {
   const manager = { ...teacher, employment_category: 'dedicated', attendance_school_manager: true };
-  const h = harness({ profiles: { actor: manager, ownSchool: teacher, foreign: { ...teacher, school_id: '999' } }, documents: {
-    'dedicated_transport_claims/a': { user_id: 'ownSchool', expense_date: '2026-09-01' },
-    'dedicated_transport_claims/b': { user_id: 'foreign', expense_date: '2026-09-01' },
+  const h = harness({ profiles: { actor: manager, ownSchool: { ...teacher, employment_category: 'dedicated' }, foreign: { ...teacher, school_id: '999', school: '999', employment_category: 'dedicated' } }, documents: {
+    'dedicated_transport_claims/a': { user_id: 'ownSchool', expense_date: '2026-09-01', status: 'pending', amount: 300 },
+    'dedicated_transport_claims/b': { user_id: 'foreign', expense_date: '2026-09-01', status: 'pending', amount: 300 },
   } });
-  const response = await h.load('app/api/admin/dedicated-claims/route.ts').GET(request('/api/admin/dedicated-claims?month=2026-09', null, 'valid', 'GET'));
-  assert.equal(response.status, 200); assert.deepEqual((await response.json()).transport.map(item => item.id), ['a']);
+  const response = await h.load('app/api/admin/dedicated-attendance/route.ts').GET(request('/api/admin/dedicated-attendance?month=2026-09', null, 'valid', 'GET'));
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.deepEqual(body.rows.map(row => row.staff.uid).sort(), ['actor', 'ownSchool']);
+  assert.deepEqual(body.queue.map(item => item.id), ['a']);
+  assert.equal(body.can_manage_system, false);
+});
+test('dedicated approvers cannot approve their own requests', async () => {
+  const manager = { ...teacher, employment_category: 'dedicated', attendance_school_manager: true };
+  const h = harness({ profiles: { actor: manager }, documents: { 'dedicated_overtime_plans/own': { user_id: 'actor', date: '2026-09-02', status: 'pending', source: 'individual' } } });
+  const response = await h.load('app/api/admin/dedicated-attendance/route.ts').POST(request('/api/admin/dedicated-attendance', { action: 'review', items: [{ kind: 'plan', id: 'own' }], status: 'approved' }));
+  assert.equal(response.status, 403);
+  assert.equal(h.writes.length, 0);
+});
+test('D05 bulk plans by a school manager wait for an attendance administrator', async () => {
+  const manager = { ...teacher, employment_category: 'dedicated', attendance_school_manager: true };
+  const target = { ...teacher, employment_category: 'dedicated', prescribed_work_start: '13:50', prescribed_work_end: '22:20', prescribed_break_minutes: 60 };
+  const h = harness({ now: '2026-11-02T03:00:00Z', profiles: { actor: manager, target } });
+  const route = h.load('app/api/admin/dedicated-attendance/route.ts');
+  const created = await route.POST(request('/api/admin/dedicated-attendance', { action: 'bulk_plans', entries: [{ user_id: 'target', date: '2026-12-03', start: '12:20', end: '13:20', break_minutes: 0, reason: '三者面談' }] }));
+  assert.equal(created.status, 200);
+  const [planKey] = [...h.data.keys()].filter(key => key.startsWith('dedicated_overtime_plans/'));
+  assert.equal(h.data.get(planKey).status, 'pending');
+  assert.equal(h.data.get(planKey).submitted_by_system, false);
+  const id = planKey.split('/')[1];
+  const approve = await route.POST(request('/api/admin/dedicated-attendance', { action: 'review', items: [{ kind: 'plan', id }], status: 'approved' }));
+  assert.equal(approve.status, 403);
+  const attendanceAdmin = { role: 'attendance_admin', school: '112', school_id: '112', school_ids: ['112'] };
+  const upper = harness({ now: '2026-11-02T03:00:00Z', profiles: { actor: attendanceAdmin, target }, documents: { [planKey]: h.data.get(planKey) } });
+  const approved = await upper.load('app/api/admin/dedicated-attendance/route.ts').POST(request('/api/admin/dedicated-attendance', { action: 'review', items: [{ kind: 'plan', id }], status: 'approved' }));
+  assert.equal(approved.status, 200);
+  assert.equal(upper.data.get(planKey).status, 'approved');
+});
+test('only attendance administrators change dedicated grades and course periods', async () => {
+  const manager = { ...teacher, employment_category: 'dedicated', attendance_school_manager: true };
+  const h = harness({ profiles: { actor: manager, target: { ...teacher, employment_category: 'dedicated' } } });
+  const route = h.load('app/api/admin/dedicated-attendance/route.ts');
+  assert.equal((await route.POST(request('/api/admin/dedicated-attendance', { action: 'staff_update', user_id: 'target', job_grade: 6 }))).status, 403);
+  assert.equal((await route.POST(request('/api/admin/dedicated-attendance', { action: 'season_save', season: { name: 'x' } }))).status, 403);
+  assert.equal(h.writes.length, 0);
+});
+test('dedicated attendance API is only for dedicated staff and locks submitted months', async () => {
+  const semi = harness({ profiles: { actor: { ...teacher, employment_category: 'semi_dedicated' } } });
+  assert.equal((await semi.load('app/api/dedicated-attendance/route.ts').GET(request('/api/dedicated-attendance?month=2026-11', null, 'valid', 'GET'))).status, 403);
+  const h = harness({ now: '2026-11-02T03:00:00Z', profiles: { actor: { ...teacher, employment_category: 'dedicated' } }, documents: { 'dedicated_monthly_reports/actor_2026-11': { user_id: 'actor', month: '2026-11', status: 'submitted' } } });
+  const route = h.load('app/api/dedicated-attendance/route.ts');
+  const locked = await route.POST(request('/api/dedicated-attendance', { action: 'plan_submit', date: '2026-11-20', start: '18:00', end: '19:00', break_minutes: 0, reason: '会議' }));
+  assert.equal(locked.status, 400);
+  assert.equal(h.writes.length, 0);
+  const open = await route.POST(request('/api/dedicated-attendance', { action: 'plan_submit', date: '2026-12-20', start: '18:00', end: '19:00', break_minutes: 0, reason: '会議' }));
+  assert.equal(open.status, 200);
+  const plan = [...h.data.entries()].find(([key]) => key.startsWith('dedicated_overtime_plans/'))[1];
+  assert.deepEqual([plan.status, plan.source, plan.minutes, plan.late], ['pending', 'individual', 60, false]);
 });
 
 test('school administrators write attendance follow-up records only for their own school', async () => {
@@ -7108,4 +7197,294 @@ test('admin inbox counts pending password recovery requests for masters only', a
 
   const menu = fs.readFileSync(path.resolve(sourceRoot, 'app/components/master/admin-menu.ts'), 'utf8');
   assert.match(menu, /key: 'passwordRecovery'[^\n]+badgeKey: 'passwordRecovery'/);
+});
+
+test('security monitor records login failures, rate limits and missing tokens without reading data', async () => {
+  const teacher142 = { role: 'teacher', name: '講師', lifetime_id: '142', email: '142@classbase.local', isFirstLogin: false, account_status: 'active' };
+  const h = harness({ profiles: { target: teacher142 }, authUsers: { target: { email: '142@classbase.local' } } });
+  const wrong = await h.load('app/api/first-login/route.ts').POST(request('/api/first-login', { lifetimeId: '142', password: 'guess' }));
+  assert.equal(wrong.status, 401);
+  assert.deepEqual(h.securityEvents.map(event => [event.kind, event.account]), [['login_failed', '142']]);
+
+  const limited = harness({ overrides: { '@/lib/server/password-recovery': { requestFingerprint: parts => parts.join('|'), getClientIp: () => '203.0.113.10', consumeRateLimit: async () => false, releaseRateLimit: async () => {} } } });
+  assert.equal((await limited.load('app/api/admin/first-login/route.ts').POST(request('/api/admin/first-login', { login: 'boss', password: 'x' }))).status, 429);
+  assert.deepEqual(limited.securityEvents.map(event => [event.kind, event.account]), [['rate_limited', 'boss']]);
+
+  // 成功したログインは記録しない。
+  const ok = harness({ profiles: { target: { ...teacher142, isFirstLogin: true, initial_password: 'init-pass', email: '142@classbase.local' } }, authUsers: { target: { email: '142@classbase.local' } } });
+  await ok.load('app/api/first-login/route.ts').POST(request('/api/first-login', { lifetimeId: '142', password: 'init-pass' }));
+  assert.equal(ok.securityEvents.length, 0);
+
+  // トークンなしのAPI呼び出しは「ログインなし」として記録し、従来どおり401。
+  const anonymous = harness();
+  const response = await anonymous.load('app/api/security/monitor/route.ts').POST(request('/api/security/monitor', {}, null));
+  assert.equal(response.status, 401);
+  assert.deepEqual(anonymous.securityEvents.map(event => event.kind), ['unauthorized']);
+});
+
+test('probe paths such as .php and wp-admin are detected and answered with 404', async () => {
+  const { isProbePath } = harness().load('lib/security-probe.ts');
+  for (const probe of ['/index.php', '/wp-login.php', '/wp-admin/setup-config.php', '/.env', '/.git/config', '/vendor/phpunit/src/Util/PHP/eval-stdin.php', '/cgi-bin/luci', '/backup.sql', '/phpmyadmin/']) {
+    assert.equal(isProbePath(probe), true, probe);
+  }
+  for (const normal of ['/', '/master/attendance-approvals', '/api/health', '/student/homework/abc', '/teacher/attendance/dedicated', '/manual', '/api/admin/school-students/import']) {
+    assert.equal(isProbePath(normal), false, normal);
+  }
+  const h = harness();
+  const probe = new Request('https://classbase.example/api/security/probe', { headers: { 'x-probe-path': '/wp-login.php' } });
+  probe.nextUrl = new URL(probe.url);
+  const response = await h.load('app/api/security/probe/route.ts').GET(probe);
+  assert.equal(response.status, 404);
+  assert.deepEqual(h.securityEvents.map(event => [event.kind, event.path]), [['probe', '/wp-login.php']]);
+  assert.equal(h.writes.length, 0);
+});
+
+test('security monitor flags attacks by thresholds and only cron or masters can run it', async () => {
+  const h = harness({ profiles: { actor: teacher } });
+  const monitor = h.load('lib/server/security-monitor.ts');
+  // 平常時（少しのログイン失敗・ログイン切れ）は知らせない。
+  assert.equal(monitor.evaluateSecurityCounts({ hours: 24, counts: { login_failed: 3, unauthorized: 40 }, subjects: [] }).length, 0);
+  // 1つのアカウントへの集中的なログイン失敗、脆弱性探り、署名違いの通知は知らせる。
+  const findings = monitor.evaluateSecurityCounts({
+    hours: 24,
+    counts: { probe: 25, webhook_signature: 1, login_failed: 30 },
+    subjects: [
+      { type: 'account', value: '142', total: 12, kinds: { login_failed: 12 } },
+      { type: 'ip', value: '198.51.100.7', total: 30, kinds: { login_failed: 25, probe: 5 }, last_path: '/wp-login.php' },
+    ],
+  });
+  const titles = findings.map(item => item.title);
+  assert.ok(titles.includes('脆弱性を探るアクセスが多い'));
+  assert.ok(titles.includes('署名が合わない外部通知'));
+  assert.ok(titles.includes('特定のアカウントへのログイン失敗が多い'));
+  assert.ok(findings.some(item => item.title === '特定のIPからの不審なアクセス' && item.severity === 'high' && item.detail.includes('198.51.100.7')));
+  // 深夜の重要な管理操作は1件でも知らせ、昼間のふつうの操作は知らせない。
+  const night = monitor.evaluateAuditLogs([{ action: 'app_permission_change', actor_name: '管理者A', created_at: new Date('2026-10-21T18:30:00Z') }], 24);
+  assert.equal(night.length, 1);
+  assert.equal(monitor.evaluateAuditLogs([{ action: 'attendance_approve', actor_name: '管理者A', created_at: new Date('2026-10-21T18:30:00Z') }], 24).length, 0);
+  assert.equal(monitor.evaluateAuditLogs([{ action: 'account_password_change', actor_name: '管理者A', created_at: new Date('2026-10-22T03:00:00Z') }], 24).length, 0);
+
+  const route = h.load('app/api/security/monitor/route.ts');
+  const cron = new Request('https://classbase.example/api/security/monitor', { headers: { authorization: 'Bearer wrong' } });
+  cron.nextUrl = new URL(cron.url);
+  assert.equal((await route.GET(cron)).status, 401);
+  assert.equal((await route.POST(request('/api/security/monitor', {}))).status, 403);
+});
+
+test('security monitor emails only valid addresses configured in SECURITY_ALERT_EMAILS', () => {
+  const configured = harness({ env: { SECURITY_ALERT_EMAILS: ' Admin@Example.test, not-an-email ,admin@example.test;second@example.test ' } });
+  assert.deepEqual(Array.from(configured.load('lib/server/security-monitor.ts').securityAlertEmails()), ['admin@example.test']);
+  const none = harness();
+  assert.deepEqual(Array.from(none.load('lib/server/security-monitor.ts').securityAlertEmails()), []);
+});
+
+test('automatic notifications: missed class is sent 10 minutes after each period starts, once per period, then summarized for admins', async () => {
+  const lesson = (status, period) => ({ date: '2026-10-22', status, period, label: period === 1 ? '中2 理科' : '中3 社会', end: period === 1 ? '20:25' : '21:40' });
+  const timetables = { s1: [lesson('scheduled', 1)], s2: [lesson('scheduled', 1)], s3: [lesson('absent', 1)], s5: [lesson('scheduled', 2)] };
+  const h = harness({
+    documents: {
+      'users/s1': { role: 'student', name: '生徒一', parent_ids: ['p1'], school_id: '112', account_status: 'active' },
+      'users/s2': { role: 'student', name: '生徒二', school_id: '112', account_status: 'active' },
+      'users/s3': { role: 'student', name: '生徒三', school_id: '112', account_status: 'active' },
+      'users/s5': { role: 'student', name: '生徒五', school_id: '112', account_status: 'active' },
+      'users/p1': { role: 'parent', name: '保護者一', account_status: 'active' },
+      'users/m1': { role: 'master', name: 'マスター', account_status: 'active' },
+      'course_registrations/r1': { student_id: 's1', status: 'active' },
+      'course_registrations/r2': { student_id: 's2', status: 'active' },
+      'course_registrations/r3': { student_id: 's3', status: 'active' },
+      'course_registrations/r5': { student_id: 's5', status: 'active' },
+      'shift_assignments/shift1': { target_date: '2026-10-22', period: 1 },
+      'attendance/s2_2026-10-22': { user_id: 's2', student_id: 's2', target_date: '2026-10-22', participations: [{ class_id: 'shift1' }] },
+    },
+    overrides: {
+      '@/lib/server/student-timetable': { buildStudentTimetable: async ({ id }) => ({ lessons: timetables[id] || [] }) },
+      '@/lib/server/student-class-masters': { loadStudentClassMasters: async () => ({ classButtonSettingsData: { period1_start: '19:20', period2_start: '20:35' } }) },
+    },
+  });
+  const { runMissedClassNotifications } = h.load('lib/server/auto-notifications.ts');
+  const notices = () => [...h.data.keys()].filter(key => key.startsWith('user_notifications/'));
+
+  // 19:29：まだ1限の開始10分前ではないので何も送らない。
+  assert.deepEqual(Array.from((await runMissedClassNotifications({ today: '2026-10-22', now: new Date('2026-10-22T10:29:00Z') })).periods), []);
+  assert.equal(notices().length, 0);
+  // 19:31：1限だけを処理。参加した s2、欠席連絡のある s3 には送らない。
+  const first = await runMissedClassNotifications({ today: '2026-10-22', now: new Date('2026-10-22T10:31:00Z') });
+  assert.deepEqual(Array.from(first.periods), [1]);
+  assert.ok(h.data.has('user_notifications/missed_class_s1_2026-10-22_p1'));
+  assert.ok(h.data.has('user_notifications/missed_class_s1_2026-10-22_p1_parent_p1'));
+  assert.equal(notices().length, 2);
+  // 同じ時限は二度送らない。
+  assert.deepEqual(Array.from((await runMissedClassNotifications({ today: '2026-10-22', now: new Date('2026-10-22T10:40:00Z') })).periods), []);
+  // 20:46：2限を処理し、最後の時限まで終わったので管理者へまとめを送る。
+  const second = await runMissedClassNotifications({ today: '2026-10-22', now: new Date('2026-10-22T11:46:00Z') });
+  assert.deepEqual(Array.from(second.periods), [2]);
+  assert.ok(h.data.has('user_notifications/missed_class_s5_2026-10-22_p2'));
+  const summary = h.data.get('user_notifications/missed_class_summary_2026-10-22_all_m1');
+  assert.match(summary.title, /未参加 2件/);
+  assert.match(summary.message, /1限 生徒一/);
+  assert.match(summary.message, /2限 生徒五/);
+
+  const off = harness({ documents: { 'settings/notification_channels': { missed_class_enabled: false, missed_class_summary_enabled: false } } });
+  assert.equal((await off.load('lib/server/auto-notifications.ts').runMissedClassNotifications({ today: '2026-10-22' })).skipped, 'disabled');
+});
+
+test('automatic notifications: work detail reminders go to semi-dedicated staff the next day and 3 days later', async () => {
+  const record = (teacher, date, segments = []) => ({ teacher_id: teacher, date, end_time: `${date}T12:00:00.000Z`, status: 'pending', work_segments: segments });
+  const h = harness({
+    documents: {
+      'users/semi': { role: 'teacher', name: '準専任', employment_category: 'semi_dedicated', account_status: 'active' },
+      'users/ded': { role: 'teacher', name: '専任', employment_category: 'dedicated', account_status: 'active' },
+      'work_records/w1': record('semi', '2026-10-21'),
+      'work_records/w2': record('semi', '2026-10-19'),
+      'work_records/w3': record('semi', '2026-10-20'),
+      'work_records/w4': record('ded', '2026-10-21'),
+      'work_records/w5': record('semi', '2026-10-21', [{ type: 'office' }]),
+    },
+  });
+  const result = await h.load('lib/server/auto-notifications.ts').runWorkDetailReminders({ today: '2026-10-22' });
+  assert.equal(result.notified, 2);
+  assert.match(h.data.get('user_notifications/work_detail_missing_w1_2026-10-22').title, /勤務詳細が未登録です$/);
+  assert.match(h.data.get('user_notifications/work_detail_missing_w2_2026-10-22').title, /再通知/);
+  assert.equal(h.data.get('user_notifications/work_detail_missing_w1_2026-10-22').link, '/teacher/attendance?detail=2026-10-21');
+  assert.equal(h.data.has('user_notifications/work_detail_missing_w4_2026-10-22'), false);
+});
+
+test('automatic notifications: missing clock-out is reminded the next morning unless a correction is already pending', async () => {
+  const h = harness({
+    documents: {
+      'users/t1': { role: 'teacher', employment_category: 'semi_dedicated', account_status: 'active' },
+      'users/t2': { role: 'teacher', employment_category: 'dedicated', account_status: 'active' },
+      'users/t3': { role: 'teacher', employment_category: 'semi_dedicated', account_status: 'active' },
+      'work_records/open1': { teacher_id: 't1', date: '2026-10-21', start_time: '2026-10-21T10:00:00.000Z', end_time: null },
+      'work_records/open2': { teacher_id: 't2', date: '2026-10-21', start_time: '2026-10-21T00:00:00.000Z', end_time: null },
+      'work_records/open3': { teacher_id: 't3', date: '2026-10-21', start_time: '2026-10-21T10:00:00.000Z', end_time: null },
+      'attendance_correction_requests/c1': { teacher_id: 't3', target_date: '2026-10-21', work_record_id: 'open3', status: 'pending' },
+    },
+  });
+  const result = await h.load('lib/server/auto-notifications.ts').runWorkDetailReminders({ today: '2026-10-22' });
+  assert.equal(result.clock_out_missing, 2);
+  assert.equal(h.data.get('user_notifications/clock_out_missing_open1').title, '退勤の打刻がありません');
+  // 専任は専任用の勤怠画面へ案内する。
+  assert.equal(h.data.get('user_notifications/clock_out_missing_open2').link, '/teacher/attendance/dedicated');
+  assert.equal(h.data.has('user_notifications/clock_out_missing_open3'), false);
+});
+
+test('automatic notifications: transfer reminders go out 2 and 7 days after an absence without a chosen transfer', async () => {
+  const absence = (date, extra = {}) => ({ type: 'absence', absence_type: 'absent', status: 'completed', student_id: 's1', user_id: 's1', target_date: date, ...extra });
+  const h = harness({
+    documents: {
+      'users/s1': { role: 'student', name: '生徒一', parent_ids: ['p1'], account_status: 'active' },
+      'users/p1': { role: 'parent', account_status: 'active' },
+      'requests/a2': absence('2026-10-20'),
+      'requests/a7': absence('2026-10-15'),
+      'requests/done': absence('2026-10-20', { transfer_status: 'registered', transfer_request_id: 't1' }),
+      'requests/late': absence('2026-10-20', { absence_type: 'late' }),
+      'requests/cancel': absence('2026-10-20', { status: 'cancelled' }),
+      'requests/a3': absence('2026-10-19'),
+    },
+  });
+  const result = await h.load('lib/server/auto-notifications.ts').runTransferReminders({ today: '2026-10-22' });
+  assert.equal(result.absences, 2);
+  assert.equal(h.data.get('user_notifications/transfer_reminder_a2_first').title, '振替を選びましょう');
+  assert.ok(h.data.has('user_notifications/transfer_reminder_a2_first_parent_p1'));
+  assert.match(h.data.get('user_notifications/transfer_reminder_a7_again').title, /再通知/);
+  assert.equal([...h.data.keys()].filter(key => key.startsWith('user_notifications/')).length, 4);
+});
+
+test('automatic notifications: clock correction results reach the requesting teacher with the reviewer comment', async () => {
+  const h = harness({ documents: { 'users/t1': { role: 'teacher', name: '講師', employment_category: 'semi_dedicated', account_status: 'active' } } });
+  const { notifyCorrectionResult } = h.load('lib/server/auto-notifications.ts');
+  await notifyCorrectionResult({ requestId: 'c1', teacherId: 't1', status: 'rejected', targetDate: '2026-10-20', reviewNote: '退勤は21:40では？' });
+  const notice = h.data.get('user_notifications/correction_result_c1');
+  assert.equal(notice.title, '打刻修正が差し戻されました');
+  assert.match(notice.message, /退勤は21:40では？/);
+  await notifyCorrectionResult({ requestId: 'c2', teacherId: 't1', status: 'approved', targetDate: '2026-10-20' });
+  assert.equal(h.data.get('user_notifications/correction_result_c2').title, '打刻修正が承認されました');
+
+  const off = harness({ documents: { 'settings/notification_channels': { correction_result_enabled: false }, 'users/t1': { role: 'teacher', account_status: 'active' } } });
+  assert.equal(await off.load('lib/server/auto-notifications.ts').notifyCorrectionResult({ requestId: 'c3', teacherId: 't1', status: 'approved' }), 0);
+});
+
+test('class merge points member classes to the host Zoom, keeps their own meeting, and can be undone', async () => {
+  const base = { target_date: '2026-10-23', role_type: 'main', target_grade: '中2', target_subject: '理科', target_detail_subject: '物理' };
+  const h = harness({
+    profiles: { actor: master },
+    documents: {
+      'shift_assignments/host': { ...base, period: 1, teacher_name: '講師A', target_meeting_id: '11111111111', target_join_url: 'https://zoom.us/j/11111111111?pwd=abc' },
+      'shift_assignments/m1': { ...base, period: 1, teacher_name: '講師B', target_meeting_id: '22222222222' },
+      'shift_assignments/m2': { ...base, period: 1, target_grade: '中3', teacher_name: '講師C', target_meeting_id: '33333333333' },
+      'shift_assignments/other': { ...base, period: 2, teacher_name: '講師D', target_meeting_id: '44444444444' },
+    },
+  });
+  const route = h.load('app/api/admin/shift-merges/route.ts');
+  // 時限が違う授業は合併できない。
+  const wrong = await route.POST(request('/api/admin/shift-merges', { action: 'merge', host_shift_id: 'host', shift_ids: ['other'] }));
+  assert.equal(wrong.status, 400);
+  const ok = await route.POST(request('/api/admin/shift-merges', { action: 'merge', host_shift_id: 'host', shift_ids: ['m1', 'm2'] }));
+  assert.equal(ok.status, 200);
+  const member = h.data.get('shift_assignments/m1');
+  assert.equal(member.merge_host_shift_id, 'host');
+  assert.equal(member.merge_meeting_id, '11111111111');
+  assert.equal(member.target_meeting_id, '22222222222');
+  assert.deepEqual(Array.from(h.data.get('shift_assignments/host').merged_shift_ids), ['m1', 'm2']);
+
+  // 生徒の参加ボタンは合併先の会議を使う。
+  const schedule = h.load('lib/student-course-schedule.ts');
+  assert.equal(schedule.getShiftMeetingId(member), '11111111111');
+  assert.equal(schedule.getShiftJoinUrl(member), 'https://zoom.us/j/11111111111?pwd=abc');
+
+  // 合併先の録画は、合併した授業の学年（中3）の生徒も当日から見られる。
+  const { canAccessClassRecording } = h.load('lib/server/recording-access.ts');
+  const today = new Date(Date.now() + 9 * 3600e3).toISOString().slice(0, 10);
+  const recording = { target_date: today, grade: '中2', subject: '理科', status: 'published', merge_audiences: h.data.get('shift_assignments/host').merge_audiences };
+  const grade3 = { uid: 's', role: 'student', school: '112', school_ids: [], profile: { grade: '中3', subjects: ['理科'] } };
+  const grade1 = { uid: 's', role: 'student', school: '112', school_ids: [], profile: { grade: '中1', subjects: ['理科'] } };
+  assert.equal(canAccessClassRecording(grade3, recording), true);
+  assert.equal(canAccessClassRecording(grade1, recording), false);
+
+  // 解除すると元の会議に戻り、合併先の一覧からも外れる。
+  const undo = await route.POST(request('/api/admin/shift-merges', { action: 'unmerge', shift_id: 'm1' }));
+  assert.equal(undo.status, 200);
+  // （テストの仮のデータベースは項目の削除を 'deleted' で表す。本番では項目そのものが消える。）
+  const restored = h.data.get('shift_assignments/m1');
+  assert.equal(restored.merge_host_shift_id, 'deleted');
+  assert.equal(restored.merge_meeting_id, 'deleted');
+  assert.equal(restored.target_meeting_id, '22222222222');
+  assert.equal(schedule.getShiftMeetingId({ ...restored, merge_meeting_id: undefined }), '22222222222');
+  assert.deepEqual(Array.from(h.data.get('shift_assignments/host').merged_shift_ids), ['m2']);
+
+  // 操作できるのはマスターと理社講座の管理者だけ。講師、専任の承認者、理社講座の権限がない管理者はできない。
+  const deny = async actor => (await harness({ profiles: { actor } }).load('app/api/admin/shift-merges/route.ts').POST(request('/api/admin/shift-merges', { action: 'unmerge', shift_id: 'm2' }))).status;
+  assert.equal(await deny(teacher), 403);
+  assert.equal(await deny({ ...teacher, employment_category: 'dedicated', attendance_school_manager: true }), 403);
+  assert.equal(await deny({ role: 'admin', school: '112', admin_permissions: { science_social: false, attendance: true } }), 403);
+  const scienceAdmin = harness({ profiles: { actor: { role: 'admin', school: '112', admin_permissions: { science_social: true } } }, documents: { 'shift_assignments/m9': { target_date: '2026-10-23' } } });
+  assert.equal((await scienceAdmin.load('app/api/admin/shift-merges/route.ts').POST(request('/api/admin/shift-merges', { action: 'unmerge', shift_id: 'm9' }))).status, 400);
+});
+
+test('lesson language checks are master-only and rules can be saved and rechecked', async () => {
+  const route = 'app/api/admin/lesson-language/route.ts';
+  for (const actor of [teacher, { role: 'admin', school: '112', admin_permissions: { science_social: true } }]) {
+    const h = harness({ profiles: { actor } });
+    assert.equal((await h.load(route).GET(request('/api/admin/lesson-language?days=30', null, 'valid', 'GET'))).status, 403);
+  }
+  const h = harness({
+    profiles: { actor: master },
+    documents: {
+      'lesson_transcripts/s1': { cues: [{ s: 65, e: 70, sp: '講師', t: 'お前には無理だよ' }, { s: 71, e: 75, sp: '講師', t: 'がんばろう' }] },
+      'shift_assignments/s1': { target_date: '2026-10-21', target_grade: '中2', target_subject: '理科', teacher_name: '講師A' },
+    },
+  });
+  const api = h.load(route);
+  const saved = await api.POST(request('/api/admin/lesson-language', { action: 'save_rules', disabled: ['omae', 'unknown'], custom: [{ label: '赤点確定', category: 'negative', severity: 'high' }, { label: 'x' }] }));
+  assert.equal(saved.status, 200);
+  const rules = h.data.get('settings/lesson_language_rules');
+  assert.deepEqual(Array.from(rules.disabled), ['omae']);
+  assert.equal(rules.custom.length, 1);
+  const recheck = await api.POST(request('/api/admin/lesson-language', { action: 'recheck', shift_id: 's1' }));
+  assert.equal(recheck.status, 200);
+  const check = h.data.get('lesson_transcript_checks/s1');
+  assert.deepEqual(Array.from(check.findings, finding => finding.rule_id), ['muri']);
+  assert.equal(check.findings[0].time, 65);
+  assert.equal(check.by_severity.high, 1);
 });

@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { adminAuth, adminDb } from '@/lib/firebase-admin';
 import { consumeRateLimit, getClientIp, requestFingerprint } from '@/lib/server/password-recovery';
 import { verifyExistingFirebasePassword } from '@/lib/server/firebase-password-check';
+import { monitorLoginResponses } from '@/lib/server/security-login-monitor';
 
 export const runtime = 'nodejs';
 
@@ -64,7 +65,7 @@ function isAdminRole(role: unknown) {
   return ADMIN_ROLE_ALIASES.includes(String(role || '').toLowerCase());
 }
 
-export async function POST(req: Request) {
+async function handleFirstLogin(req: Request) {
   try {
     const body = await req.json().catch(() => ({}));
     const login = normalizeLogin(body.login);
@@ -175,3 +176,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: `server-error:${error?.message || 'unknown'}` }, { status: 500 });
   }
 }
+
+// ログインの失敗・回数制限での拒否を、攻撃の監視（lib/server/security-events.ts）に記録する。
+export const POST = monitorLoginResponses(handleFirstLogin, body => body.login);

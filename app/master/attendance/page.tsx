@@ -1569,7 +1569,7 @@ export default function MasterAttendancePage() {
               <span className="text-xs font-bold uppercase flex items-center gap-1"><CheckSquare size={12}/> 最初に確認</span>
               <span className="text-sm font-bold">勤務実績を承認</span>
             </Link>
-            <Link href={`/master/attendance/dedicated-claims?month=${filterMonth}`} className="bg-sky-600 px-5 py-3 rounded-btn shadow-sm flex flex-col items-center min-w-[120px] text-white hover:bg-sky-700 transition-colors">
+            <Link href={`/master/attendance/dedicated`} className="bg-sky-600 px-5 py-3 rounded-btn shadow-sm flex flex-col items-center min-w-[120px] text-white hover:bg-sky-700 transition-colors">
               <span className="text-xs font-bold uppercase flex items-center gap-1"><Clock size={12}/> 専任申請</span>
               <span className="text-sm font-bold">時間外・授業・交通</span>
             </Link>

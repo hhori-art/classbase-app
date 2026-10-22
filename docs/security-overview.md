@@ -117,6 +117,19 @@ Firebase Auth のサインイン自体のブルートフォース対策は Fireb
 - 操作者はサーバーで確認した利用者から記録し、ブラウザから送られた名前は使いません。`password`・`secret`・`token` などを含む項目は保存しません。
 - 閲覧はマスターだけ（`GET /api/admin/audit-log`）。画面操作の記録依頼（`POST`）は対象操作ごとに権限を確認します。
 
+### 7.1 攻撃の監視（2026-10-22 追加）
+
+- **記録**（`lib/server/security-events.ts`）：次の出来事を、日別・IP別・アカウント別に集計します（`security_monitor_days/{日付}` と `…/subjects`、サーバー専用、30日で期限切れ）。記録は `FieldValue.increment` の書き込みだけで、読み取り予算（`docs/student-firestore-read-budget.md`）を増やしません。応答の後に書くため、利用者の操作は遅くなりません。
+  - ログインの失敗・回数制限での拒否（`/api/first-login`・`/api/admin/first-login`。`lib/server/security-login-monitor.ts`）
+  - ログインなし・無効なトークンでの API 呼び出し（`getServerUser`）
+  - 脆弱性を探るアクセス（`.php`・`wp-admin`・`.env`・`.git` など。`middleware.ts` が `/api/security/probe` へ振り替え、404 を返す。判定は `lib/security-probe.ts`）
+  - 署名が合わない Zoom の通知
+- **監視ジョブ**（`lib/server/security-monitor.ts`、`GET /api/security/monitor`）：Vercel Cron で毎朝7時（日本時間）に直近24時間を確認します。マスターは `POST` で手動実行できます。しきい値（`DAILY_THRESHOLDS`）を超えた出来事と、監査ログの深夜（0〜5時）の重要な操作・1人による大量の重要な操作を見つけると、マスターへアプリ内通知と端末通知を送り、結果を `security_monitor_reports` に残します（90日で期限切れ）。
+- **メール通知**：Vercel の環境変数 `SECURITY_ALERT_EMAILS`（カンマ区切り、最大10件）に設定したアドレスへ、Resend で同じ内容をメールでも送ります。マスターが `POST /api/security/monitor?test_email=1` を実行すると、見つかったものがなくてもテストのメールを送ります。
+- **有料プランへの切り替え後**：`vercel.json` の監視の実行間隔を5分ごとにし、パスに `?hours=1` を付けます。短い期間では読み取りを最大60件程度に絞るので、5分ごとでも読み取り予算に収まります。
+- **期限切れの削除**：Firestore の TTL ポリシーを `security_monitor_days`（サブコレクション `subjects` を含む）と `security_monitor_reports` の `expires_at` に設定すると、古い集計が自動で消えます（未設定でも動作には影響しません）。
+- **限界**：検知と通知までです。アプリより手前での遮断（Vercel Firewall のルール、ログの長期保存）は有料プランの機能です。
+
 ## 8. 秘密情報の扱い
 
 - 秘密値は Vercel の環境変数に置き、サーバーのコードだけが参照します（`server-only`）。`NEXT_PUBLIC_*` はブラウザに公開される設定値（Firebase の公開設定、VAPID 公開鍵など）だけです。
@@ -182,7 +195,7 @@ Firebase Auth のサインイン自体のブルートフォース対策は Fireb
 | `/api/admin/course-analytics` | GET, POST | IDトークン | マスター |
 | `/api/admin/course-registrations/import` | POST | IDトークン | 理社管理 |
 | `/api/admin/course-registrations` | POST | IDトークン | 理社管理（担当校舎） |
-| `/api/admin/dedicated-claims` | GET, POST | IDトークン | 勤怠管理（担当校舎。自分自身の承認は不可） |
+| `/api/admin/dedicated-attendance` | GET, POST | IDトークン | 勤怠管理・専任の校舎承認者（担当校舎の専任だけ。自分自身の承認は不可。校長の一括申請（D05）の承認・等級・講習期間の設定は勤怠システムの管理者だけ） |
 | `/api/admin/first-login` | POST | 公開 | 管理者の初回ログイン。ID＋初期パスワード照合、IP・アカウント単位のレート制限 |
 | `/api/admin/gachas` | GET, PATCH, POST | IDトークン | 理社管理（景品カタログ） |
 | `/api/admin/inbox-counts` | GET | IDトークン | いずれかの管理アプリ権限を持つ管理者・専任の勤怠承認者（件数は権限の範囲のみ） |
@@ -249,7 +262,7 @@ Firebase Auth のサインイン自体のブルートフォース対策は Fireb
 | `/api/create-user-from-gas` | POST | 共有秘密（リクエスト本文の secret、定数時間比較） | Google Apps Script からのアカウント作成 |
 | `/api/create-zoom-meeting` | POST | IDトークン | 理社管理（担当校舎のシフト） |
 | `/api/curriculum-admin` | GET, PATCH, POST | IDトークン | GET: 理社管理／POST・PATCH: マスター |
-| `/api/dedicated-attendance` | GET, POST | IDトークン | 講師本人（専任） |
+| `/api/dedicated-attendance` | GET, POST | IDトークン | 講師本人（専任）。本人の打刻・申請だけ。提出した月は差し戻されるまで変更不可 |
 | `/api/eiken/admin/catalog` | GET, PATCH, POST | IDトークン | Booster管理（マスター、またはBooster権限の管理者で担当校舎・担当コース） |
 | `/api/eiken/dashboard` | GET | IDトークン | Booster利用者（生徒本人・連携保護者・講師・管理者） |
 | `/api/eiken/lessons/[id]/host` | POST | IDトークン | 担当コースの講師・Booster管理 |

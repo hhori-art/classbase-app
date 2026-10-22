@@ -62,7 +62,9 @@ const periodFromShift = (shift: any) => {
   return 0;
 };
 
+// 合併された授業（lib/shift-merge.ts）は、合併先の会議に参加する。
 const getShiftMeetingId = (shift: any) => normalizeZoomMeetingId(
+  shift.merge_meeting_id ||
   shift.target_meeting_id ||
   shift.meeting_id ||
   shift.zoom_meeting_id ||
@@ -76,6 +78,7 @@ const getShiftMeetingId = (shift: any) => normalizeZoomMeetingId(
 );
 
 const getShiftJoinUrl = (shift: any) => String(
+  shift.merge_join_url ||
   shift.target_url ||
   shift.zoom_url ||
   shift.join_url ||

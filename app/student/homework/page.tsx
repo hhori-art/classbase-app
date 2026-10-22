@@ -9,39 +9,7 @@ import { PageHeader, SectionTitle, StatusPill, EmptyState, ErrorState, ListSkele
 import Link from 'next/link';
 import { loadStudentHomework } from '@/lib/client-student-homework';
 import { formatDateKeyMonthDay, formatDateKeySlash, isHomeworkOverdue, jstDateKeyOf, parseHomeworkDeadline } from '@/lib/homework-deadline';
-
-const MONOXER_WEB_URL = process.env.NEXT_PUBLIC_MONOXER_WEB_URL || 'https://app.monoxer.com/';
-const MONOXER_APP_URL = process.env.NEXT_PUBLIC_MONOXER_APP_URL || 'monoxer://';
-const MONOXER_APP_URLS = (process.env.NEXT_PUBLIC_MONOXER_APP_URLS || MONOXER_APP_URL)
-  .split(',')
-  .map(url => url.trim())
-  .filter(Boolean);
-
-const isMobileOrTablet = () => {
-  if (typeof navigator === 'undefined') return false;
-  return /iPhone|iPad|iPod|Android|Mobile|Tablet|Line|CriOS|FxiOS|EdgiOS/i.test(navigator.userAgent);
-};
-
-const openAppThenFallback = (appUrls: string[], webUrl: string) => {
-  let completed = false;
-  let timer: number;
-  const cleanup = () => {
-    completed = true;
-    window.clearTimeout(timer);
-    window.removeEventListener('pagehide', cleanup);
-    document.removeEventListener('visibilitychange', handleVisibilityChange);
-  };
-  const handleVisibilityChange = () => {
-    if (document.hidden) cleanup();
-  };
-  timer = window.setTimeout(() => {
-    if (!completed && !document.hidden) window.location.href = webUrl;
-  }, 1600);
-
-  window.addEventListener('pagehide', cleanup, { once: true });
-  document.addEventListener('visibilitychange', handleVisibilityChange);
-  window.location.href = appUrls[0] || webUrl;
-};
+import { monoxerPlatform, openMonoxerApp, openMonoxerWeb, type MonoxerPlatform } from '@/lib/monoxer-launch';
 
 export default function StudentHomeworkListPage() {
   const { user, profile } = useAuth();
@@ -55,13 +23,9 @@ export default function StudentHomeworkListPage() {
   // 自分の提出状況 {課題ID: true/false}
   const [submissionStatus, setSubmissionStatus] = useState<{[key:string]: boolean}>({});
 
-  const openMonoxer = () => {
-    if (isMobileOrTablet()) {
-      openAppThenFallback(MONOXER_APP_URLS, MONOXER_WEB_URL);
-      return;
-    }
-    window.open(MONOXER_WEB_URL, '_blank', 'noopener,noreferrer');
-  };
+  // 端末の種類（画面の案内と開き方を変える）。サーバー描画との差を避けるため表示後に判定する。
+  const [platform, setPlatform] = useState<MonoxerPlatform>('desktop');
+  useEffect(() => { setPlatform(monoxerPlatform()); }, []);
 
   useEffect(() => {
     const fetchData = async () => {
@@ -119,23 +83,36 @@ export default function StudentHomeworkListPage() {
         <div className="p-card">
           <div className="flex items-start gap-4">
             <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-btn bg-white/10">
-              {typeof window !== 'undefined' && isMobileOrTablet() ? <Smartphone size={28} /> : <Monitor size={28} />}
+              {platform === 'desktop' ? <Monitor size={28} /> : <Smartphone size={28} />}
             </div>
             <div className="min-w-0 flex-1">
               <p className="text-xs font-bold tracking-wide text-amber-200">宿題</p>
               <h2 className="mt-1 text-xl font-bold">Monoxerで宿題を進める</h2>
               <p className="mt-2 text-sm leading-relaxed text-slate-300">
-                スマホ・タブレットではMonoxerアプリ、PCではブラウザ版を開きます。
+                {platform === 'ios'
+                  ? 'App Storeの画面が開いたら「開く」を押すと、Monoxerアプリが起動します（入っていないときは「入手」）。'
+                  : platform === 'android'
+                    ? 'Monoxerアプリが開きます。Google Playの画面になったら「開く」を押してください（入っていないときは「インストール」）。'
+                    : 'ブラウザ版のMonoxerを新しいタブで開きます。'}
               </p>
             </div>
           </div>
           <button
             type="button"
-            onClick={openMonoxer}
+            onClick={() => openMonoxerApp(platform)}
             className="mt-5 flex min-h-12 w-full items-center justify-center gap-2 rounded-btn bg-white px-5 py-3 text-sm font-bold text-slate-950 transition active:scale-[0.99]"
           >
-            <ExternalLink size={18} aria-hidden /> Monoxerを開く
+            <ExternalLink size={18} aria-hidden /> {platform === 'desktop' ? 'Monoxerを開く' : 'Monoxerアプリを開く'}
           </button>
+          {platform !== 'desktop' && (
+            <button
+              type="button"
+              onClick={openMonoxerWeb}
+              className="mt-2 flex min-h-11 w-full items-center justify-center gap-2 rounded-btn border border-white/30 px-5 text-sm font-bold text-white transition hover:bg-white/10"
+            >
+              <Monitor size={16} aria-hidden /> アプリがうまく開かないときは、ブラウザ版で開く
+            </button>
+          )}
         </div>
       </section>
 

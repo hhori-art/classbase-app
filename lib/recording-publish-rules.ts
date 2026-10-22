@@ -212,7 +212,7 @@ export function inspectRecordingForShift(recording: any, input: { period: string
 }
 
 /** 講師配置ごとのアップ状況（管理画面の表示用）。 */
-export type RecordingUploadState = 'published' | 'replaced' | 'stopped' | 'blocked' | 'pending' | 'waiting' | 'missing';
+export type RecordingUploadState = 'published' | 'replaced' | 'stopped' | 'blocked' | 'pending' | 'waiting' | 'missing' | 'merged';
 
 export const RECORDING_UPLOAD_STATE_LABELS: Record<RecordingUploadState, string> = {
   published: '公開中',
@@ -222,4 +222,5 @@ export const RECORDING_UPLOAD_STATE_LABELS: Record<RecordingUploadState, string>
   pending: '確認待ち',
   waiting: '録画待ち',
   missing: '録画なし',
+  merged: '合併先の録画',
 };

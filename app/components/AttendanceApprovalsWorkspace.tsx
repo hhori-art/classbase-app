@@ -1,7 +1,7 @@
 'use client';
 
 import AdminPageHeader from '@/app/components/master/AdminPageHeader';
-import { Button, ButtonLink, Card, ErrorState, IconButton, ListSkeleton, PageHeader, Spinner, useConfirm, usePrompt, useToast } from '@/app/components/ui';
+import { Button, ButtonLink, Card, ErrorState, IconButton, ListSkeleton, Modal, PageHeader, Spinner, useConfirm, usePrompt, useToast } from '@/app/components/ui';
 import {
   ArrowLeft,
   BookOpen,
@@ -29,7 +29,7 @@ import {
   X,
   XCircle,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { formatDate, formatTime, jstDateKey } from '@/lib/format';
 import { hasAdminAppPermission } from '@/lib/admin-app-permissions';
@@ -145,6 +145,8 @@ export default function AttendanceApprovalsWorkspace({ mode, backHref, embedded 
   const [corrections, setCorrections] = useState<any[]>([]);
   const [reconciliationAlerts, setReconciliationAlerts] = useState<any[]>([]);
   const [jumpRecordId, setJumpRecordId] = useState('');
+  // ガントのバー・名前を押したときに開く、職員×日の詳細（編集・承認）。
+  const [detailTarget, setDetailTarget] = useState<{ recordId: string; segmentId?: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState('');
   const [canReject, setCanReject] = useState(false);
@@ -276,9 +278,8 @@ export default function AttendanceApprovalsWorkspace({ mode, backHref, embedded 
       setJumpRecordId(createdRecordId);
       setSuccessMessage(`${target.name}さんの${newRecord.date}の勤務実績を作成しました。作成した実績を表示しています。`);
       await load(targetMonth);
-      window.setTimeout(() => {
-        document.getElementById(`attendance-record-${createdRecordId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }, 150);
+      // 作った実績をすぐ編集できるよう、詳細を開く（勤務内容をまとめて登録できる）。
+      if (createdRecordId) setDetailTarget({ recordId: createdRecordId });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '勤務実績を作成できませんでした。');
     } finally {
@@ -657,6 +658,7 @@ export default function AttendanceApprovalsWorkspace({ mode, backHref, embedded 
                         onClick={() => {
                           if (alertItem.date) changeDay(String(alertItem.date).slice(0, 10));
                           setJumpRecordId(alertItem.record_id);
+                          setDetailTarget({ recordId: alertItem.record_id });
                           window.setTimeout(() => document.getElementById(`attendance-record-${alertItem.record_id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 50);
                         }}
                         className={`min-h-10 shrink-0 self-stretch rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-bold text-white sm:min-h-0 sm:self-start ${focusRing}`}
@@ -704,41 +706,64 @@ export default function AttendanceApprovalsWorkspace({ mode, backHref, embedded 
           </section>
         )}
 
-        <section aria-label="表示条件" className="rounded-card border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
-          <div className="flex flex-wrap items-center justify-between gap-3">
+        <section aria-label="表示条件" className="rounded-card border border-slate-200 bg-white px-3 py-3 shadow-sm sm:px-4">
+          <div className="flex flex-wrap items-center gap-2">
             <div role="group" aria-label="表示の範囲" className="grid grid-cols-2 rounded-btn bg-slate-100 p-1">
               <FilterButton active={range === 'day'} onClick={() => setRange('day')}>日ごと</FilterButton>
               <FilterButton active={range === 'month'} onClick={() => setRange('month')}>月の一覧</FilterButton>
             </div>
             {range === 'day' ? (
-              <div className="flex flex-wrap items-center gap-2" role="group" aria-label="表示する日">
+              <div className="flex items-center gap-1.5" role="group" aria-label="表示する日">
                 <IconButton label="前の日" variant="secondary" onClick={() => changeDay(shiftDateKey(day, -1))}><ChevronLeft size={18} /></IconButton>
                 <input
                   type="date"
                   value={day}
                   onChange={event => changeDay(event.target.value)}
                   aria-label="表示する日"
-                  className={`min-h-11 rounded-input border border-slate-200 bg-slate-50 px-3 text-sm font-bold text-slate-900 ${focusRing}`}
+                  className={`min-h-11 rounded-input border border-slate-200 bg-slate-50 px-2 text-sm font-bold text-slate-900 ${focusRing}`}
                 />
                 <IconButton label="次の日" variant="secondary" onClick={() => changeDay(shiftDateKey(day, 1))}><ChevronRight size={18} /></IconButton>
                 {day !== jstDateKey() && <Button size="sm" variant="secondary" onClick={() => changeDay(jstDateKey())}>今日</Button>}
               </div>
             ) : (
-              <label className="flex items-center gap-2 text-xs font-bold text-slate-600">
-                <span>対象月</span>
-                <input
-                  type="month"
-                  value={month}
-                  onChange={event => { setMonth(event.target.value); setDay(`${event.target.value}-01`); setSelectedSchool(''); }}
-                  className={`min-h-11 rounded-input border border-slate-200 bg-slate-50 px-3 text-sm font-bold text-slate-900 ${focusRing}`}
-                />
-              </label>
+              <input
+                type="month"
+                value={month}
+                onChange={event => { setMonth(event.target.value); setDay(`${event.target.value}-01`); setSelectedSchool(''); }}
+                aria-label="対象月"
+                className={`min-h-11 rounded-input border border-slate-200 bg-slate-50 px-3 text-sm font-bold text-slate-900 ${focusRing}`}
+              />
             )}
+            <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto">
+              <select
+                value={selectedSchool}
+                onChange={event => setSelectedSchool(event.target.value)}
+                aria-label="勤務校舎"
+                className={`min-h-11 w-full min-w-0 truncate rounded-input border border-slate-200 bg-slate-50 px-2 text-sm font-bold text-slate-900 sm:w-44 ${focusRing}`}
+              >
+                <option value="">すべての関係校舎</option>
+                {schoolOptions.map(school => <option key={school.code} value={school.code}>{school.name}</option>)}
+              </select>
+              <select
+                value={programFilter}
+                onChange={event => setProgramFilter(event.target.value as ProgramFilter)}
+                aria-label="勤務区分"
+                className={`min-h-11 w-full min-w-0 truncate rounded-input border border-slate-200 bg-slate-50 px-2 text-sm font-bold text-slate-900 sm:w-40 ${focusRing}`}
+              >
+                <option value="all">すべての勤務</option>
+                <option value="science_social">理社講座を含む</option>
+                <option value="breakthrough">突破ゼミを含む</option>
+              </select>
+            </div>
+            <div role="group" aria-label="承認状態" className="grid grid-cols-2 rounded-btn bg-slate-100 p-1">
+              <FilterButton active={viewFilter === 'all'} onClick={() => setViewFilter('all')}>すべて</FilterButton>
+              <FilterButton active={viewFilter === 'pending'} onClick={() => setViewFilter('pending')}>要確認だけ</FilterButton>
+            </div>
           </div>
 
           {range === 'day' && dayStrip.length > 0 && (
             // 月の中で勤怠がある日。要確認が残っている日は色で分かる。押すとその日を表示する。
-            <div data-day-strip className="-mx-1 mt-3 flex gap-1.5 overflow-x-auto px-1 pb-1" role="list" aria-label={`${month.replace('-', '年')}月の勤怠がある日`}>
+            <div data-day-strip className="-mx-1 mt-2 flex gap-1.5 overflow-x-auto px-1 pb-1" role="list" aria-label={`${month.replace('-', '年')}月の勤怠がある日`}>
               {dayStrip.map(item => (
                 <button
                   key={item.date}
@@ -746,7 +771,7 @@ export default function AttendanceApprovalsWorkspace({ mode, backHref, embedded 
                   role="listitem"
                   aria-current={item.date === day ? 'date' : undefined}
                   onClick={() => changeDay(item.date)}
-                  className={`flex min-h-11 shrink-0 flex-col items-center justify-center rounded-btn border px-2.5 py-1 text-xs font-bold ${focusRing} ${item.date === day
+                  className={`flex min-h-10 shrink-0 flex-col items-center justify-center rounded-btn border px-2 py-0.5 text-xs font-bold ${focusRing} ${item.date === day
                     ? 'border-accent bg-accent text-accent-ink'
                     : item.pending > 0 ? 'border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'}`}
                 >
@@ -756,42 +781,6 @@ export default function AttendanceApprovalsWorkspace({ mode, backHref, embedded 
               ))}
             </div>
           )}
-
-          <div className="mt-3 grid grid-cols-2 gap-3 md:grid-cols-[minmax(13rem,1fr)_minmax(12rem,0.85fr)_auto] md:items-end">
-            <label className="grid min-w-0 gap-1.5 text-xs font-bold text-slate-600">
-              <span>勤務校舎</span>
-              <select
-                value={selectedSchool}
-                onChange={event => setSelectedSchool(event.target.value)}
-                className={`min-h-11 w-full min-w-0 truncate rounded-input border border-slate-200 bg-slate-50 px-3 text-sm font-bold text-slate-900 motion-safe:transition hover:border-slate-300 ${focusRing}`}
-              >
-                <option value="">すべての関係校舎</option>
-                {schoolOptions.map(school => <option key={school.code} value={school.code}>{school.name}</option>)}
-              </select>
-            </label>
-            <label className="grid min-w-0 gap-1.5 text-xs font-bold text-slate-600">
-              <span className="inline-flex items-center gap-1.5"><BookOpen size={14} className="text-sky-600" />勤務区分</span>
-              <select
-                value={programFilter}
-                onChange={event => setProgramFilter(event.target.value as ProgramFilter)}
-                className={`min-h-11 w-full min-w-0 truncate rounded-input border border-slate-200 bg-slate-50 px-3 text-sm font-bold text-slate-900 motion-safe:transition hover:border-slate-300 ${focusRing}`}
-              >
-                <option value="all">すべての勤務</option>
-                <option value="science_social">理社講座を含む勤務のみ</option>
-                <option value="breakthrough">突破ゼミを含む勤務のみ</option>
-              </select>
-            </label>
-            <div role="group" aria-label="承認状態" className="col-span-2 grid grid-cols-2 rounded-btn bg-slate-100 p-1 md:col-span-1">
-              <FilterButton active={viewFilter === 'all'} onClick={() => setViewFilter('all')}>すべて</FilterButton>
-              <FilterButton active={viewFilter === 'pending'} onClick={() => setViewFilter('pending')}>要確認だけ</FilterButton>
-            </div>
-          </div>
-          <p className="mt-3 text-xs font-bold text-slate-400">
-            {range === 'day' ? `${dateHeading(day)}の勤怠を表示しています。` : `${month.replace('-', '年')}月の勤怠を日付ごとに表示しています。`}
-            {programFilter === 'science_social' ? ' 理社講座の勤務を含む人だけです。' : ''}
-            {programFilter === 'breakthrough' ? ' 突破ゼミの勤務を含む人だけです。' : ''}
-            {viewFilter === 'pending' ? ' あなたが承認できる、承認待ちの実績だけを表示しています。' : ''}
-          </p>
         </section>
 
         <CorrectionSection
@@ -815,13 +804,13 @@ export default function AttendanceApprovalsWorkspace({ mode, backHref, embedded 
         />
 
         <section aria-labelledby="work-approval-heading">
-          <div className="mb-3 flex flex-wrap items-end justify-between gap-2 px-1">
+          <div className="mb-2 flex flex-wrap items-end justify-between gap-2 px-1">
             <div>
-              <h2 id="work-approval-heading" className="text-lg font-bold text-slate-950">勤務実績の確認</h2>
+              <h2 id="work-approval-heading" className="text-base font-bold text-slate-950">勤務実績の確認</h2>
             </div>
             {!loading && <p className="text-xs font-bold text-slate-500">{range === 'day' ? `${dateHeading(day)}・${visibleDetails.length}名を表示` : `${visibleDetails.length}名・${dateGroups.length}日分を表示`}</p>}
           </div>
-          {!loading && selectableKeys.length > 0 && (
+          {!loading && range === 'month' && selectableKeys.length > 0 && (
             <div className="mb-4 flex flex-col gap-3 rounded-card border border-indigo-200 bg-indigo-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
               <label className="inline-flex min-h-10 cursor-pointer items-center gap-3 text-sm font-bold text-indigo-950">
                 <input
@@ -845,21 +834,9 @@ export default function AttendanceApprovalsWorkspace({ mode, backHref, embedded 
                   key={group.date}
                   date={group.date}
                   records={group.records}
-                  canReject={canReject}
-                  canUnlock={canUnlock}
-                  processing={processing}
-                  clockEdit={clockEdit}
-                  setClockEdit={setClockEdit}
-                  onSaveClock={saveClockEdit}
-                  onSaveSegment={saveSegmentEdit}
-                  onSaveSegments={saveSegments}
-                  onSaveTransportation={saveTransportation}
-                  onDeleteRecord={deleteRecord}
-                  jumpRecordId={jumpRecordId}
-                  onReview={reviewSegment}
                   selectedApprovals={selectedApprovals}
-                  onToggleSelection={toggleSelection}
                   onToggleSelections={toggleSelections}
+                  onOpen={(recordId, segmentId) => setDetailTarget({ recordId, segmentId })}
                 />
               ))}
             </div>
@@ -872,6 +849,33 @@ export default function AttendanceApprovalsWorkspace({ mode, backHref, embedded 
           )}
         </section>
       </div>
+      {detailTarget && (() => {
+        const record = details.find(item => item.id === detailTarget.recordId);
+        if (!record) return null;
+        return (
+          <Modal open size="xl" onClose={() => { setDetailTarget(null); setClockEdit(null); }} closeOnBackdrop={false} title={`${record.teacher_name || '講師'}さん ${dateHeading(record.date)}`} description="勤務内容の確認・編集・承認ができます。">
+            <RecordCard
+              record={record}
+              canReject={canReject}
+              canUnlock={canUnlock}
+              processing={processing}
+              clockEdit={clockEdit}
+              setClockEdit={setClockEdit}
+              onSaveClock={saveClockEdit}
+              onSaveSegment={saveSegmentEdit}
+              onSaveSegments={saveSegments}
+              onSaveTransportation={saveTransportation}
+              onDeleteRecord={deleteRecord}
+              jumpRecordId=""
+              focusSegmentId={detailTarget.segmentId}
+              onReview={reviewSegment}
+              selectedApprovals={selectedApprovals}
+              onToggleSelection={toggleSelection}
+              onToggleSelections={toggleSelections}
+            />
+          </Modal>
+        );
+      })()}
       {selectedApprovals.size > 0 && (
         <div className={`sticky z-30 mx-auto mt-5 flex max-w-3xl flex-col gap-3 rounded-card border border-slate-700 bg-slate-950 px-4 py-3 text-white shadow-2xl sm:flex-row sm:items-center sm:justify-between ${embedded ? 'bottom-3' : 'bottom-[calc(4.5rem+env(safe-area-inset-bottom))]'}`} role="region" aria-label="選択した勤務の一括操作">
           <div>
@@ -944,6 +948,14 @@ function CorrectionSection({ items, processing, selected, onToggle, onToggleAll,
 }) {
   const selectedCount = items.filter(item => selected.has(String(item.id))).length;
   const allSelected = items.length > 0 && selectedCount === items.length;
+  // 依頼がないときは1行だけにして、勤怠の表を上に寄せる。
+  if (items.length === 0) {
+    return (
+      <p className="flex items-center gap-2 px-1 text-xs font-bold text-emerald-700" aria-label="打刻修正依頼">
+        <CheckCircle2 size={15} aria-hidden />未処理の打刻修正依頼はありません
+      </p>
+    );
+  }
   return (
     <section aria-labelledby="clock-correction-heading">
       <div className="mb-3 flex flex-wrap items-start justify-between gap-3 px-1">
@@ -1012,6 +1024,7 @@ function CorrectionSection({ items, processing, selected, onToggle, onToggleAll,
                     <Clock3 size={18} className="shrink-0 text-amber-300" />
                     <p className="min-w-0 break-words font-mono text-lg font-bold tracking-tight [overflow-wrap:anywhere]">{time(item.requested_start_time)}<span className="mx-2 text-slate-500">→</span>{time(item.requested_end_time)}</p>
                   </div>
+                  {item.has_invalid_time && <p className="mt-2 rounded-btn bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800">申請の時刻を読み取れません。差し戻して、講師にもう一度申請してもらってください。</p>}
                   <div className="mt-3 rounded-card bg-slate-50 p-3">
                     <p className="text-xs font-bold text-slate-400">申請理由</p>
                     <p className="mt-1 whitespace-pre-wrap break-words text-xs font-bold leading-5 text-slate-700 [overflow-wrap:anywhere]">{item.reason || '理由は入力されていません。'}</p>
@@ -1048,24 +1061,12 @@ function CorrectionSection({ items, processing, selected, onToggle, onToggleAll,
   );
 }
 
-function DateGroup({ date, records, canReject, canUnlock, processing, clockEdit, setClockEdit, onSaveClock, onSaveSegment, onSaveSegments, onSaveTransportation, onDeleteRecord, onReview, selectedApprovals, onToggleSelection, onToggleSelections, jumpRecordId }: {
+function DateGroup({ date, records, selectedApprovals, onToggleSelections, onOpen }: {
   date: string;
   records: any[];
-  canReject: boolean;
-  canUnlock: boolean;
-  processing: string;
-  clockEdit: ClockEdit | null;
-  setClockEdit: Dispatch<SetStateAction<ClockEdit | null>>;
-  onSaveClock: (record: any) => void;
-  onSaveSegment: (recordId: string, segmentId: string, segment: SegmentEdit) => Promise<boolean>;
-  onSaveSegments: (recordId: string, segments: SegmentEdit[]) => Promise<boolean>;
-  onSaveTransportation: (recordId: string, items: TransportationDraft[], none: boolean) => Promise<boolean>;
-  onDeleteRecord: (record: any) => void;
-  onReview: (recordId: string, segmentId: string, status: 'approved' | 'rejected' | 'pending') => void;
   selectedApprovals: Set<string>;
-  onToggleSelection: (recordId: string, segmentId: string) => void;
   onToggleSelections: (keys: string[]) => void;
-  jumpRecordId: string;
+  onOpen: (recordId: string, segmentId?: string) => void;
 }) {
   const pending = records.reduce(
     (sum, record) => sum + pendingReviewCount(record),
@@ -1075,62 +1076,33 @@ function DateGroup({ date, records, canReject, canUnlock, processing, clockEdit,
     .filter(needsReview)
     .map((segment: any) => selectionKey(record.id, segment.id)));
   const selectedCount = dateKeys.filter(key => selectedApprovals.has(key)).length;
-  const allSelected = dateKeys.length > 0 && selectedCount === dateKeys.length;
   return (
     <section className="overflow-hidden rounded-card border border-slate-200 bg-white shadow-sm">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-slate-50/80 px-4 py-4 sm:px-6">
-        <div className="flex items-center gap-3">
-          <span className="grid h-11 w-11 place-items-center rounded-btn bg-accent text-accent-ink shadow-sm"><CalendarDays size={20} /></span>
-          <div>
-            <h3 className="text-base font-bold text-slate-950 sm:text-lg">{dateHeading(date)}</h3>
-            <p className="text-xs font-bold text-slate-500">{records.length}名の勤務記録</p>
-          </div>
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50/80 px-4 py-2">
+        <div className="flex items-center gap-2">
+          <CalendarDays size={17} className="text-accent" aria-hidden />
+          <h3 className="text-sm font-bold text-slate-950">{dateHeading(date)}</h3>
+          <p className="text-xs font-bold text-slate-500">{records.length}名</p>
         </div>
         {pending > 0 ? (
           <div className="flex flex-wrap items-center gap-2">
-            {dateKeys.length > 0 && (
-              <label className="inline-flex min-h-10 cursor-pointer items-center gap-2 rounded-btn border border-indigo-200 bg-white px-3 text-xs font-bold text-indigo-800">
-                <input type="checkbox" checked={allSelected} onChange={() => onToggleSelections(dateKeys)} aria-label={`${dateHeading(date)}の承認待ちをすべて選択`} className={`h-5 w-5 rounded border-indigo-300 text-indigo-600 ${focusRing}`} />
-                この日を全部チェック
-                {selectedCount > 0 && <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-xs">{selectedCount}/{dateKeys.length}</span>}
-              </label>
-            )}
+            {selectedCount > 0 && <span className="rounded-full bg-indigo-100 px-2.5 py-1 text-xs font-bold text-indigo-800">{selectedCount}/{dateKeys.length}件を選択中</span>}
             <span className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-bold text-amber-800">要確認 {pending}件</span>
           </div>
         ) : (
           <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-bold text-emerald-700"><Check size={13} />確認済み</span>
         )}
       </div>
-      {/* 1日分の勤怠を1画面で見渡せるよう、広い画面では2列に並べる。 */}
-      <div className="grid gap-3 p-3 sm:p-4 xl:grid-cols-2">
-        {records.map(record => (
-          <RecordCard
-            key={record.id}
-            record={record}
-            canReject={canReject}
-            canUnlock={canUnlock}
-            processing={processing}
-            clockEdit={clockEdit}
-            setClockEdit={setClockEdit}
-            onSaveClock={onSaveClock}
-            onSaveSegment={onSaveSegment}
-            onSaveSegments={onSaveSegments}
-            onSaveTransportation={onSaveTransportation}
-            onDeleteRecord={onDeleteRecord}
-            onReview={onReview}
-            selectedApprovals={selectedApprovals}
-            onToggleSelection={onToggleSelection}
-            onToggleSelections={onToggleSelections}
-            jumpRecordId={jumpRecordId}
-          />
-        ))}
-      </div>
+      <div className="border-b border-slate-100 px-3 py-2"><BoardLegend /></div>
+      <DayBoard records={records} selectedApprovals={selectedApprovals} onToggleSelections={onToggleSelections} onOpen={onOpen} />
     </section>
   );
 }
 
-function RecordCard({ record, canReject, canUnlock, processing, clockEdit, setClockEdit, onSaveClock, onSaveSegment, onSaveSegments, onSaveTransportation, onDeleteRecord, onReview, selectedApprovals, onToggleSelection, onToggleSelections, jumpRecordId }: {
+function RecordCard({ record, canReject, canUnlock, processing, clockEdit, setClockEdit, onSaveClock, onSaveSegment, onSaveSegments, onSaveTransportation, onDeleteRecord, onReview, selectedApprovals, onToggleSelection, onToggleSelections, jumpRecordId, focusSegmentId }: {
   record: any;
+  /** ガントのバーから開いたとき、その勤務の編集を最初から開く。 */
+  focusSegmentId?: string;
   canReject: boolean;
   canUnlock: boolean;
   processing: string;
@@ -1297,7 +1269,7 @@ function RecordCard({ record, canReject, canUnlock, processing, clockEdit, setCl
               <div className="rounded-card border border-dashed border-amber-300 bg-amber-50 p-4 text-xs font-bold text-amber-800">勤務詳細が登録されていないため、承認できません。</div>
             )}
             {record.work_segments.map((segment: any) => (
-              <SegmentCard key={segment.id} recordId={record.id} segment={segment} canReject={canReject} canUnlock={canUnlock} processing={processing} onReview={onReview} onSaveEdit={onSaveSegment} selected={selectedApprovals.has(selectionKey(record.id, segment.id))} onToggleSelection={onToggleSelection} />
+              <SegmentCard key={segment.id} recordId={record.id} segment={segment} canReject={canReject} canUnlock={canUnlock} processing={processing} onReview={onReview} onSaveEdit={onSaveSegment} selected={selectedApprovals.has(selectionKey(record.id, segment.id))} onToggleSelection={onToggleSelection} focused={focusSegmentId === segment.id} />
             ))}
           </div>
         </section>
@@ -1318,6 +1290,178 @@ function RecordCard({ record, canReject, canUnlock, processing, clockEdit, setCl
       </div>
       </div>
     </article>
+  );
+}
+
+const minutesOfLabel = (value: string) => {
+  const [hours, minutes] = String(value || '').split(':').map(Number);
+  return Number.isFinite(hours) && Number.isFinite(minutes) ? hours * 60 + minutes : NaN;
+};
+/** バーの2行目に出す詳細（学年・個別の種類・事務の内容など）。 */
+const segmentDetailLabel = (segment: any) => [
+  segment.grade,
+  individualLevelLabel(segment.individual_level),
+  segment.individual_ratio,
+  segment.office_task && (OFFICE_TASK_OPTIONS.find(option => option.value === segment.office_task)?.label || ''),
+  segmentProgram(segment) === 'science_social' ? '理社' : segmentProgram(segment) === 'breakthrough' ? '突破' : '',
+].filter(Boolean).join('・');
+const workMinutesOf = (record: any) => record.work_segments
+  .filter((segment: any) => segment.type !== 'break')
+  .reduce((sum: number, segment: any) => sum + Math.max(0, minutesOfLabel(segment.end) - minutesOfLabel(segment.start)), 0);
+
+/**
+ * 1日分の勤怠を、職員ごとの横一列のバーで見渡す表（ガントチャート）。
+ * バーの位置で何時に何をしていたかが分かり、押すとその勤務の編集を開く。
+ */
+function DayBoard({ records, selectedApprovals, onToggleSelections, onOpen }: {
+  records: any[];
+  selectedApprovals: Set<string>;
+  onToggleSelections: (keys: string[]) => void;
+  onOpen: (recordId: string, segmentId?: string) => void;
+}) {
+  const ranges = records.flatMap(record => [
+    minutesOfLabel(timeInputValue(record.start_time)), minutesOfLabel(timeInputValue(record.end_time)),
+    ...record.work_segments.flatMap((segment: any) => [minutesOfLabel(segment.start), minutesOfLabel(segment.end)]),
+  ]).filter(Number.isFinite);
+  // 表示する時間帯：その日の最初の出勤〜最後の退勤（1時間単位、最低4時間。足りない分は後ろ、次に前へ広げる）。
+  let startHour = ranges.length ? Math.floor(Math.min(...ranges) / 60) : 18;
+  let endHour = ranges.length ? Math.ceil(Math.max(...ranges) / 60) : 22;
+  if (endHour - startHour < 4) { endHour = Math.min(24, startHour + 4); startHour = Math.max(0, endHour - 4); }
+  const span = (endHour - startHour) * 60;
+  const position = (minutes: number) => Math.max(0, Math.min(100, ((minutes - startHour * 60) / span) * 100));
+  const hours = Array.from({ length: endHour - startHour + 1 }, (_, index) => startHour + index);
+  const dayKeys = records.flatMap(record => record.work_segments.filter(needsReview).map((segment: any) => selectionKey(record.id, segment.id)));
+  const allSelected = dayKeys.length > 0 && dayKeys.every(key => selectedApprovals.has(key));
+  // スマホは横にスクロールして見る（名前の列は固定）。広い画面では時間の列を広げる。
+  const columns = 'grid grid-cols-[7rem_minmax(22rem,1fr)_3rem_3.75rem_4.25rem] sm:grid-cols-[8.5rem_minmax(34rem,1fr)_3.25rem_4rem_4.5rem]';
+
+  return (
+    <div className="overflow-x-auto">
+      <div className="min-w-[40rem] sm:min-w-[56rem]" role="table" aria-label="1日の勤怠（職員ごとの時間の流れ）">
+        <div className={`${columns} sticky top-0 z-10 border-b border-slate-200 bg-slate-50 text-[11px] font-bold text-slate-500`} role="row">
+          <div className="sticky left-0 z-10 bg-slate-50 px-3 py-2" role="columnheader">職員・打刻</div>
+          <div className="relative h-8" role="columnheader" aria-label={`${startHour}時から${endHour}時`}>
+            {hours.map((hour, index) => (
+              // 両端の目盛りは枠からはみ出さないよう内側に寄せる。
+              <span key={hour} className={`absolute top-2 whitespace-nowrap tabular-nums ${index === 0 ? 'pl-1' : index === hours.length - 1 ? '-translate-x-full pr-1' : '-translate-x-1/2'}`} style={{ left: `${position(hour * 60)}%` }}>{hour}時</span>
+            ))}
+          </div>
+          <div className="px-1 py-2 text-center" role="columnheader">勤務<br />（分）</div>
+          <div className="px-1 py-2 text-center" role="columnheader">交通費</div>
+          <div className="flex items-center justify-center px-1" role="columnheader">
+            {dayKeys.length > 0 ? (
+              <label className="inline-flex cursor-pointer items-center gap-1">
+                <input type="checkbox" checked={allSelected} onChange={() => onToggleSelections(dayKeys)} className={`h-4 w-4 rounded border-indigo-300 text-indigo-600 ${focusRing}`} aria-label="この日の承認待ちをすべて選択" />全選択
+              </label>
+            ) : '承認'}
+          </div>
+        </div>
+
+        {records.map(record => {
+          const start = minutesOfLabel(timeInputValue(record.start_time));
+          const end = minutesOfLabel(timeInputValue(record.end_time));
+          const recordKeys = record.work_segments.filter(needsReview).map((segment: any) => selectionKey(record.id, segment.id));
+          const recordSelected = recordKeys.length > 0 && recordKeys.every((key: string) => selectedApprovals.has(key));
+          const missing = detailMissing(record);
+          const transportTotal = (record.transportation || []).reduce((sum: number, item: any) => sum + (Number(item.cost) || 0), 0);
+          const reviewable = record.work_segments.filter((segment: any) => segment.type !== 'break' && segment.can_review !== false);
+          const status = missing ? 'missing'
+            : recordKeys.length > 0 ? 'pending'
+              : record.detail_approval_status === 'rejected' || reviewable.some((segment: any) => segment.approval_status === 'rejected') ? 'rejected'
+                : reviewable.length > 0 ? 'approved' : 'view';
+          return (
+            <div key={record.id} id={`attendance-record-${record.id}`} className={`${columns} scroll-mt-24 border-b border-slate-100 last:border-b-0 ${recordSelected ? 'bg-indigo-50/60' : 'bg-white'}`} role="row">
+              <button
+                type="button"
+                onClick={() => onOpen(record.id)}
+                className={`sticky left-0 z-[5] flex min-w-0 flex-col justify-center border-r border-slate-100 px-3 text-left hover:bg-slate-50 ${recordSelected ? 'bg-indigo-50' : 'bg-white'} ${focusRing}`}
+                aria-label={`${record.teacher_name || '講師'}さんの勤務をまとめて確認・編集`}
+              >
+                <span className="truncate text-sm font-bold text-slate-900">{record.teacher_name || '講師未設定'}</span>
+                <span className="font-mono text-[11px] font-bold text-indigo-700 underline decoration-indigo-200 underline-offset-2">{time(record.start_time)}〜{time(record.end_time)}</span>
+              </button>
+
+              <div className="relative h-12" role="cell">
+                {hours.map(hour => <span key={hour} aria-hidden className="absolute inset-y-0 w-px bg-slate-100" style={{ left: `${position(hour * 60)}%` }} />)}
+                {missing && Number.isFinite(start) && (
+                  <button
+                    type="button"
+                    onClick={() => onOpen(record.id)}
+                    className={`absolute inset-y-1.5 flex items-center justify-center rounded-md border-2 border-dashed border-amber-300 bg-amber-50 text-[11px] font-bold text-amber-800 hover:bg-amber-100 ${focusRing}`}
+                    style={{ left: `${position(start)}%`, width: `${Math.max(2, position(Number.isFinite(end) ? end : start + 60) - position(start))}%` }}
+                  >勤務詳細が未登録（押して入力）</button>
+                )}
+                {record.work_segments.map((segment: any) => {
+                  const segmentStart = minutesOfLabel(segment.start);
+                  const segmentEnd = minutesOfLabel(segment.end);
+                  if (!Number.isFinite(segmentStart) || !Number.isFinite(segmentEnd) || segmentEnd <= segmentStart) return null;
+                  const left = position(segmentStart);
+                  const width = Math.max(0.6, position(segmentEnd) - left);
+                  const pending = needsReview(segment);
+                  const rejected = segment.approval_status === 'rejected';
+                  const viewOnly = segment.type !== 'break' && segment.can_review === false;
+                  const detail = segmentDetailLabel(segment);
+                  const school = segmentProgram(segment) === 'science_social' ? '理社講座' : segment.school_name || '';
+                  const label = `${segment.start}〜${segment.end} ${typeLabel(segment.type)}${detail ? `（${detail}）` : ''}${school ? ` ${school}` : ''}・${segment.type === 'break' ? '休憩' : statusLabel(segment.approval_status)}${viewOnly ? '・閲覧のみ' : ''}`;
+                  return (
+                    <button
+                      key={segment.id}
+                      type="button"
+                      onClick={() => onOpen(record.id, segment.id)}
+                      title={label}
+                      aria-label={`${label}。押すと詳細を開きます`}
+                      className={`group absolute inset-y-1 overflow-hidden rounded-md text-left text-white shadow-sm motion-safe:transition hover:brightness-110 ${segmentToneClass(segment, 'bar')} ${pending ? 'ring-2 ring-inset ring-amber-300' : rejected ? 'ring-2 ring-inset ring-rose-500' : ''} ${viewOnly ? 'opacity-60' : ''} ${focusRing}`}
+                      style={{ left: `${left}%`, width: `${width}%` }}
+                    >
+                      {width >= 2.2 && <span aria-hidden className="absolute left-0.5 top-0 text-[9px] font-bold leading-none opacity-90">{segment.start.slice(3)}</span>}
+                      {width >= 2.2 && <span aria-hidden className="absolute bottom-0 right-0.5 text-[9px] font-bold leading-none opacity-90">{segment.end.slice(3)}</span>}
+                      {width >= 5 && (
+                        <span aria-hidden className="flex h-full flex-col items-center justify-center px-1 text-center leading-tight">
+                          <span className="max-w-full truncate text-[11px] font-bold">{segment.type === 'support' ? 'サブ' : typeLabel(segment.type)}</span>
+                          {detail && width >= 8 && <span className="max-w-full truncate text-[10px] font-bold opacity-90">{detail}</span>}
+                        </span>
+                      )}
+                      {pending && <span aria-hidden className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-amber-300" />}
+                    </button>
+                  );
+                })}
+                {Number.isFinite(start) && <span aria-hidden className="absolute inset-y-0 w-0.5 bg-rose-500" style={{ left: `${position(start)}%` }} />}
+                {Number.isFinite(end) && <span aria-hidden className="absolute inset-y-0 w-0.5 bg-rose-500" style={{ left: `${position(end)}%` }} />}
+              </div>
+
+              <div className="flex items-center justify-center font-mono text-sm font-bold text-slate-800" role="cell">{missing ? '—' : workMinutesOf(record)}</div>
+              <button type="button" onClick={() => onOpen(record.id)} className={`flex items-center justify-center text-xs font-bold hover:bg-slate-50 ${focusRing}`} role="cell">
+                {transportTotal > 0 ? <span className="font-mono text-slate-800">¥{transportTotal.toLocaleString()}</span> : record.transportation_status === 'none' ? <span className="text-slate-400">なし</span> : <span className="text-amber-700">未入力</span>}
+              </button>
+              <div className="flex items-center justify-center px-1" role="cell">
+                {status === 'pending' ? (
+                  <label className="inline-flex cursor-pointer items-center gap-1 rounded-btn border border-indigo-200 bg-white px-2 py-1 text-xs font-bold text-indigo-700">
+                    <input type="checkbox" checked={recordSelected} onChange={() => onToggleSelections(recordKeys)} className={`h-4 w-4 rounded border-indigo-300 text-indigo-600 ${focusRing}`} aria-label={`${record.teacher_name || '講師'}さんの承認待ち${recordKeys.length}件を選択`} />承認
+                  </label>
+                ) : (
+                  <span className={`text-xs font-bold ${status === 'approved' ? 'text-emerald-700' : status === 'rejected' ? 'text-rose-700' : status === 'missing' ? 'text-amber-700' : 'text-slate-400'}`}>
+                    {status === 'approved' ? '承認済' : status === 'rejected' ? '差戻し' : status === 'missing' ? '未登録' : '閲覧のみ'}
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** 色の見方（バーの上に小さく出す）。 */
+function BoardLegend() {
+  const items: Array<[string, string]> = [['lesson', '集団授業'], ['individual', '個別'], ['office', '事務'], ['support', 'サブ'], ['breakthrough_lesson', '突破ゼミ'], ['break', '休憩']];
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-1 text-[11px] font-bold text-slate-500" aria-label="色の見方">
+      {items.map(([type, label]) => <span key={type} className="inline-flex items-center gap-1"><span className={`h-2.5 w-4 rounded-sm ${segmentToneClass({ type }, 'bar')}`} />{label}</span>)}
+      <span className="inline-flex items-center gap-1"><span className="h-2.5 w-4 rounded-sm bg-slate-300 ring-2 ring-inset ring-amber-300" />承認待ち</span>
+      <span className="inline-flex items-center gap-1"><span className="h-2.5 w-0.5 bg-rose-500" />出勤・退勤</span>
+      <span>バーを押すと詳細・編集</span>
+    </div>
   );
 }
 
@@ -1363,7 +1507,8 @@ function WorkTimeline({ record }: { record: any }) {
   );
 }
 
-function SegmentCard({ recordId, segment, canReject, canUnlock, processing, onReview, onSaveEdit, selected, onToggleSelection }: {
+function SegmentCard({ recordId, segment, canReject, canUnlock, processing, onReview, onSaveEdit, selected, onToggleSelection, focused = false }: {
+  focused?: boolean;
   recordId: string;
   segment: any;
   canReject: boolean;
@@ -1374,8 +1519,13 @@ function SegmentCard({ recordId, segment, canReject, canUnlock, processing, onRe
   selected: boolean;
   onToggleSelection: (recordId: string, segmentId: string) => void;
 }) {
-  const [editing, setEditing] = useState(false);
+  // バーから開いたときは、その勤務の編集を最初から開く（承認済み・閲覧のみは内容の表示だけ）。
+  const [editing, setEditing] = useState(() => focused && segment.can_review && segment.type !== 'break' && segment.approval_status !== 'approved');
   const [draft, setDraft] = useState<SegmentEdit>(() => segmentDraft(segment));
+  const cardRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (focused) cardRef.current?.scrollIntoView({ block: 'center' });
+  }, [focused]);
   const busy = processing === `${recordId}_${segment.id}`;
   const editBusy = processing === `edit_${recordId}_${segment.id}`;
   const details = [
@@ -1392,7 +1542,7 @@ function SegmentCard({ recordId, segment, canReject, canUnlock, processing, onRe
     if (await onSaveEdit(recordId, segment.id, draft)) setEditing(false);
   };
   return (
-    <div className={`overflow-hidden rounded-card border motion-safe:transition ${selected ? 'border-indigo-400 bg-indigo-50 ring-2 ring-indigo-200' : segmentToneClass(segment, 'card')} ${reviewable ? '' : 'opacity-75'}`}>
+    <div ref={cardRef} className={`overflow-hidden rounded-card border motion-safe:transition ${selected ? 'border-indigo-400 bg-indigo-50 ring-2 ring-indigo-200' : segmentToneClass(segment, 'card')} ${focused ? 'ring-2 ring-accent' : ''} ${reviewable ? '' : 'opacity-75'}`}>
       <div className={`px-3 py-2.5 ${reviewable && (segment.approval_status || 'pending') === 'pending' ? 'border-l-4 border-l-amber-400' : reviewable && segment.approval_status === 'rejected' ? 'border-l-4 border-l-rose-400' : ''}`}>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex min-w-0 items-start gap-2.5">

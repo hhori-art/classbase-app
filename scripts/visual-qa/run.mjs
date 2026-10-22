@@ -34,6 +34,8 @@ const HEADFUL = args.includes('--headful');
 const SEED = args.includes('--seed');
 const ONLY_ROLE = argValue('--role');
 const ONLY_PAGE = argValue('--only');
+// 画面を開いたあと、この要素を押してから撮る（モーダルなど操作後の画面の確認用）。例: --click '[aria-label*="押すと詳細"]'
+const CLICK_SELECTOR = argValue('--click');
 const ONLY_WIDTH = argValue('--width') ? Number(argValue('--width')) : null;
 const WIDTHS = ONLY_WIDTH ? [ONLY_WIDTH] : [375, 1280];
 
@@ -63,14 +65,14 @@ const ROLES = [
   {
     // 専任 (dedicated) attendance approver: school roster + attendance.
     role: 'teacher-dedicated', uid: 'security-teacher-dedicated', loginPath: '/',
-    pages: ['/teacher/school-students', '/teacher/attendance/dedicated', '/teacher/attendance-approvals', '/teacher/attendance-approvals?date=yesterday'],
+    pages: ['/teacher/school-students', '/teacher/attendance/dedicated', '/teacher/attendance-approvals', '/teacher/attendance-approvals?date=yesterday', '/teacher/attendance-approvals/dedicated'],
   },
   {
     role: 'master', uid: 'security-master', loginPath: '/admin/login',
     pages: [
       '/master',
       '/master/school-students?tab=students', '/master/school-students?tab=attendance', '/master/school-students?tab=courses',
-      '/master/requests', '/master/parent-inquiries', '/master/attendance', '/master/attendance-approvals', '/master/shifts',
+      '/master/requests', '/master/parent-inquiries', '/master/attendance', '/master/attendance/dedicated', '/master/attendance-approvals', '/master/attendance-approvals?date=yesterday', '/master/shifts/merge', '/master/lesson-language', '/master/shifts',
       '/master/settings', '/master/accounts/sso', '/master/students', '/master/inbox', '/master/audit-logs', '/master/ui-guide',
     ],
   },
@@ -366,6 +368,11 @@ async function capturePage(session, { url, width, shotPath }) {
   await navigate(session, url);
   const settle = await waitForSettled(session);
   await sleep(400);
+  if (CLICK_SELECTOR) {
+    const clicked = await session.evaluate(`(() => { const el = document.querySelector(${JSON.stringify(CLICK_SELECTOR)}); if (!el) return false; el.scrollIntoView({ block: 'center' }); el.click(); return true; })()`);
+    console.log(`[visual-qa] click ${CLICK_SELECTOR}: ${clicked ? 'clicked' : 'not found'}`);
+    await sleep(900);
+  }
   const finalPath = await session.evaluate('location.pathname + location.search');
 
   // Grow the viewport so that pages with an inner scroll container (h-screen layouts) are fully

@@ -2,8 +2,7 @@ import {
   Activity, AlertTriangle, Archive, BarChart2, Bell, BookOpen, BookOpenCheck, Briefcase, Calendar, CalendarRange,
   CheckSquare, ClipboardList, Clock, Database, DollarSign, FileText, GraduationCap, History, Home, Inbox, KeyRound, Languages,
   ListChecks, Megaphone, Palette, MessageCircle, Printer, Send, Settings, ShieldCheck, ShoppingBag, Sparkles, Train, UserSearch, UsersRound, Video,
-  type LucideIcon,
-} from 'lucide-react';
+  type LucideIcon, MessageSquareWarning } from 'lucide-react';
 import {
   hasAdminAppPermission,
   isConfigurableAdminRole,
@@ -75,6 +74,7 @@ export const ADMIN_MENU: AdminMenuSection[] = [
       { key: 'curriculum', title: 'カリキュラム', description: 'タームと単元', icon: BookOpen, href: '/master/curriculum', app: 'science_social' },
       { key: 'reviewPeriods', title: 'テスト対策（復習期間）', description: '期間・単元・対策講座の受講登録', icon: BookOpenCheck, href: '/master/review-periods', app: 'science_social' },
       { key: 'recordings', title: '授業録画', description: '録画の承認・公開', icon: Video, href: '/master/recordings', app: 'science_social' },
+      { key: 'lessonLanguage', title: '授業の発言チェック', description: '文字起こしからNGワードを検知', icon: MessageSquareWarning, href: '/master/lesson-language', app: 'science_social' },
       { key: 'slides', title: '授業スライド', description: 'スライドとAIクエスト', icon: FileText, href: '/master/slides', app: 'science_social' },
       { key: 'rewards', title: 'コイン・景品', description: 'コイン・景品・ガチャ・発送', icon: ShoppingBag, href: '/master/rewards', app: 'science_social' },
       { key: 'stats', title: '講座運用分析', description: '開始率・退会率・レポート送信', icon: BarChart2, href: '/master/stats', app: 'science_social' },
@@ -112,7 +112,7 @@ export const ADMIN_MENU: AdminMenuSection[] = [
       { key: 'attendancePayroll', title: '給与計算・勤怠出力', description: '給与計算とCSV出力', icon: DollarSign, href: '/master/attendance/payroll', app: 'attendance' },
       { key: 'commuterPasses', title: '講師の通勤定期', description: '定期の確認・更新・削除', icon: Train, href: '/master/attendance/commuter-passes', app: 'attendance' },
       { key: 'attendanceDiagnostics', title: '勤怠ミス候補', description: 'シフトと打刻の不一致', icon: AlertTriangle, href: '/master/attendance/diagnostics', app: 'attendance' },
-      { key: 'dedicatedClaims', title: '専任の各種申請', description: '専任スタッフの申請承認', icon: Clock, href: '/master/attendance/dedicated-claims', app: 'attendance' },
+      { key: 'dedicatedClaims', title: '専任の勤怠', description: '時間外の予定・報告・月の報告書・講習の授業の承認', icon: Clock, href: '/master/attendance/dedicated', app: 'attendance' },
       { key: 'employeeLessons', title: '専任の授業実績', description: '専任の授業実績を入力', icon: BookOpen, href: '/master/attendance/employee-lessons', app: 'attendance' },
       { key: 'attendanceInsights', title: '勤務実態分析', description: '曜日・職員ごとの勤務時間', icon: BarChart2, href: '/master/attendance/insights', app: 'attendance' },
       { key: 'attendanceSettings', title: '勤怠の設定', description: '交通費マスタ・給与の単価と割増', icon: Settings, href: '/master/attendance/settings', app: 'attendance' },

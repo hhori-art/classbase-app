@@ -17,6 +17,11 @@ export type NextClassShift = {
   target_signin_address?: string;
   unit?: string;
   teacher_name?: string;
+  /** 授業の合併（lib/shift-merge.ts）：合併先の Zoom に参加者として入る。 */
+  merge_host_shift_id?: string;
+  merge_meeting_id?: string;
+  merge_password?: string;
+  merge_host_label?: string;
 };
 
 /** Firestore の in 条件（最大30件）に渡す、今日（JST）からの日付キー。 */

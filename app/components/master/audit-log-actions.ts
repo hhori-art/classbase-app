@@ -36,6 +36,13 @@ export const AUDIT_ACTION_LABELS = {
   attendance_review: '勤務実績の承認・差し戻し',
   // 代行依頼
   substitution_reopen: '代行依頼の再募集',
+  shift_merge: '授業の合併',
+  lesson_language_rules_update: '授業の発言チェックの言葉の設定',
+  shift_unmerge: '授業の合併の解除',
+  dedicated_review: '専任の勤怠申請の承認・差し戻し',
+  dedicated_bulk_plans: '専任の時間外 一括申請',
+  dedicated_staff_update: '専任の等級・事業部の設定',
+  dedicated_season_save: '専任の講習期間の設定',
   // 画面から直接行う操作（操作後に画面から記録する）
   shift_unassign: 'シフト配置の解除',
   registration_task_delete: '受講登録の依頼の削除',

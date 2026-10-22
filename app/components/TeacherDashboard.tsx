@@ -42,6 +42,13 @@ type ShiftAssignment = {
   note: string;
   parent_id?: string;
   start_url?: string; 
+  /** 授業の合併（lib/shift-merge.ts）：この授業は合併先の Zoom に集約されている。 */
+  merge_host_shift_id?: string | null;
+  merge_meeting_id?: string | null;
+  merge_join_url?: string | null;
+  merge_host_label?: string | null;
+  /** 合併先の授業：集約している授業。 */
+  merge_audiences?: Array<{ shift_id: string; grade: string; subject: string; detail_subject: string }>;
 };
 
 type ClassGroup = {
@@ -110,8 +117,11 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
   const currentUserId = currentUserProfile?.id || currentUserProfile?.uid || '';
   const isMyClass = (info.main?.user_id === currentUserId) || info.subs.some(s => s.user_id === currentUserId);
 
+  // 合併された授業は、自分の Zoom ではホスト開始せず、合併先の授業に参加者として入る。
+  const mergedInto = info.main?.merge_host_shift_id ? info.main : null;
+  const mergedCount = Array.isArray(info.main?.merge_audiences) ? info.main!.merge_audiences!.length : 0;
   const loginEmail = info.signin_address?.trim();
-  const hasHostPermission = !!loginEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(loginEmail);
+  const hasHostPermission = !mergedInto && !!loginEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(loginEmail);
   
   const displayLoginId = loginEmail ? loginEmail.split('@')[0] : '';
 
@@ -133,7 +143,8 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
   };
 
   const myName = currentUserProfile?.student_name || currentUserProfile?.name || '講師';
-  const confno = normalizeMeetingId(info.meeting_id) || normalizeMeetingId(info.url ? info.url.split('/').pop()?.split('?')[0] : '');
+  const joinUrl = mergedInto ? (mergedInto.merge_join_url || null) : info.url;
+  const confno = (mergedInto ? normalizeMeetingId(mergedInto.merge_meeting_id) : '') || normalizeMeetingId(info.meeting_id) || normalizeMeetingId(info.url ? info.url.split('/').pop()?.split('?')[0] : '');
 
   const launchWebUrl = (url: string, targetWindow?: Window | null) => {
     if (targetWindow && !targetWindow.closed) {
@@ -197,10 +208,10 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
         setLoading(false);
       }
     } else {
-      let targetUrl = info.url || `zoommtg://zoom.us/join?confno=${confno}`;
-      if (info.url) {
+      let targetUrl = joinUrl || (mergedInto ? `https://zoom.us/j/${confno}` : `zoommtg://zoom.us/join?confno=${confno}`);
+      if (joinUrl) {
         try {
-          const urlObj = new URL(info.url);
+          const urlObj = new URL(joinUrl);
           const pwd = urlObj.searchParams.get('pwd');
           targetUrl = `https://zoom.us/j/${confno}?pwd=${pwd || ''}&uname=${encodeURIComponent(myName)}`;
         } catch (e) {}
@@ -210,7 +221,7 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
   };
 
   const widthClass = isExpanded ? 'w-full' : 'w-[168px] shrink-0';
-  let buttonLabel = hasHostPermission ? (isMyClass ? 'ホスト開始' : 'ホスト開始（代行）') : '入室';
+  let buttonLabel = mergedInto ? '合併先に入室' : hasHostPermission ? (isMyClass ? 'ホスト開始' : 'ホスト開始（代行）') : '入室';
   if (loading) buttonLabel = '準備中...';
 
   return (
@@ -230,6 +241,8 @@ const TeacherClassCard = ({ info, color, currentUserProfile, isExpanded }: { inf
           {info.unit || <span className="font-normal opacity-60">未設定</span>}
         </div>
       </div>
+      {mergedInto && <p className="bg-indigo-50 px-2.5 py-1 text-[11px] font-bold leading-snug text-indigo-800" title={mergedInto.merge_host_label || ''}>合併：{mergedInto.merge_host_label || '合併先の授業'}に集約</p>}
+      {!mergedInto && mergedCount > 0 && <p className="bg-indigo-50 px-2.5 py-1 text-[11px] font-bold leading-snug text-indigo-800">合併先：ほか{mergedCount}授業の生徒も参加</p>}
       <div className="flex flex-1 flex-col gap-2 bg-surface p-2">
         <div className="flex flex-col gap-1">
            <div className="flex items-center gap-1.5">

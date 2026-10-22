@@ -806,6 +806,47 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // 攻撃の監視（サーバー専用）。IPアドレスを含むため、管理者もブラウザから直接は読めない。
+    // 集計の改ざんを防ぐため、書き込みもサーバー（Admin SDK）だけにする。
+    match /security_monitor_days/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /security_monitor_reports/{reportId} {
+      allow read, write: if false;
+    }
+
+    // 自動の通知の実行記録（どの時限まで送ったか・未参加のまとめ）。サーバー専用。
+    match /auto_notification_runs/{runId} {
+      allow read, write: if false;
+    }
+
+    // 授業の文字起こしと発言チェックの結果（講師の評価にあたるためサーバー専用。マスターはAPI経由で見る）。
+    match /lesson_transcripts/{shiftId} {
+      allow read, write: if false;
+    }
+
+    match /lesson_transcript_checks/{shiftId} {
+      allow read, write: if false;
+    }
+
+    // 専任の時間外の予定・実施報告・月の報告書・講習の授業。承認の権限（担当校舎）をAPIで確かめるためサーバー専用。
+    match /dedicated_overtime_plans/{planId} {
+      allow read, write: if false;
+    }
+
+    match /dedicated_overtime_reports/{reportId} {
+      allow read, write: if false;
+    }
+
+    match /dedicated_monthly_reports/{reportId} {
+      allow read, write: if false;
+    }
+
+    match /dedicated_season_lessons/{lessonId} {
+      allow read, write: if false;
+    }
+
     function hasExplicitCollectionRules(collection) {
       return collection in [
         'users',
@@ -907,7 +948,16 @@ service cloud.firestore {
         'online_school_learning_sessions',
         'online_school_answers',
         'online_school_problems',
-        'online_school_active_sessions'
+        'online_school_active_sessions',
+        'security_monitor_days',
+        'security_monitor_reports',
+        'auto_notification_runs',
+        'lesson_transcripts',
+        'lesson_transcript_checks',
+        'dedicated_overtime_plans',
+        'dedicated_overtime_reports',
+        'dedicated_monthly_reports',
+        'dedicated_season_lessons'
       ];
     }
 

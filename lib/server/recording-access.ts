@@ -21,12 +21,18 @@ export function canAccessClassRecording(user: ServerUser, recording: FirebaseFir
   if (hasValidTargetDate && targetDate > today) return false;
   const isPastRecording = hasValidTargetDate && targetDate < today;
   const grade = String(user.profile.grade || '').trim();
-  const targetGrade = String(recording.grade || recording.target_grade || '').trim();
-  if (!isPastRecording && !globalGrades.has(targetGrade) && (!grade || targetGrade !== grade)) return false;
-
   const subjects = cleanList(user.profile.subjects);
-  const targetSubject = String(recording.subject || recording.target_subject || '').trim();
-  if (!globalSubjects.has(targetSubject) && subjects.length > 0 && !subjects.includes(targetSubject)) return false;
+  // 授業の合併（lib/shift-merge.ts）：合併先の録画は、合併された授業の学年・科目の生徒も見られる。
+  const audiences = [
+    { grade: String(recording.grade || recording.target_grade || '').trim(), subject: String(recording.subject || recording.target_subject || '').trim() },
+    ...(Array.isArray(recording.merge_audiences) ? recording.merge_audiences : [])
+      .map((item: any) => ({ grade: String(item?.grade || '').trim(), subject: String(item?.subject || '').trim() })),
+  ];
+  const audienceAllowed = audiences.some(({ grade: targetGrade, subject: targetSubject }) => (
+    (isPastRecording || globalGrades.has(targetGrade) || Boolean(grade && targetGrade === grade))
+    && (globalSubjects.has(targetSubject) || subjects.length === 0 || subjects.includes(targetSubject))
+  ));
+  if (!audienceAllowed) return false;
 
   const targetSchools = cleanList(recording.school_ids).concat(cleanList(recording.school_id ? [recording.school_id] : []));
   if (targetSchools.length > 0) {
