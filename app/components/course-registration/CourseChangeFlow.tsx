@@ -800,6 +800,11 @@ export default function CourseChangeFlow({ student, viewer, header, studentName,
                       <p className="mt-1 text-xs font-medium text-fg-muted">
                         同じ曜日・時限は1講座のみ、同じ講座は別の曜日・時限と重複して選べません。
                       </p>
+                      {stepCourseOptions.some((option: any) => option.chu3_period_varies) && (
+                        <p className="mt-1 text-xs font-bold text-info">
+                          中3の理科は、期の途中で1時限目と2時限目が入れ替わることがあります。登録した講座の授業に入り、社会はもう一方の時限になるよう自動で調整します。
+                        </p>
+                      )}
                     </div>
                     <div className="inline-flex w-fit items-center gap-2 rounded-btn bg-success-soft px-4 py-2 text-xs font-bold text-success">
                       <CheckCircle size={16} strokeWidth={3} aria-hidden />

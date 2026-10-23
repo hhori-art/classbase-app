@@ -1,3 +1,4 @@
+import { jstMinutesOfDay } from './class-live-status';
 export const CLASS_BUTTON_GRADES = ['中1', '中2', '中3'] as const;
 export type ClassButtonGrade = typeof CLASS_BUTTON_GRADES[number];
 export type TestPrepGradeVisibility = Record<ClassButtonGrade, ClassButtonGrade[]>;
@@ -90,7 +91,8 @@ export function canStudentSeeTestPrepGrade(
 
 export function isClassButtonVisible(now: Date | null, start: string, end: string, settings: ClassButtonSettings) {
   if (!now) return false;
-  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  // 授業の時刻は日本時間。海外など時差のある端末でも、日本時間で表示・非表示を決める。
+  const currentMinutes = jstMinutesOfDay(now);
   const [startH, startM] = start.split(':').map(Number);
   const [endH, endM] = end.split(':').map(Number);
   const showStartMinutes = (startH * 60 + startM) - settings.show_before_minutes;

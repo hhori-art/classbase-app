@@ -1,5 +1,6 @@
 'use client';
 
+import NumericNameNotice from '@/app/components/NumericNameNotice';
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { useSettings } from '@/app/context/SettingsContext';
@@ -718,6 +719,7 @@ export default function StudentSettingsPage() {
             <div className="w-full rounded-input border border-line bg-canvas p-4 font-bold text-fg">
               {name}
             </div>
+            <NumericNameNotice name={name} className="mt-1 pl-1" />
             <p className="mt-1 pl-1 text-xs text-fg-muted">※お名前の変更は先生にお伝えください</p>
           </div>
           <div>

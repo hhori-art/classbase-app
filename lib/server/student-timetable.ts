@@ -1,4 +1,5 @@
 import 'server-only';
+import { civicsRoomResolver, loadCivicsRosterFor } from '@/lib/server/chu3-civics-rooms';
 
 import { unstable_cache } from 'next/cache';
 import { adminDb } from '@/lib/firebase-admin';
@@ -188,7 +189,14 @@ export async function buildStudentTimetable(student: { id: string; profile: any 
     masters,
     today,
   );
-  const match = matchStudentLessons({ shifts, masters, profile: student.profile, selectedIds });
+  const civicsRoster = await loadCivicsRosterFor(student.profile);
+  const match = matchStudentLessons({
+    shifts,
+    masters,
+    profile: student.profile,
+    selectedIds,
+    civicsRoomFor: civicsRoster ? civicsRoomResolver(student.id, shifts, civicsRoster) : undefined,
+  });
   const settings = match.classButtonSettings;
   const periods: StudentTimetable['periods'] = {
     1: { start: settings.period1_start, end: settings.period1_end },

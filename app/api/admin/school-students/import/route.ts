@@ -6,6 +6,7 @@ import { writeAuditLog } from '@/lib/server/audit-log';
 import { prepareAuthAccountCredentials } from '@/lib/server/account-credentials';
 import { writeLearningEvent } from '@/lib/events';
 import { generateInitialPassword } from '@/lib/password';
+import { anonymousParentName, anonymousStudentName, isNoPersonalInfoSchool } from '@/lib/no-personal-info-schools';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
@@ -171,10 +172,15 @@ export async function POST(request: NextRequest) {
         }
         if (!studentName && idx.name !== -1) studentName = cols[idx.name] || '';
         if (!studentName) studentName = `生徒 ${loginId}`;
+        // 個人情報を入れずにテストしている校舎では、CSVに氏名があっても生徒番号を名前にし、電話番号は取り込まない。
+        const anonymous = isNoPersonalInfoSchool(school);
+        if (anonymous) studentName = anonymousStudentName(loginId);
 
-        const parentName = idx.parentName !== -1 && cols[idx.parentName]
-          ? cols[idx.parentName]
-          : `${studentName} 保護者`;
+        const parentName = anonymous
+          ? anonymousParentName(loginId)
+          : idx.parentName !== -1 && cols[idx.parentName]
+            ? cols[idx.parentName]
+            : `${studentName} 保護者`;
         const parentLoginId = `${loginId}P`;
         const siblingGroup = idx.siblingGroup !== -1 ? cleanCell(cols[idx.siblingGroup]) : '';
         const twin = idx.twinFlag !== -1 && ['1', 'true', 'TRUE', '○', '〇', '有', 'はい', '双子'].includes(cleanCell(cols[idx.twinFlag]));
@@ -224,7 +230,7 @@ export async function POST(request: NextRequest) {
           sibling_group_key: siblingGroup || null,
           trial_event_ids: trialEventIds,
           trial_continued: trialContinued,
-          phone_number: idx.phone !== -1 ? cols[idx.phone] || '' : '',
+          phone_number: !anonymous && idx.phone !== -1 ? cols[idx.phone] || '' : '',
           day_of_week: idx.day !== -1 ? cols[idx.day] || '' : '',
           subject_science: idx.science !== -1 ? cols[idx.science] || '' : '',
           subject_social: idx.social !== -1 ? cols[idx.social] || '' : '',
@@ -247,7 +253,7 @@ export async function POST(request: NextRequest) {
           ...parentCredentials,
           parent_name: parentName,
           name: parentName,
-          phone_number: idx.parentPhone !== -1 ? cols[idx.parentPhone] || '' : '',
+          phone_number: !anonymous && idx.parentPhone !== -1 ? cols[idx.parentPhone] || '' : '',
           student_ids: FieldValue.arrayUnion(studentAuth.uid),
           school_id: school,
           school,
@@ -273,7 +279,7 @@ export async function POST(request: NextRequest) {
           day_of_week: idx.day !== -1 ? cols[idx.day] || '' : '',
           subject_science: idx.science !== -1 ? cols[idx.science] || '' : '',
           subject_social: idx.social !== -1 ? cols[idx.social] || '' : '',
-          phone_number: idx.phone !== -1 ? cols[idx.phone] || '' : '',
+          phone_number: !anonymous && idx.phone !== -1 ? cols[idx.phone] || '' : '',
           lifetime_id: loginId,
           initial_password: studentAuth.password_preserved ? '' : studentPassword,
           isFirstLogin: !studentAuth.password_preserved,

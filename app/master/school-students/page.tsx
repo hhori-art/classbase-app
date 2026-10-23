@@ -23,9 +23,11 @@ import {
   Printer,
   RefreshCw,
   Search,
+  ShieldCheck,
   UserPlus,
   XCircle,
 } from 'lucide-react';
+import { isNoPersonalInfoSchool } from '@/lib/no-personal-info-schools';
 import { useAuth } from '@/app/context/AuthContext';
 import CsvSampleDownload from '@/app/components/CsvSampleDownload';
 import CourseRegistrationCalendar, { getCourseDay, getCourseSlot, getCourseSubject } from '@/app/components/CourseRegistrationCalendar';
@@ -201,6 +203,8 @@ export default function SchoolStudentsPage() {
   const sessionRecoveryStartedRef = useRef(false);
   const [students, setStudents] = useState<any[]>([]);
   const [school, setSchool] = useState('');
+  // 個人情報を入れずにテストしている校舎（氏名の代わりに生徒番号。サーバーでも番号に置き換える）。
+  const anonymousSchool = isNoPersonalInfoSchool(school);
   const [schoolOptions, setSchoolOptions] = useState<string[]>([]);
   const [status, setStatus] = useState('all');
   const [activeView, setActiveView] = useState<'students' | 'attendance' | 'courses'>('students');
@@ -661,7 +665,7 @@ export default function SchoolStudentsPage() {
   };
 
   const createStudent = async () => {
-    if (!form.display_name.trim()) return toast.error('氏名は必須です');
+    if (!anonymousSchool && !form.display_name.trim()) return toast.error('氏名は必須です');
     if (!form.login_id.trim()) return toast.error('初期IDは必須です');
     if (!form.course_start_month) return toast.error('利用開始月を選択してください');
     if (!school) return toast.error('校舎が設定されていません。管理者アカウントの school_ids を確認してください。');
@@ -863,7 +867,7 @@ export default function SchoolStudentsPage() {
   };
 
   const saveStudentProfile = async () => {
-    if (!editStudent || !editForm.display_name.trim()) return toast.error('氏名は必須です');
+    if (!editStudent || (!anonymousSchool && !editForm.display_name.trim())) return toast.error('氏名は必須です');
     setSavingId(editStudent.id);
     try {
       const patch = {
@@ -1266,7 +1270,7 @@ export default function SchoolStudentsPage() {
               <UserPlus className="shrink-0 text-accent" size={24} />
             </div>
             <div className="mt-4 grid gap-3 sm:grid-cols-2">
-              <input value={form.display_name} onChange={event => setForm(prev => ({ ...prev, display_name: event.target.value }))} placeholder="生徒氏名（必須）" className="rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-accent/30" />
+              <input value={anonymousSchool ? '' : form.display_name} disabled={anonymousSchool} aria-label="生徒氏名" title={anonymousSchool ? 'テスト中の校舎のため、セキュリティ上の理由により氏名は登録できません（名前は生徒番号になります）' : undefined} onChange={event => setForm(prev => ({ ...prev, display_name: event.target.value }))} placeholder={anonymousSchool ? '氏名は登録しません（生徒番号）' : '生徒氏名（必須）'} className="rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-accent/30 disabled:cursor-not-allowed" />
               <input value={form.login_id} onChange={event => setForm(prev => ({ ...prev, login_id: event.target.value }))} placeholder="生涯番号／ログインID（必須）" className="rounded-input border border-line bg-slate-50 px-4 py-3 font-mono text-sm font-bold outline-none focus:ring-2 focus:ring-accent/30" />
               <select value={form.grade} onChange={event => setForm(prev => ({ ...prev, grade: event.target.value }))} className="rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-accent/30">
                 {['中1', '中2', '中3'].map(option => <option key={option} value={option}>{option}</option>)}
@@ -1601,15 +1605,16 @@ export default function SchoolStudentsPage() {
           </>
         ) : undefined}
       >
+            {anonymousSchool && <NoPersonalInfoNotice />}
             <div className="grid gap-4 md:grid-cols-2">
-              <Field label="氏名" value={editForm.display_name} onChange={value => setEditForm(prev => ({ ...prev, display_name: value }))} />
-              <Field label="フリガナ" value={editForm.student_name_kana} onChange={value => setEditForm(prev => ({ ...prev, student_name_kana: value }))} />
+              <Field label="氏名" disabled={anonymousSchool} value={anonymousSchool ? String(editStudent?.lifetime_id || editForm.display_name) : editForm.display_name} onChange={value => setEditForm(prev => ({ ...prev, display_name: value }))} />
+              <Field label="フリガナ" disabled={anonymousSchool} value={anonymousSchool ? '' : editForm.student_name_kana} onChange={value => setEditForm(prev => ({ ...prev, student_name_kana: value }))} />
               <SelectField label="学年" value={editForm.grade} options={['中1', '中2', '中3']} onChange={value => setEditForm(prev => ({ ...prev, grade: value }))} />
               <Field label="教室/クラス" value={editForm.classroom} onChange={value => setEditForm(prev => ({ ...prev, classroom: value }))} />
               <Field label="中学校名" value={editForm.middle_school} onChange={value => setEditForm(prev => ({ ...prev, middle_school: value }))} />
               <MonthField label="受講開始月" value={editForm.course_start_month} onChange={value => setEditForm(prev => ({ ...prev, course_start_month: value }))} />
               <SelectField label="曜日" value={editForm.day_of_week} options={['', '月', '火', '水', '木', '金', '土']} onChange={value => setEditForm(prev => ({ ...prev, day_of_week: value }))} />
-              <Field label="電話番号" value={editForm.phone_number} onChange={value => setEditForm(prev => ({ ...prev, phone_number: value }))} />
+              <Field label="電話番号" disabled={anonymousSchool} value={anonymousSchool ? '' : editForm.phone_number} onChange={value => setEditForm(prev => ({ ...prev, phone_number: value }))} />
               <SelectField label="会員区分" value={editForm.member_type} options={['enrolled', 'general']} optionLabels={{ enrolled: '在籍', general: '一般' }} onChange={value => setEditForm(prev => ({ ...prev, member_type: value }))} />
               <SelectField label="夏期講習" value={editForm.summer_course_status} options={['none', 'attending']} optionLabels={{ none: '受講無', attending: '夏期受講' }} onChange={value => setEditForm(prev => ({ ...prev, summer_course_status: value }))} />
               <Field label="兄弟姉妹UID（カンマ区切り）" value={editForm.sibling_ids} onChange={value => setEditForm(prev => ({ ...prev, sibling_ids: value }))} />
@@ -1841,12 +1846,13 @@ export default function SchoolStudentsPage() {
           </>
         )}
       >
+            {anonymousSchool && <NoPersonalInfoNotice />}
             <div className="grid gap-4 md:grid-cols-2">
-              <Field label="氏名" value={form.display_name} onChange={value => setForm(prev => ({ ...prev, display_name: value }))} />
-              <Field label="フリガナ" value={form.student_name_kana} onChange={value => setForm(prev => ({ ...prev, student_name_kana: value }))} />
+              <Field label="氏名" disabled={anonymousSchool} value={anonymousSchool ? form.login_id : form.display_name} onChange={value => setForm(prev => ({ ...prev, display_name: value }))} />
+              <Field label="フリガナ" disabled={anonymousSchool} value={anonymousSchool ? '' : form.student_name_kana} onChange={value => setForm(prev => ({ ...prev, student_name_kana: value }))} />
               <Field label="初期ID" value={form.login_id} onChange={value => setForm(prev => ({ ...prev, login_id: value }))} />
               <Field label="初期パスワード（空欄なら自動発行）" value={form.password} onChange={value => setForm(prev => ({ ...prev, password: value }))} />
-              <Field label="電話番号" value={form.phone_number} onChange={value => setForm(prev => ({ ...prev, phone_number: value }))} />
+              <Field label="電話番号" disabled={anonymousSchool} value={anonymousSchool ? '' : form.phone_number} onChange={value => setForm(prev => ({ ...prev, phone_number: value }))} />
               <Field label="教室/クラス" value={form.classroom} onChange={value => setForm(prev => ({ ...prev, classroom: value }))} />
               <Field label="中学校名" value={form.middle_school} onChange={value => setForm(prev => ({ ...prev, middle_school: value }))} />
               <MonthField label="受講開始月" value={form.course_start_month} onChange={value => setForm(prev => ({ ...prev, course_start_month: value }))} />
@@ -1902,12 +1908,22 @@ export default function SchoolStudentsPage() {
   );
 }
 
-function Field({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+function Field({ label, value, onChange, disabled = false }: { label: string; value: string; onChange: (value: string) => void; disabled?: boolean }) {
   return (
     <label>
       <span className="mb-2 block text-xs font-bold text-slate-500">{label}</span>
-      <input value={value} onChange={e => onChange(e.target.value)} className="w-full rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-accent/30" />
+      <input value={value} disabled={disabled} onChange={e => onChange(e.target.value)} className="w-full rounded-input border border-line bg-slate-50 px-4 py-3 text-sm font-bold outline-none focus:ring-2 focus:ring-accent/30 disabled:cursor-not-allowed disabled:text-slate-400" />
     </label>
+  );
+}
+
+/** テスト中の校舎で、氏名などを入れられない理由を示す。 */
+function NoPersonalInfoNotice() {
+  return (
+    <p role="note" className="mb-4 flex items-start gap-2 rounded-input bg-info-soft px-4 py-3 text-xs font-bold leading-relaxed text-info">
+      <ShieldCheck size={16} className="mt-0.5 shrink-0" aria-hidden />
+      この校舎はテスト中のため、セキュリティ上の理由により氏名・フリガナ・電話番号は登録できません。名前は生徒番号で表示します。
+    </p>
   );
 }
 

@@ -8,6 +8,7 @@ import { generateInitialPassword } from '@/lib/password';
 import type { AdminAppPermissions } from '@/lib/admin-app-permissions';
 import { normalizeEmploymentCategory } from '@/lib/employment-category';
 import { attendanceSchoolName, resolveAttendanceSchoolCode } from '@/lib/attendance-schools';
+import { anonymousParentName, anonymousStudentName, isNoPersonalInfoSchool } from '@/lib/no-personal-info-schools';
 import {
   findAccountProfileDocs,
   normalizeAccountLoginId,
@@ -52,10 +53,14 @@ export async function POST(request: NextRequest) {
     const requestedPassword = normalizeInitialPassword(body.password);
     // 既存アカウントの情報編集で空欄なら、現在のPWを変更しない。
     const password = requestedPassword || (requestedUserId ? '' : generateInitialPassword());
-    const displayName = String(body.display_name || body.student_name || body.name || '').trim();
     const schoolId = resolveAttendanceSchoolCode(
       body.school_id || body.school_code || body.school_name || body.school || ''
     );
+    // 個人情報を入れずにテストしている校舎の生徒・保護者は、氏名の代わりに生徒番号を名前にする。
+    const anonymous = (role === 'student' || role === 'parent') && isNoPersonalInfoSchool(schoolId);
+    const displayName = anonymous
+      ? (role === 'student' ? anonymousStudentName(body.login_id || body.lifetime_id) : anonymousParentName(body.login_id || body.lifetime_id))
+      : String(body.display_name || body.student_name || body.name || '').trim();
     const schoolName = attendanceSchoolName(schoolId);
     const employmentCategory = normalizeEmploymentCategory(body.employment_category, role);
     const enabledPrograms = Array.isArray(body.enabled_programs)
@@ -134,7 +139,7 @@ export async function POST(request: NextRequest) {
     }
     const parentLoginId = String(body.parent_login_id || `${loginId}P`).trim();
     const parentPassword = String(body.parent_password || '').trim() || generateInitialPassword();
-    const parentName = String(body.parent_name || `${displayName} 保護者`).trim();
+    const parentName = anonymous ? anonymousParentName(parentLoginId) : String(body.parent_name || `${displayName} 保護者`).trim();
     const prepareParent = role === 'student' && body.auto_create_parent !== false;
     const parentProfiles = prepareParent ? await findAccountProfileDocs(parentLoginId, body.parent_email) : [];
     const syncParent = prepareParent ? await prepareAuthAccountCredentials({
@@ -201,7 +206,7 @@ export async function POST(request: NextRequest) {
     if (role === 'student') {
       Object.assign(baseData, {
         student_name: displayName,
-        student_name_kana: String(body.student_name_kana || body.name_kana || '').trim().slice(0, 120),
+        student_name_kana: anonymous ? '' : String(body.student_name_kana || body.name_kana || '').trim().slice(0, 120),
         name: null,
         grade: String(body.grade || ''),
         classroom: String(body.classroom || ''),

@@ -7498,3 +7498,20 @@ test('security monitor flags Node.js runtimes older than the patched security re
   assert.equal(evaluateRuntimeVersion('v22.23.3').length, 1);
   assert.equal(evaluateRuntimeVersion('v20.19.0')[0].severity, 'high');
 });
+
+test('student edits in test schools store the student number instead of the typed name', async () => {
+  const h = harness({ now: '2026-11-01T03:00:00Z', profiles: { actor: admin, target: { ...student, school_id: '112', lifetime_id: '12098761', student_name: '12098761' } } });
+  const response = await h.load('app/api/admin/school-students/options/route.ts').POST(request('/api/admin/school-students/options', {
+    user_id: 'target', student_name: '山田 太郎', student_name_kana: 'ﾔﾏﾀﾞ ﾀﾛｳ', phone_number: '09000000000',
+  }));
+  assert.equal(response.status, 200);
+  const saved = h.data.get('users/target');
+  assert.deepEqual([saved.student_name, saved.student_name_kana, saved.phone_number], ['12098761', '', '']);
+  const other = harness({ profiles: { actor: { ...admin, school: '142', school_id: '142', school_ids: ['142'] }, target: { ...student, school_id: '142', lifetime_id: '1', student_name: '1' } } });
+  await other.load('app/api/admin/school-students/options/route.ts').POST(request('/api/admin/school-students/options', { user_id: 'target', student_name: '山田 太郎' }));
+  assert.equal(other.data.get('users/target').student_name, '山田 太郎');
+  // セキュリティチェックの期間（11/30まで）が終わったら、テスト校舎でも名前を登録できる。
+  const later = harness({ now: '2026-12-01T03:00:00Z', profiles: { actor: admin, target: { ...student, school_id: '112', lifetime_id: '12098761', student_name: '12098761' } } });
+  await later.load('app/api/admin/school-students/options/route.ts').POST(request('/api/admin/school-students/options', { user_id: 'target', student_name: '山田 太郎' }));
+  assert.equal(later.data.get('users/target').student_name, '山田 太郎');
+});

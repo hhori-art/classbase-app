@@ -58,6 +58,12 @@ export const getCourseOptionIdentityIds = (option: any) => Array.from(new Set([
   getCourseOptionStableKey(option),
 ].map(value => String(value || '').trim()).filter(Boolean)));
 
+/** 選択済みかの判定に使うID（中3の理科で1つにまとめた候補の、元の時限のIDも含める）。 */
+const getCourseOptionSelectionMatchIds = (option: any) => Array.from(new Set([
+  ...getCourseOptionIdentityIds(option),
+  ...(Array.isArray(option?.alias_selection_ids) ? option.alias_selection_ids.map(String) : []),
+]));
+
 const getCourseOptionLegacyAliasIds = (option: any) => Array.from(new Set([
   option?.parent_course_option_id,
   option?.fallback_curriculum_option_id,
@@ -101,7 +107,7 @@ export const legacyCourseSelectionLabel = (value: any) => {
 
 export const courseOptionMatchesSelection = (option: any, selectedIds: Iterable<string>) => {
   const selected = selectedIds instanceof Set ? selectedIds : new Set(Array.from(selectedIds, String));
-  const identities = getCourseOptionIdentityIds(option);
+  const identities = getCourseOptionSelectionMatchIds(option);
   if (identities.some(id => selected.has(id))) return true;
 
   // 旧登録の stable key に「通常」が含まれていても、現在の講師配置と

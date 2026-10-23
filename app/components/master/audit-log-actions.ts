@@ -11,6 +11,7 @@ export const AUDIT_ACTION_LABELS = {
   app_permission_change: '管理者の権限変更',
   app_permission_initialize: '管理者の権限の初期設定',
   student_lifecycle: '生徒の転校・退塾・復帰',
+  student_profile_update: '生徒の情報の変更（氏名・学年など）',
   // 連絡・申請
   request_approve: '申請の承認',
   request_reject: '申請の却下',

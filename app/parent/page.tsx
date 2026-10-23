@@ -1,5 +1,6 @@
 'use client';
 
+import NumericNameNotice from '@/app/components/NumericNameNotice';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '@/app/context/AuthContext';
 import { db } from '@/lib/firebase';
@@ -688,6 +689,7 @@ export default function ParentDashboardPage() {
                 <p className="truncate text-lg font-bold">{studentName}<span className="ml-1 text-sm font-medium text-accent-ink/75">さん</span></p>
               </div>
             </div>
+            <NumericNameNotice name={selectedStudent?.student_name} tone="hero" className="mt-3" />
             <div className="mt-4 flex flex-wrap gap-2 text-xs font-bold">
               {selectedStudent?.grade && <span className="rounded-full bg-white/10 px-3 py-1 ring-1 ring-white/15">{selectedStudent.grade}</span>}
               {selectedStudent?.school && <span className="rounded-full bg-white/10 px-3 py-1 ring-1 ring-white/15">{selectedStudent.school}</span>}

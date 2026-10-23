@@ -7,7 +7,9 @@ import { canStudentRegisterCourseOption, normalizeCourseGrade } from '@/lib/cour
 import { getAllQueryDocuments } from '@/lib/server/firestore-pagination';
 import { isTestPrepShift } from '@/lib/class-button-settings';
 import { buildTestPrepRegistrationOptions, canStudentUseTestPrepDefinition, normalizeTestPrepDefinition, testPrepTermRanges } from '@/lib/test-prep-registration';
-import { getCourseOptionCourseKey, getCourseOptionStableKey } from '@/lib/course-registration-selection';
+import { getCourseOptionCourseKey, getCourseOptionIdentityIds, getCourseOptionStableKey } from '@/lib/course-registration-selection';
+import { chu3TermSciencePeriods, collapseChu3ScienceOptions } from '@/lib/chu3-schedule';
+import { periodFromShift } from '@/lib/student-course-schedule';
 import { issueCourseRegistrationToken } from '@/lib/server/course-registration-token';
 import { canIssueCourseRegistrationGrantForContext } from '@/lib/course-registration-window';
 import { jstSchoolYear } from '@/lib/date-key';
@@ -160,7 +162,23 @@ const getCachedCourseSourceData = unstable_cache(async (year: number) => {
       .where('target_date', '>=', shiftRange.start)
       .where('target_date', '<=', shiftRange.end)
       .orderBy('target_date', 'asc'));
+    // 期のはじめ（最初の1週間）の講師配置。中3の理科は期の途中で時限が入れ替わるので、
+    // 登録の画面はその期のはじめの配置（配置表どおり）の時限で表示する。
+    const allTermRanges = buildTermDateRanges(allCurriculumRows, lessonRows);
+    const termStartShifts: Record<string, any[]> = {};
+    await Promise.all(Object.entries(allTermRanges).map(async ([key, termRange]) => {
+      if (!termRange?.start) return;
+      const startWeekEnd = new Date(`${termRange.start}T12:00:00Z`);
+      startWeekEnd.setUTCDate(startWeekEnd.getUTCDate() + 6);
+      const snap = await db.collection('shift_assignments')
+        .where('target_date', '>=', termRange.start)
+        .where('target_date', '<=', startWeekEnd.toISOString().slice(0, 10))
+        .limit(400)
+        .get();
+      termStartShifts[key] = snap.docs.map(doc => compactShiftSource({ id: doc.id, ...doc.data() }));
+    }));
     return {
+      termStartShifts,
       allOptions: allOptions.map(compactCourseOptionSource),
       allCurriculumRows: allCurriculumRows.map(compactCurriculumSource),
       lessonRows: lessonRows.map(compactLessonSource),
@@ -168,7 +186,7 @@ const getCachedCourseSourceData = unstable_cache(async (year: number) => {
       shiftRange,
       allShiftRows: shiftDocs.map(doc => compactShiftSource({ id: doc.id, ...doc.data() })),
     };
-}, ['course-registration-source-v2-compact'], {
+}, ['course-registration-source-v3-term-start'], {
   revalidate: 300,
   tags: ['course-registration-options'],
 });
@@ -181,6 +199,7 @@ const getCachedCourseOptions = unstable_cache(async (requestedGrade: string, yea
       testPrepRows,
       shiftRange,
       allShiftRows,
+      termStartShifts,
     } = await getCachedCourseSourceData(year);
 
     const rawOptions = allOptions
@@ -200,8 +219,14 @@ const getCachedCourseOptions = unstable_cache(async (requestedGrade: string, yea
     const regularShifts = shiftRows.filter((row: any) => !isTestPrepShift(row));
     // 対策講座の学年跨ぎは専用設定の allowed_student_grades を正とする。
     const testPrepShifts = allShiftRows.filter((row: any) => isTestPrepShift(row));
-    const regularOptions = enrichCourseOptionsWithShifts(rawOptions, curriculumRows, regularShifts, regularTermRanges)
-      .filter((option: any) => canStudentRegisterCourseOption(requestedGrade, option));
+    // 中3の理科は時限が期の途中で入れ替わるので、曜日×講座ごとに1つにまとめる（時限はその日の配置で決まる）。
+    const regularOptions = collapseChu3ScienceOptions(
+      enrichCourseOptionsWithShifts(rawOptions, curriculumRows, regularShifts, regularTermRanges)
+        .filter((option: any) => canStudentRegisterCourseOption(requestedGrade, option)),
+      todayInJapan(),
+      getCourseOptionIdentityIds,
+      new Map(Object.entries(termStartShifts || {}).map(([key, rows]) => [key, chu3TermSciencePeriods(rows as any[], periodFromShift, isTestPrepShift)])),
+    );
     const testPrepOptions = buildTestPrepRegistrationOptions(testPrepDefinitions, testPrepShifts, requestedGrade);
     const options = [...regularOptions.map((option: any) => ({ ...option, registration_type: 'regular' })), ...testPrepOptions];
 
@@ -228,7 +253,7 @@ const getCachedCourseOptions = unstable_cache(async (requestedGrade: string, yea
       },
     };
     return payload;
-}, ['course-registration-options-v25-explicit-period'], {
+}, ['course-registration-options-v27-chu3-term-period'], {
   revalidate: 300,
   tags: ['course-registration-options'],
 });

@@ -12,6 +12,7 @@ import {
   syncAuthAccountCredentials,
 } from '@/lib/server/account-credentials';
 import { normalizeEmploymentCategory } from '@/lib/employment-category';
+import { anonymousParentName, anonymousStudentName, isNoPersonalInfoSchool } from '@/lib/no-personal-info-schools';
 
 export const runtime = 'nodejs';
 
@@ -245,8 +246,12 @@ export async function POST(request: NextRequest) {
         ? Array.from(new Set<number>(user.prescribed_work_days.map(Number).filter((value: number) => Number.isInteger(value) && value >= 0 && value <= 6)))
         : [1, 2, 3, 4, 5];
       const password = normalizeInitialPassword(user.password || user.initial_password) || generateInitialPassword();
-      const displayName = String(user.student_name || user.name || user.teacher_name || strId).trim();
       const schoolId = String(user.school_id || user.school || actor.school_ids[0] || actor.school || '').trim();
+      // 個人情報を入れずにテストしている校舎の生徒・保護者は、氏名の代わりに生徒番号を名前にする。
+      const anonymous = (role === 'student' || role === 'parent') && isNoPersonalInfoSchool(schoolId);
+      const displayName = anonymous
+        ? (role === 'student' ? anonymousStudentName(strId) : anonymousParentName(strId))
+        : String(user.student_name || user.name || user.teacher_name || strId).trim();
       if (role === 'master' && actor.role !== 'master') {
         errors.push({ name: user.student_name, error: 'masterアカウントは作成できません' });
         continue;
@@ -295,7 +300,7 @@ export async function POST(request: NextRequest) {
           role,
           student_name: role === 'student' ? displayName : null,
           name: role === 'student' ? null : displayName,
-          name_kana: user.name_kana || '',
+          name_kana: anonymous ? '' : user.name_kana || '',
           grade: user.grade || '',
           student_id: user.student_id || '',
           lifetime_id: strId,
@@ -303,7 +308,7 @@ export async function POST(request: NextRequest) {
           classroom: user.classroom || '',
           school_id: schoolId || null,
           school: schoolId || null,
-          phone_number: user.phone_number || '',
+          phone_number: anonymous ? '' : user.phone_number || '',
           email: authUser.email,
           day_of_week: user.day_of_week || '',
           science_subject: user.science_subject || '',

@@ -2,6 +2,8 @@ import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { canManageSchool, getServerUser, isAdminLike, jsonError } from '@/lib/server-auth';
+import { writeAuditLog } from '@/lib/server/audit-log';
+import { anonymousStudentName, isNoPersonalInfoSchool } from '@/lib/no-personal-info-schools';
 
 export const runtime = 'nodejs';
 
@@ -48,8 +50,27 @@ export async function POST(request: NextRequest) {
     if ('member_type' in body) updates.member_type = body.member_type === 'general' ? 'general' : 'enrolled';
     if ('summer_course_status' in body) updates.summer_course_status = body.summer_course_status === 'attending' ? 'attending' : 'none';
     if ('summer_only' in body) updates.summer_only = Boolean(body.summer_only);
+    // 個人情報を入れずにテストしている校舎では、氏名・ふりがな・電話番号は保存せず、名前は生徒番号にする。
+    if (isNoPersonalInfoSchool(targetSchool)) {
+      if ('student_name' in updates) updates.student_name = anonymousStudentName(data.lifetime_id || data.initial_login_id || userId);
+      if ('student_name_kana' in updates) updates.student_name_kana = '';
+      if ('phone_number' in updates) updates.phone_number = '';
+    }
 
     await ref.set(updates, { merge: true });
+    // 氏名などを誰がいつ変えたかを残す（値そのものは個人情報なので残さず、変えた項目だけを記録する）。
+    const changed = Object.keys(updates).filter(key => !['updated_at', 'updated_by'].includes(key) && JSON.stringify(updates[key]) !== JSON.stringify(data[key]));
+    if (changed.length) {
+      await writeAuditLog({
+        actor,
+        action: 'student_profile_update',
+        target_type: 'user',
+        target_id: userId,
+        target_label: String(data.lifetime_id || data.initial_login_id || userId),
+        school_id: String(targetSchool || ''),
+        details: { fields: changed.join(',') },
+      });
+    }
     return Response.json({ ok: true, updates });
   } catch (error) {
     return jsonError(error);

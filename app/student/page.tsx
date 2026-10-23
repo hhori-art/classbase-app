@@ -1,5 +1,6 @@
 'use client';
 
+import NumericNameNotice from '@/app/components/NumericNameNotice';
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
@@ -522,6 +523,7 @@ export default function StudentDashboard() {
               )}
               {appearance.title && <br/>}
               <span className={`${theme.nameColor} text-3xl`}>{displayProfile.student_name}</span> さん</h1>
+            <NumericNameNotice name={displayProfile.student_name} tone="hero" className="mt-2" />
             {displayProfile.error_mode ? (
               <div className="mt-3 inline-flex items-center gap-2 bg-danger/80 backdrop-blur-sm px-3 py-1 rounded-full text-xs font-bold motion-safe:animate-pulse">
                 <AlertTriangle size={12} aria-hidden /> プロフィール読み込みエラー (管理者へご連絡ください)

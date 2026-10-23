@@ -15,6 +15,7 @@ import {
   preferSheetSyncedShifts,
 } from '@/lib/student-course-schedule';
 import { loadTodayLessonSources, resolveTodayEligibility } from '@/lib/server/student-today-lessons';
+import { loadCivicsRosterFor } from '@/lib/server/chu3-civics-rooms';
 import { issueClassParticipationToken } from '@/lib/server/class-participation-token';
 
 export const runtime = 'nodejs';
@@ -202,6 +203,9 @@ export async function GET(request: NextRequest) {
       masters: sources.masters,
       profile: user.profile,
       targetDate,
+      dayShifts: sources.dayShifts,
+      studentId: previewMode ? null : user.uid,
+      civicsRoster: previewMode ? null : await loadCivicsRosterFor(user.profile),
     });
 
     if (previewMode) {

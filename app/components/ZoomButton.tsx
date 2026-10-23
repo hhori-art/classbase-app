@@ -279,7 +279,9 @@ export default function ZoomButton(props: {
         iconText: 'text-accent',
         ctaText: 'text-accent'
       };
-  const timeLabel = [startTime, endTime].filter(Boolean).join(' - ');
+  // 時差のある地域の端末では、授業の時刻が日本時間だと分かるようにする（表示は端末の時刻が分かってから）。
+  const outsideJapanTime = Boolean(now && now.getTimezoneOffset() !== -540);
+  const timeLabel = [[startTime, endTime].filter(Boolean).join(' - '), outsideJapanTime && (startTime || endTime) ? '（日本時間）' : ''].filter(Boolean).join(' ');
 
   return (
     <div className="w-full py-1.5 sm:py-2">

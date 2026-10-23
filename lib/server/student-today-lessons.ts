@@ -1,4 +1,5 @@
 import 'server-only';
+import { civicsRoomResolver, type CivicsRosterSource } from '@/lib/server/chu3-civics-rooms';
 
 import { jstTodayKey, lessonDayEnded } from '@/lib/lesson-deadline';
 import { isTestPrepShift, normalizeClassButtonSettings } from '@/lib/class-button-settings';
@@ -38,10 +39,11 @@ export async function loadTodayLessonSources(db: FirebaseFirestore.Firestore, in
     loadStudentClassMasters(),
   ]);
 
-  const rawShifts: any[] = shiftSnap.docs
+  // その日のすべての時限の配置（中3の理科・社会の時限の判断と、社会の教室の割り振りに使う）。
+  const dayShifts: any[] = shiftSnap.docs
     .map(doc => ({ id: doc.id, ...doc.data() }))
-    .filter(isStudentVisibleShift)
-    .filter((shift: any) => !period || periodFromShift(shift) === period);
+    .filter(isStudentVisibleShift);
+  const rawShifts: any[] = dayShifts.filter((shift: any) => !period || periodFromShift(shift) === period);
   const transferRequests: any[] = requestSnap.docs
     .map(doc => ({ id: doc.id, ...doc.data() }))
     .filter((item: any) => item.type === 'transfer')
@@ -50,6 +52,7 @@ export async function loadTodayLessonSources(db: FirebaseFirestore.Firestore, in
   return {
     targetDate,
     rawShifts,
+    dayShifts,
     registrationDocs: registrationSnap.docs.map(doc => ({ id: doc.id, ...doc.data() })),
     transferRequests,
     masters,
@@ -66,13 +69,22 @@ export function resolveTodayEligibility(input: {
   masters: StudentClassMasters;
   profile: any;
   targetDate: string;
+  /** その日のすべての時限の配置と、中3の社会の教室の名簿（中3だけ）。 */
+  dayShifts?: any[];
+  studentId?: string | null;
+  civicsRoster?: CivicsRosterSource | null;
 }) {
   const { selectedIds } = collectSelectedCourseIds(input.registrationDocs, input.profile, input.masters, input.targetDate);
+  const planShifts = input.dayShifts ? preferSheetSyncedShifts(input.dayShifts) : undefined;
   const { eligibleShiftIds, eligibleReasons, testPrepShiftIds } = matchStudentLessons({
     shifts: input.shifts,
     masters: input.masters,
     profile: input.profile,
     selectedIds,
+    planShifts,
+    civicsRoomFor: input.civicsRoster && input.studentId
+      ? civicsRoomResolver(input.studentId, planShifts || input.shifts, input.civicsRoster)
+      : undefined,
   });
   input.transferRequests.forEach((item: any) => {
     const shiftId = transferShiftIdOf(item);
@@ -123,6 +135,8 @@ export function todayGradeTransferCandidates(input: {
   sources: Awaited<ReturnType<typeof loadTodayLessonSources>>;
   profile: any;
   period: number;
+  studentId?: string | null;
+  civicsRoster?: CivicsRosterSource | null;
 }) {
   const { sources, profile, period } = input;
   const { targetDate, masters } = sources;
@@ -135,6 +149,9 @@ export function todayGradeTransferCandidates(input: {
     masters,
     profile,
     targetDate,
+    dayShifts: sources.dayShifts,
+    studentId: input.studentId,
+    civicsRoster: input.civicsRoster,
   });
   const eligibleMeetings = new Set(shifts
     .filter((shift: any) => eligibleShiftIds.has(String(shift.id)))

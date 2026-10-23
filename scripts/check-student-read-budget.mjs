@@ -155,7 +155,9 @@ const limits = {
   // 承認者の画面は表示中の月の範囲と承認待ちだけを読む。旧 /api/admin/dedicated-claims（5件）は削除した。
   // いずれも専任と承認者の操作のときだけで、生徒・保護者の画面からは呼ばれない。
   // +2: 専任の手続きの案内（runDedicatedReportReminders）。毎朝の Vercel Cron で、月初1〜3日と20日だけ専任の一覧と前の月の報告書を読む。
-  serverFirestoreReads: 443,
+  // +1: 受講登録の候補（/api/course-registration-options）で、期のはじめ1週間の講師配置を読む（中3の理科の、その期の時限）。
+  // 共有キャッシュ（5分）の中だけで、期の数（最大4件程度）× 最大400件。生徒ごとの読み取りは増えない。
+  serverFirestoreReads: 444,
 };
 const exceeded = Object.entries(limits).filter(([key, max]) => usage[key] > max);
 

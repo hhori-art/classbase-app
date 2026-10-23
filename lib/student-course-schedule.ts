@@ -4,6 +4,7 @@ import { canStudentRegisterCourseOption } from '@/lib/course-registration-rules'
 import { getCourseSubjectGroup, normalizeCourseText, toAsciiDigits } from '@/lib/course-text';
 import { normalizeZoomMeetingId, looksLikeZoomUrl } from '@/lib/zoom-url';
 import { weekdayFromDateKey } from '@/lib/date-key';
+import { applyChu3Rules, chu3SelectionsFromIds } from '@/lib/chu3-schedule';
 import {
   canStudentSeeTestPrepGrade,
   isTestPrepShift,
@@ -303,6 +304,10 @@ export function matchStudentLessons(input: {
   masters: StudentClassMasters;
   profile: any;
   selectedIds: Set<string>;
+  /** 中3の社会の教室（同じ時限に2教室あるとき）。日付ごとに 1 か 2。省略すると両方の教室を出す。 */
+  civicsRoomFor?: (dateKey: string) => 1 | 2 | null;
+  /** その日のすべての時限の配置（shifts を1つの時限に絞って渡すとき、中3の時限の判断に使う）。 */
+  planShifts?: any[];
 }): StudentLessonMatch {
   const { shifts, masters, profile } = input;
   const selectedIds = new Set(input.selectedIds);
@@ -356,6 +361,26 @@ export function matchStudentLessons(input: {
         });
       }
     });
+
+  // 中3は理科と社会を1時間ずつ受ける。理科の時限の入れ替わりに追従し、社会はもう一方の時限・割り振られた教室にする。
+  if (normalizeGrade(profile?.grade) === '中3') {
+    const adjusted = applyChu3Rules({
+      shifts,
+      eligible: eligibleShiftIds,
+      selections: chu3SelectionsFromIds(selectedIds),
+      periodOf: periodFromShift,
+      isTestPrep: isTestPrepShift,
+      civicsRoomFor: input.civicsRoomFor,
+      planShifts: input.planShifts,
+      directShiftIds: new Set(shifts.filter((shift: any) => selectedIds.has(String(shift.id))).map((shift: any) => String(shift.id))),
+    });
+    eligibleShiftIds.forEach(id => { if (!adjusted.has(id)) { eligibleShiftIds.delete(id); eligibleReasons.delete(id); } });
+    adjusted.forEach(id => {
+      if (eligibleShiftIds.has(id)) return;
+      eligibleShiftIds.add(id);
+      eligibleReasons.set(id, '受講登録した講座（中3は理科と社会を1時間ずつ）');
+    });
+  }
 
   testPrepOptions
     .filter((option: any) => courseOptionMatchesSelection(option, selectedIds))
