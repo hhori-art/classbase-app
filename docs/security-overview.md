@@ -7,7 +7,7 @@
 
 | 要素 | 内容 |
 |---|---|
-| 画面・API | Next.js 15（App Router）。Vercel 上で配信。API は `app/api/**/route.ts` の Route Handler（Node.js ランタイム、最大 60 秒） |
+| 画面・API | Next.js 15（App Router、15.5.28 以上）。Vercel 上で配信。API は `app/api/**/route.ts` の Route Handler（Node.js 24.x ランタイム、最大 60 秒）。Node.js の修正版（`MIN_PATCHED_NODE`）より古い版で動いていると、毎日のセキュリティ監視がマスターへ知らせる |
 | 実行リージョン | `vercel.json` に `"regions": ["hnd1"]`（東京）を指定。Firestore（asia-northeast1）と同じ地域で実行する。※次回デプロイから有効 |
 | データベース | Cloud Firestore（asia-northeast1）。サーバーは Firebase Admin SDK、ブラウザは Firebase JS SDK（セキュリティルールで制御） |
 | 認証 | Firebase Authentication（メールアドレス＋パスワード） |

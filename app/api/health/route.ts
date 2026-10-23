@@ -43,6 +43,8 @@ export async function GET(request: Request) {
       status: 'ok',
       check: 'readiness',
       dependencies: { firestore: 'ok' },
+      // 実行中の Node.js の版（脆弱性の修正版が使われているかの確認用）。秘密の鍵を付けた確認のときだけ返す。
+      runtime: { node: process.version },
       duration_ms: Date.now() - startedAt,
       timestamp: new Date().toISOString(),
     }, { headers });

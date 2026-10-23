@@ -7488,3 +7488,13 @@ test('lesson language checks are master-only and rules can be saved and rechecke
   assert.equal(check.findings[0].time, 65);
   assert.equal(check.by_severity.high, 1);
 });
+
+test('security monitor flags Node.js runtimes older than the patched security release', () => {
+  const { evaluateRuntimeVersion } = harness().load('lib/server/security-monitor.ts');
+  assert.equal(evaluateRuntimeVersion('v24.21.0').length, 1);
+  assert.equal(evaluateRuntimeVersion('v24.21.0')[0].severity, 'medium');
+  assert.equal(evaluateRuntimeVersion('v24.22.1').length, 0);
+  assert.equal(evaluateRuntimeVersion('v24.23.0').length, 0);
+  assert.equal(evaluateRuntimeVersion('v22.23.3').length, 1);
+  assert.equal(evaluateRuntimeVersion('v20.19.0')[0].severity, 'high');
+});

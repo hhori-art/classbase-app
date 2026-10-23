@@ -130,6 +130,30 @@ export function evaluateAuditLogs(logs: Array<{ action: string; actor_name?: str
 }
 
 /** 監視結果をメールでも受け取る宛先（Vercel の環境変数 SECURITY_ALERT_EMAILS、カンマ区切り）。 */
+/**
+ * 実行中の Node.js が、既知の脆弱性を直した版より古くないか。Vercel は修正版を自動で配るが時期は選べないため、毎日確かめる。
+ * 新しいセキュリティリリースが出たら、ここの版を上げる（2026年10月21日：Brotli の RCE ほか10件）。
+ */
+export const MIN_PATCHED_NODE: Record<number, string> = { 22: '22.23.4', 24: '24.22.1', 26: '26.12.1' };
+
+export function evaluateRuntimeVersion(version: string, minimums: Record<number, string> = MIN_PATCHED_NODE): SecurityFinding[] {
+  const parse = (value: string) => value.replace(/^v/, '').split('.').map(part => Number(part) || 0);
+  const [major] = parse(version);
+  const minimum = minimums[major];
+  if (!minimum) {
+    return [{ severity: 'high', title: 'サポートの終わった Node.js で動いています', detail: `実行中の版は ${version} です。Vercel の設定で Node.js を ${Object.keys(minimums).join('・')} のどれかにしてください。` }];
+  }
+  const current = parse(version);
+  const wanted = parse(minimum);
+  const older = wanted.some((value, index) => {
+    for (let i = 0; i < index; i++) if (current[i] !== wanted[i]) return false;
+    return (current[index] || 0) < value;
+  });
+  return older
+    ? [{ severity: 'medium', title: 'Node.js の脆弱性の修正版がまだ使われていません', detail: `実行中の版は ${version}、修正版は ${minimum} 以上です。Vercel が自動で更新するまで、外部の決まったサービス以外へは接続しない作りで影響を抑えています。更新後に自動で消えます。` }]
+    : [];
+}
+
 export function securityAlertEmails() {
   return Array.from(new Set(String(process.env.SECURITY_ALERT_EMAILS || '')
     .split(/[,\s]+/).map(value => value.trim().toLowerCase())
@@ -198,6 +222,7 @@ export async function runSecurityMonitor(options: { hours?: number; now?: Date; 
   const findings = [
     ...evaluateSecurityCounts({ hours, counts, subjects: Array.from(subjects.values()) }),
     ...evaluateAuditLogs(logs, hours),
+    ...evaluateRuntimeVersion(process.version),
   ].sort((a, b) => (a.severity === b.severity ? 0 : a.severity === 'high' ? -1 : 1));
 
   const runKey = `${jstDayKey(now)}_${String(jstHour(now)).padStart(2, '0')}`;
