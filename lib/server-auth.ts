@@ -201,9 +201,14 @@ export function jsonError(error: unknown, status = 400) {
     message === 'forbidden' ? 403 :
     status;
 
+  // 画面にそのまま出る文言なので、どの画面でも同じ意味になる汎用のコードだけ日本語にする（元のコードは code に残す）。
+  const GENERIC_MESSAGES: Record<string, string> = {
+    forbidden: 'この操作を行う権限がありません。',
+    'profile-not-found': 'アカウントの情報が見つかりません。管理者に連絡してください。',
+  };
   return Response.json({
     ok: false,
-    error: authenticationExpired ? 'ログイン情報が失効しています。再度ログインしてください。' : message,
-    ...(authenticationExpired ? { code: 'reauth-required' } : {}),
+    error: authenticationExpired ? 'ログイン情報が失効しています。再度ログインしてください。' : GENERIC_MESSAGES[message] || message,
+    code: authenticationExpired ? 'reauth-required' : message,
   }, { status: normalizedStatus });
 }

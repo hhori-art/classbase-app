@@ -5,6 +5,7 @@ import { BookOpen, Pencil, Plus, Trash2 } from 'lucide-react';
 import { Button, EmptyState, ErrorState, IconButton, ListSkeleton, useConfirm, useToast } from '@/app/components/ui';
 import { useAuth } from '@/app/context/AuthContext';
 import AdminPageHeader from '@/app/components/master/AdminPageHeader';
+import { userErrorMessage } from '@/lib/user-error';
 
 type Problem = { id: string; subject_id: string; category_id: string; category_name: string; level: number; problem_type: string; prompt: string; passage?: string; choices?: string[]; correct_answer: string; explanation: string; published: boolean };
 const EMPTY = { subjectId: 'math', categoryId: 'addition', categoryName: 'たし算', level: 1, problemType: 'number_input', prompt: '', passage: '', choicesText: '', correctAnswer: '', explanation: '', published: true };
@@ -28,17 +29,17 @@ export default function ProblemManagement() {
     try {
       await api('/api/online-school/admin', { method: editingId ? 'PATCH' : 'POST', body: JSON.stringify({ ...form, id: editingId || undefined, choices: form.choicesText.split('\n').map(item => item.trim()).filter(Boolean) }) });
       setForm(EMPTY); setEditingId(''); await load();
-    } catch (err) { console.error(err); toast.error(err instanceof Error ? err.message : '保存できませんでした。'); } finally { setSaving(false); }
+    } catch (err) { console.error(err); toast.error(userErrorMessage(err, '保存できませんでした。')); } finally { setSaving(false); }
   };
   const edit = (problem: Problem) => {
     setEditingId(problem.id); setForm({ subjectId: problem.subject_id, categoryId: problem.category_id, categoryName: problem.category_name, level: problem.level, problemType: problem.problem_type, prompt: problem.prompt, passage: problem.passage || '', choicesText: (problem.choices || []).join('\n'), correctAnswer: problem.correct_answer, explanation: problem.explanation, published: problem.published });
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
-  const toggle = async (problem: Problem) => { try { await api('/api/online-school/admin', { method: 'PATCH', body: JSON.stringify({ id: problem.id, subjectId: problem.subject_id, categoryId: problem.category_id, categoryName: problem.category_name, level: problem.level, problemType: problem.problem_type, prompt: problem.prompt, passage: problem.passage || '', choices: problem.choices || [], correctAnswer: problem.correct_answer, explanation: problem.explanation, published: !problem.published }) }); await load(); } catch (err) { console.error(err); toast.error(err instanceof Error ? err.message : '公開状態を変更できませんでした。'); } };
+  const toggle = async (problem: Problem) => { try { await api('/api/online-school/admin', { method: 'PATCH', body: JSON.stringify({ id: problem.id, subjectId: problem.subject_id, categoryId: problem.category_id, categoryName: problem.category_name, level: problem.level, problemType: problem.problem_type, prompt: problem.prompt, passage: problem.passage || '', choices: problem.choices || [], correctAnswer: problem.correct_answer, explanation: problem.explanation, published: !problem.published }) }); await load(); } catch (err) { console.error(err); toast.error(userErrorMessage(err, '公開状態を変更できませんでした。')); } };
   const remove = async (problem: Problem) => {
     const label = problem.prompt.length > 30 ? `${problem.prompt.slice(0, 30)}…` : problem.prompt;
     if (!(await confirm({ title: `「${label}」を削除しますか？`, message: '削除した問題は元に戻せません。', confirmLabel: '削除する', tone: 'danger' }))) return;
-    try { await api(`/api/online-school/admin?id=${problem.id}`, { method: 'DELETE' }); await load(); } catch (err) { console.error(err); toast.error(err instanceof Error ? err.message : '削除できませんでした。'); }
+    try { await api(`/api/online-school/admin?id=${problem.id}`, { method: 'DELETE' }); await load(); } catch (err) { console.error(err); toast.error(userErrorMessage(err, '削除できませんでした。')); }
   };
   const field = 'h-11 rounded-input border border-line bg-surface px-3';
   const area = 'w-full rounded-input border border-line bg-surface p-3';

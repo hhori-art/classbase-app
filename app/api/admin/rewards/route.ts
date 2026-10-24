@@ -3,7 +3,7 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, jsonError } from '@/lib/server-auth';
 import { revalidateTag } from 'next/cache';
-import { REWARD_CATALOG_TAG, requireRewardCatalogManager, rewardKindOf, stockOf } from '@/lib/server/reward-store';
+import { REWARD_CATALOG_TAG, requireRewardCatalogEditor, rewardKindOf, stockOf } from '@/lib/server/reward-store';
 import { saveDigitalRewardFile, saveRewardImage } from '@/lib/server/reward-uploads';
 import { findRewardPreset, presetRewardKind } from '@/lib/reward-presets';
 
@@ -16,7 +16,7 @@ const badRequest = (error: string) => Response.json({ ok: false, error }, { stat
 export async function GET(request: NextRequest) {
   try {
     const user = await getServerUser(request);
-    requireRewardCatalogManager(user);
+    requireRewardCatalogEditor(user);
     const snap = await adminDb().collection('rewards').orderBy('required_coins', 'asc').limit(500).get();
     return Response.json({
       ok: true,
@@ -41,7 +41,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const user = await getServerUser(request);
-    requireRewardCatalogManager(user);
+    requireRewardCatalogEditor(user);
     const form = await request.formData();
     const id = String(form.get('id') || '').trim();
     const presetIdInput = String(form.get('preset_id') || '').trim();
@@ -114,7 +114,7 @@ export async function POST(request: NextRequest) {
 export async function PATCH(request: NextRequest) {
   try {
     const user = await getServerUser(request);
-    requireRewardCatalogManager(user);
+    requireRewardCatalogEditor(user);
     const body = await request.json();
     const id = String(body.id || '').trim();
     const active = body.active;

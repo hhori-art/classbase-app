@@ -24,6 +24,11 @@ export function canManageRewardCatalog(user: ServerUser) {
   return user.role === 'master' || (user.role === 'admin' && canManageAdminApp(user, 'science_social'));
 }
 
+/** 景品・ガチャ（全校舎共通）の設定はマスターだけ。校舎管理者は見ることもできない。 */
+export function requireRewardCatalogEditor(user: ServerUser) {
+  if (user.role !== 'master') throw new Error('forbidden');
+}
+
 export function requireRewardCatalogManager(user: ServerUser) {
   if (!canManageRewardCatalog(user)) throw new Error('forbidden');
 }

@@ -7,8 +7,10 @@ import { doc, getDoc } from 'firebase/firestore';
 import { CalendarCheck, Clock, AlertTriangle, Send, CheckCircle, CalendarDays, MessageSquare, Repeat, Loader2 } from 'lucide-react';
 import { ButtonLink, EmptyState, ErrorState, PageHeader, Spinner, useToast } from '@/app/components/ui';
 import { jstTodayKey } from '@/lib/lesson-deadline';
+import { earliestAbsenceDate } from '@/lib/absence-window';
 import { formatDate } from '@/lib/format';
 import { AbsenceRequestError, isTransferOptionError } from '@/lib/absence-request-errors';
+import { userErrorMessage } from '@/lib/user-error';
 
 type TransferOption = {
   id: string;
@@ -176,7 +178,7 @@ export default function StudentAbsencePage() {
       if (mode === 'transfer' && error instanceof AbsenceRequestError && isTransferOptionError(error.code)) {
         setTransferReload(value => value + 1);
       }
-      toast.error(error instanceof Error ? error.message : '送信できませんでした。もう一度お試しください。');
+      toast.error(userErrorMessage(error, '送信できませんでした。もう一度お試しください。'));
       setLoading(false);
     }
   };
@@ -357,6 +359,7 @@ export default function StudentAbsencePage() {
                 <input
                   type="date"
                   aria-label="振替元の授業日"
+                  min={earliestAbsenceDate(jstTodayKey())}
                   required={absences.length === 0}
                   value={manualTransferDate}
                   onChange={e => chooseManualDate(e.target.value)}
@@ -373,10 +376,18 @@ export default function StudentAbsencePage() {
 
           {/* 3. 理由の入力 (PCでは高さを伸ばす) */}
           <div className="cb-card flex flex-1 flex-col p-card">
-            <label htmlFor="absence-reason" className={sectionLabel}>
-              <span className={labelIcon}><MessageSquare size={18} strokeWidth={3} aria-hidden /></span>
-              {mode === 'transfer' ? '振替候補を選んでください' : '理由をおしえてください'}
-            </label>
+            {/* 振替のときは見出し（候補の一覧）と、補足の入力欄のラベルを分ける（読み上げで補足欄が「振替候補」にならないように）。 */}
+            {mode === 'transfer' ? (
+              <p className={sectionLabel}>
+                <span className={labelIcon}><MessageSquare size={18} strokeWidth={3} aria-hidden /></span>
+                振替候補を選んでください
+              </p>
+            ) : (
+              <label htmlFor="absence-reason" className={sectionLabel}>
+                <span className={labelIcon}><MessageSquare size={18} strokeWidth={3} aria-hidden /></span>
+                理由をおしえてください
+              </label>
+            )}
             {mode === 'transfer' && (
               <div className="mb-4 space-y-3">
                 {transferError && !loadingTransfers ? (
@@ -403,6 +414,7 @@ export default function StudentAbsencePage() {
             )}
             <textarea
               id="absence-reason"
+              aria-label={mode === 'transfer' ? '補足（任意）' : undefined}
               value={reason}
               onChange={(e) => setReason(e.target.value)}
               required={mode === 'absence'}

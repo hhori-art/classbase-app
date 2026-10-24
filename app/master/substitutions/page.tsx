@@ -11,6 +11,7 @@ import AdminTabs from '@/app/components/master/AdminTabs';
 import { Button, EmptyState, ErrorState, ListSkeleton, StatusPill, useConfirm, useToast } from '@/app/components/ui';
 import { formatDate } from '@/lib/format';
 import { jstDateKey } from '@/lib/date-key';
+import { userErrorMessage } from '@/lib/user-error';
 
 type Post = {
   id: string;
@@ -205,7 +206,7 @@ export default function MasterSubstitutionsPage() {
       toast.success('代行依頼を作成しました。');
       await loadData();
     } catch (e: any) {
-      toast.error(`代行依頼を作成できませんでした。${e.message || e}`);
+      toast.error(`代行依頼を作成できませんでした。${userErrorMessage(e, '')}`);
     } finally {
       setSaving(false);
     }

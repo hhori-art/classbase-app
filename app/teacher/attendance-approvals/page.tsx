@@ -6,5 +6,5 @@ import { hasScienceSocialProgram } from '@/lib/teacher-programs';
 
 export default function AttendanceApprovalsPage() {
   const { profile } = useAuth();
-  return <AttendanceApprovalsWorkspace mode="school_manager" backHref={hasScienceSocialProgram(profile) ? '/teacher/work' : '/teacher/attendance/dedicated'} />;
+  return <AttendanceApprovalsWorkspace mode="school_manager" backHref={hasScienceSocialProgram(profile) ? '/teacher/school-students' : '/teacher/attendance/dedicated'} />;
 }

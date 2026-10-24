@@ -28,6 +28,8 @@ export default function AdminHome() {
       : section)
     .filter(section => section.items.length > 0);
   const name = String(profile?.name || profile?.teacher_name || '').trim();
+  // 「共通」（自分への通知・マニュアル）はだれにでも出るので、それ以外の分野があるかで判定する。
+  const hasWorkSections = sections.some(section => section.id !== 'home');
 
   return (
     <div>
@@ -38,15 +40,16 @@ export default function AdminHome() {
         description="このアカウントの権限で使える機能だけを表示しています。左のメニューからも同じ画面を開けます。"
       />
 
-      {sections.length > 0 && <TodayTasks isMaster={profile?.role === 'master'} />}
+      {hasWorkSections && <TodayTasks isMaster={profile?.role === 'master'} />}
 
-      {sections.length === 0 ? (
+      {!hasWorkSections && (
         <div className="rounded-card border border-amber-200 bg-amber-50 p-8 text-center text-amber-900">
           <LockKeyhole className="mx-auto mb-3" size={28} aria-hidden />
           <p className="font-bold">利用できる管理画面が設定されていません。</p>
           <p className="mt-2 text-sm">マスター管理者へ権限設定をご依頼ください。</p>
         </div>
-      ) : (
+      )}
+      {sections.length > 0 && (
         <div className="grid gap-5 xl:grid-cols-2">
           {sections.map(section => {
             const tone = TONES[section.tone];

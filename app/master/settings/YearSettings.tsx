@@ -5,6 +5,7 @@ import { db } from '@/lib/firebase';
 import { doc, getDoc, setDoc, collection, getDocs, writeBatch, query, where } from 'firebase/firestore';
 import { CalendarClock, ArrowUpCircle } from 'lucide-react';
 import { Button, useConfirm, useToast } from '@/app/components/ui';
+import { userErrorMessage } from '@/lib/user-error';
 
 export default function YearSettings() {
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear().toString());
@@ -65,7 +66,7 @@ export default function YearSettings() {
       toast.success(`${count}名の生徒を進級させました。`);
     } catch (e: any) {
       console.error(e);
-      toast.error(`進級できませんでした。${e?.message || ''}`);
+      toast.error(`進級できませんでした。${userErrorMessage(e, '')}`);
     } finally {
       setProcessing(false);
     }

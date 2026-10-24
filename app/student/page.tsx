@@ -51,6 +51,7 @@ import { courseOptionMatchesSelection } from '@/lib/course-registration-selectio
 import { AbsenceRequestError } from '@/lib/absence-request-errors';
 import { formatDate, formatShortDate } from '@/lib/format';
 import { Button, Spinner, useConfirm, useToast } from '@/app/components/ui';
+import { userErrorMessage } from '@/lib/user-error';
 
 export default function StudentDashboard() {
   const { user, profile: authProfile, loading: authLoading, logout } = useAuth();
@@ -78,6 +79,8 @@ export default function StudentDashboard() {
   const [urgentHomework, setUrgentHomework] = useState<{ title: string; deadline: string; daysLeft: number } | null>(null);
   const [requiredTransfer, setRequiredTransfer] = useState<any | null>(null);
   const [requiredTransferError, setRequiredTransferError] = useState(false);
+  // 振替の選択・確認を後回しにした（授業の直前でも授業に入れるように）。ホームの上にお知らせを出し、押すと開き直す。
+  const [transferDeferred, setTransferDeferred] = useState(false);
   const [requiredTransferReload, setRequiredTransferReload] = useState(0);
   const [selectedTransferId, setSelectedTransferId] = useState('');
   const [transferSubmitting, setTransferSubmitting] = useState(false);
@@ -313,7 +316,13 @@ export default function StudentDashboard() {
     if (!grade) return;
     const todayStr = jstDateKey();
     try {
-      const foundHw = (await loadStudentHomework({ start: todayStr, limit: 5 }))[0] || null;
+      const [upcoming, submissionSnap] = await Promise.all([
+        loadStudentHomework({ start: todayStr, limit: 5 }),
+        user ? getDocs(query(collection(db, 'submissions'), where('student_id', '==', user.uid), limit(100))) : Promise.resolve(null),
+      ]);
+      // 提出済み（再提出を求められたものは除く）の宿題は、期限の案内に出さない。
+      const done = new Set((submissionSnap?.docs || []).filter(doc => doc.data().status !== 'resubmit').map(doc => String(doc.data().assignment_id || '')));
+      const foundHw = upcoming.find((homework: any) => !done.has(String(homework.id))) || null;
       if (foundHw && foundHw.deadline) {
         const deadlineDate = new Date(foundHw.deadline.replace(/-/g, '/'));
         const nowTime = new Date();
@@ -346,11 +355,13 @@ export default function StudentDashboard() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.ok === false) throw new AbsenceRequestError(data, '振替登録に失敗しました。もう一度お試しください。');
+      const chosen = requiredTransfer.options?.find((option: any) => option.id === selectedTransferId);
+      toast.success(`振替を登録しました${chosen?.target_date ? `（${formatDate(chosen.target_date)}${chosen.period ? ` ${chosen.period}限` : ''}）` : ''}。`);
       setRequiredTransfer(null);
       setSelectedTransferId('');
     } catch (error) {
       console.error(error);
-      toast.error(error instanceof Error ? error.message : '振替登録に失敗しました。もう一度お試しください。');
+      toast.error(userErrorMessage(error, '振替登録に失敗しました。もう一度お試しください。'));
     } finally {
       setTransferSubmitting(false);
       // 成功しても失敗しても、最新の振替候補（期限つきの署名・ほかの必須振替）を読み込み直す。
@@ -406,7 +417,15 @@ export default function StudentDashboard() {
 
       <TrophyModal isOpen={isTrophyOpen} onClose={() => setIsTrophyOpen(false)} userData={displayProfile} canUseShop={isStudentFeatureEnabled(visibility, displayProfile, 'shop')} />
 
-      {requiredTransferError && !isTeacherPreview && (
+      {(transferDeferred && (requiredTransfer || requiredTransferError)) && !isTeacherPreview && (
+        <div className="fixed inset-x-0 top-0 z-[60] flex justify-center px-3 pt-[calc(env(safe-area-inset-top)+0.5rem)]">
+          <button type="button" onClick={() => { setTransferDeferred(false); if (requiredTransferError) setRequiredTransferReload(value => value + 1); }} className="flex min-h-11 w-full max-w-lg items-center justify-center gap-2 rounded-btn bg-warning px-4 text-sm font-bold text-white shadow-lg">
+            <Repeat size={16} aria-hidden />{requiredTransferError ? '振替情報をもう一度確認する' : '振替先を選んでください（押すと開きます）'}
+          </button>
+        </div>
+      )}
+
+      {requiredTransferError && !transferDeferred && !isTeacherPreview && (
         <div className="fixed inset-0 z-[270] flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
           <div role="alertdialog" aria-modal="true" aria-labelledby="required-transfer-error-title" className="w-full max-w-md rounded-hero bg-surface p-6 text-center shadow-2xl">
             <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-btn bg-danger-soft text-danger">
@@ -425,11 +444,14 @@ export default function StudentDashboard() {
             >
               もう一度確認する
             </Button>
+            <Button size="lg" variant="ghost" fullWidth className="mt-2" onClick={() => setTransferDeferred(true)}>
+              あとで確認する
+            </Button>
           </div>
         </div>
       )}
 
-      {requiredTransfer && !isTeacherPreview && (
+      {requiredTransfer && !transferDeferred && !isTeacherPreview && (
         <div className="fixed inset-0 z-[260] flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
           <div role="dialog" aria-modal="true" aria-labelledby="required-transfer-title" className="relative max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-hero bg-surface p-6 shadow-2xl">
             {(!Array.isArray(requiredTransfer.options) || requiredTransfer.options.length === 0) && (
@@ -454,7 +476,7 @@ export default function StudentDashboard() {
                 <h2 id="required-transfer-title" className="mt-1 text-xl font-bold text-fg">振替先を選択してください</h2>
                 <p className="mt-2 text-sm text-fg-muted">
                   {Array.isArray(requiredTransfer.options) && requiredTransfer.options.length > 0
-                    ? '保護者から欠席連絡が届いています。振替先を選ぶまで、この画面を閉じることはできません。'
+                    ? '保護者から欠席連絡が届いています。振替先を選んでください（授業の前などは「あとで選ぶ」で先に授業に入れます）。'
                     : '保護者から欠席連絡が届いています。現在は候補がないため、閉じて後から振替登録できます。'}
                 </p>
               </div>
@@ -501,6 +523,11 @@ export default function StudentDashboard() {
             >
               この振替先で確定する
             </Button>
+            {Array.isArray(requiredTransfer.options) && requiredTransfer.options.length > 0 && (
+              <Button size="lg" variant="ghost" fullWidth className="mt-2" onClick={() => setTransferDeferred(true)}>
+                あとで選ぶ
+              </Button>
+            )}
           </div>
         </div>
       )}

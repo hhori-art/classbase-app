@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { CheckCircle2, Loader2, Mail, ShieldCheck } from 'lucide-react';
 import { auth } from '@/lib/firebase';
+import { userErrorMessage } from '@/lib/user-error';
 
 type Props = {
   currentEmail?: string | null;
@@ -50,7 +51,7 @@ export default function RecoveryEmailSettings({ currentEmail, verified, compact 
       }
       setMessage('創造学園アプリの確認メールを送信しました。30分以内にメール内のリンクを押してください。見つからない場合は迷惑メールもご確認ください。');
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '確認メールを送信できませんでした。');
+      setError(userErrorMessage(cause, '確認メールを送信できませんでした。'));
     } finally {
       setSaving(false);
     }

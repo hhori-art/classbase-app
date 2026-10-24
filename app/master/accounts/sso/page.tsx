@@ -35,6 +35,7 @@ import {
 } from '@/lib/attendance-schools';
 import AdminPageHeader from '@/app/components/master/AdminPageHeader';
 import { Button, EmptyState, ErrorState, IconButton, ListSkeleton, Modal, useConfirm, useToast } from '@/app/components/ui';
+import { userErrorMessage } from '@/lib/user-error';
 
 const STATUSES = [
   { id: 'active', label: '有効', icon: CheckCircle2, className: 'bg-emerald-50 text-emerald-700 border-emerald-100' },
@@ -361,7 +362,7 @@ export default function SsoAccountConsolePage() {
         window.location.replace('/admin/login?reason=session-expired');
         return;
       }
-      toast.error(`パスワード変更に失敗しました: ${error.message || error}`);
+      toast.error(`パスワード変更に失敗しました: ${userErrorMessage(error, '')}`);
     } finally {
       setSavingPassword(false);
     }
@@ -441,7 +442,7 @@ export default function SsoAccountConsolePage() {
         window.location.replace('/admin/login?reason=session-expired');
         return;
       }
-      toast.error(`保存に失敗しました: ${error.message || error}`);
+      toast.error(`保存に失敗しました: ${userErrorMessage(error, '')}`);
     } finally {
       setSavingAccount(false);
     }
@@ -469,7 +470,7 @@ export default function SsoAccountConsolePage() {
       await fetchUsers();
       toast.success(`${body.updated || 0}アカウントを更新しました（講師へ統合: ${body.migrated_roles || 0}件）。`);
     } catch (error: any) {
-      toast.error(`一括設定に失敗しました: ${error.message || error}`);
+      toast.error(`一括設定に失敗しました: ${userErrorMessage(error, '')}`);
     } finally {
       setInitializingCategories(false);
     }
@@ -506,7 +507,7 @@ export default function SsoAccountConsolePage() {
       setSelectedTeacherIds(new Set());
       toast.success(`${body.updated || 0}名の理社講座を${actionLabel}にしました。`);
     } catch (error: any) {
-      toast.error(`一括更新に失敗しました: ${error.message || error}`);
+      toast.error(`一括更新に失敗しました: ${userErrorMessage(error, '')}`);
     } finally {
       setUpdatingTeacherPrograms(false);
     }

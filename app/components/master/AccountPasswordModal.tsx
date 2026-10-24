@@ -5,6 +5,7 @@ import { CheckCircle2, Eye, EyeOff, KeyRound, RefreshCw } from 'lucide-react';
 import { auth } from '@/lib/firebase';
 import { generateInitialPassword } from '@/lib/password';
 import { Button, Modal, useConfirm, useToast } from '@/app/components/ui';
+import { userErrorMessage } from '@/lib/user-error';
 
 type Target = 'student' | 'parent';
 
@@ -72,7 +73,7 @@ export default function AccountPasswordModal({ student, onClose, onChanged }: Pr
       setDone({ target, password, loginId: targetLoginId });
       onChanged?.();
     } catch (error: any) {
-      toast.error(`パスワード変更に失敗しました: ${error?.message || error}`);
+      toast.error(`パスワード変更に失敗しました: ${userErrorMessage(error, '')}`);
     } finally {
       setSaving(false);
     }

@@ -122,10 +122,12 @@ export async function POST(request: NextRequest) {
 
     const segments = normalizeSegments(body.work_segments);
     let transportation = normalizeTransportation(body.transportation);
-    if (transportation.some(item => !String(item.from || '').trim() || !String(item.to || '').trim())) {
-      return Response.json({ ok: false, error: '交通費の出発地と到着地を入力してください。' }, { status: 400 });
-    }
     const transportationNone = body.transportation_status === 'none';
+    // 「交通費なし」のときは行を見ない。行に足りない所があれば、何行目かを示す。
+    const incompleteRow = transportationNone ? -1 : transportation.findIndex(item => !String(item.from || '').trim() || !String(item.to || '').trim());
+    if (incompleteRow >= 0) {
+      return Response.json({ ok: false, error: `交通費の${incompleteRow + 1}行目の出発地と到着地を入力してください（使わない行は消してください）。` }, { status: 400 });
+    }
     if (transportationNone) transportation = [];
     const transportationStatus = transportationNone ? 'none' : transportation.length ? 'entered' : 'unset';
     const attendanceKind = segments.some(segment => segmentProgram(segment) === 'breakthrough') ? 'breakthrough' : 'normal';

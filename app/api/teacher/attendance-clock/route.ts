@@ -50,7 +50,8 @@ export async function POST(request: NextRequest) {
     );
     const schoolName = isScienceSocialWorkplace ? SCIENCE_SOCIAL_WORKPLACE_LABEL : attendanceSchoolName(schoolId);
 
-    if (isClockBlocked()) {
+    // 23時以降に止めるのは出勤だけ。退勤はその日の23:59まで打てる（遅くまで残った日も、そのまま退勤できる）。
+    if (action === 'clock_in' && isClockBlocked()) {
       return Response.json({
         ok: false,
         error: 'clocking is closed after 23:00',

@@ -5,6 +5,7 @@ import { db } from '@/lib/firebase';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { Calendar, Save } from 'lucide-react';
 import { Button, Skeleton, useConfirm, useToast } from '@/app/components/ui';
+import { userErrorMessage } from '@/lib/user-error';
 
 const WEEKS = ['1週','2週','3週','4週','5週','8週','9週','10週','14週','15週','16週','17週','18週','22週','23週','24週','25週','28週','29週','30週'];
 
@@ -59,7 +60,7 @@ export default function WeekSelector() {
       toast.success(`設定を「${currentWeek}」に変更しました。`);
     } catch (error: any) {
       console.error(error);
-      toast.error(`保存できませんでした。${error?.message || ''}`);
+      toast.error(`保存できませんでした。${userErrorMessage(error, '')}`);
     } finally {
       setSaving(false);
     }

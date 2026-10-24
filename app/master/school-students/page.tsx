@@ -35,7 +35,7 @@ import LastLoginCell from '@/app/components/LastLoginCell';
 import AccountGuidePrintView from '@/app/components/account-guides/AccountGuidePrintView';
 import AccountPasswordModal from '@/app/components/master/AccountPasswordModal';
 import { toGuideAccount } from '@/app/components/account-guides/guide-model';
-import { attendanceSchoolName } from '@/lib/attendance-schools';
+import { attendanceSchoolName, isAttendanceSchool, resolveAttendanceSchoolCode } from '@/lib/attendance-schools';
 import { describeSyncErrors, syncPrintedPasswords, type PrintedPasswordSkip } from '@/lib/client-printed-password-sync';
 import { loadCourseRegistrationOptions } from '@/lib/client-course-options';
 import { readCsvFileText, type CsvEncoding } from '@/lib/csv-file-text';
@@ -48,6 +48,7 @@ import AdminTabs from '@/app/components/master/AdminTabs';
 import { Button, EmptyState, ErrorState, ListSkeleton, Modal, Spinner, useToast, useConfirm, usePrompt } from '@/app/components/ui';
 import { formatDateTime } from '@/lib/format';
 import { jstDateKey } from '@/lib/date-key';
+import { userErrorMessage } from '@/lib/user-error';
 
 const STATUSES = [
   { id: 'active', label: '有効', icon: CheckCircle2, className: 'bg-emerald-50 text-emerald-700 border-emerald-100' },
@@ -534,7 +535,7 @@ export default function SchoolStudentsPage() {
       setCourseYear(nextYear);
       setCourseTerm(nextTerm);
     } catch (e: any) {
-      toast.error(`受講講座の読み込みに失敗しました: ${e.message || e}`);
+      toast.error(`受講講座の読み込みに失敗しました: ${userErrorMessage(e, '')}`);
     } finally {
       setCourseLoading(false);
     }
@@ -632,7 +633,7 @@ export default function SchoolStudentsPage() {
       setCourseModalStudent(null);
       toast.success('受講講座を登録しました');
     } catch (e: any) {
-      toast.error(`受講講座の登録に失敗しました: ${e.message || e}`);
+      toast.error(`受講講座の登録に失敗しました: ${userErrorMessage(e, '')}`);
     } finally {
       setCourseSaving(false);
     }
@@ -658,7 +659,7 @@ export default function SchoolStudentsPage() {
       if (!res.ok || !data.ok) throw new Error(data.error || 'failed');
       setStudents(prev => prev.map(student => student.id === target.id ? { ...student, account_status: nextStatus } : student));
     } catch (e: any) {
-      toast.error(`状態変更に失敗しました: ${e.message || e}`);
+      toast.error(`状態変更に失敗しました: ${userErrorMessage(e, '')}`);
     } finally {
       setSavingId('');
     }
@@ -728,7 +729,7 @@ export default function SchoolStudentsPage() {
       setIsPrintModalOpen(true);
       toast.success(data.updated ? '生徒アカウントを更新し、案内書面を作成しました' : '生徒アカウントを作成し、案内書面を作成しました');
     } catch (e: any) {
-      toast.error(`作成に失敗しました: ${e.message || e}`);
+      toast.error(`作成に失敗しました: ${userErrorMessage(e, '')}`);
     } finally {
       setSaving(false);
     }
@@ -751,7 +752,7 @@ export default function SchoolStudentsPage() {
       if (!res.ok || !data.ok) throw new Error(data.error || 'failed');
     } catch (e: any) {
       setStudents(prev => prev.map(item => item.id === student.id ? { ...item, [key]: !value } : item));
-      toast.error(`設定変更に失敗しました: ${e.message || e}`);
+      toast.error(`設定変更に失敗しました: ${userErrorMessage(e, '')}`);
     }
   };
 
@@ -774,18 +775,24 @@ export default function SchoolStudentsPage() {
       if (betaMode) await writeBetaLog('student_option_updated', { student_id: student.id, keys: Object.keys(patch) });
     } catch (e: any) {
       await loadStudents(school);
-      toast.error(`更新に失敗しました: ${e.message || e}`);
+      toast.error(`更新に失敗しました: ${userErrorMessage(e, '')}`);
     }
   };
 
   const transferStudent = async (student: any) => {
-    const nextSchool = await ask({
+    const input = await ask({
       title: `「${student.student_name || student.id}」を移籍`,
-      label: schoolOptions.length > 0 ? `移籍先の校舎ID（例：${schoolOptions.slice(0, 8).join('、')}${schoolOptions.length > 8 ? ' ほか' : ''}）` : '移籍先の校舎ID',
-      defaultValue: student.school_id || school || '',
-      confirmLabel: '移籍する',
+      label: '移籍先の校舎（校舎番号か校舎名。例：112、須磨海浜校）',
+      defaultValue: '',
+      confirmLabel: '次へ',
     });
-    if (!nextSchool) return;
+    if (!input) return;
+    const nextSchool = resolveAttendanceSchoolCode(input.trim());
+    if (!nextSchool || !isAttendanceSchool(nextSchool)) {
+      toast.error('移籍先の校舎が見つかりません。校舎番号か校舎名を確認してください。');
+      return;
+    }
+    if (!(await confirm({ title: `「${attendanceSchoolName(nextSchool)}」へ移籍しますか？`, message: `${student.student_name || student.id} の所属校舎を ${attendanceSchoolName(nextSchool)}（${nextSchool}）に変えます。`, confirmLabel: '移籍する' }))) return;
     try {
       const token = await auth.currentUser?.getIdToken();
       const res = await fetch('/api/admin/school-students/lifecycle', {
@@ -795,9 +802,10 @@ export default function SchoolStudentsPage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || 'failed');
+      toast.success(`${attendanceSchoolName(nextSchool)}へ移籍しました。`);
       await loadStudents(school);
     } catch (e: any) {
-      toast.error(`移籍処理に失敗しました: ${e.message || e}`);
+      toast.error(`移籍処理に失敗しました: ${userErrorMessage(e, '')}`);
     }
   };
 
@@ -831,7 +839,7 @@ export default function SchoolStudentsPage() {
       setWithdrawalStudent(null);
       await loadStudents(school);
     } catch (e: any) {
-      toast.error(`受講解除に失敗しました: ${e.message || e}`);
+      toast.error(`受講解除に失敗しました: ${userErrorMessage(e, '')}`);
     }
   };
 
@@ -845,9 +853,10 @@ export default function SchoolStudentsPage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || 'failed');
+      toast.success('受講中に戻しました。');
       await loadStudents(school);
     } catch (e: any) {
-      toast.error(`復帰処理に失敗しました: ${e.message || e}`);
+      toast.error(`復帰処理に失敗しました: ${userErrorMessage(e, '')}`);
     }
   };
 
@@ -891,7 +900,7 @@ export default function SchoolStudentsPage() {
       setEditStudent(null);
       await loadStudents(school);
     } catch (e: any) {
-      toast.error(`生徒情報の更新に失敗しました: ${e.message || e}`);
+      toast.error(`生徒情報の更新に失敗しました: ${userErrorMessage(e, '')}`);
     } finally {
       setSavingId('');
     }
@@ -929,7 +938,7 @@ export default function SchoolStudentsPage() {
       await loadStudents(school);
       if (betaMode) await writeBetaLog('student_relations_updated', { student_id: student.id });
     } catch (e: any) {
-      toast.error(`兄弟姉妹連携の更新に失敗しました: ${e.message || e}`);
+      toast.error(`兄弟姉妹連携の更新に失敗しました: ${userErrorMessage(e, '')}`);
     }
   };
 
@@ -959,9 +968,12 @@ export default function SchoolStudentsPage() {
 
   const registerBulkAbsence = async () => {
     if (!middleSchoolFilter) return toast.error('中学校名で絞り込んでから実行してください');
+    // 画面に表示している生徒だけを対象にする（学年・状態・検索の絞り込みもそのまま反映する）。
+    const targetIds = filtered.map((student: any) => String(student.id || student.uid || '')).filter(Boolean);
+    if (!targetIds.length) return toast.error('表示中の生徒がいません。');
     if (!(await confirm({
-      title: `「${middleSchoolFilter}」の生徒を一括欠席登録しますか？`,
-      message: `${middleSchoolFilter} の表示対象生徒を ${bulkAbsenceDate} に一括欠席登録します。`,
+      title: `「${middleSchoolFilter}」の生徒 ${targetIds.length}名を一括欠席登録しますか？`,
+      message: `いま一覧に表示している ${targetIds.length}名を ${bulkAbsenceDate} の欠席にします。すでに出席・欠席の記録がある生徒はそのままにします。`,
       confirmLabel: '一括欠席登録する',
       tone: 'danger',
     }))) return;
@@ -970,14 +982,14 @@ export default function SchoolStudentsPage() {
       const res = await fetch('/api/admin/school-students/bulk-absence', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ school_id: school, middle_school: middleSchoolFilter, target_date: bulkAbsenceDate }),
+        body: JSON.stringify({ school_id: school, middle_school: middleSchoolFilter, target_date: bulkAbsenceDate, student_ids: targetIds }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || 'failed');
-      toast.success(`${data.count || 0}名を一括欠席登録しました`);
+      toast.success(`${data.count || 0}名を一括欠席登録しました${data.skipped ? `（記録がすでにある${data.skipped}名はそのまま）` : ''}`);
       if (betaMode) await writeBetaLog('bulk_absence_registered', { middle_school: middleSchoolFilter, target_date: bulkAbsenceDate, count: data.count || 0 });
     } catch (e: any) {
-      toast.error(`一括欠席登録に失敗しました: ${e.message || e}`);
+      toast.error(`一括欠席登録に失敗しました: ${userErrorMessage(e, '')}`);
     }
   };
 
@@ -997,7 +1009,7 @@ export default function SchoolStudentsPage() {
       setTestPrepForm(prev => ({ ...prev, title: '', description: '' }));
       if (betaMode) await writeBetaLog('test_prep_event_created', { id: data.id, middle_school: testPrepForm.middle_school });
     } catch (e: any) {
-      toast.error(`テスト対策登録に失敗しました: ${e.message || e}`);
+      toast.error(`テスト対策登録に失敗しました: ${userErrorMessage(e, '')}`);
     }
   };
 
@@ -1161,7 +1173,7 @@ export default function SchoolStudentsPage() {
         }
       } catch (e: any) {
         addCsvLog(`エラー: ${e.message || e}`);
-        toast.error(`CSV取り込みに失敗しました: ${e.message || e}`);
+        toast.error(`CSV取り込みに失敗しました: ${userErrorMessage(e, '')}`);
       } finally {
         setCsvImporting(false);
         setCsvImportProgress(null);
@@ -1442,7 +1454,8 @@ export default function SchoolStudentsPage() {
           </div>
         </div>
 
-        {loading ? (
+        {/* 操作のたびに表を消さない（スクロール位置を保つ）。骨組みを出すのは最初の読み込みだけ。 */}
+        {loading && students.length === 0 ? (
           <ListSkeleton rows={5} />
         ) : loadError ? (
           <ErrorState message={loadError} onRetry={() => void loadStudents(school)} />
@@ -1994,7 +2007,7 @@ function AttendanceOverview({ students, showAll, onHistoryChange, onSaved }: { s
       setTarget(null);
       setFollowUpNote('');
     } catch (error: any) {
-      toast.error(`対応記録の保存に失敗しました: ${error.message || error}`);
+      toast.error(`対応記録の保存に失敗しました: ${userErrorMessage(error, '')}`);
     } finally {
       setFollowUpSaving(false);
     }

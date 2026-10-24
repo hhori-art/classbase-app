@@ -10,6 +10,7 @@ import AdminPageHeader from '@/app/components/master/AdminPageHeader';
 import AdminTabs from '@/app/components/master/AdminTabs';
 import { Button, EmptyState, ErrorState, IconButton, ListSkeleton, StatusPill, useConfirm, useToast, type StatusTone } from '@/app/components/ui';
 import { formatDate, formatDateTime } from '@/lib/format';
+import { userErrorMessage } from '@/lib/user-error';
 
 // 型定義
 interface RequestData {
@@ -128,7 +129,7 @@ export default function MasterRequestsPage() {
 
     } catch (e: any) {
       console.error(e);
-      toast.error(`承認できませんでした: ${e.message}`);
+      toast.error(`承認できませんでした: ${userErrorMessage(e, '')}`);
     } finally {
       setProcessingId(null);
     }
@@ -172,7 +173,7 @@ export default function MasterRequestsPage() {
       await processRequest(req.id, 'reject');
       setRequests(prev => prev.map(r => r.id === req.id ? { ...r, status: 'rejected' } : r));
       if (isExchange) toast.success('申請を却下し、コインを返還しました');
-    } catch (e: any) { console.error(e); toast.error(`却下できませんでした: ${e.message}`); } finally { setProcessingId(null); }
+    } catch (e: any) { console.error(e); toast.error(`却下できませんでした: ${userErrorMessage(e, '')}`); } finally { setProcessingId(null); }
   };
 
   const filteredRequests = requests.filter(r => {

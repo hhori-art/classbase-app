@@ -7,6 +7,7 @@ import { AlertCircle, BookOpen, CalendarCheck, Download, FileText, Search } from
 import { useAuth } from '@/app/context/AuthContext';
 import { Button, Card, PageHeader, SectionTitle, useToast, ListSkeleton, EmptyState, ErrorState } from '@/app/components/ui';
 import { formatDate } from '@/lib/format';
+import { userErrorMessage } from '@/lib/user-error';
 
 type SlideItem = {
   id: string;
@@ -177,7 +178,7 @@ export default function TeacherSlidesPage() {
       if (!res.ok || !data.ok) throw new Error(data.error || 'download-failed');
       window.open(data.url, '_blank', 'noopener,noreferrer');
     } catch (e: any) {
-      toast.error(`ダウンロードに失敗しました: ${e.message || e}`);
+      toast.error(`ダウンロードに失敗しました: ${userErrorMessage(e, '')}`);
     } finally {
       setDownloadingId(null);
     }

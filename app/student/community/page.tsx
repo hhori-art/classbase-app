@@ -221,7 +221,7 @@ export default function CommunityPage() {
         onClick={(event) => reported ? event.stopPropagation() : openReport(event, target)}
         disabled={reported}
         aria-label={reported ? '通報済み' : target.type === 'topic' ? 'この投稿を通報する' : 'このコメントを通報する'}
-        className="inline-flex min-h-9 items-center gap-1 rounded-full px-3 text-xs font-bold text-fg-muted transition-colors hover:bg-danger-soft hover:text-danger disabled:cursor-default disabled:hover:bg-transparent disabled:hover:text-fg-muted"
+        className="inline-flex min-h-11 items-center gap-1 rounded-full px-3 text-xs font-bold text-fg-muted transition-colors hover:bg-danger-soft hover:text-danger disabled:cursor-default disabled:hover:bg-transparent disabled:hover:text-fg-muted"
       >
         <Flag size={14} aria-hidden /> {reported ? '通報済み' : '通報'}
       </button>

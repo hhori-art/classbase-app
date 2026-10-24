@@ -74,11 +74,12 @@ export const correctionFormForRecord = (record: CorrectionTargetRecord, request?
   reason: '',
 });
 
-export const missingClockFormForDate = (targetDate: string, schoolId: string, request?: CorrectionRequest | null): MissingClockForm => ({
+/** defaults は出勤・退勤の初期値（専任は所定の勤務時間。指定がなければ準専任の授業時間 19:20〜21:40）。 */
+export const missingClockFormForDate = (targetDate: string, schoolId: string, request?: CorrectionRequest | null, defaults?: { start?: string; end?: string }): MissingClockForm => ({
   target_date: targetDate,
   school_id: request?.school_id || schoolId,
-  requested_start_time: toFiveMinuteLocalInputValue(request?.requested_start_time) || `${targetDate}T19:20`,
-  requested_end_time: toFiveMinuteLocalInputValue(request?.requested_end_time) || `${targetDate}T21:40`,
+  requested_start_time: toFiveMinuteLocalInputValue(request?.requested_start_time) || `${targetDate}T${defaults?.start || '19:20'}`,
+  requested_end_time: toFiveMinuteLocalInputValue(request?.requested_end_time) || `${targetDate}T${defaults?.end || '21:40'}`,
   reason: '',
 });
 
@@ -338,7 +339,9 @@ export function TimeCorrectionModal({ open, record, initialForm, user, onClose, 
   );
 }
 
-export function MissingClockModal({ open, initialForm, user, hasRecordOnDate, onClose, onSubmitted }: {
+export function MissingClockModal({ open, initialForm, user, hasRecordOnDate, onClose, onSubmitted, allowScienceSocial = true }: {
+  /** 理社講座の勤務を選べるか（理社講座を担当する人だけ）。 */
+  allowScienceSocial?: boolean;
   open: boolean;
   initialForm: MissingClockForm;
   user: User | null | undefined;
@@ -409,13 +412,13 @@ export function MissingClockModal({ open, initialForm, user, hasRecordOnDate, on
       <div className="space-y-5">
         <label className="block">
           <span className={fieldLabelClass}>申請する日付</span>
-          <input type="date" value={form.target_date} onChange={event => updateTargetDate(event.target.value)} className={formInputClass} />
+          <input type="date" max={new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10)} value={form.target_date} onChange={event => updateTargetDate(event.target.value)} className={formInputClass} />
         </label>
         <label className="block">
           <span className={fieldLabelClass}>勤務した校舎</span>
           <select value={form.school_id} onChange={event => setForm(prev => ({ ...prev, school_id: event.target.value }))} className={schoolSelectClass}>
             <option value="">勤務校舎を選択</option>
-            <option value={SCIENCE_SOCIAL_WORKPLACE_ID}>★ {SCIENCE_SOCIAL_WORKPLACE_LABEL}</option>
+            {allowScienceSocial && <option value={SCIENCE_SOCIAL_WORKPLACE_ID}>★ {SCIENCE_SOCIAL_WORKPLACE_LABEL}</option>}
             {ATTENDANCE_SCHOOL_OPTION_GROUPS.map(group => (
               <optgroup key={group.label} label={group.label}>
                 {group.schools.map(school => <option key={school.code} value={school.code}>{school.name}</option>)}

@@ -12,7 +12,8 @@ import {
   Calendar, LayoutTemplate, Coffee, DollarSign, Send, LogOut, MapPin
 } from 'lucide-react';
 import { Button, EmptyState, ErrorState, IconButton, ListSkeleton, Modal, PageHeader, StatusPill, useConfirm, useToast } from '@/app/components/ui';
-import { formatTime } from '@/lib/format';
+import { formatDate, formatTime } from '@/lib/format';
+import { userErrorMessage } from '@/lib/user-error';
 import { TRANSPORT_TYPE_OPTIONS } from '@/lib/transport-fares';
 import { hasScienceSocialProgram } from '@/lib/teacher-programs';
 import TransportLineSelect from '@/app/components/TransportLineSelect';
@@ -235,8 +236,8 @@ const removeFareMetadata = (item: Transportation): Transportation => {
 
 const formatTransportationForSave = (items: Transportation[]) => {
   return items
+    // 交通機関を選んだだけの行は「入力なし」とみなして送らない（初期値が入っているだけの行で保存が止まらないように）。
     .filter(item =>
-      item.transport_type ||
       item.route_line ||
       item.from ||
       item.to ||
@@ -372,6 +373,8 @@ export default function TeacherAttendancePage() {
   const [history, setHistory] = useState<any[]>([]);
   const [historyError, setHistoryError] = useState('');
   const [todayError, setTodayError] = useState(false);
+  // 前日以前に退勤を押し忘れた記録（直近14日）。今日の出勤はそのままでき、修正依頼で直す。
+  const [openPastRecords, setOpenPastRecords] = useState<any[]>([]);
   const [viewDate, setViewDate] = useState(new Date());
   const [programFilter, setProgramFilter] = useState<AttendanceProgramFilter>('all');
   const [clockSchoolId, setClockSchoolId] = useState('');
@@ -489,6 +492,14 @@ export default function TeacherAttendancePage() {
       setCurrentSession(active);
       setTodayRecord(finished);
       setLoading(false);
+      getDocs(query(collection(db, 'work_records'), where('teacher_id', '==', user?.uid), where('end_time', '==', null), limit(10)))
+        .then(openSnap => {
+          const since = new Date(Date.parse(`${todayStr}T12:00:00+09:00`) - 14 * 86_400_000).toISOString().slice(0, 10);
+          setOpenPastRecords(openSnap.docs.map(d => ({ id: d.id, ...d.data() } as any))
+            .filter(record => String(record.date) < todayStr && String(record.date) >= since && record.status !== 'deleted')
+            .sort((a, b) => String(b.date).localeCompare(String(a.date))));
+        })
+        .catch(error => console.warn('open past records unavailable', error));
       return finished;
     } catch (e) { console.error(e); setTodayError(true); setLoading(false); return null; }
   };
@@ -605,19 +616,15 @@ export default function TeacherAttendancePage() {
           ? '本日はすでに出勤中の勤務記録があります。1日に同じ講師が複数の打刻を作ることはできません。'
           : data.error === 'work record already completed today'
           ? '本日はすでに勤務記録が完了しています。1日に同じ講師が複数の打刻を作ることはできません。'
-          : data.error || '出勤打刻に失敗しました';
+          : userErrorMessage(data.error, '出勤打刻に失敗しました。');
         throw new Error(message);
       }
       await fetchTodayStatus();
       await fetchMonthlyHistory();
-    } catch (e: any) { toast.error(e.message || '打刻に失敗しました。'); } finally { setLoading(false); }
+    } catch (e: any) { toast.error(userErrorMessage(e, '打刻に失敗しました。')); } finally { setLoading(false); }
   };
 
   const handleClockOut = async () => {
-    if (isClockClosedNow()) {
-      toast.error('23時以降は退勤打刻できません。打刻修正依頼から退勤時刻を申請してください。');
-      return;
-    }
     if (!(await confirm({ title: '退勤しますか？', confirmLabel: '退勤する' }))) return;
     try {
       setLoading(true);
@@ -633,7 +640,7 @@ export default function TeacherAttendancePage() {
           ? '日付が変わっているため、このまま退勤打刻はできません。打刻修正依頼から前日の退勤時刻を申請してください。'
           : data.error === 'work record already clocked out'
           ? 'すでに退勤打刻済みです。画面を更新してください。'
-          : data.error || '退勤打刻に失敗しました';
+          : userErrorMessage(data.error, '退勤打刻に失敗しました。');
         throw new Error(message);
       }
       if (Array.isArray(data.warnings) && data.warnings.length > 0) {
@@ -1124,8 +1131,7 @@ export default function TeacherAttendancePage() {
       fetchTodayStatus();
       detailReminders.reload();
     } catch (e: any) {
-      const message = String(e?.message || '');
-      toast.error('保存エラー: ' + (message || '保存に失敗しました。'));
+      toast.error(`保存できませんでした：${userErrorMessage(e, '勤務詳細を保存できませんでした。')}`);
     } finally {
       setDetailSaving(false);
     }
@@ -1133,10 +1139,8 @@ export default function TeacherAttendancePage() {
 
   const openCorrectionForRecord = (record: any, request?: CorrectionRequest | null) => {
     if (!record) return;
-    if (record.status === 'approved') {
-      toast.error('承認済みの勤怠記録は講師側から修正できません。管理者へ連絡してください。');
-      return;
-    }
+    // 承認済みの記録も修正依頼は出せる（承認者がもう一度承認する）。
+    if (record.status === 'approved') toast.info('承認済みの記録です。修正依頼を送ると、承認者がもう一度確認します。');
     setCorrectionTarget(record);
     setCorrectionInitialForm(correctionFormForRecord(record, request));
     setCorrectionModalOpen(true);
@@ -1290,6 +1294,12 @@ export default function TeacherAttendancePage() {
           <div className="mb-6 mt-2 font-mono text-5xl font-black tracking-tighter text-fg sm:text-6xl">
             {clockLabel.time}
           </div>
+          {openPastRecords.map(record => (
+            <div key={record.id} role="alert" className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-card bg-danger-soft px-4 py-3 text-left text-sm font-bold text-danger">
+              <span>{formatDate(record.date)} の退勤打刻がありません。退勤した時刻を申請してください。</span>
+              <Button size="sm" variant="secondary" onClick={() => openCorrectionForRecord(record)} icon={<Send size={14} aria-hidden />}>修正を申請</Button>
+            </div>
+          ))}
           {loading ? (
             <div className="flex h-16 items-center justify-center"><Loader2 className="animate-spin text-accent" aria-label="読み込み中" /></div>
           ) : todayError ? (
@@ -1304,17 +1314,11 @@ export default function TeacherAttendancePage() {
                 <MapPin size={14} aria-hidden /> {attendanceWorkplaceName(currentSession) || '勤務校舎未登録'}
                 {currentSession.default_program === 'science_social' && <span className="ml-1 rounded-full bg-sky-100 px-2 py-0.5 text-xs text-sky-700">実績も理社講座が初期値</span>}
               </div>
-              {clockClosed && (
-                <div className="rounded-card border border-amber-200 bg-warning-soft px-4 py-3 text-xs font-bold leading-relaxed text-amber-800">
-                  23時以降は退勤打刻できません。退勤時刻は下の修正依頼から申請してください。
-                </div>
-              )}
               <Button
                 variant="danger"
                 size="lg"
                 fullWidth
                 onClick={handleClockOut}
-                disabled={clockClosed}
                 icon={<Square fill="currentColor" size={18} aria-hidden />}
                 className="min-h-[60px] text-lg"
               >
@@ -1369,7 +1373,7 @@ export default function TeacherAttendancePage() {
                       className={schoolSelectClass}
                     >
                       <option value="">勤務校舎を選択</option>
-                      <option value={SCIENCE_SOCIAL_WORKPLACE_ID}>★ {SCIENCE_SOCIAL_WORKPLACE_LABEL}</option>
+                      {!isAttendanceOnly && <option value={SCIENCE_SOCIAL_WORKPLACE_ID}>★ {SCIENCE_SOCIAL_WORKPLACE_LABEL}</option>}
                       {attendanceSchoolOptions()}
                     </select>
                   </label>
@@ -1604,7 +1608,9 @@ export default function TeacherAttendancePage() {
       <Modal
         open={Boolean(editingRecord)}
         onClose={() => { if (!correctionModalOpen) closeEditModal(); }}
-        title="業務詳細修正"
+        // 入力中に背景を触って閉じると、入れた業務・交通費が消えるため、背景のタップでは閉じない（×・キャンセルで閉じる）。
+        closeOnBackdrop={false}
+        title="勤務の詳細入力"
         description={editingRecord ? `${editingRecord.date}（${dayLabel(editingRecord.date)}）` : undefined}
         size="lg"
         footer={editingRecord ? (
@@ -1664,8 +1670,6 @@ export default function TeacherAttendancePage() {
                   <span className="flex items-center gap-1 text-amber-600"><span className="w-2 h-2 bg-amber-500 rounded-full"></span>事務</span>
                   <span className="flex items-center gap-1 text-fuchsia-600"><span className="w-2 h-2 bg-fuchsia-500 rounded-full"></span>突破授業</span>
                   <span className="flex items-center gap-1 text-rose-600"><span className="w-2 h-2 bg-rose-500 rounded-full"></span>突破事務</span>
-                  <span className="flex items-center gap-1 text-violet-600"><span className="w-2 h-2 bg-violet-500 rounded-full"></span>面接</span>
-                  <span className="flex items-center gap-1 text-cyan-600"><span className="w-2 h-2 bg-cyan-500 rounded-full"></span>成績</span>
                   <span className="flex items-center gap-1 text-slate-500"><span className="w-2 h-2 bg-slate-400 rounded-full"></span>休憩</span>
                 </div>
               </div>
@@ -1702,13 +1706,13 @@ export default function TeacherAttendancePage() {
                       </label>
                     </div>
                     <label className="mt-3 block">
-                      <span className="mb-1 block text-xs font-bold text-slate-500">種別</span>
+                      <span className="mb-1 block text-xs font-bold text-slate-500">講座</span>
                       <select
                         className={`min-h-[48px] w-full rounded-input border px-3 text-sm font-bold outline-none ${segmentGroup(seg.type) === 'breakthrough' ? 'border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700' : 'border-blue-200 bg-white text-blue-700'}`}
                         value={segmentProgram(seg)}
                         onChange={(e) => updateSegmentProgram(i, e.target.value as AttendanceProgram)}
                       >
-                        {ATTENDANCE_PROGRAMS.map(program => <option key={program} value={program}>{ATTENDANCE_PROGRAM_LABELS[program]}</option>)}
+                        {ATTENDANCE_PROGRAMS.filter(program => program !== 'science_social' || !isAttendanceOnly || segmentProgram(seg) === 'science_social').map(program => <option key={program} value={program}>{ATTENDANCE_PROGRAM_LABELS[program]}</option>)}
                       </select>
                     </label>
                     {attendanceSegmentNeedsSchool(seg) && <label className="mt-3 block">
@@ -1719,7 +1723,7 @@ export default function TeacherAttendancePage() {
                       </select>
                     </label>}
                     <label className="mt-3 block">
-                      <span className="mb-1 block text-xs font-bold text-slate-500">区分</span>
+                      <span className="mb-1 block text-xs font-bold text-slate-500">業務の種類</span>
                       <select
                         className={`min-h-[48px] w-full rounded-input border px-3 text-sm font-bold outline-none ${segmentToneClass(seg.type, 'select')}`}
                         value={seg.type}
@@ -1751,8 +1755,8 @@ export default function TeacherAttendancePage() {
                     <tr>
                       <th className="px-2 py-2 text-left w-16">開始</th>
                       <th className="px-2 py-2 text-left w-16">終了</th>
-                      <th className="px-2 py-2 text-left w-24">種別</th>
-                      <th className="px-2 py-2 text-left w-32">区分</th>
+                      <th className="px-2 py-2 text-left w-24">講座</th>
+                      <th className="px-2 py-2 text-left w-32">業務の種類</th>
                       <th className="px-2 py-2 text-left w-28">勤務校舎</th>
                       <th className="px-2 py-2 text-left hidden sm:table-cell">詳細</th>
                       <th className="w-10"></th>
@@ -1770,7 +1774,7 @@ export default function TeacherAttendancePage() {
                               value={segmentProgram(seg)}
                               onChange={(e) => updateSegmentProgram(i, e.target.value as AttendanceProgram)}
                             >
-                              {ATTENDANCE_PROGRAMS.map(program => <option key={program} value={program}>{ATTENDANCE_PROGRAM_LABELS[program]}</option>)}
+                              {ATTENDANCE_PROGRAMS.filter(program => program !== 'science_social' || !isAttendanceOnly || segmentProgram(seg) === 'science_social').map(program => <option key={program} value={program}>{ATTENDANCE_PROGRAM_LABELS[program]}</option>)}
                             </select>
                           </div>
                         </td>
@@ -1817,7 +1821,7 @@ export default function TeacherAttendancePage() {
                   <p className="text-xs text-slate-500 font-bold mt-1">購入済み定期券を登録している場合は、自動入力時に定期区間を控除します。</p>
                 </div>
                 <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto">
-                  <Button variant="secondary" onClick={handleCopyLastTransport} icon={<Copy size={14} aria-hidden />} className="text-xs">
+                  <Button variant="secondary" disabled={transportationNone} onClick={handleCopyLastTransport} icon={<Copy size={14} aria-hidden />} className="text-xs">
                     前回をコピー
                   </Button>
                   <Button variant="secondary" disabled={transportationNone} onClick={addExpense} icon={<Plus size={14} aria-hidden />} className="text-xs text-emerald-700">
@@ -1924,6 +1928,7 @@ export default function TeacherAttendancePage() {
       />
 
       <MissingClockModal
+        allowScienceSocial={!isAttendanceOnly}
         open={missingCorrectionOpen}
         initialForm={missingInitialForm}
         user={user}

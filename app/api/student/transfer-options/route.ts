@@ -1,4 +1,5 @@
 import { NextRequest } from 'next/server';
+import { isWithinAbsenceWindow } from '@/lib/absence-window';
 import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, jsonError, requireRole } from '@/lib/server-auth';
 import { canonicalPeriodForGradeSubject, enrichCourseOptionsWithShifts, fixedPeriodForGradeCourse } from '@/lib/course-registration-match';
@@ -263,7 +264,8 @@ export async function GET(request: NextRequest) {
 
     // 欠席連絡を先に登録していない場合も、選択した元授業日を一時的な欠席として扱う。
     // 確定時は署名済みトークンを検証したうえで、欠席と振替を同一トランザクションで作成する。
-    const pendingRequestedAbsence = /^\d{4}-\d{2}-\d{2}$/.test(requestedAbsenceDate)
+    // さかのぼって振替を選べるのは3か月前の授業日まで（それより前の日は候補を出さない）。
+    const pendingRequestedAbsence = /^\d{4}-\d{2}-\d{2}$/.test(requestedAbsenceDate) && isWithinAbsenceWindow(requestedAbsenceDate, today)
       ? { id: `pending:${studentId}:${requestedAbsenceDate}`, student_id: studentId, type: 'absence', target_date: requestedAbsenceDate }
       : null;
     const selectedAbsence = pendingRequestedAbsence || absences.find((item: any) => item.id === absenceId) || absences[0] || null;

@@ -6,6 +6,7 @@ import { collection, getDocs, query, where, writeBatch, doc } from 'firebase/fir
 import { FileText, Download, Settings, Loader2 } from 'lucide-react';
 import { buttonClass, useConfirm, useToast } from '@/app/components/ui';
 import { cn } from '@/lib/cn';
+import { userErrorMessage } from '@/lib/user-error';
 
 export default function PfImportButton({ onSuccess }: { onSuccess?: () => void }) {
   const [uploading, setUploading] = useState(false);
@@ -53,7 +54,7 @@ export default function PfImportButton({ onSuccess }: { onSuccess?: () => void }
         if (onSuccess) onSuccess();
       } catch (err: any) {
         console.error(err);
-        toast.error(`取り込めませんでした。${err?.message || ''}`);
+        toast.error(`取り込めませんでした。${userErrorMessage(err, '')}`);
       } finally {
         setUploading(false);
         input.value = '';

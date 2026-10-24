@@ -7,6 +7,7 @@ import { DIGITAL_FILE_MAX_BYTES, MANUAL_REWARD_KINDS, REWARD_KIND_LABELS, type R
 import RewardVisual from '@/app/components/rewards/RewardVisual';
 import PresetRewardAdder from './PresetRewardAdder';
 import { adminApi, inputClass, labelClass, type AdminReward } from './api';
+import { userErrorMessage } from '@/lib/user-error';
 
 type Props = { rewards: AdminReward[]; onChanged: () => Promise<void> };
 
@@ -62,7 +63,7 @@ export default function RewardCatalogPanel({ rewards, onChanged }: Props) {
       await onChanged();
     } catch (error) {
       console.error(error);
-      toast.error(error instanceof Error ? error.message : '保存できませんでした');
+      toast.error(userErrorMessage(error, '保存できませんでした'));
     } finally {
       setSubmitting(false);
     }
@@ -78,7 +79,7 @@ export default function RewardCatalogPanel({ rewards, onChanged }: Props) {
       await onChanged();
     } catch (error) {
       console.error(error);
-      toast.error(error instanceof Error ? error.message : '更新できませんでした');
+      toast.error(userErrorMessage(error, '更新できませんでした'));
     }
   };
 

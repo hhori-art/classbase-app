@@ -22,6 +22,8 @@ import { ParentCard, ParentEmpty, ParentPageHeader, ParentSectionTitle, parentSt
 import ChildSwitcher, { pickChildId } from '@/app/components/parent/ChildSwitcher';
 import { Button, ButtonLink, ErrorState, IconButton, Modal, Skeleton, Spinner, StatusPill, useConfirm, useToast } from '@/app/components/ui';
 import { formatDate, formatDateTime } from '@/lib/format';
+import { clearCourseRegistrationOptionsCache } from '@/lib/client-course-options';
+import { isWithinAbsenceWindow } from '@/lib/absence-window';
 import { TERMS } from '@/lib/glossary';
 import { cn } from '@/lib/cn';
 import {
@@ -44,6 +46,7 @@ import {
   Video,
   X,
 } from 'lucide-react';
+import { userErrorMessage } from '@/lib/user-error';
 
 type Student = { id: string; student_name?: string; grade?: string; school?: string; school_id?: string; day_of_week?: string; selected_course_ids?: string[] };
 type DetailItem = { id: string; title: string; meta: string; body?: string; status?: string; requestType?: string; targetDate?: string };
@@ -109,12 +112,18 @@ export default function ParentDashboardPage() {
   const [submitting, setSubmitting] = useState(false);
   const [courseOptions, setCourseOptions] = useState<any[]>([]);
   const [selectedCourseIds, setSelectedCourseIds] = useState<string[]>([]);
+  // 通塾カレンダーの曜日に使う、お子さまの今の期の登録（だれが登録したかに関係なく。モーダルの選択とは分ける）。
+  const [calendarCourseIds, setCalendarCourseIds] = useState<string[]>([]);
+  // 回答済みの登録依頼（お子さま本人・ほかの保護者の登録も含む）。
+  const [answeredRequestIds, setAnsweredRequestIds] = useState<string[]>([]);
   const [savingCourses, setSavingCourses] = useState(false);
   const [pendingCourseRequests, setPendingCourseRequests] = useState<any[]>([]);
   const [activeCourseRequest, setActiveCourseRequest] = useState<any>(null);
   const [transferOptions, setTransferOptions] = useState<TransferOption[]>([]);
   const [selectedTransferShiftId, setSelectedTransferShiftId] = useState('');
   const [loadingTransferOptions, setLoadingTransferOptions] = useState(false);
+  // 振替候補を読めなかったとき（「候補なし」と区別する）。
+  const [transferOptionsError, setTransferOptionsError] = useState('');
   const [transferOptionsReload, setTransferOptionsReload] = useState(0);
   const [activityTab, setActivityTab] = useState('');
   const [lessons, setLessons] = useState<LessonDay[]>([]);
@@ -128,16 +137,16 @@ export default function ParentDashboardPage() {
 
   const selectedStudent = useMemo(() => students.find(s => s.id === selectedId), [students, selectedId]);
   const registeredWeekdays = useMemo(() => {
-    const registeredIds = new Set(selectedCourseIds.map(String));
+    const registeredIds = new Set(calendarCourseIds.map(String));
     const days = new Set(courseOptions
-      .filter(option => registeredIds.has(String(option.id)) || registeredIds.has(String(option.parent_course_option_id || '')) || registeredIds.has(String(option.fallback_curriculum_option_id || '')))
+      .filter(option => courseOptionMatchesSelection(option, registeredIds) || registeredIds.has(String(option.parent_course_option_id || '')) || registeredIds.has(String(option.fallback_curriculum_option_id || '')))
       .map(getCourseDay)
       .filter(Boolean));
     if (days.size === 0 && selectedStudent?.day_of_week) {
       String(selectedStudent.day_of_week).split(/[、,\/]/).map(day => day.replace('曜日', '').trim()).filter(Boolean).forEach(day => days.add(day));
     }
     return Array.from(days);
-  }, [courseOptions, selectedCourseIds, selectedStudent?.day_of_week]);
+  }, [courseOptions, calendarCourseIds, selectedStudent?.day_of_week]);
   // 欠席・遅刻の連絡締切は、サーバー（/api/parent/absence-requests）と同じく、その日いちばん遅い授業（2時間目）の終了時刻。
   // 授業が終わった日でも、振替（休んだ授業の補講）の登録はできる。
   const lessonEndFor = (_date: string) => classTimes.period2_end;
@@ -297,25 +306,33 @@ export default function ParentDashboardPage() {
     const loadCourseOptions = async () => {
       if (!user || !selectedStudent) return;
       try {
-        const [optionData, registrationSnap] = await Promise.all([
-          loadCourseRegistrationOptions({
-            grade: normalizeGrade(selectedStudent.grade),
-            studentId: selectedStudent.id,
-            getToken: forceRefresh => user.getIdToken(forceRefresh),
-          }),
-          getDocs(query(collection(db, 'course_registrations'), where('parent_id', '==', user.uid), limit(50))).catch(() => ({ docs: [] as any[] })),
-        ]);
+        const optionData = await loadCourseRegistrationOptions({
+          grade: normalizeGrade(selectedStudent.grade),
+          studentId: selectedStudent.id,
+          getToken: forceRefresh => user.getIdToken(forceRefresh),
+        });
         const selectedGrade = normalizeGrade(selectedStudent.grade);
         const options = (Array.isArray(optionData.options) ? optionData.options : [])
           .filter((item: any) => item.is_active !== false)
           .filter((item: any) => canStudentRegisterCourseOption(selectedGrade, item))
           .sort((a: any, b: any) => `${a.year}_${a.term}_${a.subject}_${a.course_name}`.localeCompare(`${b.year}_${b.term}_${b.subject}_${b.course_name}`));
-        const registrations = registrationSnap.docs.map((d: any) => ({ id: d.id, ...d.data() })).filter((item: any) => item.student_id === selectedStudent.id);
         setCourseOptions(options);
-        const latest = registrations.sort((a: any, b: any) => String(b.updated_at?.seconds || 0).localeCompare(String(a.updated_at?.seconds || 0)))[0];
-        setSelectedCourseIds(Array.isArray(latest?.selected_course_ids)
-          ? latest.selected_course_ids.map(String)
-          : Array.isArray(selectedStudent.selected_course_ids) ? selectedStudent.selected_course_ids.map(String) : []);
+        // お子さまの登録（本人・ほかの保護者が出したものも含む）から、今の期の通常の登録を選ぶ。
+        const today = jstTodayKey();
+        const ranges = (optionData.term_ranges || {}) as Record<string, { start: string; end: string }>;
+        const summaries = (Array.isArray(optionData.registration_summaries) ? optionData.registration_summaries : [])
+          .filter((item: any) => item.registration_type !== 'test_prep' && item.status !== 'cancelled');
+        const inCurrentTerm = (item: any) => {
+          const range = ranges[`${item.year}__${item.term}`];
+          return Boolean(range && range.start <= today && today <= range.end);
+        };
+        const current = summaries.find(inCurrentTerm) || summaries.find((item: any) => item.is_current) || summaries[0];
+        const ids = current
+          ? [...(current.selected_course_ids || []), ...(current.selected_course_keys || [])].map(String)
+          : Array.isArray(selectedStudent.selected_course_ids) ? selectedStudent.selected_course_ids.map(String) : [];
+        setCalendarCourseIds(ids);
+        setSelectedCourseIds(ids);
+        setAnsweredRequestIds(Array.isArray(optionData.answered_request_ids) ? optionData.answered_request_ids.map(String) : []);
       } catch (e) {
         console.warn('Course options read failed:', e);
         setCourseOptions([]);
@@ -329,17 +346,9 @@ export default function ParentDashboardPage() {
       if (!user || !selectedStudent) return;
       try {
         const today = jstTodayKey();
-        const [requestSnap, registrationSnap] = await Promise.all([
-          getDocs(query(collection(db, 'registration_requests'), where('is_active', '==', true), limit(50))).catch(() => ({ docs: [] as any[] })),
-          getDocs(query(collection(db, 'course_registrations'), where('parent_id', '==', user.uid), limit(50))).catch(() => ({ docs: [] as any[] })),
-        ]);
-        const answered = new Set(
-          registrationSnap.docs
-            .map((d: any) => d.data())
-            .filter((item: any) => item.student_id === selectedStudent.id)
-            .map((item: any) => item.request_id || item.registration_request_id)
-            .filter(Boolean)
-        );
+        const requestSnap = await getDocs(query(collection(db, 'registration_requests'), where('is_active', '==', true), limit(50))).catch(() => ({ docs: [] as any[] }));
+        // 回答済みは、お子さまの登録すべて（本人・ほかの保護者を含む）から判断する（受講候補の読み込みで受け取る）。
+        const answered = new Set(answeredRequestIds);
         const selectedGrade = normalizeGrade(selectedStudent.grade);
         const requests = requestSnap.docs
           .map((d: any) => ({ id: d.id, ...d.data() }))
@@ -358,7 +367,7 @@ export default function ParentDashboardPage() {
       }
     };
     loadCourseRequests();
-  }, [user, selectedStudent, courseOptions]);
+  }, [user, selectedStudent, courseOptions, answeredRequestIds]);
 
   useEffect(() => {
     const loadTransferOptions = async () => {
@@ -373,6 +382,7 @@ export default function ParentDashboardPage() {
         const res = await fetch(`/api/student/transfer-options?${params}`, { headers: { Authorization: `Bearer ${token}` } });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || data.ok === false) throw new AbsenceRequestError(data, '振替候補を読み込めませんでした。');
+        setTransferOptionsError('');
         setTransferOptions((Array.isArray(data.options) ? data.options : []).map((option: any) => ({
           id: String(option.id || ''), title: String(option.title || ''), unit: String(option.unit || ''),
           subject: String(option.subject || ''), courseName: String(option.course_name || ''),
@@ -383,6 +393,7 @@ export default function ParentDashboardPage() {
       } catch (e) {
         console.warn('Transfer options read failed:', e);
         setTransferOptions([]);
+        setTransferOptionsError(userErrorMessage(e, '振替候補を読み込めませんでした。'));
       } finally {
         setLoadingTransferOptions(false);
       }
@@ -454,7 +465,7 @@ export default function ParentDashboardPage() {
       if (requestMode === 'transfer' && e instanceof AbsenceRequestError && isTransferOptionError(e.code)) {
         setTransferOptionsReload(value => value + 1);
       }
-      toast.error(e instanceof Error ? e.message : '送信に失敗しました。');
+      toast.error(userErrorMessage(e, '送信に失敗しました。'));
     } finally {
       setSubmitting(false);
     }
@@ -502,7 +513,7 @@ export default function ParentDashboardPage() {
       toast.success(data.transfer_cancelled ? `${kindLabel}連絡と振替を取り消しました。` : `${kindLabel}連絡を取り消しました。`);
     } catch (e) {
       console.error(e);
-      toast.error(e instanceof Error ? e.message : '取り消しできませんでした。');
+      toast.error(userErrorMessage(e, '取り消しできませんでした。'));
     } finally {
       setCancellingId('');
     }
@@ -559,13 +570,15 @@ export default function ParentDashboardPage() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.ok === false) throw new Error(data.error || 'failed');
       setSelectedCourseIds(freshSelectedCourseIds);
+      // 受講講座のページが古い登録内容を出さないよう、候補のキャッシュを消す。
+      clearCourseRegistrationOptionsCache();
       toast.success(freshSelectedCourseIds.length === 0 ? '受講講座の登録を解除しました。' : '受講講座を登録しました。');
       if (requestId) {
         setPendingCourseRequests(prev => prev.filter(req => req.id !== requestId));
         setActiveCourseRequest(null);
       }
     } catch (e: any) {
-      toast.error(`登録に失敗しました: ${e.message || e}`);
+      toast.error(`登録に失敗しました: ${userErrorMessage(e, '')}`);
     } finally {
       setSavingCourses(false);
     }
@@ -695,7 +708,7 @@ export default function ParentDashboardPage() {
               {selectedStudent?.school && <span className="rounded-full bg-white/10 px-3 py-1 ring-1 ring-white/15">{selectedStudent.school}</span>}
               {registeredWeekdays.length > 0 && <span className="rounded-full bg-white/20 px-3 py-1 ring-1 ring-white/25">通塾 {registeredWeekdays.map(day => `${day}曜`).join('・')}</span>}
             </div>
-            <Link href="/parent/courses" className="mt-3 inline-flex min-h-9 items-center gap-1 rounded-btn text-xs font-bold text-accent-ink/90 underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white">
+            <Link href="/parent/courses" className="mt-3 inline-flex min-h-11 items-center gap-1 rounded-btn text-xs font-bold text-accent-ink/90 underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white">
               受講講座の登録・変更<ChevronRight size={14} aria-hidden />
             </Link>
             {latestAnnouncement && (
@@ -850,10 +863,12 @@ export default function ParentDashboardPage() {
               {requestMode === 'transfer' && (
                 <div className="rounded-card border border-line bg-canvas p-3">
                   <div className="mb-2 flex items-center gap-2 text-sm font-bold text-accent">
-                    <Video size={15} aria-hidden /> この日に受けられる同じ単元の授業
+                    <Video size={15} aria-hidden /> 休む授業と同じ単元の振替先（別の日の授業）
                   </div>
                   {loadingTransferOptions ? (
                     <div className="rounded-btn bg-surface px-3 py-3"><Spinner label="振替候補を読み込み中" /></div>
+                  ) : transferOptionsError ? (
+                    <ErrorState title="振替候補を読み込めませんでした" message={transferOptionsError} onRetry={() => setTransferOptionsReload(value => value + 1)} />
                   ) : transferOptions.length === 0 ? (
                     <div className="rounded-btn bg-surface px-3 py-3 text-sm text-fg-muted">この日に選べる振替候補はありません。</div>
                   ) : (
@@ -869,7 +884,7 @@ export default function ParentDashboardPage() {
                             onClick={() => setSelectedTransferShiftId(option.id)}
                             className={cn('min-h-11 rounded-btn border-2 p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent', active ? 'border-accent bg-surface text-accent shadow-sm' : 'border-transparent bg-surface text-fg hover:border-line')}
                           >
-                            <p className="text-sm font-bold">{option.title}</p>
+                            <p className="text-sm font-bold">{option.targetDate ? `${formatDate(option.targetDate)}${option.period ? ` ${option.period}限` : ''} ` : ''}{option.title.replace(/^\d{4}-\d{2}-\d{2}\s*/, '')}</p>
                             <p className="mt-1 text-xs text-fg-muted">{option.unit || '単元名未設定'} / {option.matchLabel}</p>
                           </button>
                         );
@@ -880,7 +895,7 @@ export default function ParentDashboardPage() {
               )}
               {requestMode === 'student_transfer' && (
                 <div className="rounded-card border border-info/20 bg-info-soft p-4 text-sm leading-relaxed text-info">
-                  連絡後、お子さまの画面に振替先を選ぶ案内が表示されます。振替先を選ぶまで、お子さまのホーム画面は先へ進めません。
+                  連絡後、お子さまの画面に振替先を選ぶ案内が表示されます。
                 </div>
               )}
               <label className="block">
@@ -1356,7 +1371,13 @@ function ParentActionCalendar({
         <div className="mb-5">
           <p className="mb-2 text-sm font-bold text-fg-muted">次の通塾日</p>
           {upcoming.length === 0 ? (
-            <p className="rounded-btn bg-canvas px-4 py-3 text-sm text-fg-muted">連絡できる通塾日が見つかりません。受講講座の登録内容をご確認ください。</p>
+            <div className="rounded-btn bg-canvas px-4 py-3 text-sm text-fg-muted">
+              <p>連絡できる通塾日が見つかりません。受講講座の登録内容をご確認ください。</p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <ButtonLink href="/parent/courses" size="sm" variant="secondary">受講講座を確認する</ButtonLink>
+                <ButtonLink href="/parent/contact" size="sm" variant="ghost">教室へ連絡する</ButtonLink>
+              </div>
+            </div>
           ) : (
             <div className="grid gap-2 sm:grid-cols-3">
               {upcoming.map(date => {
@@ -1396,7 +1417,8 @@ function ParentActionCalendar({
           const isRegisteredDay = registeredWeekdays.includes(weekdayOf(day.date));
           const ended = isRegisteredDay && lessonDayEnded(day.date, lessonEndFor(day.date));
           // 授業が終わった日は、振替（補講）の登録だけできる。
-          const actionable = !isClosedDay && isRegisteredDay && (ended ? canTransfer : canContact);
+          // さかのぼって連絡できるのは3か月前まで（サーバーと同じ決まり）。
+          const actionable = !isClosedDay && isRegisteredDay && isWithinAbsenceWindow(day.date, jstTodayKey()) && (ended ? canTransfer : canContact);
           const sent = sentKind(day.date);
           const declined = sent ? undefined : declinedStatus(day.date);
           const selected = selectedDate === day.date;

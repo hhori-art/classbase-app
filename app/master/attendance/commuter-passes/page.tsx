@@ -5,6 +5,7 @@ import { CheckCircle, RefreshCw, Search, Train, Trash2, XCircle } from 'lucide-r
 import { Button, EmptyState, ErrorState, ListSkeleton } from '@/app/components/ui';
 import AdminPageHeader from '@/app/components/master/AdminPageHeader';
 import { useAuth } from '@/app/context/AuthContext';
+import { userErrorMessage } from '@/lib/user-error';
 
 type CommuterPass = {
   id: string;
@@ -68,7 +69,7 @@ export default function CommuterPassesAdminPage() {
       setPasses(Array.isArray(data.passes) ? data.passes : []);
     } catch (error) {
       console.error(error);
-      setLoadError(error instanceof Error ? error.message : '定期を読み込めませんでした。');
+      setLoadError(userErrorMessage(error, '定期を読み込めませんでした。'));
     } finally {
       setLoading(false);
     }
@@ -104,7 +105,7 @@ export default function CommuterPassesAdminPage() {
       setMessage(action === 'renewed' ? `${pass.teacher_name || '講師'}の定期を ${endDate} まで有効にしました。` : `${pass.teacher_name || '講師'}の定期を無効にしました。`);
       await load();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : '更新できませんでした。');
+      setMessage(userErrorMessage(error, '更新できませんでした。'));
     } finally {
       setBusy('');
     }
@@ -119,7 +120,7 @@ export default function CommuterPassesAdminPage() {
       setMessage(`${pass.teacher_name || '講師'}の定期（${pass.from} - ${pass.to}）を削除しました。`);
       await load();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : '削除できませんでした。');
+      setMessage(userErrorMessage(error, '削除できませんでした。'));
     } finally {
       setBusy('');
     }

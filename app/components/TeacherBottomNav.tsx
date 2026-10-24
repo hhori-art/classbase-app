@@ -109,6 +109,13 @@ export default function TeacherBottomNav() {
       icon: <Briefcase size={22} aria-hidden />,
       visible: visibility.work !== false,
     },
+    // 毎日の出退勤で使うので、理社講座の講師にも「勤怠」を出す（多いときは掲示板・設定がメニューにまとまる）。
+    {
+      label: '勤怠',
+      path: attendancePath,
+      icon: <Clock size={22} aria-hidden />,
+      visible: true,
+    },
     {
       label: '掲示板',
       path: '/teacher/community',

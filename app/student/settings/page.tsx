@@ -6,7 +6,8 @@ import { useAuth } from '@/app/context/AuthContext';
 import { useSettings } from '@/app/context/SettingsContext';
 import { auth, db } from '@/lib/firebase';
 import { doc, updateDoc } from 'firebase/firestore';
-import { signInWithEmailAndPassword } from 'firebase/auth';
+import { signInWithEmailAndPassword, signOut } from 'firebase/auth';
+import { PASSWORD_CHANGED_RELOGIN_MESSAGE, passwordChangedButReloginFailed } from '@/lib/password-change-error';
 import {
   User, Lock, LogOut, ChevronRight,
   Save, Type,
@@ -378,7 +379,10 @@ export default function StudentSettingsPage() {
       await refreshedCredential.user.getIdToken(true);
       showMessage('success', 'パスワードを変更し、ログイン状態を更新しました');
       setNewPassword(''); setConfirmPassword(''); setIsPasswordExpanded(false);
-    } catch(e) { showMessage('error', 'パスワードを変更できませんでした。もう一度お試しください。'); }
+    } catch(e) {
+      if (passwordChangedButReloginFailed(e)) { showMessage('success', PASSWORD_CHANGED_RELOGIN_MESSAGE); await signOut(auth).catch(() => undefined); window.setTimeout(() => window.location.replace('/'), 2500); return; }
+      showMessage('error', 'パスワードを変更できませんでした。もう一度お試しください。');
+    }
     finally { setLoading(false); }
   };
 

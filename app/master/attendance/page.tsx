@@ -1737,7 +1737,8 @@ export default function MasterAttendancePage() {
               突破ゼミ出勤簿
             </Button>
 
-            <Button
+            {/* 勤務記録の作成・編集・削除はマスターだけ（ほかの管理者は承認の画面で直す）。 */}
+            {isMaster && <Button
               onClick={() => {
                 setNewRecordSearch('');
                 setNewRecordData({ teacher_id: '', date: filterDate || filterMonth + '-01' });
@@ -1747,7 +1748,7 @@ export default function MasterAttendancePage() {
               className="w-full md:w-auto"
             >
               新規追加
-            </Button>
+            </Button>}
           </div>
         </div>
 
@@ -1784,7 +1785,7 @@ export default function MasterAttendancePage() {
                   >
                     選択した項目を承認
                   </Button>
-                  <Button
+                  {isMaster && <Button
                     size="sm"
                     variant="danger"
                     onClick={handleBulkDelete}
@@ -1792,7 +1793,7 @@ export default function MasterAttendancePage() {
                     icon={<Trash2 size={14} aria-hidden />}
                   >
                     一括削除
-                  </Button>
+                  </Button>}
                 </div>
               )}
             </div>
@@ -1907,11 +1908,11 @@ export default function MasterAttendancePage() {
                                   </Button>
                                 )}
                                 <Button size="sm" variant="secondary" onClick={() => openEditor(rec)} fullWidth icon={<Edit size={14} aria-hidden />}>
-                                  編集
+                                  {isMaster ? '編集' : '承認画面で修正'}
                                 </Button>
-                                <Button size="sm" variant="ghost" onClick={() => handleDelete(rec.id)} fullWidth icon={<Trash2 size={14} aria-hidden />} className="text-danger hover:bg-danger-soft hover:text-danger">
+                                {isMaster && <Button size="sm" variant="ghost" onClick={() => handleDelete(rec.id)} fullWidth icon={<Trash2 size={14} aria-hidden />} className="text-danger hover:bg-danger-soft hover:text-danger">
                                   削除
-                                </Button>
+                                </Button>}
                               </div>
 
                             </div>

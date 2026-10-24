@@ -8,6 +8,7 @@ import { EmptyState, ErrorState, IconButton, buttonClass, useConfirm } from '@/a
 import { useAuth } from '@/app/context/AuthContext';
 import { subjectById } from '@/lib/online-school/catalog';
 import type { PublicProblem } from '@/lib/online-school/types';
+import { userErrorMessage } from '@/lib/user-error';
 
 type Session = { id: string; subjectId: string; status: string; startedAtMs: number; endsAtMs: number; currentLevel: number; answeredCount: number; correctCount: number; xpEarned: number; currentProblem: PublicProblem | null; result?: { answeredCount: number; correctCount: number; xpEarned: number; durationSeconds: number; endingLevel: number } | null };
 type AnswerResult = { isCorrect: boolean; correctAnswer: string; explanation: string; xpEarned: number; leveledUp: boolean; currentLevel: number; levelXp: number; reviewMode: boolean; timeExpired: boolean; nextProblem: PublicProblem | null; answeredCount: number };
@@ -34,7 +35,7 @@ export default function LearnPage() {
   const finish = useCallback(async () => {
     if (!session) return; setSending(true); setError('');
     try { const data = await authorizedFetch('/api/online-school/session', { method: 'PATCH', body: JSON.stringify({ sessionId: session.id }) }); setSession(data.session); setFeedback(null); }
-    catch (err) { setError(err instanceof Error ? err.message : '終了処理に失敗しました。'); } finally { setSending(false); }
+    catch (err) { setError(userErrorMessage(err, '終了処理に失敗しました。')); } finally { setSending(false); }
   }, [authorizedFetch, session]);
 
   // 途中で戻るときは確認してから、時間切れと同じ終了処理（PATCH）を呼んで結果画面を出す。
@@ -57,7 +58,7 @@ export default function LearnPage() {
       const result = data.result as AnswerResult; setFeedback(result);
       setSession(current => current ? { ...current, answeredCount: result.answeredCount, correctCount: current.correctCount + (result.isCorrect ? 1 : 0), xpEarned: current.xpEarned + result.xpEarned, currentLevel: result.currentLevel } : current);
       setLocalCategories(current => { const old = current[problem.categoryId] || { name: problem.categoryName, answered: 0, correct: 0 }; return { ...current, [problem.categoryId]: { ...old, answered: old.answered + 1, correct: old.correct + (result.isCorrect ? 1 : 0) } }; });
-    } catch (err) { setError(err instanceof Error ? err.message : '回答を送信できませんでした。'); } finally { setSending(false); }
+    } catch (err) { setError(userErrorMessage(err, '回答を送信できませんでした。')); } finally { setSending(false); }
   };
   const next = async () => {
     if (!feedback || !session) return;

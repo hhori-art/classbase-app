@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation';
 import { BookOpen, CheckCircle2, ExternalLink, Sparkles } from 'lucide-react';
 import { useEikenApi } from '@/app/eiken/useEikenApi';
 import { Button, ErrorState, ListSkeleton, PageHeader, buttonClass } from '@/app/components/ui';
+import { userErrorMessage } from '@/lib/user-error';
 
 const youtubeEmbedUrl = (value: string) => {
   try {
@@ -54,7 +55,7 @@ export default function EikenTaskPage() {
         setQuiz(quizData);
       }
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : '学習内容を取得できませんでした。');
+      setError(userErrorMessage(loadError, '学習内容を取得できませんでした。'));
     } finally {
       setLoading(false);
     }
@@ -89,7 +90,7 @@ export default function EikenTaskPage() {
         ...(action === 'complete' ? { status: 'completed' } : { understanding }),
       }));
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : '保存できませんでした。');
+      setError(userErrorMessage(saveError, '保存できませんでした。'));
     } finally {
       setSaving(false);
     }
@@ -118,7 +119,7 @@ export default function EikenTaskPage() {
       setQuizResult(result);
       if (result.ok) await saveProgress('complete');
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : '確認テストを提出できませんでした。');
+      setError(userErrorMessage(submitError, '確認テストを提出できませんでした。'));
       setSaving(false);
     }
   };
@@ -136,7 +137,7 @@ export default function EikenTaskPage() {
       await saveProgress('complete');
     } catch (submitError) {
       setWritingStatus('failed');
-      setError(submitError instanceof Error ? submitError.message : 'AI添削へ提出できませんでした。');
+      setError(userErrorMessage(submitError, 'AI添削へ提出できませんでした。'));
       setSaving(false);
     }
   };

@@ -4,7 +4,7 @@ import { revalidateTag } from 'next/cache';
 import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, jsonError } from '@/lib/server-auth';
 import { GACHA_RATE_SCALE } from '@/lib/rewards';
-import { normalizeGachaItems, REWARD_CATALOG_TAG, requireRewardCatalogManager, validateGachaRates } from '@/lib/server/reward-store';
+import { normalizeGachaItems, REWARD_CATALOG_TAG, requireRewardCatalogEditor, validateGachaRates } from '@/lib/server/reward-store';
 import { saveRewardImage } from '@/lib/server/reward-uploads';
 
 export const runtime = 'nodejs';
@@ -16,7 +16,7 @@ const badRequest = (error: string) => Response.json({ ok: false, error }, { stat
 export async function GET(request: NextRequest) {
   try {
     const user = await getServerUser(request);
-    requireRewardCatalogManager(user);
+    requireRewardCatalogEditor(user);
     const db = adminDb();
     const [gachaSnap, drawSnap] = await Promise.all([
       db.collection('gachas').limit(100).get(),
@@ -57,7 +57,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const user = await getServerUser(request);
-    requireRewardCatalogManager(user);
+    requireRewardCatalogEditor(user);
     const form = await request.formData();
     const id = String(form.get('id') || '').trim();
     const name = String(form.get('name') || '').trim();
@@ -117,7 +117,7 @@ export async function POST(request: NextRequest) {
 export async function PATCH(request: NextRequest) {
   try {
     const user = await getServerUser(request);
-    requireRewardCatalogManager(user);
+    requireRewardCatalogEditor(user);
     const body = await request.json();
     const id = String(body.id || '').trim();
     if (!id || typeof body.active !== 'boolean') return badRequest('id and active are required');

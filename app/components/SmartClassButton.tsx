@@ -103,8 +103,8 @@ export default function SmartClassButton({ profile, period, startTime, endTime, 
 
   // 表示するものがない場合
   if (classDataList.length === 0) {
-    const title = scheduleMissing ? '本日の授業配置が未反映です' : `${period}限目の登録授業はありません`;
-    const description = scheduleMissing ? '過去の配置では参加できません。校舎の先生に確認してください。' : '本日の受講登録と一致する授業がありません。';
+    const title = scheduleMissing ? '今日の授業はまだ準備中です' : `${period}限目にあなたの授業はありません`;
+    const description = scheduleMissing ? '授業の情報がまだ届いていません。少し待ってから開き直すか、校舎の先生に聞いてください。' : '受講講座に登録した授業が、この時間にはありません。';
     if (previewMode) {
       return (
         <EmptyState
@@ -244,7 +244,7 @@ export default function SmartClassButton({ profile, period, startTime, endTime, 
               ? `講師テスト表示${classData.unit ? ` | ${classData.unit}` : ''}`
               : classData.source === 'transfer'
                 ? `振替登録済み${classData.unit ? ` | ${classData.unit}` : ''}`
-                : `${classData.match_reason || '受講登録と一致'}${classData.unit ? ` | ${classData.unit}` : ''}`
+                : `${classData.unit || 'あなたの授業'}`
           }
           color={period === 1 ? 'blue' : 'purple'}
           startTime={startTime}

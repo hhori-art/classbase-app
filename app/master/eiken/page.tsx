@@ -22,6 +22,7 @@ import { formatDate, formatDateTime, toDate } from '@/lib/format';
 import EikenCalendar from '@/app/components/eiken/EikenCalendar';
 import { useEikenApi } from '@/app/eiken/useEikenApi';
 import { EIKEN_LEVELS, EIKEN_LEVEL_LABELS, EIKEN_TASK_TYPES, type EikenLevel } from '@/lib/eiken/types';
+import { userErrorMessage } from '@/lib/user-error';
 
 const fieldClass = 'min-h-10 w-full rounded-input border border-line bg-surface px-3 py-2 text-sm text-fg outline-none focus:border-accent focus:ring-2 focus:ring-accent/20';
 const labelClass = 'block text-xs font-bold text-slate-600';
@@ -46,7 +47,7 @@ export default function EikenAdminPage() {
       setData(await api('/api/eiken/admin/catalog'));
     } catch (loadError) {
       console.error(loadError);
-      setError(loadError instanceof Error ? loadError.message : '英検管理情報を取得できませんでした。');
+      setError(userErrorMessage(loadError, '英検管理情報を取得できませんでした。'));
     } finally {
       setLoading(false);
     }
@@ -68,7 +69,7 @@ export default function EikenAdminPage() {
       await load();
     } catch (saveError) {
       console.error(saveError);
-      toast.error(saveError instanceof Error ? saveError.message : '保存できませんでした。');
+      toast.error(userErrorMessage(saveError, '保存できませんでした。'));
     } finally {
       setSaving(false);
     }
@@ -90,7 +91,7 @@ export default function EikenAdminPage() {
       await load();
     } catch (saveError) {
       console.error(saveError);
-      toast.error(saveError instanceof Error ? saveError.message : '更新できませんでした。');
+      toast.error(userErrorMessage(saveError, '更新できませんでした。'));
     } finally {
       setSaving(false);
     }

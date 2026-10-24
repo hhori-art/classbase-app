@@ -6,6 +6,7 @@ import { auth } from '@/lib/firebase';
 import AdminPageHeader from '@/app/components/master/AdminPageHeader';
 import AdminTabs from '@/app/components/master/AdminTabs';
 import { Button, EmptyState, ErrorState, ListSkeleton, useConfirm, useToast } from '@/app/components/ui';
+import { userErrorMessage } from '@/lib/user-error';
 
 type ManagedUser = { id: string; role?: string; name?: string; student_name?: string; lifetime_id?: string; grade?: string; account_status?: string; status?: string };
 
@@ -33,7 +34,7 @@ export default function AccountArchivePage() {
       setUsers((Array.isArray(result.users) ? result.users : []).filter((item: ManagedUser) => !['archived', 'withdrawn'].includes(String(item.account_status || item.status || '').toLowerCase())));
     } catch (error) {
       console.error('Archive target fetch failed:', error);
-      setLoadError(error instanceof Error ? error.message : 'アカウントを取得できませんでした。');
+      setLoadError(userErrorMessage(error, 'アカウントを取得できませんでした。'));
       setUsers([]);
     } finally {
       setLoading(false);
@@ -93,7 +94,7 @@ export default function AccountArchivePage() {
       setSelectedIds(new Set());
       toast.success(`${result.count || ids.length}件をアーカイブしました。`);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'アーカイブできませんでした。');
+      toast.error(userErrorMessage(error, 'アーカイブできませんでした。'));
     } finally { setIsProcessing(false); }
   };
 

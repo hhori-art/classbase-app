@@ -170,6 +170,8 @@ export function visibleAdminMenu(profile: Record<string, any> | null | undefined
     }
     if (viewer.isSchoolAdmin) {
       if (!SCHOOL_ADMIN_KEYS.has(item.key)) return false;
+      // 理社講座の権限を外した校舎管理者（勤怠だけ等）には、理社講座の画面を出さない（開くとホームへ戻されるため）。
+      if (item.app === 'science_social' && !hasAdminAppPermission(profile.role, profile, 'science_social')) return false;
       if (item.href.startsWith('/master') && !isSchoolAdminAllowedPath(item.href)) return false;
       if (item.key === 'shifts' && !viewer.canUseShifts) return false;
       return item.app === 'global' || adminVisibility[item.key] !== false;

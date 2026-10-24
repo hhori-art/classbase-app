@@ -3,7 +3,8 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { auth } from '@/lib/firebase';
-import { signInWithEmailAndPassword } from 'firebase/auth';
+import { signInWithEmailAndPassword, signOut } from 'firebase/auth';
+import { PASSWORD_CHANGED_RELOGIN_MESSAGE, passwordChangedButReloginFailed } from '@/lib/password-change-error';
 import { Bell, ChevronRight, Lock, Mail, MessageCircle, Settings, Shield, Smartphone } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
 import LineLinkPanel from '@/app/components/LineLinkPanel';
@@ -96,8 +97,9 @@ export default function ParentSettingsPage() {
       setConfirmPassword('');
       setPasswordMessage({ type: 'success', text: 'パスワードを変更しました。' });
       window.location.replace('/parent');
-    } catch {
-      setPasswordMessage({ type: 'error', text: 'パスワード変更に失敗しました。再度ログインしてお試しください。' });
+    } catch (e) {
+      if (passwordChangedButReloginFailed(e)) { setPasswordMessage({ type: 'success', text: PASSWORD_CHANGED_RELOGIN_MESSAGE }); await signOut(auth).catch(() => undefined); window.setTimeout(() => window.location.replace('/'), 2500); return; }
+      setPasswordMessage({ type: 'error', text: 'パスワードを変更できませんでした。もう一度お試しください。' });
     } finally {
       setChangingPassword(false);
     }

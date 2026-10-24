@@ -10,6 +10,7 @@ import { Button, ErrorState, Skeleton } from '@/app/components/ui';
 import { jstDateKey } from '@/lib/format';
 import type { LucideIcon } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
+import { userErrorMessage } from '@/lib/user-error';
 
 type Program = 'all' | 'normal' | 'science_social' | 'breakthrough';
 type Source = 'combined' | 'system' | 'external';
@@ -44,8 +45,15 @@ export default function AttendanceInsightsPage() {
   const { user } = useAuth();
   const currentMonth = jstDateKey().slice(0, 7);
   // 旧システムの履歴も初期表示で確認できるよう、当月だけでなく直近3か月を表示する。
+  // 勤怠一覧から開いたときは、見ていた月（?month=）までの3か月にする。
   const [from, setFrom] = useState(() => shiftMonth(currentMonth, -2));
   const [to, setTo] = useState(currentMonth);
+  useEffect(() => {
+    const requested = new URLSearchParams(window.location.search).get('month') || '';
+    if (!/^\d{4}-\d{2}$/.test(requested)) return;
+    setTo(requested);
+    setFrom(shiftMonth(requested, -2));
+  }, []);
   const [program, setProgram] = useState<Program>('all');
   const [source, setSource] = useState<Source>('combined');
   const [school, setSchool] = useState('all');
@@ -71,7 +79,7 @@ export default function AttendanceInsightsPage() {
       setData(body);
     } catch (caught) {
       console.error(caught);
-      setError(caught instanceof Error ? caught.message : '分析データを取得できませんでした。');
+      setError(userErrorMessage(caught, '分析データを取得できませんでした。'));
     } finally {
       setLoading(false);
     }

@@ -3,6 +3,7 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { canManageSchool, getServerUser, isAdminLike, jsonError } from '@/lib/server-auth';
 import { writeLearningEvent } from '@/lib/events';
+import { jstDateKey } from '@/lib/date-key';
 
 export const runtime = 'nodejs';
 
@@ -13,7 +14,9 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const school = String(body.school_id || body.school || actor.school_ids[0] || actor.school || '').trim();
     const middleSchool = String(body.middle_school || '').trim();
-    const targetDate = String(body.target_date || new Date().toISOString().slice(0, 10)).slice(0, 10);
+    const targetDate = String(body.target_date || jstDateKey()).slice(0, 10);
+    // 画面で表示していた生徒だけ（指定がなければ従来どおり中学校で絞った全員）。
+    const requestedIds = new Set((Array.isArray(body.student_ids) ? body.student_ids : []).map((id: unknown) => String(id).trim()).filter(Boolean));
     const reason = String(body.reason || `${middleSchool} 一括欠席登録`).slice(0, 500);
 
     if (!school) return Response.json({ ok: false, error: 'school is required' }, { status: 400 });
@@ -28,8 +31,20 @@ export async function POST(request: NextRequest) {
       .limit(500)
       .get();
 
+    const INACTIVE = ['suspended', 'withdrawn', 'archived', 'cancelled', 'inactive'];
+    const targets = studentSnap.docs.filter(doc => {
+      const data = doc.data() || {};
+      if (requestedIds.size && !requestedIds.has(doc.id)) return false;
+      return !INACTIVE.includes(String(data.account_status || data.status || ''));
+    });
+    // すでに出席・欠席の記録がある生徒は上書きしない（出席を欠席にしてしまわないため）。
+    const existing = targets.length
+      ? await db.getAll(...targets.map(doc => db.collection('attendance').doc(`${doc.id}_${targetDate}`)))
+      : [];
+    const existingIds = new Set(existing.filter(snap => snap.exists).map(snap => snap.id));
+    const toWrite = targets.filter(doc => !existingIds.has(`${doc.id}_${targetDate}`));
     const batch = db.batch();
-    studentSnap.docs.forEach(doc => {
+    toWrite.forEach(doc => {
       const data = doc.data() || {};
       const ref = db.collection('attendance').doc(`${doc.id}_${targetDate}`);
       batch.set(ref, {
@@ -55,10 +70,10 @@ export async function POST(request: NextRequest) {
       type: 'bulk_absence_by_middle_school',
       target_type: 'attendance',
       school,
-      metadata: { middle_school: middleSchool, target_date: targetDate, count: studentSnap.size },
+      metadata: { middle_school: middleSchool, target_date: targetDate, count: toWrite.length, skipped: targets.length - toWrite.length },
     });
 
-    return Response.json({ ok: true, count: studentSnap.size, event_id: eventId });
+    return Response.json({ ok: true, count: toWrite.length, skipped: targets.length - toWrite.length, event_id: eventId });
   } catch (error) {
     return jsonError(error);
   }

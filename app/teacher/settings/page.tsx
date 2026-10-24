@@ -4,7 +4,8 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useAuth } from '@/app/context/AuthContext';
 import { auth, db } from '@/lib/firebase';
-import { signInWithEmailAndPassword } from 'firebase/auth';
+import { signInWithEmailAndPassword, signOut } from 'firebase/auth';
+import { PASSWORD_CHANGED_RELOGIN_MESSAGE, passwordChangedButReloginFailed } from '@/lib/password-change-error';
 import { doc, updateDoc } from 'firebase/firestore';
 import { 
   User, Lock, LogOut, ChevronRight, 
@@ -155,7 +156,10 @@ export default function TeacherSettingsPage() {
       await refreshedCredential.user.getIdToken(true);
       showMessage('success', 'パスワードを変更し、ログイン状態を更新しました');
       setNewPassword(''); setConfirmPassword(''); setIsPasswordExpanded(false);
-    } catch(e) { showMessage('error', 'パスワード変更に失敗しました'); }
+    } catch(e) {
+      if (passwordChangedButReloginFailed(e)) { showMessage('success', PASSWORD_CHANGED_RELOGIN_MESSAGE); await signOut(auth).catch(() => undefined); window.setTimeout(() => window.location.replace('/'), 2500); return; }
+      showMessage('error', 'パスワードを変更できませんでした。もう一度お試しください。');
+    }
     finally { setLoading(false); }
   };
 

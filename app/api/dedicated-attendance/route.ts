@@ -5,6 +5,7 @@ import { adminDb } from '@/lib/firebase-admin';
 import { isDedicatedProfile } from '@/lib/employment-category';
 import { getServerUser, jsonError, requireRole } from '@/lib/server-auth';
 import { jstDateKey } from '@/lib/date-key';
+import { attendanceSchoolName, resolveAttendanceSchoolCode } from '@/lib/attendance-schools';
 import { buildMonth, buildSeasonView, dedicatedStaffFromProfile } from '@/lib/dedicated-month';
 import { checkOvertimePlan, formatDuration, monthDates } from '@/lib/dedicated-overtime';
 import { isInSeason, seasonRange } from '@/lib/dedicated-season';
@@ -77,8 +78,14 @@ export async function GET(request: NextRequest) {
 
     // 本日の打刻状態は表示中の月に関係なく、全勤務記録から判定する（過去月表示中の二重出勤防止）。
     const byStartDesc = (a: { start_time?: string }, b: { start_time?: string }) => String(b.start_time).localeCompare(String(a.start_time));
-    const activeRecord = records.filter(record => !record.end_time).sort(byStartDesc)[0] || null;
+    // 出勤中は「今日の退勤していない記録」だけ。前日以前の退勤忘れは別に知らせ、今日の出勤は止めない。
+    const activeRecord = records.filter(record => !record.end_time && record.date === today).sort(byStartDesc)[0] || null;
     const todayRecord = records.filter(record => record.date === today).sort(byStartDesc)[0] || null;
+    const fourteenDaysAgo = new Date(Date.parse(`${today}T12:00:00+09:00`) - 14 * 86_400_000).toISOString().slice(0, 10);
+    const openPastRecords = records
+      .filter(record => !record.end_time && record.date < today && record.date >= fourteenDaysAgo)
+      .sort((a, b) => b.date.localeCompare(a.date))
+      .map(record => ({ id: record.id, date: record.date, start_time: record.start_time }));
 
     // 表示中の月か今日にかかる講習期間。
     const monthStart = `${month}-01`;
@@ -97,6 +104,13 @@ export async function GET(request: NextRequest) {
     ).values()).slice(0, 6);
 
     const monthly = monthlySnap.exists ? monthlySnap.data() || {} : null;
+    // 月初（1〜3日）は、前の月の報告書が出ているかも返す（表示中の月に関係なく提出を案内する）。
+    const previousMonth = new Date(Date.parse(`${today.slice(0, 7)}-01T12:00:00+09:00`) - 86_400_000).toISOString().slice(0, 7);
+    const previousMonthly = Number(today.slice(8, 10)) <= 3
+      ? await db.collection(MONTHLY).doc(monthlyReportId(user.uid, previousMonth)).get()
+      : null;
+    const schoolIds = Array.from(new Set([staff.school, ...(Array.isArray(user.profile.school_ids) ? user.profile.school_ids : [])]
+      .map(value => resolveAttendanceSchoolCode(value)).filter(Boolean)));
     return Response.json({
       ok: true,
       month,
@@ -106,6 +120,9 @@ export async function GET(request: NextRequest) {
       summary: view.summary,
       active_record: activeRecord,
       today_record: todayRecord,
+      open_past_records: openPastRecords,
+      schools: schoolIds.map(id => ({ id, name: attendanceSchoolName(id) })),
+      previous_month: previousMonthly ? { month: previousMonth, status: String(previousMonthly.data()?.status || '') } : null,
       today_plans: plans.filter(plan => plan.date === today && (plan.status === 'approved' || plan.status === 'pending')),
       plans: plans.filter(plan => (inMonth(plan.date) || plan.date >= today) && plan.status !== 'cancelled').sort((a, b) => a.date.localeCompare(b.date) || a.start.localeCompare(b.start)),
       lessons: lessons.filter(item => inMonth(item.lesson_date)).sort((a, b) => b.lesson_date.localeCompare(a.lesson_date)),
@@ -178,7 +195,7 @@ export async function POST(request: NextRequest) {
       const data = snap.data() || {};
       if (!snap.exists || data.user_id !== user.uid) throw new Error('forbidden');
       if (data.status === 'approved' && String(data.date) < today) return bad('過ぎた日の承認済みの予定は取り消せません。');
-      if (!['pending', 'approved'].includes(String(data.status))) return bad('取り消せる予定ではありません。');
+      if (!['pending', 'approved', 'rejected'].includes(String(data.status))) return bad('取り消せる予定ではありません。');
       if (await isMonthLocked(user.uid, String(data.date).slice(0, 7))) return bad(LOCKED_ERROR);
       await ref.set({ status: 'cancelled', cancelled_at: FieldValue.serverTimestamp(), updated_at: FieldValue.serverTimestamp() }, { merge: true });
       return Response.json({ ok: true });
@@ -247,6 +264,11 @@ export async function POST(request: NextRequest) {
       if (!DATE.test(lessonDate) || minutes < 1 || minutes > 720) return bad('授業日と授業分数（1〜720分）を入れてください。');
       if (await isMonthLocked(user.uid, lessonDate.slice(0, 7))) return bad(LOCKED_ERROR);
       const key = `daily_${createHash('sha256').update([user.uid, lessonDate].join('\u001f')).digest('hex').slice(0, 34)}`;
+      // 同じ日の申請は1件（出し直すと置き換わる）。承認済みの日は、黙って承認待ちに戻さない。
+      const existing = await db.collection(LESSONS).doc(key).get();
+      if (existing.exists && existing.data()?.status === 'approved') {
+        return bad('この日の授業時間は承認済みです。直すときは承認者に差し戻してもらってください。');
+      }
       await db.collection(LESSONS).doc(key).set({
         ...base,
         person_code: clean(user.profile.lifetime_id || user.profile.staff_id || user.profile.employee_id, 40),

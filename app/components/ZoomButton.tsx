@@ -236,10 +236,10 @@ export default function ZoomButton(props: {
       }
       const zoomTargets = buildZoomTargets(baseUrl, meetingId, formattedName);
 
-      // --- 2. 出席・参加ログ（失敗してもZoom起動は止めない） ---
-      try {
+      // --- 2. 出席・参加ログ（失敗してもZoom起動は止めない。記録できないと「未参加」の通知が届くので、1回だけやり直し、だめなら知らせる） ---
+      const recordParticipation = async () => {
         const token = await user.getIdToken();
-        await fetch('/api/class-participation', {
+        const response = await fetch('/api/class-participation', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
           body: JSON.stringify({
@@ -248,8 +248,13 @@ export default function ZoomButton(props: {
             ...(classId ? { class_id: classId } : {}),
           }),
         });
+        if (!response.ok) throw new Error(`participation-${response.status}`);
+      };
+      try {
+        await recordParticipation().catch(() => recordParticipation());
       } catch (logError) {
         console.warn('Zoom participation log failed:', logError);
+        toast.error('授業への参加を記録できませんでした。授業のあとで先生に「参加の記録ができなかった」と伝えてください。');
       }
 
       // --- 3. Zoom起動 ---

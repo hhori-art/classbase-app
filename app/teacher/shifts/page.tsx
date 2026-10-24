@@ -9,6 +9,7 @@ import { Button, ButtonLink, Card, EmptyState, ErrorState, IconButton, ListSkele
 import { ATTENDANCE_SCHOOL_OPTION_GROUPS, ATTENDANCE_SCHOOLS, resolveAttendanceSchool } from '@/lib/attendance-schools';
 import { formatShortDate, jstDateKey } from '@/lib/format';
 import { DEFAULT_WEEKLY_DAY, WEEKDAY_KEYS, type TeacherAvailabilityProfile, type WeekdayKey, type WeeklyAvailabilityDay } from '@/lib/teacher-weekly-availability';
+import { userErrorMessage } from '@/lib/user-error';
 
 // ロール定義
 const ROLES = [
@@ -295,7 +296,7 @@ export default function TeacherShiftSubmissionPage() {
       setWeeklyModalOpen(false);
       toast.success('基本勤務可能日を保存しました。');
     } catch (error: any) {
-      toast.error(`保存できませんでした: ${error.message}`);
+      toast.error(`保存できませんでした: ${userErrorMessage(error, '')}`);
     } finally {
       setWeeklySaving(false);
     }

@@ -6,6 +6,7 @@ import { Button, buttonClass, useToast } from '@/app/components/ui';
 import RewardVisual from '@/app/components/rewards/RewardVisual';
 import { REWARD_PRESET_CATEGORY_LABELS, REWARD_PRESETS, type RewardPreset, type RewardPresetCategory } from '@/lib/reward-presets';
 import { adminApi, inputClass, type AdminReward } from './api';
+import { userErrorMessage } from '@/lib/user-error';
 
 type Props = { rewards: AdminReward[]; onChanged: () => Promise<void> };
 
@@ -35,7 +36,7 @@ export default function PresetRewardAdder({ rewards, onChanged }: Props) {
       await onChanged();
     } catch (error) {
       console.error(error);
-      toast.error(error instanceof Error ? error.message : '追加できませんでした');
+      toast.error(userErrorMessage(error, '追加できませんでした'));
     } finally {
       setBusy('');
     }

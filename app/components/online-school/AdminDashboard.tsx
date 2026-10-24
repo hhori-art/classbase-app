@@ -7,6 +7,7 @@ import type { LucideIcon } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
 import AdminPageHeader from '@/app/components/master/AdminPageHeader';
 import { Button, ButtonLink, EmptyState, ErrorState, ListSkeleton, Skeleton } from '@/app/components/ui';
+import { userErrorMessage } from '@/lib/user-error';
 
 type Dashboard = {
   today: string;
@@ -18,7 +19,7 @@ type Dashboard = {
 
 export default function AdminDashboard({ basePath = '/master/online-school', compact = false }: { basePath?: string; compact?: boolean }) {
   const { user } = useAuth(); const [data, setData] = useState<Dashboard | null>(null); const [loading, setLoading] = useState(true); const [error, setError] = useState(''); const [query, setQuery] = useState(''); const [classFilter, setClassFilter] = useState('all'); const requestInFlight = useRef(false); const lastLoadedAt = useRef(0);
-  const load = useCallback(async () => { if (!user || requestInFlight.current) return; requestInFlight.current = true; setLoading(true); try { const token = await user.getIdToken(); const response = await fetch('/api/online-school/admin?mode=dashboard', { headers: { Authorization: `Bearer ${token}` } }); const value = await response.json(); if (!response.ok) throw new Error(value.error); setData(value); setError(''); lastLoadedAt.current = Date.now(); } catch (err) { console.error(err); setError(err instanceof Error ? err.message : '読み込みに失敗しました。'); } finally { requestInFlight.current = false; setLoading(false); } }, [user]);
+  const load = useCallback(async () => { if (!user || requestInFlight.current) return; requestInFlight.current = true; setLoading(true); try { const token = await user.getIdToken(); const response = await fetch('/api/online-school/admin?mode=dashboard', { headers: { Authorization: `Bearer ${token}` } }); const value = await response.json(); if (!response.ok) throw new Error(value.error); setData(value); setError(''); lastLoadedAt.current = Date.now(); } catch (err) { console.error(err); setError(userErrorMessage(err, '読み込みに失敗しました。')); } finally { requestInFlight.current = false; setLoading(false); } }, [user]);
   useEffect(() => {
     void load();
     const refreshIfVisible = () => {

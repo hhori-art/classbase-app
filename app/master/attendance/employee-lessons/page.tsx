@@ -6,6 +6,7 @@ import { Building2, CalendarDays, Clock3, Plus, RefreshCw, Trash2, UserRound } f
 import { Button, EmptyState, ErrorState, ListSkeleton, useConfirm } from '@/app/components/ui';
 import { jstDateKey } from '@/lib/format';
 import { useAuth } from '@/app/context/AuthContext';
+import { userErrorMessage } from '@/lib/user-error';
 
 type Employee = { id: string; name: string; person_code: string; school_code: string; school_name: string };
 type Lesson = {
@@ -60,7 +61,7 @@ export default function EmployeeLessonEntryPage() {
     } catch (loadError) {
       console.error(loadError);
       setLoadFailed(true);
-      setError(loadError instanceof Error ? loadError.message : '授業実績を取得できませんでした。');
+      setError(userErrorMessage(loadError, '授業実績を取得できませんでした。'));
     } finally {
       setLoading(false);
     }
@@ -104,7 +105,7 @@ export default function EmployeeLessonEntryPage() {
       setForm(current => ({ ...emptyForm(), employee_id: current.employee_id, person_code: current.person_code, employee_name: current.employee_name, school_code: current.school_code, school_name: current.school_name, lesson_date: current.lesson_date }));
       await load();
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : '登録できませんでした。');
+      setError(userErrorMessage(saveError, '登録できませんでした。'));
     } finally {
       setSaving(false);
     }
@@ -130,7 +131,7 @@ export default function EmployeeLessonEntryPage() {
       if (!response.ok || body.ok === false) throw new Error(body.error || '削除できませんでした。');
       await load();
     } catch (removeError) {
-      setError(removeError instanceof Error ? removeError.message : '削除できませんでした。');
+      setError(userErrorMessage(removeError, '削除できませんでした。'));
     }
   };
 

@@ -11,6 +11,7 @@ import { useAuth } from '@/app/context/AuthContext';
 import AdminPageHeader from '@/app/components/master/AdminPageHeader';
 import AdminTabs from '@/app/components/master/AdminTabs';
 import { ErrorState, ListSkeleton } from '@/app/components/ui';
+import { userErrorMessage } from '@/lib/user-error';
 
 type Tab = 'shipments' | 'points' | 'rewards' | 'gachas';
 
@@ -43,25 +44,26 @@ export default function RewardsManagementPage() {
       setCatalogLoaded(true);
     } catch (loadError) {
       console.error(loadError);
-      setError(loadError instanceof Error ? loadError.message : '景品を取得できませんでした');
+      setError(userErrorMessage(loadError, '景品を取得できませんでした'));
     } finally {
       setCatalogLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    if ((tab === 'rewards' || tab === 'gachas') && !catalogLoaded) void loadCatalog();
-  }, [tab, catalogLoaded, loadCatalog]);
+    if (profile?.role === 'master' && (tab === 'rewards' || tab === 'gachas') && !catalogLoaded) void loadCatalog();
+  }, [tab, catalogLoaded, loadCatalog, profile?.role]);
 
   const active = TABS.find(item => item.id === tab)!;
-  const isCatalogTab = tab === 'rewards' || tab === 'gachas';
+  const isCatalogTab = profile?.role === 'master' && (tab === 'rewards' || tab === 'gachas');
 
   return (
     <div className="font-sans text-slate-800">
       <AdminPageHeader description={active.description} />
 
       <AdminTabs
-        tabs={TABS.map(({ id, label, icon }) => ({ id, label, icon }))}
+        // 景品・ガチャ（全校舎共通）の設定はマスターだけ。
+        tabs={TABS.filter(item => profile?.role === 'master' || (item.id !== 'rewards' && item.id !== 'gachas')).map(({ id, label, icon }) => ({ id, label, icon }))}
         value={tab}
         onChange={setTab}
         urlParam="tab"

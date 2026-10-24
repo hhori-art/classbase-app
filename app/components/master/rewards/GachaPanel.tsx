@@ -5,6 +5,7 @@ import { Archive, Check, Coins, Image as ImageIcon, Pencil, Plus, RotateCcw, Spa
 import { Button, EmptyState, IconButton, useConfirm, useToast } from '@/app/components/ui';
 import { formatPercent, GACHA_RATE_SCALE, percentToRate, rateToPercent } from '@/lib/rewards';
 import { adminApi, inputClass, labelClass, type AdminGacha, type AdminReward } from './api';
+import { userErrorMessage } from '@/lib/user-error';
 
 type Props = { gachas: AdminGacha[]; rewards: AdminReward[]; onChanged: () => Promise<void> };
 type ItemRow = { reward_id: string; percent: string };
@@ -63,7 +64,7 @@ export default function GachaPanel({ gachas, rewards, onChanged }: Props) {
       await onChanged();
     } catch (error) {
       console.error(error);
-      toast.error(error instanceof Error ? error.message : '保存できませんでした');
+      toast.error(userErrorMessage(error, '保存できませんでした'));
     } finally {
       setSubmitting(false);
     }
@@ -79,7 +80,7 @@ export default function GachaPanel({ gachas, rewards, onChanged }: Props) {
       await onChanged();
     } catch (error) {
       console.error(error);
-      toast.error(error instanceof Error ? error.message : '更新できませんでした');
+      toast.error(userErrorMessage(error, '更新できませんでした'));
     }
   };
 

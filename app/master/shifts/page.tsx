@@ -17,6 +17,7 @@ import { isConfigurableAdminRole } from '@/lib/admin-app-permissions';
 import AdminPageHeader from '@/app/components/master/AdminPageHeader';
 import { Button, ButtonLink, buttonClass, EmptyState, ErrorState, IconButton, ListSkeleton, Modal, Spinner, useConfirm, useToast } from '@/app/components/ui';
 import { formatDate } from '@/lib/format';
+import { userErrorMessage } from '@/lib/user-error';
 
 // --- 型定義 ---
 type ShiftAssignment = {
@@ -246,7 +247,7 @@ export default function ShiftManagementPage() {
       toast.success(`再照合しました。更新 ${data.updated}件／未解決 ${data.unresolved}件`);
       await fetchData();
     } catch (e: any) {
-      toast.error(`紐付けを再照合できませんでした。${e.message || e}`);
+      toast.error(`紐付けを再照合できませんでした。${userErrorMessage(e, '')}`);
     } finally {
       setRelinking(false);
     }
@@ -325,7 +326,7 @@ export default function ShiftManagementPage() {
       fetchData();
     } catch (e: any) {
       console.error(e);
-      toast.error(`配置できませんでした。${e?.message || ''}`);
+      toast.error(`配置できませんでした。${userErrorMessage(e, '')}`);
     }
   };
 
@@ -397,7 +398,7 @@ export default function ShiftManagementPage() {
       });
     } catch (e: any) {
       console.error(e);
-      toast.error(`配置を解除できませんでした。${e?.message || ''}`);
+      toast.error(`配置を解除できませんでした。${userErrorMessage(e, '')}`);
     }
   };
 
@@ -510,7 +511,7 @@ export default function ShiftManagementPage() {
       }
     } catch (e) {
       console.error(e);
-      toast.error(`Zoomミーティングを発行できませんでした。${e instanceof Error ? e.message : '通信エラー'}`);
+      toast.error(`Zoomミーティングを発行できませんでした。${userErrorMessage(e, '通信エラー')}`);
     } finally {
       setCreatingZoom(false);
     }
@@ -781,7 +782,7 @@ export default function ShiftManagementPage() {
             <section className="rounded-card border border-slate-200 bg-white p-5 shadow-sm">
               <div className="flex items-end justify-between gap-3"><div><h2 className="text-lg font-bold">{date}（{dayOfWeek}）の配置</h2><p className="mt-1 text-xs font-bold text-slate-400">講師・担当・教室を一覧で確認できます。</p></div><span className="rounded-full bg-accent-soft px-3 py-1 text-xs font-bold text-accent">{scopedAssignments.length}件</span></div>
               <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {scopedAssignments.map(item => <article key={item.id} className="rounded-card border border-slate-200 bg-slate-50 p-4"><div className="flex items-start justify-between gap-2"><p className="font-bold text-slate-900">{item.teacher_name || '講師未設定'}</p><span className="rounded-full bg-white px-2 py-1 text-xs font-bold text-accent">{item.note?.match(/[12]限/)?.[0] || item.role_type}</span></div><p className="mt-3 text-sm font-bold text-slate-700">{[item.target_grade, item.target_subject, item.target_detail_subject].filter(Boolean).join('・') || '全体サポート'}</p><p className="mt-2 flex items-center gap-1 text-xs font-bold text-slate-500"><MapPin size={13} />{item.target_place || item.teacher_workplace || '教室未設定'}</p>{item.unit ? <p className="mt-2 text-xs font-medium text-slate-500">単元：{item.unit}</p> : null}</article>)}
+                {scopedAssignments.map(item => <article key={item.id} className="rounded-card border border-slate-200 bg-slate-50 p-4"><div className="flex items-start justify-between gap-2"><p className="font-bold text-slate-900">{item.teacher_name || '講師未設定'}</p><span className="rounded-full bg-white px-2 py-1 text-xs font-bold text-accent">{item.note?.match(/[12]限/)?.[0] || ({ main: '主担当', sub: 'サポート', general: '全体サポート' } as Record<string, string>)[String(item.role_type || '')] || item.role_type}</span></div><p className="mt-3 text-sm font-bold text-slate-700">{[item.target_grade, item.target_subject, item.target_detail_subject].filter(Boolean).join('・') || '全体サポート'}</p><p className="mt-2 flex items-center gap-1 text-xs font-bold text-slate-500"><MapPin size={13} />{item.target_place || item.teacher_workplace || '教室未設定'}</p>{item.unit ? <p className="mt-2 text-xs font-medium text-slate-500">単元：{item.unit}</p> : null}</article>)}
                 {scopedAssignments.length === 0 ? <EmptyState className="col-span-full" title="この日の配置はありません" description="別の日付を選ぶと、その日の配置を確認できます。" /> : null}
               </div>
             </section>

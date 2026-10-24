@@ -8,6 +8,7 @@ import { formatDate, formatDateTime } from '@/lib/format';
 import type { LucideIcon } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
 import AdminPageHeader from '@/app/components/master/AdminPageHeader';
+import { userErrorMessage } from '@/lib/user-error';
 
 type Category = { categoryId: string; categoryName: string; answeredCount: number; correctCount: number; accuracy: number };
 type Progress = { subjectId: string; currentLevel: number; totalXp: number; totalAnswers: number; correctAnswers: number; totalStudySeconds: number; currentStreak: number; lastStudyDate: string | null; categories: Category[] };
@@ -17,7 +18,7 @@ type Student = { id: string; student_name?: string; name?: string; login_id?: st
 export default function StudentDetail() {
   const params = useParams<{ studentId: string }>();
   const { user } = useAuth(); const [student, setStudent] = useState<Student | null>(null); const [loading, setLoading] = useState(true); const [error, setError] = useState('');
-  const load = useCallback(async () => { if (!user) return; setLoading(true); setError(''); try { const token = await user.getIdToken(); const response = await fetch(`/api/online-school/admin?mode=student&studentId=${encodeURIComponent(params.studentId)}`, { headers: { Authorization: `Bearer ${token}` } }); const data = await response.json(); if (!response.ok) throw new Error(data.error); setStudent(data.student); } catch (err) { console.error(err); setError(err instanceof Error ? err.message : '読み込みに失敗しました。'); } finally { setLoading(false); } }, [params.studentId, user]);
+  const load = useCallback(async () => { if (!user) return; setLoading(true); setError(''); try { const token = await user.getIdToken(); const response = await fetch(`/api/online-school/admin?mode=student&studentId=${encodeURIComponent(params.studentId)}`, { headers: { Authorization: `Bearer ${token}` } }); const data = await response.json(); if (!response.ok) throw new Error(data.error); setStudent(data.student); } catch (err) { console.error(err); setError(userErrorMessage(err, '読み込みに失敗しました。')); } finally { setLoading(false); } }, [params.studentId, user]);
   useEffect(() => { void load(); }, [load]);
   if (loading && !student) return <div><AdminPageHeader title="生徒の詳細" backHref="/master/online-school" /><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{[0, 1, 2, 3].map(index => <Skeleton key={index} className="h-28 rounded-card" />)}</div><div className="mt-5"><ListSkeleton rows={4} /></div></div>;
   if (!student) return <div><AdminPageHeader title="生徒の詳細" backHref="/master/online-school" />{error ? <ErrorState message={error} onRetry={() => void load()} /> : <EmptyState title="生徒が見つかりません" description="一覧から生徒を選び直してください。" />}</div>;

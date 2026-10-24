@@ -1,7 +1,8 @@
 'use client';
 
 import { useState } from 'react';
-import { signInWithEmailAndPassword } from 'firebase/auth';
+import { signInWithEmailAndPassword, signOut } from 'firebase/auth';
+import { PASSWORD_CHANGED_RELOGIN_MESSAGE, passwordChangedButReloginFailed } from '@/lib/password-change-error';
 import { Eye, EyeOff, Loader2, LockKeyhole } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
 import { auth } from '@/lib/firebase';
@@ -40,6 +41,7 @@ export default function RequiredPasswordChangePage() {
       window.location.replace(targetPathForProfile({ ...profile, isFirstLogin: false }));
     } catch (error) {
       console.error('Required password change failed:', error);
+      if (passwordChangedButReloginFailed(error)) { setMessage(PASSWORD_CHANGED_RELOGIN_MESSAGE); await signOut(auth).catch(() => undefined); window.setTimeout(() => window.location.replace('/'), 2500); return; }
       setMessage('パスワードを変更できませんでした。通信環境を確認して、もう一度お試しください。');
       setSaving(false);
     }

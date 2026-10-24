@@ -157,6 +157,8 @@ const canReviewSegment = (
   profile: Record<string, any>,
 ) => {
   if (segment.type === 'break') return false;
+  // 自分の勤務実績は自分で承認しない（マスター以外。ほかの承認者が承認する）。
+  if (actor.role !== 'master' && String(record.teacher_id || '') === actor.uid) return false;
   if (actor.role === 'teacher' && segmentProgram(segment) === 'science_social') return false;
   return canManageAttendanceSchool(actor, effectiveSchool(segment, record, profile));
 };

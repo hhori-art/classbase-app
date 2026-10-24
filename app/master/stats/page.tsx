@@ -6,6 +6,7 @@ import { AlertTriangle, BookCheck, CalendarDays, Download, Mail, PlayCircle, Ref
 import { useAuth } from '@/app/context/AuthContext';
 import AdminPageHeader from '@/app/components/master/AdminPageHeader';
 import { Button, EmptyState, ErrorState, Skeleton, Spinner, useToast } from '@/app/components/ui';
+import { userErrorMessage } from '@/lib/user-error';
 
 type Period = 'week' | 'month';
 const pct = (value: number | null | undefined) => value == null ? '—' : `${value}%`;
@@ -40,7 +41,7 @@ export default function StatisticsPage() {
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error || '分析データを取得できませんでした。');
       setData(body);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : '分析データを取得できませんでした。'); }
+    } catch (cause) { setError(userErrorMessage(cause, '分析データを取得できませんでした。')); }
     finally { setLoading(false); }
   }, [anchor, grade, period, profile?.role, school, user]);
 
@@ -65,7 +66,7 @@ export default function StatisticsPage() {
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error || 'メールを送信できませんでした。');
       toast.success('レポート作成完了メールを送信しました。');
-    } catch (cause) { console.error(cause); toast.error(cause instanceof Error ? cause.message : 'メールを送信できませんでした。'); }
+    } catch (cause) { console.error(cause); toast.error(userErrorMessage(cause, 'メールを送信できませんでした。')); }
     finally { setSending(false); }
   };
 

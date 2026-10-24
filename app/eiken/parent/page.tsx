@@ -9,6 +9,7 @@ import { useAuth } from '@/app/context/AuthContext';
 import { useEikenApi } from '@/app/eiken/useEikenApi';
 import { formatDate, formatDateTime } from '@/lib/format';
 import { TERMS } from '@/lib/glossary';
+import { userErrorMessage } from '@/lib/user-error';
 
 /** 確認テストの技能タグ（教材側で自由に付けるコード）を保護者向けの言葉にする。知らないタグはそのまま出す。 */
 const SKILL_LABELS: Record<string, string> = {
@@ -50,7 +51,7 @@ export default function EikenParentPage() {
       setData(result);
       setSelectedStudentId(result.selected_student_id || '');
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : '進捗を取得できませんでした。');
+      setError(userErrorMessage(loadError, '進捗を取得できませんでした。'));
     } finally {
       setLoading(false);
     }

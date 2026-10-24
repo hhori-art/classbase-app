@@ -7,6 +7,7 @@ import { Button, Card, PageHeader, Spinner, useToast, EmptyState, ErrorState } f
 import { formatDate, formatDateTime } from '@/lib/format';
 import EikenCalendar from '@/app/components/eiken/EikenCalendar';
 import { useEikenApi } from '@/app/eiken/useEikenApi';
+import { userErrorMessage } from '@/lib/user-error';
 
 export default function EikenTeacherPage() {
   const api = useEikenApi();
@@ -21,7 +22,7 @@ export default function EikenTeacherPage() {
       const data = await api<any>('/api/eiken/dashboard');
       setDashboard(data.dashboard);
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : '担当講座を取得できませんでした。');
+      setError(userErrorMessage(loadError, '担当講座を取得できませんでした。'));
     } finally {
       setLoading(false);
     }
@@ -37,7 +38,7 @@ export default function EikenTeacherPage() {
       const result = await api<any>(`/api/eiken/lessons/${lessonId}/host`, { method: 'POST', body: '{}' });
       window.location.href = result.start_url;
     } catch (startError) {
-      toast.error(startError instanceof Error ? startError.message : 'LIVE授業を開始できませんでした。');
+      toast.error(userErrorMessage(startError, 'LIVE授業を開始できませんでした。'));
     } finally {
       setStartingId('');
     }

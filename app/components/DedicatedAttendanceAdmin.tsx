@@ -18,6 +18,7 @@ import {
 } from '@/lib/dedicated-overtime';
 import type { DedicatedDay, DedicatedStaff, PlanDoc, SeasonView } from '@/lib/dedicated-month';
 import { BASELINE_TYPE_LABELS, SUMMER_2026_TEMPLATE, seasonBaselineMinutes, seasonLessonDays, type BaselineType, type DedicatedSeason, type SeasonCourse } from '@/lib/dedicated-season';
+import { userErrorMessage } from '@/lib/user-error';
 
 /**
  * 専任の勤怠の承認と確認（マスター・勤怠管理者は管理画面、専任の校舎承認者は講師の画面で使う）。
@@ -111,7 +112,7 @@ export default function DedicatedAttendanceAdmin({ title = '専任の勤怠' }: 
     setLoading(true);
     setError('');
     try { setData(await call(`?month=${month}`)); }
-    catch (loadError) { setError(loadError instanceof Error ? loadError.message : '読み込めませんでした。'); }
+    catch (loadError) { setError(userErrorMessage(loadError, '読み込めませんでした。')); }
     finally { setLoading(false); }
   }, [call, month, user]);
   useEffect(() => { void load(); }, [load]);
@@ -124,7 +125,7 @@ export default function DedicatedAttendanceAdmin({ title = '専任の勤怠' }: 
       await load();
       return result;
     } catch (postError) {
-      toast.error(postError instanceof Error ? postError.message : '処理できませんでした。');
+      toast.error(userErrorMessage(postError, '処理できませんでした。'));
       return null;
     } finally { setBusy(false); }
   };
@@ -132,7 +133,7 @@ export default function DedicatedAttendanceAdmin({ title = '専任の勤怠' }: 
   const tabs: Array<{ id: Tab; label: string; badge?: number; system?: boolean }> = [
     { id: 'queue', label: '承認待ち', badge: data?.queue.filter(item => item.can_review).length },
     { id: 'month', label: '月の照合' },
-    { id: 'bulk', label: '一括申請（D05）' },
+    { id: 'bulk', label: '翌月の予定の一括申請' },
     { id: 'season', label: '講習期間', system: true },
     { id: 'staff', label: '職員の設定', system: true },
   ];
@@ -142,7 +143,7 @@ export default function DedicatedAttendanceAdmin({ title = '専任の勤怠' }: 
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-xl font-black text-fg">{title}</h1>
-          <p className="mt-1 text-xs font-bold text-fg-muted">時間外の予定（D05・D06）、実施報告（D07）、月の報告書（D08）、授業・講習の授業・交通費を承認します。</p>
+          <p className="mt-1 text-xs font-bold text-fg-muted">時間外の予定（一括申請・個別申請）、予定と違った時間外の実施報告、月の時間外報告書、授業・講習の授業・交通費を承認します。（紙の様式：D05〜D08）</p>
         </div>
         <div className="flex items-center gap-2">
           <input type="month" aria-label="表示する月" value={month} onChange={event => event.target.value && setMonth(event.target.value)} className="min-h-11 rounded-input border border-line bg-surface px-3 text-sm font-bold text-fg" />
@@ -170,6 +171,7 @@ export default function DedicatedAttendanceAdmin({ title = '専任の勤怠' }: 
 }
 
 function QueueTab({ data, busy, onReview }: { data: Data; busy: boolean; onReview: (items: Array<{ kind: Kind; id: string }>, status: 'approved' | 'rejected', note: string) => Promise<unknown> }) {
+  const confirm = useConfirm();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [kind, setKind] = useState<Kind | 'all'>('all');
   const [rejecting, setRejecting] = useState<QueueItem[] | null>(null);
@@ -180,7 +182,23 @@ function QueueTab({ data, busy, onReview }: { data: Data; busy: boolean; onRevie
   const chosen = data.queue.filter(item => selected.has(key(item)));
   const counts = data.queue.reduce<Record<string, number>>((acc, item) => ({ ...acc, [item.kind]: (acc[item.kind] || 0) + 1 }), {});
   const toggle = (item: QueueItem) => setSelected(current => { const next = new Set(current); if (next.has(key(item))) next.delete(key(item)); else next.add(key(item)); return next; });
-  const approve = async (items: QueueItem[]) => { await onReview(items.map(item => ({ kind: item.kind, id: item.id })), 'approved', ''); setSelected(new Set()); };
+  const approve = async (items: QueueItem[]) => {
+    // 月の報告書を確認すると、その月は固まる。同じ人の予定・報告がまだ承認待ちなら、先に知らせる。
+    const months = items.filter(item => item.kind === 'monthly');
+    const waiting = months.filter(month => data.queue.some(other => other.user_id === month.user_id && (other.kind === 'plan' || other.kind === 'report') && other.date.startsWith(month.date)));
+    if (items.length > 1 || waiting.length) {
+      const ok = await confirm({
+        title: `${items.length}件を承認しますか？`,
+        message: waiting.length
+          ? `${waiting.map(item => item.user_name).join('、')}さんは、この月の時間外の予定・報告がまだ承認待ちです。月の報告書を確認すると、その月は直せなくなります。`
+          : undefined,
+        confirmLabel: '承認する',
+      });
+      if (!ok) return;
+    }
+    await onReview(items.map(item => ({ kind: item.kind, id: item.id })), 'approved', '');
+    setSelected(new Set());
+  };
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-1.5">
@@ -231,7 +249,13 @@ function QueueTab({ data, busy, onReview }: { data: Data; busy: boolean; onRevie
         onClose={() => setRejecting(null)}
         title={`${rejecting?.length || 0}件を差し戻す`}
         description="理由は申請した人に届きます。"
-        footer={<><Button variant="secondary" onClick={() => setRejecting(null)}>やめる</Button><Button variant="danger" loading={busy} disabled={!note.trim()} onClick={async () => { await onReview(rejecting!.map(item => ({ kind: item.kind, id: item.id })), 'rejected', note); setRejecting(null); setSelected(new Set()); }}>差し戻す</Button></>}
+        footer={<><Button variant="secondary" onClick={() => setRejecting(null)}>やめる</Button><Button variant="danger" loading={busy} disabled={!note.trim()} onClick={async () => {
+          // 失敗したときは、書いた理由を残したまま開いておく。
+          const result = await onReview(rejecting!.map(item => ({ kind: item.kind, id: item.id })), 'rejected', note);
+          if (!result) return;
+          setRejecting(null);
+          setSelected(new Set());
+        }}>差し戻す</Button></>}
       >
         <label className={labelClass}>差し戻す理由<textarea value={note} onChange={event => setNote(event.target.value)} className={`${inputClass} mt-1 min-h-24`} placeholder="例：予定の時刻が勤務表と合っていません" /></label>
       </Modal>
@@ -428,7 +452,7 @@ function SeasonTab({ data, busy, call, onSave, onDelete }: {
   const openReport = async (season: DedicatedSeason) => {
     setLoadingReport(season.id);
     try { setReport(await call(`?season=${encodeURIComponent(season.id)}`)); }
-    catch (error) { toast.error(error instanceof Error ? error.message : '読み込めませんでした。'); }
+    catch (error) { toast.error(userErrorMessage(error, '読み込めませんでした。')); }
     finally { setLoadingReport(''); }
   };
   const exportReport = () => {

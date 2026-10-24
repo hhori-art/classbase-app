@@ -12,6 +12,7 @@ import type { IndividualRateMapping, IntegratedPayrollRow, IntegratedPayrollScop
 import { buildQ141PayrollWorkbook } from '@/lib/payroll-q141-xlsx';
 import type { ScienceSocialWorkSummary } from '@/lib/science-social-work-summary';
 import { jstDateKey } from '@/lib/date-key';
+import { userErrorMessage } from '@/lib/user-error';
 
 type CategoryKey = 'lesson' | 'office' | 'interview' | 'other';
 type PayrollRow = PayrollPersonSummary & IntegratedPayrollRow;
@@ -150,7 +151,12 @@ function downloadTemplate(type: 'rates' | 'regular') {
 
 export default function AttendancePayrollPage() {
   const { user } = useAuth();
+  // 勤怠一覧から開いたときは、見ていた月（?month=）を引き継ぐ。
   const [month, setMonth] = useState(() => jstDateKey().slice(0, 7));
+  useEffect(() => {
+    const requested = new URLSearchParams(window.location.search).get('month') || '';
+    if (/^\d{4}-\d{2}$/.test(requested)) setMonth(requested);
+  }, []);
   const [scope, setScope] = useState<IntegratedPayrollScope>('combined');
   const [program, setProgram] = useState<AttendanceProgramFilter>('all');
   const [data, setData] = useState<PayrollResponse | null>(null);
@@ -188,7 +194,7 @@ export default function AttendancePayrollPage() {
       setPremiumRules(Array.isArray(body.premium_rules) ? body.premium_rules : []);
       setIndividualRateMappings(Array.isArray(body.individual_rate_mappings) ? body.individual_rate_mappings : []);
     } catch (loadError) {
-      if (requestId === requestSequence.current) setError(loadError instanceof Error ? loadError.message : '給与集計を取得できませんでした。');
+      if (requestId === requestSequence.current) setError(userErrorMessage(loadError, '給与集計を取得できませんでした。'));
     } finally {
       if (requestId === requestSequence.current) setLoading(false);
     }
@@ -204,6 +210,13 @@ export default function AttendancePayrollPage() {
       setError(kind === 'regular' ? '旧システム勤怠はCSVまたは.xlsx形式を選択してください。' : kind === 'rates' ? '単価マスターはCSVまたは原本.xlsを選択してください。' : kind === 'allowances' ? 'Q042の.xlsファイルを選択してください。' : '校前配布申請はCSVを選択してください。');
       return;
     }
+    // 取込はその月のデータを置き換えるので、ファイル名・種類・対象の月を見せてから始める。
+    const kindLabel = kind === 'rates' ? '単価マスター' : kind === 'regular' ? '旧システムの勤怠' : kind === 'allowances' ? '手当（Q042）' : '校前配布申請';
+    if (!(await confirm({
+      title: `${kindLabel}を取り込みますか？`,
+      message: `ファイル：${file.name}\n対象の月：${month.replace('-', '年')}月\n${kind === 'rates' ? '単価マスターを置き換えます。' : 'この月の同じ種類のデータを置き換えます。'}`,
+      confirmLabel: '取り込む',
+    }))) return;
     setImporting(kind);
     setError('');
     setImportNotice('');
@@ -275,7 +288,7 @@ export default function AttendancePayrollPage() {
         await load();
       }
     } catch (importError) {
-      setError(importError instanceof Error ? importError.message : '取込に失敗しました。');
+      setError(userErrorMessage(importError, '取込に失敗しました。'));
     } finally {
       if (legacyChunkUploadId) {
         const token = await user.getIdToken().catch(() => '');
@@ -302,7 +315,7 @@ export default function AttendancePayrollPage() {
       const body = await response.json().catch(() => ({}));
       if (!response.ok || body.ok === false) throw new Error(body.error || '割増計算式を保存できませんでした。');
       await load();
-    } catch (saveError) { setError(saveError instanceof Error ? saveError.message : '割増計算式を保存できませんでした。'); }
+    } catch (saveError) { setError(userErrorMessage(saveError, '割増計算式を保存できませんでした。')); }
     finally { setPremiumRulesSaving(false); }
   };
 
@@ -319,7 +332,7 @@ export default function AttendancePayrollPage() {
       const body = await response.json().catch(() => ({}));
       if (!response.ok || body.ok === false) throw new Error(body.error || '個別指導の単価紐付けを保存できませんでした。');
       await load();
-    } catch (saveError) { setError(saveError instanceof Error ? saveError.message : '個別指導の単価紐付けを保存できませんでした。'); }
+    } catch (saveError) { setError(userErrorMessage(saveError, '個別指導の単価紐付けを保存できませんでした。')); }
     finally { setIndividualRateMappingsSaving(false); }
   };
 
@@ -337,7 +350,7 @@ export default function AttendancePayrollPage() {
       if (!response.ok || body.ok === false) throw new Error(body.error || '手当を保存できませんでした。');
       setAdjustment({ person_code: '', person_name: '', label: '', category: 'special_4', amount: '', reason: '' });
       await load();
-    } catch (saveError) { setError(saveError instanceof Error ? saveError.message : '手当を保存できませんでした。'); }
+    } catch (saveError) { setError(userErrorMessage(saveError, '手当を保存できませんでした。')); }
     finally { setAdjustmentSaving(false); }
   };
 

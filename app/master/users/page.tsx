@@ -15,6 +15,7 @@ import AdminPageHeader from '@/app/components/master/AdminPageHeader';
 import AdminTabs from '@/app/components/master/AdminTabs';
 import { Button, EmptyState, ErrorState, ListSkeleton, Modal, buttonClass, useConfirm, useToast } from '@/app/components/ui';
 import { formatDate, formatDateTime } from '@/lib/format';
+import { userErrorMessage } from '@/lib/user-error';
 
 // ユーザー型定義
 interface UserData {
@@ -316,7 +317,7 @@ export default function UserManagementPage() {
       setPrintAccounts(preparedPrintAccounts);
       setIsPrintModalOpen(true);
     } catch (e: any) {
-      toast.error(`印刷前のパスワード確認に失敗しました。 ${e.message || e}`);
+      toast.error(`印刷前のパスワード確認に失敗しました。 ${userErrorMessage(e, '')}`);
     } finally {
       setIsPasswordSyncing(false);
       setSyncProgress(null);

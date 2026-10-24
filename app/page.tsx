@@ -57,8 +57,11 @@ export default function LoginPage() {
       .normalize('NFKC')
       .replace(/\s+/g, '')
       .trim();
-  const isValidLoginId = (s: string) => /^[0-9A-Za-z_-]+$/.test(s);
+  // 職員番号・生徒番号（半角英数字）か、メールアドレスで登録した職員のメールアドレス。
+  const isEmailLogin = (s: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+  const isValidLoginId = (s: string) => /^[0-9A-Za-z_-]+$/.test(s) || isEmailLogin(s);
   const buildLoginEmails = (id: string) => {
+    if (isEmailLogin(id)) return [id.toLowerCase()];
     return EMAIL_DOMAINS.map(domain => `${id.toLowerCase()}@${domain}`);
   };
 
@@ -109,7 +112,7 @@ export default function LoginPage() {
       return;
     }
     if (!isValidLoginId(id)) {
-      setErrorMsg('ログインIDは半角英数字で入力してください');
+      setErrorMsg('ログインIDは半角英数字（またはメールアドレス）で入力してください');
       setLoading(false);
       return;
     }
@@ -139,7 +142,8 @@ export default function LoginPage() {
         const code = signInError?.code;
 
         // 初回ユーザー・Auth側だけ古いユーザーは invalid-credential / wrong-password になることがある
-        if (code === 'auth/user-not-found' || code === 'auth/invalid-credential' || code === 'auth/wrong-password') {
+        // メールアドレスでのログインは初回登録（生徒番号・職員番号から作る）の対象外。パスワード違いとして扱う。
+        if (!isEmailLogin(id) && (code === 'auth/user-not-found' || code === 'auth/invalid-credential' || code === 'auth/wrong-password')) {
           // 2) 初回登録APIを試す（ここで initial_password が一致しないなら弾かれる）
           const restored = await firstLoginViaApi(id, resolvedPassword);
 

@@ -15,6 +15,7 @@ import {
   type LanguageFinding,
   type LanguageSeverity,
 } from '@/lib/lesson-language';
+import { userErrorMessage } from '@/lib/user-error';
 
 type Check = {
   id: string;
@@ -90,7 +91,7 @@ export default function LessonLanguagePage() {
       const requested = new URLSearchParams(window.location.search).get('shift');
       if (requested) setOpenId(requested);
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : '読み込めませんでした。');
+      setError(userErrorMessage(loadError, '読み込めませんでした。'));
     } finally {
       setLoading(false);
     }
@@ -112,7 +113,7 @@ export default function LessonLanguagePage() {
       await authed('/api/admin/lesson-language', { method: 'POST', body: JSON.stringify({ action: 'review', shift_id: check.id, status }) });
       setChecks(current => current.map(item => item.id === check.id ? { ...item, review_status: status } : item));
     } catch (reviewError) {
-      toast.error(reviewError instanceof Error ? reviewError.message : '保存できませんでした。');
+      toast.error(userErrorMessage(reviewError, '保存できませんでした。'));
     } finally { setBusy(''); }
   };
 
@@ -123,7 +124,7 @@ export default function LessonLanguagePage() {
       toast.success(`今の言葉の設定で確認し直しました（${result.findings}件）。`);
       await load();
     } catch (recheckError) {
-      toast.error(recheckError instanceof Error ? recheckError.message : '確認し直せませんでした。');
+      toast.error(userErrorMessage(recheckError, '確認し直せませんでした。'));
     } finally { setBusy(''); }
   };
 
@@ -142,7 +143,7 @@ export default function LessonLanguagePage() {
       setCustom(body.custom || []);
       toast.success('言葉の設定を保存しました。これからチェックする授業に使います（済んだ授業は「確認し直す」で反映できます）。');
     } catch (saveError) {
-      toast.error(saveError instanceof Error ? saveError.message : '保存できませんでした。');
+      toast.error(userErrorMessage(saveError, '保存できませんでした。'));
     } finally { setBusy(''); }
   };
 

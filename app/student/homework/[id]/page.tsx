@@ -10,6 +10,8 @@ import { PageHeader, Button, IconButton, StatusPill, EmptyState, ErrorState, Lis
 import Image from 'next/image';
 import { loadStudentHomework } from '@/lib/client-student-homework';
 import { formatDateKeySlash, isHomeworkOverdue, parseHomeworkDeadline } from '@/lib/homework-deadline';
+import { userErrorMessage } from '@/lib/user-error';
+import { compressImageForUpload } from '@/lib/client-image-compress';
 
 export default function HomeworkDetailPage({ params }: { params: Promise<{ id: string }> }) {
   // Next.js 13+ (App Router) の params アンラップ
@@ -94,7 +96,9 @@ export default function HomeworkDetailPage({ params }: { params: Promise<{ id: s
 
   const handleSubmit = async () => {
     if (!selectedFile) { toast.error('提出する画像を選択してください'); return; }
-    const ok = await confirm({ title: 'この画像で提出しますか？', message: '提出すると50コイン獲得できます！', confirmLabel: '提出する' });
+    const resubmitting = submission?.status === 'resubmit';
+    // 再提出ではコインは付かない（コインは最初の提出の1回だけ）。
+    const ok = await confirm({ title: resubmitting ? 'この画像で再提出しますか？' : 'この画像で提出しますか？', message: resubmitting ? undefined : '提出すると50コイン獲得できます！', confirmLabel: resubmitting ? '再提出する' : '提出する' });
     if (!ok) return;
 
     setSubmitting(true);
@@ -106,12 +110,14 @@ export default function HomeworkDetailPage({ params }: { params: Promise<{ id: s
       const form = new FormData();
       form.set('assignment_id', assignmentId);
       form.set('comment', comment);
-      form.set('image', selectedFile);
+      // スマホの写真は大きいので、送る前に縮める（サーバーの上限を超えると提出できない）。
+      form.set('image', await compressImageForUpload(selectedFile));
       const submitRes = await fetch('/api/student/homework/submission', {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
         body: form,
       });
+      if (submitRes.status === 413) throw new Error('画像が大きすぎます。別の写真にするか、少し離れて撮り直してください。');
       const submitData = await submitRes.json().catch(() => ({}));
       if (!submitRes.ok || submitData.ok === false) throw new Error(submitData.error || '提出に失敗しました');
 
@@ -121,7 +127,7 @@ export default function HomeworkDetailPage({ params }: { params: Promise<{ id: s
       await fetchData(); // 画面更新
 
     } catch (e: any) {
-      toast.error(`提出できませんでした。${e.message || ''}`);
+      toast.error(`提出できませんでした。${userErrorMessage(e, '')}`);
     } finally {
       setSubmitting(false);
     }

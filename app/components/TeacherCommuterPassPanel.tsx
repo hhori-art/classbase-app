@@ -9,6 +9,7 @@ import TransportLineSelect from '@/app/components/TransportLineSelect';
 import TransportStationSearchInput from '@/app/components/TransportStationSearchInput';
 import { Button, IconButton, ErrorState, Spinner, useToast } from '@/app/components/ui';
 import { formatDate } from '@/lib/format';
+import { userErrorMessage } from '@/lib/user-error';
 
 type Pass = {
   id: string;
@@ -108,7 +109,7 @@ export default function TeacherCommuterPassPanel() {
       toast.success('定期券を登録しました。');
       await load();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '定期券の登録に失敗しました。');
+      toast.error(userErrorMessage(error, '定期券の登録に失敗しました。'));
     } finally {
       setSaving(false);
     }

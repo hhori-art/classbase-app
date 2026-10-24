@@ -23,6 +23,7 @@ import AdminPageHeader from '@/app/components/master/AdminPageHeader';
 import { Button, ButtonLink, EmptyState, ErrorState, IconButton, ListSkeleton, useConfirm, useToast } from '@/app/components/ui';
 import { formatDate } from '@/lib/format';
 import { cn } from '@/lib/cn';
+import { userErrorMessage } from '@/lib/user-error';
 
 const SUBJECT_CATEGORIES = {
   science: { label: '理科', items: ['物理', '化学', '生物', '地学'], color: 'bg-sky-100 text-sky-700' },
@@ -449,7 +450,7 @@ export default function SlideManagerPage() {
       await fetchData();
     } catch (e: any) {
       console.error(e);
-      toast.error(`登録できませんでした：${e.message || e}`);
+      toast.error(`登録できませんでした：${userErrorMessage(e, '')}`);
     } finally {
       setSubmitting(false);
     }
@@ -536,14 +537,14 @@ export default function SlideManagerPage() {
       const failed = results.filter(r => !r.ok);
       if (success > 0) toast.success(`${success}件のPPTXを教材として登録しました。`);
       if (failed.length) {
-        toast.error(`${failed.length}件の登録に失敗しました：${failed.slice(0, 3).map(r => `${r.file}（${r.message}）`).join('／')}${failed.length > 3 ? ' ほか' : ''}`);
+        toast.error(`${failed.length}件の登録に失敗しました：${failed.slice(0, 3).map(r => `${r.file}（${userErrorMessage(r, '')}）`).join('／')}${failed.length > 3 ? ' ほか' : ''}`);
       }
       setPendingPptx(failed.length ? pendingPptx.filter(item => failed.some(f => f.file === item.file.name)) : []);
       setContent('');
       await fetchData();
     } catch (e: any) {
       console.error(e);
-      toast.error(`アップロードできませんでした：${e.message || e}`);
+      toast.error(`アップロードできませんでした：${userErrorMessage(e, '')}`);
     } finally {
       setUploading(false);
     }
@@ -580,7 +581,7 @@ export default function SlideManagerPage() {
       toast.success(`${data.saved_count}問をAIクエスト問題として追加保存しました。`);
     } catch (e: any) {
       console.error(e);
-      toast.error(`問題を作成できませんでした：${e.message || e}`);
+      toast.error(`問題を作成できませんでした：${userErrorMessage(e, '')}`);
     } finally {
       setGeneratingId(null);
     }
@@ -616,7 +617,7 @@ export default function SlideManagerPage() {
       toast.success(`スライドを削除しました（削除した問題：${data.deleted_quizzes || 0}問）。`);
     } catch (e: any) {
       console.error(e);
-      toast.error(`削除できませんでした：${e.message || e}`);
+      toast.error(`削除できませんでした：${userErrorMessage(e, '')}`);
     } finally {
       setDeletingId(null);
     }
@@ -638,7 +639,7 @@ export default function SlideManagerPage() {
       window.open(data.url, '_blank', 'noopener,noreferrer');
     } catch (e: any) {
       console.error(e);
-      toast.error(`ダウンロードできませんでした：${e.message || e}`);
+      toast.error(`ダウンロードできませんでした：${userErrorMessage(e, '')}`);
     }
   };
 
@@ -662,7 +663,7 @@ export default function SlideManagerPage() {
       setUnits(prev => prev.filter(u => u.id !== id));
     } catch (e: any) {
       console.error(e);
-      toast.error(`削除できませんでした：${e.message || e}`);
+      toast.error(`削除できませんでした：${userErrorMessage(e, '')}`);
     }
   };
 

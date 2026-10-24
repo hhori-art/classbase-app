@@ -23,6 +23,7 @@ import {
   type AttendanceShiftView,
 } from '@/lib/attendance-shift-plan';
 import { minutesToShiftTime, movedShiftTimes, shiftTimeMinutes } from '@/lib/attendance-shift-timeline';
+import { userErrorMessage } from '@/lib/user-error';
 
 type Staff = {
   id: string;
@@ -196,7 +197,7 @@ export default function AttendanceShiftCalendar() {
       setRooms({ group: body.rooms?.group || [], individual: body.rooms?.individual || [], office: body.rooms?.office || [] });
     } catch (error) {
       setLoadError(true);
-      setMessage(error instanceof Error ? error.message : 'シフトを読み込めませんでした。');
+      setMessage(userErrorMessage(error, 'シフトを読み込めませんでした。'));
     } finally {
       setLoading(false);
     }
@@ -264,7 +265,7 @@ export default function AttendanceShiftCalendar() {
       setSelectedDate(form.date);
       await load();
       setMessage(`${form.teacherIds.length}件のシフトを保存しました。`);
-    } catch (error) { setMessage(error instanceof Error ? error.message : '保存できませんでした。'); }
+    } catch (error) { setMessage(userErrorMessage(error, '保存できませんでした。')); }
     finally { setSaving(false); }
   };
 
@@ -277,7 +278,7 @@ export default function AttendanceShiftCalendar() {
       setRooms(previous => ({ ...previous, [category]: Array.from(new Set([...(previous[category] || []), room])) }));
       setSelectedRoom(room); setNewRoomName(''); setAddingRoom(false);
       setMessage(`${room}を追加しました。この教室にコマを配置できます。`);
-    } catch (error) { setMessage(error instanceof Error ? error.message : '教室を追加できませんでした。'); }
+    } catch (error) { setMessage(userErrorMessage(error, '教室を追加できませんでした。')); }
     finally { setSaving(false); }
   };
 
@@ -299,7 +300,7 @@ export default function AttendanceShiftCalendar() {
       setMessage(`${shift.teacher_name}さんのコマを${date} ${times.start}へ移動しました。`);
     } catch (error) {
       setShifts(original);
-      setMessage(error instanceof Error ? error.message : 'コマを移動できませんでした。');
+      setMessage(userErrorMessage(error, 'コマを移動できませんでした。'));
     } finally { setSaving(false); }
   };
 
@@ -315,7 +316,7 @@ export default function AttendanceShiftCalendar() {
     if (!ok) return;
     setSaving(true);
     try { await api({ action: 'delete', id: shift.id, school_id: school.id }); await load(); setMessage('シフトを削除しました。'); }
-    catch (error) { setMessage(error instanceof Error ? error.message : '削除できませんでした。'); }
+    catch (error) { setMessage(userErrorMessage(error, '削除できませんでした。')); }
     finally { setSaving(false); }
   };
 
@@ -331,7 +332,7 @@ export default function AttendanceShiftCalendar() {
     try {
       const body = await api({ action: 'copy', mode: copyState.mode, id: copyState.shiftId, source_date: copyState.sourceDate, target_date: copyTarget, school_id: school.id });
       setCopyState(null); setFocusDate(copyTarget); setSelectedDate(copyTarget); await load(); setMessage(`${body.copied}件をコピーしました。`);
-    } catch (error) { setMessage(error instanceof Error ? error.message : 'コピーできませんでした。'); }
+    } catch (error) { setMessage(userErrorMessage(error, 'コピーできませんでした。')); }
     finally { setSaving(false); }
   };
 
@@ -358,7 +359,7 @@ export default function AttendanceShiftCalendar() {
     });
     setSaving(true);
     try { const body = await api({ action: 'import', school_id: school.id, rows }); await load(); setMessage(`${body.count}件を取り込みました。`); }
-    catch (error) { setMessage(error instanceof Error ? error.message : 'CSVを取り込めませんでした。'); }
+    catch (error) { setMessage(userErrorMessage(error, 'CSVを取り込めませんでした。')); }
     finally { setSaving(false); if (fileRef.current) fileRef.current.value = ''; }
   };
 
@@ -385,7 +386,7 @@ export default function AttendanceShiftCalendar() {
       const start = startOfWeek(focusDate);
       await downloadWeeklyShiftWorkbook({ schoolName: school.name, start, end: addDateDays(start, 6), category, shifts: output });
       setMessage('現在の1週間をExcelファイルに変換しました。Googleスプレッドシートにも取り込めます。');
-    } catch (error) { setMessage(error instanceof Error ? error.message : '週次表を出力できませんでした。'); }
+    } catch (error) { setMessage(userErrorMessage(error, '週次表を出力できませんでした。')); }
     finally { setSaving(false); }
   };
 
@@ -396,7 +397,7 @@ export default function AttendanceShiftCalendar() {
       setPrintShifts(output);
       setPrintDays(Array.from({ length: 7 }, (_, index) => addDateDays(startOfWeek(focusDate), index)));
       setTimeout(() => window.print(), 100);
-    } catch (error) { setMessage(error instanceof Error ? error.message : '印刷データを準備できませんでした。'); }
+    } catch (error) { setMessage(userErrorMessage(error, '印刷データを準備できませんでした。')); }
     finally { setSaving(false); }
   };
 

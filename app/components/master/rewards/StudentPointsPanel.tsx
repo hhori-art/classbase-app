@@ -7,6 +7,7 @@ import { formatDateTime } from '@/lib/format';
 import { attendanceSchoolName } from '@/lib/attendance-schools';
 import { BADGE_RARITY_LABELS, BADGE_RARITY_STYLES, MANUAL_BADGES } from '@/lib/gamification';
 import { adminApi, inputClass, labelClass, newOperationId } from './api';
+import { userErrorMessage } from '@/lib/user-error';
 
 type Student = { id: string; name: string; grade: string; school: string; login_id: string; coins: number; total_coins: number; badge_count: number; inactive: boolean; shop_override: boolean };
 type HistoryItem = { id: string; amount: number; reason: string; source: string; created_at: string | null };
@@ -38,7 +39,7 @@ export default function StudentPointsPanel({ isMaster = false }: { isMaster?: bo
       setStudents(data.students || []);
     } catch (error) {
       console.error(error);
-      setLoadError(error instanceof Error ? error.message : '生徒を取得できませんでした');
+      setLoadError(userErrorMessage(error, '生徒を取得できませんでした'));
     } finally {
       setLoading(false);
     }
@@ -93,7 +94,7 @@ export default function StudentPointsPanel({ isMaster = false }: { isMaster?: bo
       await openStudent(updated);
     } catch (error) {
       console.error(error);
-      toast.error(error instanceof Error ? error.message : '更新できませんでした');
+      toast.error(userErrorMessage(error, '更新できませんでした'));
     } finally {
       setBusy(false);
     }
@@ -114,7 +115,7 @@ export default function StudentPointsPanel({ isMaster = false }: { isMaster?: bo
       toast.success(enabled ? '景品交換・ガチャを個別に表示しました（生徒は再ログイン後に反映）' : '個別表示をやめました');
     } catch (error) {
       console.error(error);
-      toast.error(error instanceof Error ? error.message : '更新できませんでした');
+      toast.error(userErrorMessage(error, '更新できませんでした'));
     } finally {
       setBusy(false);
     }
@@ -130,7 +131,7 @@ export default function StudentPointsPanel({ isMaster = false }: { isMaster?: bo
       toast.success(granting ? 'バッジを授与しました' : 'バッジを取り消しました');
     } catch (error) {
       console.error(error);
-      toast.error(error instanceof Error ? error.message : '更新できませんでした');
+      toast.error(userErrorMessage(error, '更新できませんでした'));
     } finally {
       setBusy(false);
     }

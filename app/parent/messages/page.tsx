@@ -46,7 +46,7 @@ function MessageBubble({ message, kind }: { message: ChatMessage; kind: 'questio
         <div className={`mt-1 rounded-card rounded-tl-sm px-4 py-3 text-sm leading-relaxed text-fg ${isQuestion ? 'bg-warning-soft' : 'bg-canvas'}`}>
           <p className={`whitespace-pre-wrap break-words ${long && !open ? 'line-clamp-6' : ''}`}>{message.content || '（内容なし）'}</p>
           {long && (
-            <button type="button" onClick={() => setOpen(value => !value)} aria-expanded={open} className="mt-1 inline-flex min-h-9 items-center gap-1 rounded-btn text-sm font-bold text-accent">
+            <button type="button" onClick={() => setOpen(value => !value)} aria-expanded={open} className="mt-1 inline-flex min-h-11 items-center gap-1 rounded-btn text-sm font-bold text-accent">
               {open ? '閉じる' : '全文を見る'}<ChevronDown size={14} aria-hidden className={open ? 'rotate-180' : ''} />
             </button>
           )}

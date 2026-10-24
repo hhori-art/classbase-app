@@ -107,7 +107,7 @@ async function notifyCourseRegistrationChange(db: FirebaseFirestore.Firestore, n
       title,
       message: summary,
       kind: 'course_registration_changed',
-      link: recipient.role === 'student' ? '/student/timetable' : '/parent/courses',
+      link: recipient.role === 'student' ? '/student/timetable' : `/parent/courses?student_id=${encodeURIComponent(studentId)}`,
       student_id: studentId,
       student_name: studentName,
       changed_by: user.uid,
@@ -129,7 +129,7 @@ async function notifyCourseRegistrationChange(db: FirebaseFirestore.Firestore, n
   const createdStudents = created.filter(item => item.role === 'student').map(item => item.id);
   const createdParents = created.filter(item => item.role === 'parent').map(item => item.id);
   queuePushToUsers(createdStudents, { title: `保護者の方が${courseWord}を変更しました`, body: 'アプリで確認してください。', link: '/student/timetable' }, { kind: 'registration' });
-  queuePushToUsers(createdParents, { title: `${courseWord}が変更されました`, body: 'アプリで確認してください。', link: '/parent/courses' }, { kind: 'registration' });
+  queuePushToUsers(createdParents, { title: `${courseWord}が変更されました`, body: 'アプリで確認してください。', link: `/parent/courses?student_id=${encodeURIComponent(studentId)}` }, { kind: 'registration' });
 }
 
 const notifySafely = (db: FirebaseFirestore.Firestore, notice: ChangeNotice) => notifyCourseRegistrationChange(db, notice)

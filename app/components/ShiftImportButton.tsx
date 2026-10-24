@@ -6,6 +6,7 @@ import { weekdayFromDateKey } from '@/lib/date-key';
 import { collection, getDocs, query, where, writeBatch, doc } from 'firebase/firestore';
 import { FileUp, Loader2, Settings, Calendar, Copy, AlertTriangle, Trash2 } from 'lucide-react';
 import { Button, buttonClass, useConfirm, useToast } from '@/app/components/ui';
+import { userErrorMessage } from '@/lib/user-error';
 
 interface ShiftImportButtonProps {
   onSuccess?: () => void;
@@ -106,7 +107,7 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
 
     } catch (e: any) {
       console.error(e);
-      toast.error(`削除できませんでした。${e?.message || ''}`);
+      toast.error(`削除できませんでした。${userErrorMessage(e, '')}`);
     } finally {
       setDeleting(false);
       setProgress('');
@@ -146,7 +147,7 @@ export default function ShiftImportButton({ onSuccess }: ShiftImportButtonProps)
         if (onSuccess) onSuccess();
       } catch (err: any) {
         console.error(err);
-        toast.error(`取り込めませんでした。${err?.message || ''}`);
+        toast.error(`取り込めませんでした。${userErrorMessage(err, '')}`);
       } finally {
         setUploading(false);
         setProgress('');

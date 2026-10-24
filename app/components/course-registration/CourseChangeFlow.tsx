@@ -539,6 +539,17 @@ export default function CourseChangeFlow({ student, viewer, header, studentName,
 
       if (isParent) {
         clearCourseRegistrationOptionsCache();
+        // メモは教室への連絡（保護者からの連絡の一覧）として届ける。送れなくても登録は済んでいる。
+        const memo = form.reason.trim();
+        if (memo) {
+          const memoToken = await user.getIdToken();
+          await fetch('/api/parent/faq', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${memoToken}` },
+            body: JSON.stringify({ action: 'send', question: memo.slice(0, 2000), subject: '受講講座の変更についてのメモ', category: 'course', student_id: targetStudentId }),
+          }).then(response => { if (!response.ok) throw new Error(String(response.status)); })
+            .catch(() => toast.error('受講講座は登録しましたが、メモを教室へ送れませんでした。「教室への連絡」から送ってください。'));
+        }
       } else window.dispatchEvent(new CustomEvent('classbase:user-profile-updated', {
         detail: activeRegistrationType === 'test_prep' ? {
           selected_test_prep_course_ids: freshSelectedCourseIds,
@@ -866,19 +877,19 @@ export default function CourseChangeFlow({ student, viewer, header, studentName,
             </div>
           </Card>
 
-          <Card>
+          {isParent && <Card>
             <label htmlFor="change-request-memo" className="mb-3 flex items-center gap-2 text-sm font-bold text-fg">
               <span className="rounded-input bg-accent-soft p-1.5 text-accent"><MessageSquare size={16} strokeWidth={3} aria-hidden /></span>
-              メモ（任意）
+              教室へのメモ（任意）
             </label>
             <textarea
               id="change-request-memo"
               value={form.reason}
               onChange={e => setForm({...form, reason: e.target.value})}
-              placeholder="必要な場合だけ入力してください。"
+              placeholder="教室に伝えたいことがあれば入力してください（登録と一緒に「教室への連絡」として届きます）。"
               className="h-24 w-full resize-none rounded-input border-2 border-line bg-canvas p-4 text-sm font-medium text-fg outline-none transition-colors placeholder:text-fg-muted focus:border-accent focus:bg-surface focus:ring-4 focus:ring-accent/15"
             />
-          </Card>
+          </Card>}
 
           {submitError && (
             <div role="alert" className="rounded-card border border-danger/20 bg-danger-soft p-4 text-sm font-bold leading-relaxed text-danger">

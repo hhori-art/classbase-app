@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { useEikenApi } from '@/app/eiken/useEikenApi';
 import AdminPageHeader from '@/app/components/master/AdminPageHeader';
+import { userErrorMessage } from '@/lib/user-error';
 
 type EikenStudentDetailProps = {
   studentId: string;
@@ -71,7 +72,7 @@ export default function EikenStudentDetail({
       const data = await api<any>(`/api/eiken/students/${encodeURIComponent(studentId)}${query}`);
       setDetail(data.detail);
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : '受講生情報を取得できませんでした。');
+      setError(userErrorMessage(loadError, '受講生情報を取得できませんでした。'));
     } finally {
       setLoading(false);
     }
@@ -110,7 +111,7 @@ export default function EikenStudentDetail({
       setMessage('フォロー記録を保存しました。');
       await load();
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : 'フォロー記録を保存できませんでした。');
+      setError(userErrorMessage(saveError, 'フォロー記録を保存できませんでした。'));
     } finally {
       setSaving(false);
     }

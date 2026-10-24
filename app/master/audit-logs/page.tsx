@@ -7,6 +7,7 @@ import AdminPageHeader from '@/app/components/master/AdminPageHeader';
 import { AUDIT_ACTION_LABELS, auditActionLabel } from '@/app/components/master/audit-log-actions';
 import { Button, Card, EmptyState, ErrorState, ListSkeleton, StatusPill } from '@/app/components/ui';
 import { formatDateTime, jstDateKey } from '@/lib/format';
+import { userErrorMessage } from '@/lib/user-error';
 
 type AuditLog = {
   id: string;
@@ -91,7 +92,7 @@ export default function AuditLogsPage() {
     } catch (loadError) {
       setLogs([]);
       setCursor(null);
-      setError(loadError instanceof Error ? loadError.message : '操作ログを読み込めませんでした。');
+      setError(userErrorMessage(loadError, '操作ログを読み込めませんでした。'));
     } finally {
       setLoading(false);
     }
@@ -107,7 +108,7 @@ export default function AuditLogsPage() {
       setLogs(current => [...current, ...page.logs.filter(log => !current.some(existing => existing.id === log.id))]);
       setCursor(page.next);
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : '続きを読み込めませんでした。');
+      setError(userErrorMessage(loadError, '続きを読み込めませんでした。'));
     } finally {
       setLoadingMore(false);
     }

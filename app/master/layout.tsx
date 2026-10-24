@@ -121,10 +121,7 @@ export default function MasterLayout({ children }: { children: React.ReactNode }
     });
   }, [user]);
 
-  useEffect(() => {
-    if (loading || !effectiveProfile || currentPathAllowed) return;
-    window.location.replace('/master');
-  }, [currentPathAllowed, effectiveProfile, loading]);
+  // 権限のない画面は自動で移動させず、理由とホームへのボタンを出す（通知やブックマークから開いたとき）。
 
   const handleLogout = async () => {
     if (!(await confirm({ title: '管理画面からログアウトしますか？', confirmLabel: 'ログアウト' }))) return;
@@ -136,8 +133,19 @@ export default function MasterLayout({ children }: { children: React.ReactNode }
     }
   };
 
-  if (loading || !effectiveProfile || !currentPathAllowed) {
+  if (loading || !effectiveProfile) {
     return <div data-portal="admin" className="min-h-dvh bg-canvas" aria-busy="true" />;
+  }
+  if (!currentPathAllowed) {
+    return (
+      <div data-portal="admin" className="grid min-h-dvh place-items-center bg-canvas px-4">
+        <div role="alert" className="w-full max-w-md rounded-card border border-line bg-surface p-6 text-center shadow-sm">
+          <p className="text-lg font-bold text-fg">この画面を開く権限がありません</p>
+          <p className="mt-2 text-sm text-fg-muted">必要な場合は、マスター管理者に「管理者の権限設定」で権限を付けてもらってください。</p>
+          <a href="/master" className="mt-5 inline-flex min-h-11 items-center justify-center rounded-btn bg-accent px-5 text-sm font-bold text-white">管理画面のホームへ</a>
+        </div>
+      </div>
+    );
   }
 
   // compact はデスクトップで折りたたんだ状態（アイコンのみ）。スマホの引き出しでは常に全表示。

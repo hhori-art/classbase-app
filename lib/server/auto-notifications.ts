@@ -358,9 +358,9 @@ export async function runTransferReminders(options: { today?: string; dryRun?: b
     const extra = { absence_request_id: item.id, student_id: studentId, target_date: date };
     notices.push({
       id: `transfer_reminder_${item.id}_${again ? 'again' : 'first'}`,
-      userId: studentId, role: 'student', kind: 'attendance', link: '/student/absence',
+      userId: studentId, role: 'student', kind: 'attendance', link: '/student/absence?mode=transfer',
       title: again ? '振替がまだ選ばれていません（再通知）' : '振替を選びましょう',
-      message: `${dateLabel(date)}に休んだ授業の振替が、まだ決まっていません。「欠席・遅刻連絡」から振替の授業を選びましょう。録画で学習することもできます。`,
+      message: `${dateLabel(date)}に休んだ授業の振替が、まだ決まっていません。ホームの「振替登録」から振替の授業を選びましょう。録画で学習することもできます。`,
       extra,
     });
     linkedParentIds(profile!, [clean(item.parent_id)].filter(Boolean)).forEach(parentId => {

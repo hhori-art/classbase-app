@@ -9,6 +9,7 @@ import { isDedicatedProfile } from '@/lib/employment-category';
 import { loadAppAvailability } from '@/lib/client-app-availability';
 import { ErrorState, Skeleton } from '@/app/components/ui';
 import { formatDate } from '@/lib/format';
+import { userErrorMessage } from '@/lib/user-error';
 
 type AppId = 'science_social' | 'eiken' | 'attendance' | 'online_school';
 type AppAvailability = Record<AppId, boolean>;
@@ -97,7 +98,7 @@ export default function AppsHomePage() {
     setError('');
     loadAppAvailability(user.uid, () => user.getIdToken())
       .then(data => { if (active && data.apps) setApps(data.apps as AppAvailability); })
-      .catch(fetchError => { if (active) setError(fetchError instanceof Error ? fetchError.message : 'アプリ情報の取得に失敗しました。'); });
+      .catch(fetchError => { if (active) setError(userErrorMessage(fetchError, 'アプリ情報の取得に失敗しました。')); });
     return () => { active = false; };
   }, [user, reload]);
 

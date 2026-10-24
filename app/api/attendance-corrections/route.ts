@@ -141,6 +141,10 @@ export async function POST(request: NextRequest) {
         if (!targetDate || !isIsoLikeDate(targetDate)) {
           return Response.json({ ok: false, error: 'target_date is required' }, { status: 400 });
         }
+        // 打刻忘れは過ぎた日（今日まで）の勤務だけ。未来の日の勤務は申請できない。
+        if (targetDate > jstDateKeyOf(new Date())) {
+          return Response.json({ ok: false, error: '未来の日の打刻忘れは申請できません。日付を確認してください。' }, { status: 400 });
+        }
         if (!requestedStartTime || !requestedEndTime) {
           return Response.json({ ok: false, error: 'missing clock request requires start and end time' }, { status: 400 });
         }
@@ -267,6 +271,8 @@ export async function POST(request: NextRequest) {
       const targetSchool = workRecordSchool(existingWorkRecord) || resolveAttendanceSchoolCode(latestCorrection.school_id) ||
         resolveAttendanceSchoolCode(targetTeacher.school_id || targetTeacher.school);
       if (!canManageAttendanceSchool(user, targetSchool)) throw new Error('forbidden');
+      // 自分の打刻修正は自分で承認しない（マスター以外。ほかの承認者が承認する）。
+      if (user.role !== 'master' && String(latestCorrection.teacher_id || '') === user.uid) throw new Error('forbidden');
 
       reviewed.info = {
         teacher_id: String(latestCorrection.teacher_id || ''),

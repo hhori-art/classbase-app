@@ -100,14 +100,16 @@ export default function StudentChat() {
     void loadHistory();
   }, [loadHistory]);
 
+  const [teacherMessagesError, setTeacherMessagesError] = useState(false);
   const loadTeacherMessages = useCallback(async () => {
     if (!user) return;
+    setTeacherMessagesError(false);
     try {
       const response = await fetch('/api/student/teacher-chat', { headers: { Authorization: `Bearer ${await user.getIdToken()}` }, cache: 'no-store' });
       const data = await response.json();
       if (!response.ok || !data.ok) throw new Error(data.error || 'teacher-chat-load-failed');
       setTeacherMessages(data.messages || []);
-    } catch (error) { console.error('先生チャット読み込みエラー', error); }
+    } catch (error) { console.error('先生チャット読み込みエラー', error); setTeacherMessagesError(true); }
   }, [user]);
   useEffect(() => { void loadTeacherMessages(); }, [loadTeacherMessages]);
 
@@ -235,7 +237,9 @@ export default function StudentChat() {
             <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-bold text-amber-700">{teacherMessages.length}件</span>
           </div>
 
-          {teacherMessages.length === 0 ? (
+          {teacherMessagesError ? (
+            <ErrorState title="先生からのメッセージを読み込めませんでした" onRetry={() => void loadTeacherMessages()} className="mb-3" />
+          ) : teacherMessages.length === 0 ? (
             <EmptyState icon={MessageCircle} title="まだ先生からのメッセージはありません" className="mb-3 py-6" />
           ) : (
             <div className="mb-3 max-h-56 space-y-2 overflow-y-auto pr-1">

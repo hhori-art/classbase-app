@@ -27,3 +27,11 @@ test('the security notice shows only for number names', () => {
   assert.equal(isNumberOnlyName('テスト2'), false);
   assert.equal(isNumberOnlyName(''), false);
 });
+
+test('absence contacts can go back three months', async () => {
+  const { earliestAbsenceDate, isWithinAbsenceWindow } = await import('../lib/absence-window.ts');
+  assert.equal(earliestAbsenceDate('2026-10-24'), '2026-07-24');
+  assert.equal(earliestAbsenceDate('2026-05-31'), '2026-02-28');
+  assert.equal(isWithinAbsenceWindow('2026-07-24', '2026-10-24'), true);
+  assert.equal(isWithinAbsenceWindow('2026-07-23', '2026-10-24'), false);
+});

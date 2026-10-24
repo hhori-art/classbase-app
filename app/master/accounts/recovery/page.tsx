@@ -6,6 +6,7 @@ import { auth } from '@/lib/firebase';
 import AdminPageHeader from '@/app/components/master/AdminPageHeader';
 import { Button, EmptyState, ErrorState, IconButton, ListSkeleton, useConfirm, useToast } from '@/app/components/ui';
 import { formatDateTime } from '@/lib/format';
+import { userErrorMessage } from '@/lib/user-error';
 
 type RecoveryRequest = {
   id: string;
@@ -49,7 +50,7 @@ export default function PasswordRecoveryRequestsPage() {
       setRequests(Array.isArray(data.requests) ? data.requests : []);
     } catch (error) {
       console.error('Password recovery requests fetch failed:', error);
-      setLoadError(error instanceof Error ? error.message : '取得できませんでした');
+      setLoadError(userErrorMessage(error, '取得できませんでした'));
     } finally {
       setLoading(false);
     }
@@ -69,7 +70,7 @@ export default function PasswordRecoveryRequestsPage() {
       if (!response.ok) throw new Error(data.error || '更新できませんでした');
       setRequests(current => current.map(request => request.id === item.id ? { ...request, status } : request));
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '更新できませんでした');
+      toast.error(userErrorMessage(error, '更新できませんでした'));
     } finally {
       setWorkingId('');
     }
@@ -96,7 +97,7 @@ export default function PasswordRecoveryRequestsPage() {
       setIssuedLink({ code: item.request_code, url });
       await updateStatus(item, 'resolved');
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'リンクを発行できませんでした');
+      toast.error(userErrorMessage(error, 'リンクを発行できませんでした'));
     } finally {
       setWorkingId('');
     }

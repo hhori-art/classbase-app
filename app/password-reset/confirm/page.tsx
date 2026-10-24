@@ -3,6 +3,7 @@
 import { FormEvent, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { CheckCircle2, KeyRound, Loader2 } from 'lucide-react';
+import { userErrorMessage } from '@/lib/user-error';
 
 export default function PasswordResetConfirmPage() {
   const [token, setToken] = useState('');
@@ -36,7 +37,7 @@ export default function PasswordResetConfirmPage() {
       }
       setComplete(true);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'パスワードを変更できませんでした。');
+      setError(userErrorMessage(cause, 'パスワードを変更できませんでした。'));
     } finally {
       setSaving(false);
     }

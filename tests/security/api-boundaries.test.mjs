@@ -4170,13 +4170,15 @@ test('reward exchange validates the reward and writes deduction plus request ato
   assert.equal(invalid.data.has('requests/exchange_actor_exchange_12345678'), false);
 });
 
-test('reward management is limited to authorized science-social managers and archives instead of deleting', async () => {
+test('reward and gacha catalogs are master-only and archive instead of deleting', async () => {
   const denied = harness({ profiles: { actor: { ...admin, admin_permissions: { science_social: false } } }, documents: { 'rewards/reward': { name: 'ノート', required_coins: 30 } } });
   assert.equal((await denied.load('app/api/admin/rewards/route.ts').GET(request('/api/admin/rewards', null, 'valid', 'GET'))).status, 403);
   assert.equal((await denied.load('app/api/admin/rewards/route.ts').PATCH(request('/api/admin/rewards', { id: 'reward', active: false }))).status, 403);
 
+  // 校舎管理者（理社講座の権限あり）も、全校舎共通の景品・ガチャは見られない。
   const scienceSocialManager = harness({ profiles: { actor: admin }, documents: { 'rewards/reward': { name: 'ノート', required_coins: 30, active: true } } });
-  assert.equal((await scienceSocialManager.load('app/api/admin/rewards/route.ts').GET(request('/api/admin/rewards', null, 'valid', 'GET'))).status, 200);
+  assert.equal((await scienceSocialManager.load('app/api/admin/rewards/route.ts').GET(request('/api/admin/rewards', null, 'valid', 'GET'))).status, 403);
+  assert.equal((await scienceSocialManager.load('app/api/admin/gachas/route.ts').GET(request('/api/admin/gachas', null, 'valid', 'GET'))).status, 403);
 
   const allowed = harness({ profiles: { actor: master }, documents: { 'rewards/reward': { name: 'ノート', required_coins: 30, active: true } } });
   const listed = await allowed.load('app/api/admin/rewards/route.ts').GET(request('/api/admin/rewards', null, 'valid', 'GET'));
@@ -4487,7 +4489,7 @@ test('point adjustments are school-scoped, audited, and cannot push a balance be
 });
 
 test('gacha configuration requires item rates plus the miss rate to total exactly 100 percent', async () => {
-  const h = harness({ profiles: { actor: admin }, documents: { 'rewards/prize': { name: 'ノート', required_coins: 10, active: true } } });
+  const h = harness({ profiles: { actor: master }, documents: { 'rewards/prize': { name: 'ノート', required_coins: 10, active: true } } });
   const route = h.load('app/api/admin/gachas/route.ts');
   const form = (items, missWeight) => {
     const body = new FormData();
@@ -4568,7 +4570,7 @@ test('gacha turns an already-owned cosmetic prize into a miss instead of a dupli
 });
 
 test('administrators add preset rewards without uploading images and unknown presets are rejected', async () => {
-  const h = harness({ profiles: { actor: admin } });
+  const h = harness({ profiles: { actor: master } });
   const route = h.load('app/api/admin/rewards/route.ts');
   const form = fields => {
     const body = new FormData();
@@ -5970,7 +5972,7 @@ test('student course change notifies every linked parent once, and only them', a
     assert.equal(item.role, 'parent');
     assert.equal(item.kind, 'course_registration_changed');
     assert.equal(item.title, 'Taroさんが受講講座を変更しました');
-    assert.equal(item.link, '/parent/courses');
+    assert.equal(item.link, '/parent/courses?student_id=actor');
     assert.equal(item.read, false);
     assert.match(item.message, /月 1時間目 理科（物理）/);
   }
@@ -6007,7 +6009,7 @@ test('parent course change notifies the student and the other linked parents, no
   const toSibling = sent.find(item => item.user_id === 'sibling');
   assert.equal(toSibling.role, 'parent');
   assert.equal(toSibling.title, '保護者の方がHanakoさんの受講講座を変更しました');
-  assert.equal(toSibling.link, '/parent/courses');
+  assert.equal(toSibling.link, '/parent/courses?student_id=child');
 });
 
 test('timetable shows the student\'s confirmed transfer, marks the absence day, and ignores cancelled or other students\' transfers', async () => {
@@ -7514,4 +7516,58 @@ test('student edits in test schools store the student number instead of the type
   const later = harness({ now: '2026-12-01T03:00:00Z', profiles: { actor: admin, target: { ...student, school_id: '112', lifetime_id: '12098761', student_name: '12098761' } } });
   await later.load('app/api/admin/school-students/options/route.ts').POST(request('/api/admin/school-students/options', { user_id: 'target', student_name: '山田 太郎' }));
   assert.equal(later.data.get('users/target').student_name, '山田 太郎');
+});
+
+test('approvers other than masters cannot approve their own work records or clock corrections', async () => {
+  const attendanceAdmin = { ...admin, admin_permissions: { science_social: false, attendance: true } };
+  const own = harness({ profiles: { actor: attendanceAdmin }, documents: {
+    'work_records/own': {
+      teacher_id: 'actor', teacher_name: 'Admin', date: '2026-10-05', school_id: '112',
+      start_time: '2026-10-05T09:00:00+09:00', end_time: '2026-10-05T10:00:00+09:00',
+      work_segments: [{ id: 'segment', type: 'office', program: 'normal', start: '09:00', end: '10:00', school_id: '112' }],
+    },
+    'attendance_correction_requests/mine': {
+      teacher_id: 'actor', school_id: '112', target_date: '2026-10-05', status: 'pending',
+      request_type: 'time_correction', work_record_id: 'own',
+      requested_start_time: '2026-10-05T00:05:00.000Z', requested_end_time: '2026-10-05T01:05:00.000Z',
+    },
+  }, overrides: { '@/lib/events': { writeLearningEvent: async () => 'event' } } });
+  const detail = await own.load('app/api/attendance-detail-approvals/route.ts').POST(request('/api/attendance-detail-approvals', {
+    work_record_id: 'own', segment_id: 'segment', status: 'approved',
+  }));
+  assert.notEqual(detail.status, 200);
+  assert.notEqual(own.data.get('work_records/own').work_segments[0].approval_status, 'approved');
+  const correction = await own.load('app/api/attendance-corrections/route.ts').POST(request('/api/attendance-corrections', {
+    action: 'review', request_id: 'mine', status: 'approved',
+  }));
+  assert.equal(correction.status, 403);
+  assert.equal(own.data.get('attendance_correction_requests/mine').status, 'pending');
+});
+
+test('bulk absence only marks the students shown on screen and keeps existing attendance', async () => {
+  const shown = { ...student, middle_school: '東中', account_status: 'active' };
+  const h = harness({
+    profiles: { actor: admin, s1: shown, s2: shown, s3: shown, gone: { ...shown, account_status: 'withdrawn' } },
+    documents: { 'attendance/s2_2026-10-30': { attendance_status: '出', student_id: 's2' } },
+    overrides: { '@/lib/events': { writeLearningEvent: async () => 'event' } },
+  });
+  const response = await h.load('app/api/admin/school-students/bulk-absence/route.ts').POST(request('/api/admin/school-students/bulk-absence', {
+    school_id: '112', middle_school: '東中', target_date: '2026-10-30', student_ids: ['s1', 's2', 'gone'],
+  }));
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.deepEqual([body.count, body.skipped], [1, 1]);
+  assert.equal(h.data.get('attendance/s1_2026-10-30').attendance_status, '欠');
+  assert.equal(h.data.get('attendance/s2_2026-10-30').attendance_status, '出');
+  assert.equal(h.data.has('attendance/s3_2026-10-30'), false);
+  assert.equal(h.data.has('attendance/gone_2026-10-30'), false);
+});
+
+test('student transfer rejects unknown school codes', async () => {
+  const h = harness({ profiles: { actor: master, target: { ...student } } });
+  const response = await h.load('app/api/admin/school-students/lifecycle/route.ts').POST(request('/api/admin/school-students/lifecycle', {
+    action: 'transfer', user_id: 'target', school_id: 'typo-school',
+  }));
+  assert.equal(response.status, 400);
+  assert.equal(h.data.get('users/target').school_id, '112');
 });

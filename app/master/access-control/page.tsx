@@ -11,8 +11,9 @@ import {
   type AdminAppPermissions,
 } from '@/lib/admin-app-permissions';
 import AdminPageHeader from '@/app/components/master/AdminPageHeader';
-import { Button, EmptyState, ErrorState, ListSkeleton, useConfirm } from '@/app/components/ui';
+import { Button, EmptyState, ErrorState, ListSkeleton, useConfirm, useToast } from '@/app/components/ui';
 import { formatDateTime } from '@/lib/format';
+import { userErrorMessage } from '@/lib/user-error';
 
 type AdminAccount = {
   id: string;
@@ -47,6 +48,7 @@ const PERMISSION_PRESETS: Array<{ label: string; permissions: AdminAppPermission
 export default function AdminAccessControlPage() {
   const { user, profile } = useAuth();
   const confirm = useConfirm();
+  const toast = useToast();
   const [accounts, setAccounts] = useState<AdminAccount[]>([]);
   const [loading, setLoading] = useState(true);
   const [migrating, setMigrating] = useState(false);
@@ -125,15 +127,18 @@ export default function AdminAccessControlPage() {
           : item,
       ));
       if (data.audit) setHistory(current => [data.audit, ...current].slice(0, 30));
+      toast.success(`${account.name || '管理者'}の権限を保存しました。`);
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : '権限を保存できませんでした。');
+      setError(userErrorMessage(saveError, '権限を保存できませんでした。'));
     } finally {
       setSavingId('');
     }
   };
 
-  const togglePermission = (account: AdminAccount, app: AdminAppId) => {
-    return savePermissions(account, {
+  const togglePermission = async (account: AdminAccount, app: AdminAppId) => {
+    // 権限を外すと、その人は次に画面を移ったときにメニューを失うので、外すときだけ確かめる。
+    if (account.permissions[app] && !(await confirm({ title: `${account.name || 'この管理者'}の「${ADMIN_APP_LABELS[app]}」を外しますか？`, message: '外すと、その画面を開けなくなります。', tone: 'danger', confirmLabel: '外す' }))) return;
+    await savePermissions(account, {
       ...account.permissions,
       [app]: !account.permissions[app],
     });
@@ -163,7 +168,7 @@ export default function AdminAccessControlPage() {
       if (!response.ok || data.ok === false) throw new Error(data.error || '既存権限を確定できませんでした。');
       await loadAccounts();
     } catch (migrationError) {
-      setError(migrationError instanceof Error ? migrationError.message : '既存権限を確定できませんでした。');
+      setError(userErrorMessage(migrationError, '既存権限を確定できませんでした。'));
     } finally {
       setMigrating(false);
     }

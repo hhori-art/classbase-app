@@ -7,6 +7,7 @@ import { Button, ButtonLink, EmptyState, ErrorState, ListSkeleton, useConfirm, u
 import { formatDateTime } from '@/lib/format';
 import { useAuth } from '@/app/context/AuthContext';
 import { jstDateKey } from '@/lib/date-key';
+import { userErrorMessage } from '@/lib/user-error';
 
 type WarningItem = {
   code: string;
@@ -225,7 +226,7 @@ export default function AttendanceDiagnosticsPage() {
       toast.success(`通知を送信しました（アプリ内: ${data.in_app_count || 0}件 / LINE: ${data.line_sent_count || 0}件）`);
     } catch (e: any) {
       console.error(e);
-      toast.error(`通知を送信できませんでした。${e?.message || ''}`);
+      toast.error(`通知を送信できませんでした。${userErrorMessage(e, '')}`);
     } finally {
       setNotificationSending(false);
     }

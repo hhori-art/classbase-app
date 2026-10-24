@@ -6,6 +6,7 @@ import { Button, EmptyState, ErrorState, IconButton, ListSkeleton, buttonClass, 
 import { formatDate } from '@/lib/format';
 import { useAuth } from '@/app/context/AuthContext';
 import { normalizeGrade } from '@/lib/test-prep-registration';
+import { userErrorMessage } from '@/lib/user-error';
 
 type Item = { id?: string; date: string; subject: string; unit: string; grade: string; time: string; lesson: string; level: string };
 type Period = { id: string; name: string; start_date: string; end_date: string; subjects: string[]; items: Item[]; status: string };
@@ -75,13 +76,13 @@ export default function ReviewPeriodsPanel() {
   const groupedCount = useMemo(() => new Set(form.items.map(item => item.date).filter(Boolean)).size, [form.items]);
   const save = async () => {
     if (!user || busy) return; setBusy(true);
-    try { const res = await fetch('/api/review-periods', { method: 'POST', headers: { Authorization: `Bearer ${await token()}`, 'Content-Type': 'application/json' }, body: JSON.stringify(form) }); const data = await res.json(); if (!res.ok) throw new Error(data.error); setForm({ id: '', name: '', start_date: '', end_date: '', items: [emptyItem()] }); await load(); toast.success(form.id ? '復習期間を更新しました。' : '復習期間を保存しました。'); } catch (error) { console.error(error); toast.error(error instanceof Error ? error.message : '保存に失敗しました。'); } finally { setBusy(false); }
+    try { const res = await fetch('/api/review-periods', { method: 'POST', headers: { Authorization: `Bearer ${await token()}`, 'Content-Type': 'application/json' }, body: JSON.stringify(form) }); const data = await res.json(); if (!res.ok) throw new Error(data.error); setForm({ id: '', name: '', start_date: '', end_date: '', items: [emptyItem()] }); await load(); toast.success(form.id ? '復習期間を更新しました。' : '復習期間を保存しました。'); } catch (error) { console.error(error); toast.error(userErrorMessage(error, '保存に失敗しました。')); } finally { setBusy(false); }
   };
   const archive = async (period: Period) => {
     if (!(await confirm({ title: `「${period.name}」を終了しますか？`, message: '終了した期間は生徒の画面に表示されなくなります。', confirmLabel: '終了する', tone: 'danger' }))) return;
-    try { const res = await fetch('/api/review-periods', { method: 'POST', headers: { Authorization: `Bearer ${await token()}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'archive', id: period.id }) }); const data = await res.json(); if (!res.ok) throw new Error(data.error); await load(); } catch (error) { console.error(error); toast.error(error instanceof Error ? error.message : '復習期間を終了できませんでした。'); }
+    try { const res = await fetch('/api/review-periods', { method: 'POST', headers: { Authorization: `Bearer ${await token()}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'archive', id: period.id }) }); const data = await res.json(); if (!res.ok) throw new Error(data.error); await load(); } catch (error) { console.error(error); toast.error(userErrorMessage(error, '復習期間を終了できませんでした。')); }
   };
-  const importCsv = async (file?: File) => { if (!file) return; try { const items = parseCsv(await file.text()); setForm(current => ({ ...current, items: current.id ? keepExistingIds(items, current.items) : items })); } catch (error) { toast.error(error instanceof Error ? error.message : 'CSVを読み込めませんでした。'); } };
+  const importCsv = async (file?: File) => { if (!file) return; try { const items = parseCsv(await file.text()); setForm(current => ({ ...current, items: current.id ? keepExistingIds(items, current.items) : items })); } catch (error) { toast.error(userErrorMessage(error, 'CSVを読み込めませんでした。')); } };
   const editPeriod = (period: Period) => {
     setForm({ id: period.id, name: period.name, start_date: period.start_date, end_date: period.end_date, items: period.items.map(item => ({ ...item, grade: toGradeOption(item.grade) })) });
     window.setTimeout(() => formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);

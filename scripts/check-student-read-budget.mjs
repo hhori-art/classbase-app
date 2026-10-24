@@ -157,7 +157,11 @@ const limits = {
   // +2: 専任の手続きの案内（runDedicatedReportReminders）。毎朝の Vercel Cron で、月初1〜3日と20日だけ専任の一覧と前の月の報告書を読む。
   // +1: 受講登録の候補（/api/course-registration-options）で、期のはじめ1週間の講師配置を読む（中3の理科の、その期の時限）。
   // 共有キャッシュ（5分）の中だけで、期の数（最大4件程度）× 最大400件。生徒ごとの読み取りは増えない。
-  serverFirestoreReads: 444,
+  // +1: 専任勤怠（/api/dedicated-attendance）で、月初1〜3日だけ前の月の報告書1件を読む（提出の案内のため）。
+  // +1: 専任の授業時間の申請で、同じ日の申請1件を読む（承認済みを黙って承認待ちに戻さないため）。申請の操作のときだけ。
+  // +4: βテスト校の日次レポート（lib/server/beta-school-report.ts）。毎朝の Vercel Cron で1回だけ、3校の在籍生徒・
+  // 受講登録の有無・前日の講師配置と参加記録を読む（2026年11月21日まで）。生徒・保護者の画面からは呼ばれない。
+  serverFirestoreReads: 450,
 };
 const exceeded = Object.entries(limits).filter(([key, max]) => usage[key] > max);
 

@@ -21,7 +21,8 @@ export default function StudentHomeworkListPage() {
   const [studentInfo, setStudentInfo] = useState<{ grade: string, subjects: string[] } | null>(null);
   
   // 自分の提出状況 {課題ID: true/false}
-  const [submissionStatus, setSubmissionStatus] = useState<{[key:string]: boolean}>({});
+  // 提出の状態：submitted（先生の確認待ち）・checked（確認済み）・resubmit（再提出）。
+  const [submissionStatus, setSubmissionStatus] = useState<{[key:string]: string}>({});
 
   // 端末の種類（画面の案内と開き方を変える）。サーバー描画との差を避けるため表示後に判定する。
   const [platform, setPlatform] = useState<MonoxerPlatform>('desktop');
@@ -43,10 +44,10 @@ export default function StudentHomeworkListPage() {
         const qSub = query(collection(db, 'submissions'), where('student_id', '==', user.uid));
         const subSnap = await getDocs(qSub);
         
-        const statusMap: {[key:string]: boolean} = {};
+        const statusMap: {[key:string]: string} = {};
         subSnap.forEach(d => {
           const data = d.data();
-          statusMap[data.assignment_id] = true;
+          statusMap[data.assignment_id] = String(data.status || 'submitted');
         });
         setSubmissionStatus(statusMap);
 
@@ -133,7 +134,10 @@ export default function StudentHomeworkListPage() {
       ) : (
         <div className="space-y-3">
           {assignments.map((assign) => {
-            const isSubmitted = submissionStatus[assign.id];
+            const submission = submissionStatus[assign.id];
+            // 再提出を求められた宿題は「未提出」と同じく、出し直しが必要なものとして扱う。
+            const isSubmitted = Boolean(submission) && submission !== 'resubmit';
+            const needsResubmit = submission === 'resubmit';
             // 期限切れ判定（日本時間。日付だけの期限は期限日の終わりまで期限内）
             const deadline = parseHomeworkDeadline(assign.deadline);
             const isLate = isHomeworkOverdue(assign.deadline) && !isSubmitted;
@@ -166,8 +170,12 @@ export default function StudentHomeworkListPage() {
 
                   {/* ステータスバッジ */}
                   <div className="absolute right-4 top-4">
-                    {isSubmitted ? (
-                      <StatusPill tone="success" icon={<CheckCircle size={12} aria-hidden />}>完了</StatusPill>
+                    {needsResubmit ? (
+                      <StatusPill tone="danger" icon={<AlertCircle size={12} aria-hidden />}>再提出</StatusPill>
+                    ) : submission === 'checked' ? (
+                      <StatusPill tone="success" icon={<CheckCircle size={12} aria-hidden />}>確認済み</StatusPill>
+                    ) : isSubmitted ? (
+                      <StatusPill tone="success" icon={<CheckCircle size={12} aria-hidden />}>提出済み</StatusPill>
                     ) : isLate ? (
                       <StatusPill tone="danger" icon={<AlertCircle size={12} aria-hidden />}>期限切れ</StatusPill>
                     ) : (

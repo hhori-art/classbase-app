@@ -12,6 +12,13 @@ import { queuePushToUsers } from '@/lib/server/web-push';
 import { loadStudentClassMasters } from '@/lib/server/student-class-masters';
 import { isTodayGradeTransferShift, todayPeriodEnded } from '@/lib/server/student-today-lessons';
 import { jstTodayKey } from '@/lib/lesson-deadline';
+import { ABSENCE_WINDOW_MESSAGE, isWithinAbsenceWindow } from '@/lib/absence-window';
+
+const WEEKDAY_LABELS = ['日', '月', '火', '水', '木', '金', '土'];
+/** 通知の本文の日付（10月25日(日)）。 */
+const dateText = (dateKey: string) => /^\d{4}-\d{2}-\d{2}$/.test(dateKey)
+  ? `${Number(dateKey.slice(5, 7))}月${Number(dateKey.slice(8, 10))}日(${WEEKDAY_LABELS[new Date(`${dateKey}T12:00:00+09:00`).getUTCDay()]})`
+  : dateKey;
 
 export const runtime = 'nodejs';
 
@@ -90,7 +97,7 @@ function queueCounterpartNotifications(
     ? `保護者（${clean(user.profile.parent_name || user.profile.name) || '保護者'}）`
     : `${studentName}さん本人`;
   const lines = [
-    `${targetDate}の${label}連絡を${senderName}が送りました。`,
+    `${dateText(targetDate)}の${label}連絡を${senderName}が送りました。`,
     `理由：${reason || '（記入なし）'}`,
     input.transferNote || '',
   ].filter(Boolean);
@@ -110,6 +117,7 @@ function queueCounterpartNotifications(
       ...base,
       user_id: studentId,
       role: 'student',
+      link: '/student',
       message: [...lines, input.studentGuide || ''].filter(Boolean).join('\n'),
       ...(input.studentExtra || {}),
     });
@@ -123,12 +131,13 @@ function queueCounterpartNotifications(
         role: 'parent',
         student_id: studentId,
         student_name: studentName,
+        link: `/parent?student_id=${encodeURIComponent(studentId)}`,
         message: lines.join('\n'),
       });
     });
   return {
     title: base.title,
-    body: `${targetDate}の${label}連絡です。アプリで確認してください。`,
+    body: `${dateText(targetDate)}の${label}連絡です。アプリで確認してください。`,
     studentIds: user.role === 'parent' ? [studentId] : [],
     parentIds,
   } satisfies PushPlan;
@@ -272,7 +281,7 @@ function queueCancelNotifications(
     ? `保護者（${clean(user.profile.parent_name || user.profile.name) || '保護者'}）`
     : `${studentName}さん本人`;
   const message = [
-    `${targetDate}の${label}連絡を${senderName}が取り消しました。`,
+    `${dateText(targetDate)}の${label}連絡を${senderName}が取り消しました。`,
     input.transferCancelled ? '登録されていた振替も取り消されました。' : '',
     '授業にはいつもどおり参加する予定です。',
   ].filter(Boolean).join('\n');
@@ -288,13 +297,14 @@ function queueCancelNotifications(
     created_at: FieldValue.serverTimestamp(),
   };
   if (user.role === 'parent') {
-    transaction.set(db.collection('user_notifications').doc(`absence_${requestId}`), { ...base, user_id: studentId, role: 'student' });
+    transaction.set(db.collection('user_notifications').doc(`absence_${requestId}`), { ...base, user_id: studentId, role: 'student', link: '/student' });
   }
   const parentIds = linkedParentIds(student, input.extraParentIds).filter(parentId => parentId !== user.uid);
   parentIds
     .forEach(parentId => {
       transaction.set(db.collection('user_notifications').doc(`absence_${requestId}_parent_${parentId}`), {
         ...base, user_id: parentId, role: 'parent', student_id: studentId, student_name: studentName,
+        link: `/parent?student_id=${encodeURIComponent(studentId)}`,
       });
     });
   return {
@@ -325,6 +335,10 @@ export async function POST(request: NextRequest) {
 
     if (!studentId || !targetDate) {
       return Response.json({ ok: false, error: 'student_id and target_date are required' }, { status: 400 });
+    }
+    // さかのぼって連絡できるのは3か月前まで。
+    if (!isWithinAbsenceWindow(targetDate, jstTodayKey())) {
+      return Response.json({ ok: false, error: ABSENCE_WINDOW_MESSAGE }, { status: 400 });
     }
     if (type === 'absence' && !reason) {
       return Response.json({ ok: false, error: 'reason is required' }, { status: 400 });

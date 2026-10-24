@@ -9,6 +9,7 @@ import {
 } from './guide-model';
 import { useToast } from '@/app/components/ui/feedback';
 import { ChecklistPage, ParentGuidePage, ParentPlaceholderPage, StaffGuidePage, StudentGuidePage } from './GuidePages';
+import { userErrorMessage } from '@/lib/user-error';
 
 const ORDER_LABELS: Record<GuideOrder, { label: string; description: string }> = {
   alternate: { label: '生徒用→保護者用を交互', description: '1人ずつ生徒用・保護者用の順に出します' },
@@ -132,7 +133,7 @@ export default function AccountGuidePrintView({ accounts, loginUrl, title, onClo
       anchor.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (error: any) {
-      toast.error(`PDFの作成に失敗しました。${error?.message || error}`);
+      toast.error(`PDFの作成に失敗しました。${userErrorMessage(error, '')}`);
     } finally {
       setPdfProgress(null);
     }

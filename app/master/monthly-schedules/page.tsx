@@ -10,6 +10,7 @@ import AdminPageHeader from '@/app/components/master/AdminPageHeader';
 import { jstDateKey } from '@/lib/date-key';
 import { formatShortDate } from '@/lib/format';
 import { Button, ErrorState, Skeleton, useConfirm, useToast } from '@/app/components/ui';
+import { userErrorMessage } from '@/lib/user-error';
 
 const CATEGORY_OPTIONS = [
   { id: 'general', label: '通常予定' },
@@ -158,7 +159,7 @@ export default function MasterMonthlySchedulesPage() {
       toast.success(editingId ? '予定を更新しました。' : '予定を登録しました。');
       await loadSchedules();
     } catch (e: any) {
-      toast.error(`保存できませんでした。${e.message || e}`);
+      toast.error(`保存できませんでした。${userErrorMessage(e, '')}`);
     } finally {
       setSaving(false);
     }
@@ -183,7 +184,7 @@ export default function MasterMonthlySchedulesPage() {
       setSchedules(prev => prev.filter(item => item.id !== schedule.id));
       toast.success(`「${schedule.title}」を削除しました。`);
     } catch (e: any) {
-      toast.error(`削除できませんでした。${e.message || e}`);
+      toast.error(`削除できませんでした。${userErrorMessage(e, '')}`);
     }
   };
 

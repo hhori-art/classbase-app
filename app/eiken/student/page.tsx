@@ -20,6 +20,7 @@ import { useEikenApi } from '@/app/eiken/useEikenApi';
 import { EIKEN_LEVEL_LABELS, type EikenLevel } from '@/lib/eiken/types';
 import { formatDate, formatDateTime } from '@/lib/format';
 import { EmptyState, ErrorState, ListSkeleton, buttonClass, useToast } from '@/app/components/ui';
+import { userErrorMessage } from '@/lib/user-error';
 
 const taskLabels: Record<string, string> = {
   video: '映像授業',
@@ -53,7 +54,7 @@ export default function EikenStudentPage() {
       const data = await api<any>('/api/eiken/dashboard');
       setDashboard(data.dashboard);
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : '学習情報を取得できませんでした。');
+      setError(userErrorMessage(loadError, '学習情報を取得できませんでした。'));
     } finally {
       setLoading(false);
     }
@@ -84,7 +85,7 @@ export default function EikenStudentPage() {
       const result = await api<any>(`/api/eiken/lessons/${lessonId}/join`, { method: 'POST', body: '{}' });
       window.location.href = result.join_url;
     } catch (joinError) {
-      toast.error(joinError instanceof Error ? joinError.message : '授業へ参加できませんでした。');
+      toast.error(userErrorMessage(joinError, '授業へ参加できませんでした。'));
     } finally {
       setJoiningId('');
     }

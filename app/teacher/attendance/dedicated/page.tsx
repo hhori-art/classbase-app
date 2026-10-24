@@ -48,6 +48,7 @@ import {
   type CorrectionTargetRecord,
   type MissingClockForm,
 } from '../correction-requests';
+import { userErrorMessage } from '@/lib/user-error';
 
 type CurrentRecord = { id: string; date: string; start_time: string; end_time?: string | null };
 type Route = { from: string; to: string; amount: number; reason: string };
@@ -67,11 +68,14 @@ type Data = {
   recent_routes: Route[];
   seasons: SeasonView[];
   monthly: Monthly;
+  open_past_records: Array<{ id: string; date: string; start_time: string }>;
+  schools: Array<{ id: string; name: string }>;
+  previous_month: { month: string; status: string } | null;
 };
 type Tab = 'days' | 'plans' | 'lessons' | 'transport' | `season:${string}`;
 
 const CLOCK_ERROR_MESSAGES: Record<string, string> = {
-  'clocking is closed after 23:00': '23時以降は打刻できません。打刻を忘れた場合は修正を申請してください。',
+  'clocking is closed after 23:00': '23時以降は出勤打刻できません。打刻を忘れた場合は打刻忘れを申請してください。',
   'active work record already exists': '本日はすでに出勤中の勤務記録があります。',
   'work record already completed today': '本日はすでに勤務記録が完了しています。',
   'work_record_id is required': '出勤中の勤務記録が見つかりません。画面を読み込み直してください。',
@@ -107,6 +111,8 @@ export default function DedicatedAttendancePage() {
   const [working, setWorking] = useState(false);
   const [error, setError] = useState('');
   const [tab, setTab] = useState<Tab>('days');
+  // 出勤する校舎（複数校舎の人は選ぶ。打刻APIは出勤時に勤務校舎が必要）。
+  const [clockSchool, setClockSchool] = useState('');
   const [reportDay, setReportDay] = useState<DedicatedDay | null>(null);
   const [settingsDay, setSettingsDay] = useState<DedicatedDay | null>(null);
   const [correctionTarget, setCorrectionTarget] = useState<CorrectionTargetRecord | null>(null);
@@ -137,7 +143,7 @@ export default function DedicatedAttendancePage() {
     try {
       setData(await call());
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : '専任勤怠を読み込めませんでした。');
+      setError(userErrorMessage(loadError, '専任勤怠を読み込めませんでした。'));
     } finally {
       setLoading(false);
     }
@@ -154,7 +160,7 @@ export default function DedicatedAttendancePage() {
       await load();
       return true;
     } catch (postError) {
-      toast.error(postError instanceof Error ? postError.message : '処理できませんでした。');
+      toast.error(userErrorMessage(postError, '処理できませんでした。'));
       return false;
     } finally {
       setWorking(false);
@@ -169,7 +175,7 @@ export default function DedicatedAttendancePage() {
       const response = await fetch('/api/teacher/attendance-clock', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ action, work_record_id: data?.active_record?.id, attendance_kind: 'normal' }),
+        body: JSON.stringify({ action, work_record_id: data?.active_record?.id, attendance_kind: 'normal', school_id: clockSchool || data?.schools?.[0]?.id || profileSchoolId }),
       });
       const body = await response.json().catch(() => ({}));
       if (!response.ok || body.ok === false) throw new Error(clockError(body.error, '打刻できませんでした。'));
@@ -177,7 +183,7 @@ export default function DedicatedAttendancePage() {
       if (month !== jstDateKey().slice(0, 7)) setMonth(jstDateKey().slice(0, 7));
       else await load();
     } catch (clockFailure) {
-      toast.error(clockFailure instanceof Error ? clockFailure.message : '打刻できませんでした。');
+      toast.error(userErrorMessage(clockFailure, '打刻できませんでした。'));
     } finally {
       setWorking(false);
     }
@@ -188,7 +194,7 @@ export default function DedicatedAttendancePage() {
     setCorrectionInitialForm(correctionFormForRecord(record, request));
   };
   const openMissing = (targetDate = jstDateKey(), request?: CorrectionRequest | null) => {
-    setMissingInitialForm(missingClockFormForDate(targetDate, profileSchoolId, request));
+    setMissingInitialForm(missingClockFormForDate(targetDate, profileSchoolId, request, { start: data?.staff.schedule.start_time, end: data?.staff.schedule.end_time }));
     setMissingOpen(true);
   };
   const reopenRequest = (request: CorrectionRequest) => {
@@ -212,16 +218,28 @@ export default function DedicatedAttendancePage() {
       text: `${dayLabel(day.date)} 予定より ${hours(day.reconciliation.unapproved_minutes)} 長く働いています。理由を報告してください。`,
       action: { label: '報告する', onClick: () => setReportDay(day) },
     }));
-    data.days.filter(day => day.record && !day.record.end_time && day.date < today).forEach(day => list.push({
-      key: `clock_${day.date}`,
+    // 前日以前の退勤忘れ（直近14日・月をまたいでも出す）。今日の出勤はそのままできる。
+    (data.open_past_records || []).forEach(record => list.push({
+      key: `clock_${record.date}`,
       tone: 'danger',
-      text: `${dayLabel(day.date)} の退勤打刻がありません。`,
-      action: { label: '修正を申請', onClick: () => openCorrection({ id: day.record!.id, date: day.date, start_time: day.record!.start_time, end_time: day.record!.end_time }) },
+      text: `${dayLabel(record.date)} の退勤打刻がありません。退勤した時刻を申請してください。`,
+      action: { label: '修正を申請', onClick: () => openCorrection({ id: record.id, date: record.date, start_time: record.start_time, end_time: null }) },
     }));
+    // 月初（1〜3日）は、前の月の報告書の提出を案内する（表示中の月に関係なく）。
+    if (data.previous_month && !['submitted', 'confirmed'].includes(data.previous_month.status)) {
+      const previous = data.previous_month.month;
+      list.push({
+        key: 'previous_month',
+        tone: 'warning',
+        text: `${Number(previous.slice(5))}月の時間外報告書がまだ提出されていません（${Number(today.slice(5, 7))}月3日まで）。`,
+        action: { label: `${Number(previous.slice(5))}月を開く`, onClick: () => { setMonth(previous); setTab('days'); } },
+      });
+    }
     data.plans.filter(plan => plan.status === 'rejected').forEach(plan => list.push({
       key: `plan_${plan.id}`,
       tone: 'warning',
-      text: `${dayLabel(plan.date)} の時間外の予定が差し戻されました${plan.review_note ? `：${plan.review_note}` : ''}`,
+      text: `${dayLabel(plan.date)} の時間外の予定が差し戻されました${plan.review_note ? `：${plan.review_note}` : ''}。直して出し直すか、取り消してください。`,
+      action: { label: '予定を見る', onClick: () => setTab('plans') },
     }));
     if (data.monthly?.status === 'returned') list.push({ key: 'monthly', tone: 'warning', text: `月の報告書が差し戻されました${data.monthly.review_note ? `：${data.monthly.review_note}` : ''}。直してもう一度提出してください。` });
     if (!locked && today >= lastDay) {
@@ -248,7 +266,7 @@ export default function DedicatedAttendancePage() {
           tone="plain"
           title="専任勤怠"
           eyebrow="専任"
-          backHref={hasScienceSocialProgram(profile) ? '/teacher/work' : undefined}
+          backHref={hasScienceSocialProgram(profile) ? '/teacher/school-students' : undefined}
           description={data ? `${data.staff.name || '専任'} ／ 所定 ${data.staff.schedule.start_time}〜${data.staff.schedule.end_time}（休憩${data.staff.schedule.break_minutes}分）${data.staff.grade ? ` ／ ${data.staff.grade}等級` : ''}` : undefined}
           actions={<>
             {canApprove && <ButtonLink href="/teacher/attendance-approvals/dedicated" variant="secondary" icon={<ClipboardCheck size={17} aria-hidden />}>専任の承認</ButtonLink>}
@@ -269,6 +287,8 @@ export default function DedicatedAttendancePage() {
               onClock={clock}
               onCorrect={record => openCorrection(record)}
               onReport={day => setReportDay(day)}
+              clockSchool={clockSchool}
+              onClockSchool={setClockSchool}
             />
 
             {todo.length > 0 && (
@@ -335,8 +355,8 @@ export default function DedicatedAttendancePage() {
               if (!(await confirm({ title: `${dayLabel(plan.date)} ${plan.start}〜${plan.end} の予定を取り消しますか？`, tone: 'danger', confirmLabel: '取り消す' }))) return;
               await post({ action: 'plan_cancel', id: plan.id }, '予定を取り消しました。');
             }} />}
-            {tab === 'lessons' && <LessonsTab data={data} working={working} defaultSchool={String(profile?.school_name || profile?.school || '')} onSubmit={body => post({ action: 'lesson_apply', ...body }, '授業時間を申請しました。')} onCancel={id => post({ action: 'item_cancel', kind: 'lesson', id }, '取り下げました。')} />}
-            {tab === 'transport' && <TransportTab data={data} working={working} onSubmit={body => post({ action: 'transport_apply', ...body }, '交通費を申請しました。')} onCancel={id => post({ action: 'item_cancel', kind: 'transport', id }, '取り下げました。')} />}
+            {tab === 'lessons' && <LessonsTab data={data} working={working} defaultSchool={String(profile?.school_name || profile?.school || '')} onSubmit={body => post({ action: 'lesson_apply', ...body }, '授業時間を申請しました。')} onCancel={async id => { if (await confirm({ title: 'この授業時間の申請を取り下げますか？', tone: 'danger', confirmLabel: '取り下げる' })) await post({ action: 'item_cancel', kind: 'lesson', id }, '取り下げました。'); }} />}
+            {tab === 'transport' && <TransportTab data={data} working={working} onSubmit={body => post({ action: 'transport_apply', ...body }, '交通費を申請しました。')} onCancel={async id => { if (await confirm({ title: 'この交通費の申請を取り下げますか？', tone: 'danger', confirmLabel: '取り下げる' })) await post({ action: 'item_cancel', kind: 'transport', id }, '取り下げました。'); }} />}
             {data.seasons.map(view => tab === `season:${view.season.id}` && (
               <SeasonTab
                 key={view.season.id}
@@ -346,7 +366,7 @@ export default function DedicatedAttendancePage() {
                 working={working}
                 defaultSchool={String(profile?.school_name || profile?.school || '')}
                 onAdd={body => post({ action: 'season_lesson_add', season_id: view.season.id, ...body }, '授業を登録しました。')}
-                onCancel={id => post({ action: 'item_cancel', kind: 'season_lesson', id }, '取り下げました。')}
+                onCancel={async id => { if (await confirm({ title: 'この授業の登録を取り下げますか？', tone: 'danger', confirmLabel: '取り下げる' })) await post({ action: 'item_cancel', kind: 'season_lesson', id }, '取り下げました。'); }}
               />
             ))}
           </>
@@ -361,6 +381,7 @@ export default function DedicatedAttendancePage() {
       }} />
       <TimeCorrectionModal open={Boolean(correctionTarget)} record={correctionTarget} initialForm={correctionInitialForm} user={user} onClose={() => setCorrectionTarget(null)} onSubmitted={async () => { setCorrectionTarget(null); await corrections.reload(); }} />
       <MissingClockModal
+        allowScienceSocial={hasScienceSocialProgram(profile)}
         open={missingOpen}
         initialForm={missingInitialForm}
         user={user}
@@ -376,10 +397,12 @@ export default function DedicatedAttendancePage() {
   );
 }
 
-function TodayCard({ data, todayDay, working, onClock, onCorrect, onReport }: {
+function TodayCard({ data, todayDay, working, onClock, onCorrect, onReport, clockSchool, onClockSchool }: {
   data: Data;
   todayDay?: DedicatedDay;
   working: boolean;
+  clockSchool: string;
+  onClockSchool: (school: string) => void;
   onClock: (action: 'clock_in' | 'clock_out') => void;
   onCorrect: (record: CurrentRecord) => void;
   onReport: (day: DedicatedDay) => void;
@@ -412,6 +435,14 @@ function TodayCard({ data, todayDay, working, onClock, onCorrect, onReport }: {
           )}
         </div>
         <div className="flex flex-col gap-2 sm:items-end">
+          {!active && !data.today_record && (data.schools || []).length > 1 && (
+            <label className="flex flex-col gap-1 text-xs font-bold text-slate-300">
+              出勤する校舎
+              <select value={clockSchool || data.schools[0].id} onChange={event => onClockSchool(event.target.value)} className="min-h-11 rounded-input border border-white/20 bg-slate-800 px-3 text-sm font-bold text-white">
+                {data.schools.map(school => <option key={school.id} value={school.id}>{school.name}</option>)}
+              </select>
+            </label>
+          )}
           {active
             ? <Button variant="danger" size="lg" loading={working} onClick={() => onClock('clock_out')} icon={<Square size={20} aria-hidden />} className="min-h-14 px-8">退勤打刻</Button>
             : <Button size="lg" loading={working} disabled={Boolean(data.today_record)} onClick={() => onClock('clock_in')} icon={<Play size={20} aria-hidden />} className="min-h-14 px-8">出勤打刻</Button>}
@@ -448,7 +479,8 @@ function DaysTab({ data, month, locked, working, lastDay, onReport, onSettings, 
 }) {
   const visible = data.days.filter(day => day.record || day.plans.length || day.report);
   const summary = data.summary;
-  const canSubmit = !locked && data.today >= lastDay && summary.open_days.length === 0;
+  const missingClockOut = data.days.filter(day => day.record && !day.record.end_time && day.date < data.today).length;
+  const canSubmit = !locked && data.today >= lastDay && summary.open_days.length === 0 && missingClockOut === 0;
   return (
     <div className="space-y-4">
       <section className="grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -507,6 +539,7 @@ function DaysTab({ data, month, locked, working, lastDay, onReport, onSettings, 
         ) : (
           <div className="space-y-2">
             {summary.open_days.length > 0 && <p className="text-sm font-bold text-danger">報告が必要な日が {summary.open_days.length}日 あります。先に報告してください。</p>}
+            {missingClockOut > 0 && <p className="text-sm font-bold text-danger">退勤打刻のない日が {missingClockOut}日 あります。先に打刻の修正を申請してください。</p>}
             {summary.waiting_days.length > 0 && <p className="text-sm font-bold text-amber-700">承認待ちの日が {summary.waiting_days.length}日 あります（提出はできます）。</p>}
             <Button onClick={onSubmitMonth} disabled={!canSubmit} loading={working} icon={<FileCheck2 size={17} aria-hidden />}>
               {data.today < lastDay ? `${Number(lastDay.slice(5, 7))}/${Number(lastDay.slice(8))} から提出できます` : 'この月を提出する'}
@@ -562,7 +595,7 @@ function PlansTab({ data, working, onSubmit, onCancel }: { data: Data; working: 
                 </div>
                 <div className="flex items-center gap-1.5">
                   <StatusPill tone={STATUS_TONES[plan.status]}>{STATUS_LABELS[plan.status]}</StatusPill>
-                  {(plan.status === 'pending' || (plan.status === 'approved' && plan.date >= data.today)) && <IconButton label="予定を取り消す" size="sm" variant="ghost" onClick={() => onCancel(plan)}><Trash2 size={15} /></IconButton>}
+                  {(plan.status === 'pending' || plan.status === 'rejected' || (plan.status === 'approved' && plan.date >= data.today)) && <IconButton label="予定を取り消す" size="sm" variant="ghost" onClick={() => onCancel(plan)}><Trash2 size={15} /></IconButton>}
                 </div>
               </li>
             ))}

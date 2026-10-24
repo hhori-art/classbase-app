@@ -1,4 +1,5 @@
 import { NextRequest } from 'next/server';
+import { isAttendanceSchool, resolveAttendanceSchoolCode } from '@/lib/attendance-schools';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { canManageSchool, getServerUser, isAdminLike, jsonError } from '@/lib/server-auth';
@@ -31,8 +32,9 @@ export async function POST(request: NextRequest) {
     };
 
     if (action === 'transfer') {
-      const nextSchool = String(body.school_id || body.school || '').trim();
-      if (!nextSchool) return Response.json({ ok: false, error: 'school_id is required' }, { status: 400 });
+      // 校舎番号・校舎名のどちらでも受け、知っている校舎だけに移す（打ち間違いで、どの一覧にも出ない生徒を作らない）。
+      const nextSchool = resolveAttendanceSchoolCode(String(body.school_id || body.school || '').trim());
+      if (!nextSchool || !isAttendanceSchool(nextSchool)) return Response.json({ ok: false, error: '移籍先の校舎が見つかりません。校舎番号か校舎名を確認してください。' }, { status: 400 });
       if (!canManageSchool(actor, nextSchool)) throw new Error('forbidden');
       Object.assign(updates, {
         previous_school_id: student.school_id || student.school || null,

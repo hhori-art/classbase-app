@@ -7,6 +7,7 @@ import { auth } from '@/lib/firebase';
 import AdminPageHeader from '@/app/components/master/AdminPageHeader';
 import { Button, ButtonLink, Card, EmptyState, ErrorState, ListSkeleton, SectionTitle, StatusPill, type StatusTone } from '@/app/components/ui';
 import { formatDateTime } from '@/lib/format';
+import { userErrorMessage } from '@/lib/user-error';
 
 type GroupKey = 'parentInquiries' | 'requests' | 'safetyAlerts' | 'community' | 'rewardShipments' | 'passwordRecovery';
 type Item = { id: string; status: string; title: string; summary: string; at: string | null; href: string };
@@ -52,7 +53,7 @@ export default function AdminInboxPage() {
       if (!response.ok || body.ok === false) throw new Error(body.error || '対応待ちを読み込めませんでした。');
       setGroups(body.groups || []);
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : '対応待ちを読み込めませんでした。');
+      setError(userErrorMessage(loadError, '対応待ちを読み込めませんでした。'));
     } finally {
       setLoading(false);
     }

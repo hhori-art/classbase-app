@@ -1,5 +1,6 @@
 'use client';
 
+import { usePortalVisibility } from '@/app/hooks/usePortalVisibility';
 import { useEffect, useState } from 'react';
 import { CalendarDays, Users } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
@@ -14,6 +15,7 @@ type Student = { id: string; student_name?: string; grade?: string };
 /** 保護者向けの時間割。紐づいているお子さまごとに、毎週の授業と2週間の予定（休講つき）を表示する。 */
 export default function ParentTimetablePage() {
   const { user } = useAuth();
+  const { visibility } = usePortalVisibility('parent');
   const [students, setStudents] = useState<Student[] | null>(null);
   const [studentId, setStudentId] = useState('');
   const [studentsError, setStudentsError] = useState(false);
@@ -69,7 +71,7 @@ export default function ParentTimetablePage() {
         description={current?.student_name ? `${current.student_name}さんの毎週の授業と、今後2週間の予定です。` : 'お子さまの毎週の授業と、今後2週間の予定です。'}
         icon={CalendarDays}
         backHref="/parent"
-        actions={<ButtonLink href="/parent/courses" variant="secondary" className="no-underline">受講講座を変更する</ButtonLink>}
+        actions={visibility.courseRegistration !== false ? <ButtonLink href="/parent/courses" variant="secondary" className="no-underline">受講講座を変更する</ButtonLink> : undefined}
       />
       {students && students.length > 1 && (
         <ChildSwitcher options={students.map(student => ({ id: student.id, name: student.student_name, grade: student.grade }))} value={studentId} onChange={setStudentId} />

@@ -48,6 +48,7 @@ import { ATTENDANCE_SCHOOL_DIRECTORY, SCIENCE_SOCIAL_WORKPLACE_ID, SCIENCE_SOCIA
 import { isDedicatedProfile } from '@/lib/employment-category';
 import { attendanceDurationLabel, attendanceTimeLabel } from '@/lib/attendance-display';
 import FiveMinuteTimePicker from '@/app/components/FiveMinuteTimePicker';
+import { userErrorMessage } from '@/lib/user-error';
 
 type Props = {
   mode: 'school_manager' | 'admin';
@@ -191,7 +192,7 @@ export default function AttendanceApprovalsWorkspace({ mode, backHref, embedded 
       setCanUnlock(detailBody.can_unlock === true);
       setUpdatedAt(new Date());
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : '承認データを取得できませんでした。');
+      setLoadError(userErrorMessage(error, '承認データを取得できませんでした。'));
     } finally {
       setLoading(false);
     }
@@ -230,10 +231,16 @@ export default function AttendanceApprovalsWorkspace({ mode, backHref, embedded 
 
   const reviewSegment = async (recordId: string, segmentId: string, status: 'approved' | 'rejected' | 'pending') => {
     const action = status === 'approved' ? '承認' : status === 'rejected' ? '差し戻し' : '承認解除';
-    if (!await confirm({ title: `この勤務実績を${action}しますか？`, tone: status === 'approved' ? 'default' : 'danger', confirmLabel: `${action}する` })) return;
+    let reviewNote = '';
+    if (status === 'rejected') {
+      // 差し戻しは、講師が何を直せばよいか分かるよう理由を書けるようにする。
+      const note = await askText({ title: 'この勤務実績を差し戻しますか？', label: '差し戻しの理由（講師に表示されます・任意）', placeholder: '例：授業の時間がシフトと合っていません', multiline: true, confirmLabel: '差し戻す' });
+      if (note === null) return;
+      reviewNote = note;
+    } else if (!await confirm({ title: `この勤務実績を${action}しますか？`, tone: status === 'approved' ? 'default' : 'danger', confirmLabel: `${action}する` })) return;
     setProcessing(`${recordId}_${segmentId}`);
     try {
-      await post({ work_record_id: recordId, segment_id: segmentId, status });
+      await post({ work_record_id: recordId, segment_id: segmentId, status, ...(reviewNote ? { review_note: reviewNote } : {}) });
       await load();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : `${action}処理に失敗しました。`);
@@ -281,7 +288,7 @@ export default function AttendanceApprovalsWorkspace({ mode, backHref, embedded 
       // 作った実績をすぐ編集できるよう、詳細を開く（勤務内容をまとめて登録できる）。
       if (createdRecordId) setDetailTarget({ recordId: createdRecordId });
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '勤務実績を作成できませんでした。');
+      toast.error(userErrorMessage(error, '勤務実績を作成できませんでした。'));
     } finally {
       setProcessing('');
     }
@@ -297,7 +304,7 @@ export default function AttendanceApprovalsWorkspace({ mode, backHref, embedded 
       if (!response.ok) throw new Error(body.error || '職員一覧を取得できませんでした。');
       setStaff(body.staff || []);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '職員一覧を取得できませんでした。');
+      toast.error(userErrorMessage(error, '職員一覧を取得できませんでした。'));
     }
   };
 
@@ -310,7 +317,7 @@ export default function AttendanceApprovalsWorkspace({ mode, backHref, embedded 
       await load();
       toast.success(`${items.length}件を承認しました。`);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '選択した勤務実績を一括承認できませんでした。');
+      toast.error(userErrorMessage(error, '選択した勤務実績を一括承認できませんでした。'));
     } finally {
       setProcessing('');
     }
@@ -337,7 +344,7 @@ export default function AttendanceApprovalsWorkspace({ mode, backHref, embedded 
       if (!response.ok || body.ok === false) throw new Error(body.error || '処理できませんでした。');
       await load();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '承認処理に失敗しました。');
+      toast.error(userErrorMessage(error, '承認処理に失敗しました。'));
     } finally {
       setProcessing('');
     }
@@ -364,7 +371,7 @@ export default function AttendanceApprovalsWorkspace({ mode, backHref, embedded 
       if (failed.length) toast.error(`${ids.length - failed.length}件を承認しました。${failed.length}件は承認できなかったため、内容を確認してください。`);
       else toast.success(`${ids.length}件を承認しました。`);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '選択した打刻修正依頼を一括承認できませんでした。');
+      toast.error(userErrorMessage(error, '選択した打刻修正依頼を一括承認できませんでした。'));
     } finally {
       setProcessing('');
     }
@@ -388,7 +395,7 @@ export default function AttendanceApprovalsWorkspace({ mode, backHref, embedded 
       setClockEdit(null);
       await load();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '打刻時刻の修正に失敗しました。');
+      toast.error(userErrorMessage(error, '打刻時刻の修正に失敗しました。'));
     } finally {
       setProcessing('');
     }
@@ -402,7 +409,7 @@ export default function AttendanceApprovalsWorkspace({ mode, backHref, embedded 
       await load();
       return true;
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '勤務詳細の修正に失敗しました。');
+      toast.error(userErrorMessage(error, '勤務詳細の修正に失敗しました。'));
       return false;
     } finally {
       setProcessing('');
@@ -421,7 +428,7 @@ export default function AttendanceApprovalsWorkspace({ mode, backHref, embedded 
       } : record));
       return true;
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '勤務詳細を保存できませんでした。');
+      toast.error(userErrorMessage(error, '勤務詳細を保存できませんでした。'));
       return false;
     } finally { setProcessing(''); }
   };
@@ -440,7 +447,7 @@ export default function AttendanceApprovalsWorkspace({ mode, backHref, embedded 
       } : record));
       return true;
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '交通費を保存できませんでした。');
+      toast.error(userErrorMessage(error, '交通費を保存できませんでした。'));
       return false;
     } finally {
       setProcessing('');
@@ -455,7 +462,7 @@ export default function AttendanceApprovalsWorkspace({ mode, backHref, embedded 
       setDetails(current => current.filter(item => item.id !== record.id));
       toast.success('打刻を削除しました。');
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '打刻を削除できませんでした。');
+      toast.error(userErrorMessage(error, '打刻を削除できませんでした。'));
     } finally { setProcessing(''); }
   };
 
@@ -619,6 +626,11 @@ export default function AttendanceApprovalsWorkspace({ mode, backHref, embedded 
             <Card padded={false} className="overflow-hidden">
               {summaryGrid}
             </Card>
+            {mode === 'school_manager' && (
+              <ButtonLink href="/teacher/attendance-approvals/dedicated" variant="secondary" fullWidth icon={<CheckCircle2 size={16} aria-hidden />}>
+                専任の時間外の予定・報告・月の報告書の承認へ
+              </ButtonLink>
+            )}
           </>
         )}
 
@@ -808,9 +820,9 @@ export default function AttendanceApprovalsWorkspace({ mode, backHref, embedded 
             <div>
               <h2 id="work-approval-heading" className="text-base font-bold text-slate-950">勤務実績の確認</h2>
             </div>
-            {!loading && <p className="text-xs font-bold text-slate-500">{range === 'day' ? `${dateHeading(day)}・${visibleDetails.length}名を表示` : `${visibleDetails.length}名・${dateGroups.length}日分を表示`}</p>}
+            {!(loading && details.length === 0) && <p className="text-xs font-bold text-slate-500">{range === 'day' ? `${dateHeading(day)}・${visibleDetails.length}名を表示` : `${visibleDetails.length}名・${dateGroups.length}日分を表示`}</p>}
           </div>
-          {!loading && range === 'month' && selectableKeys.length > 0 && (
+          {!(loading && details.length === 0) && range === 'month' && selectableKeys.length > 0 && (
             <div className="mb-4 flex flex-col gap-3 rounded-card border border-indigo-200 bg-indigo-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
               <label className="inline-flex min-h-10 cursor-pointer items-center gap-3 text-sm font-bold text-indigo-950">
                 <input
@@ -825,7 +837,8 @@ export default function AttendanceApprovalsWorkspace({ mode, backHref, embedded 
               <p className="text-xs font-bold text-indigo-700">承認する明細にチェックを付けてください</p>
             </div>
           )}
-          {loading ? (
+          {/* 承認のたびに一覧を消さない（見ていた場所を保つ）。骨組みを出すのは最初の読み込みだけ。 */}
+          {loading && details.length === 0 ? (
             <ListSkeleton rows={4} />
           ) : loadError ? null : dateGroups.length ? (
             <div className="space-y-5">

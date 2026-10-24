@@ -8,6 +8,7 @@ import { formatDateTime } from '@/lib/format';
 import { SHIPMENT_STATUS_LABELS, SHIPMENT_TRANSITIONS, type ShipmentStatus } from '@/lib/rewards';
 import { attendanceSchoolName } from '@/lib/attendance-schools';
 import { adminApi, inputClass } from './api';
+import { userErrorMessage } from '@/lib/user-error';
 
 type Shipment = {
   id: string;
@@ -64,7 +65,7 @@ export default function ShipmentPanel() {
       setShipments(data.shipments || []);
     } catch (error) {
       console.error(error);
-      setLoadError(error instanceof Error ? error.message : '発送状況を取得できませんでした');
+      setLoadError(userErrorMessage(error, '発送状況を取得できませんでした'));
     } finally {
       setLoading(false);
     }
@@ -98,7 +99,7 @@ export default function ShipmentPanel() {
       await load();
     } catch (error) {
       console.error(error);
-      toast.error(error instanceof Error ? error.message : '更新できませんでした');
+      toast.error(userErrorMessage(error, '更新できませんでした'));
     } finally {
       setBusyId('');
     }

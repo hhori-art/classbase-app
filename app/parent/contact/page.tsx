@@ -9,6 +9,7 @@ import { Button, EmptyState, ErrorState, IconButton, ListSkeleton, StatusPill, u
 import { formatDateTime } from '@/lib/format';
 import { TERMS } from '@/lib/glossary';
 import { cn } from '@/lib/cn';
+import { userErrorMessage } from '@/lib/user-error';
 
 const FAQ_LIST = ['欠席連絡はどこからできますか？', '振替受講はできますか？', '録画はどこで確認できますか？', '宿題提出状況を確認したいです', '通知設定を変更したいです', '受講講座の登録はどこで行いますか？', 'ログインできない場合はどうすればよいですか？'];
 const CATEGORIES = [{ value: 'lesson', label: '授業・受講' }, { value: 'absence', label: '欠席・振替' }, { value: 'homework', label: '宿題・学習状況' }, { value: 'account', label: 'アカウント・操作' }, { value: 'other', label: 'その他' }];
@@ -60,7 +61,7 @@ export default function ParentContactPage() {
     if (!form.subject.trim() || !form.question.trim()) return toast.error('件名と連絡内容を入力してください。');
     setSaving(true);
     try { const data = await post({ action: 'send', ...form }); setForm(current => ({ ...current, subject: '', question: '' })); await load(); setExpandedId(data.inquiry_id || ''); toast.success('教室へ送信しました。'); }
-    catch (error: any) { toast.error(`送信できませんでした: ${error.message || error}`); }
+    catch (error: any) { toast.error(`送信できませんでした: ${userErrorMessage(error, '')}`); }
     finally { setSaving(false); }
   };
   const reply = async (id: string) => {

@@ -7,6 +7,7 @@ import AdminPageHeader from '@/app/components/master/AdminPageHeader';
 import { Button, Card, EmptyState, ErrorState, IconButton, ListSkeleton, useConfirm, useToast } from '@/app/components/ui';
 import { formatDate, jstDateKey } from '@/lib/format';
 import { hasAdminAppPermission } from '@/lib/admin-app-permissions';
+import { userErrorMessage } from '@/lib/user-error';
 
 type MergeShift = {
   id: string;
@@ -57,7 +58,7 @@ export default function ShiftMergePage() {
       setHostByPeriod({});
       setSelected(new Set());
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : '授業を読み込めませんでした。');
+      setError(userErrorMessage(loadError, '授業を読み込めませんでした。'));
     } finally {
       setLoading(false);
     }
@@ -106,7 +107,7 @@ export default function ShiftMergePage() {
       toast.success(`${members.length}件の授業を合併しました。`);
       await load();
     } catch (mergeError) {
-      toast.error(mergeError instanceof Error ? mergeError.message : '合併できませんでした。');
+      toast.error(userErrorMessage(mergeError, '合併できませんでした。'));
     } finally { setBusy(''); }
   };
 
@@ -118,7 +119,7 @@ export default function ShiftMergePage() {
       toast.success('合併を解除しました。');
       await load();
     } catch (unmergeError) {
-      toast.error(unmergeError instanceof Error ? unmergeError.message : '解除できませんでした。');
+      toast.error(userErrorMessage(unmergeError, '解除できませんでした。'));
     } finally { setBusy(''); }
   };
 

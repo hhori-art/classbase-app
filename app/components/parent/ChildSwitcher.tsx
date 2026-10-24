@@ -22,8 +22,15 @@ export function rememberChild(uid: string | null | undefined, childId: string) {
   try { window.localStorage.setItem(storageKey(uid), childId); } catch { /* 保存できない端末では覚えない */ }
 }
 
-/** 表示するお子さまを決める：今の選択 → 最後に選んだ子 → 一覧の先頭 の順。 */
+/** 表示するお子さまを決める：通知などのリンクで指定された子（?student_id=）→ 今の選択 → 最後に選んだ子 → 一覧の先頭 の順。 */
 export function pickChildId(uid: string | null | undefined, ids: string[], current = '') {
+  if (!current && typeof window !== 'undefined') {
+    const requested = new URLSearchParams(window.location.search).get('student_id') || '';
+    if (requested && ids.includes(requested)) {
+      rememberChild(uid, requested);
+      return requested;
+    }
+  }
   if (current && ids.includes(current)) return current;
   const remembered = readRememberedChild(uid);
   if (remembered && ids.includes(remembered)) return remembered;

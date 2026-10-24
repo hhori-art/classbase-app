@@ -399,7 +399,7 @@ export default function StudentShopPage() {
                 </ButtonLink>
               )}
               {item.kind === 'digital' && (
-                <button type="button" onClick={() => download(item)} disabled={processingId === item.id} className="inline-flex min-h-9 shrink-0 items-center gap-1 rounded-btn bg-info px-3 text-xs font-bold text-white disabled:opacity-50">
+                <button type="button" onClick={() => download(item)} disabled={processingId === item.id} className="inline-flex min-h-11 shrink-0 items-center gap-1 rounded-btn bg-info px-3 text-xs font-bold text-white disabled:opacity-50">
                   {processingId === item.id ? <Loader2 className="animate-spin" size={14} aria-hidden /> : <Download size={14} aria-hidden />}ダウンロード
                 </button>
               )}
