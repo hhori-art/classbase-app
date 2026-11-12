@@ -26,10 +26,19 @@ const project = JSON.parse(fs.readFileSync(path.join(repo, '.vercel/project.json
 const vercel = (url, init = {}) => fetch(`https://api.vercel.com${url}${url.includes('?') ? '&' : '?'}teamId=${project.orgId}`, { ...init, headers: { Authorization: `Bearer ${token}`, ...(init.headers || {}) } });
 
 // 1) 修正の差分（KDLの修正は含まれない：修正ブランチと、その元のコミットの差だけ）
-const patch = execFileSync('git', ['diff', '--binary', `${base}..${branch}`], { cwd: repo, maxBuffer: 50 * 1024 * 1024 });
-if (!patch.length) step('差分', false, '修正ブランチに差分がありません');
-const changed = execFileSync('git', ['diff', '--name-only', `${base}..${branch}`], { cwd: repo, encoding: 'utf8' }).trim().split('\n').filter(Boolean);
-step('差分', true, `${changed.length}ファイル：${changed.join(', ')}`);
+// テスト・Firestore のルール・読み取り量の上限は本番に出るものではなく、本番と手元で中身が違うので、差分としては当てない。
+// 読み取り量の上限だけは、増やした分を本番の値に足す（本番のビルドで確かめられるため）。
+const SKIP = ['tests', 'firestore.rules', 'storage.rules', 'scripts/check-student-read-budget.mjs', 'docs'];
+const pathspec = ['--', '.', ...SKIP.map(item => `:(exclude)${item}`)];
+const patch = execFileSync('git', ['diff', '--binary', `${base}..${branch}`, ...pathspec], { cwd: repo, maxBuffer: 50 * 1024 * 1024 });
+const changed = execFileSync('git', ['diff', '--name-only', `${base}..${branch}`, ...pathspec], { cwd: repo, encoding: 'utf8' }).trim().split('\n').filter(Boolean);
+if (!patch.length) step('差分', false, '本番に出るファイルの差分がありません');
+const budgetDiff = execFileSync('git', ['diff', '-U0', `${base}..${branch}`, '--', 'scripts/check-student-read-budget.mjs'], { cwd: repo, encoding: 'utf8' });
+const budgetDelta = {};
+for (const [, sign, key, value] of budgetDiff.matchAll(/^([+-])\s+(\w+): (\d+),/gm)) {
+  budgetDelta[key] = (budgetDelta[key] || 0) + (sign === '+' ? Number(value) : -Number(value));
+}
+step('差分', true, `${changed.length}ファイル：${changed.join(', ')}${Object.keys(budgetDelta).length ? `／読み取り量の上限 ${JSON.stringify(budgetDelta)}` : ''}`);
 
 // 2) 今の本番の元ファイル
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'classbase-overlay-'));
@@ -66,6 +75,14 @@ fs.writeFileSync(patchFile, patch);
 const applied = spawnSync('git', ['apply', '--whitespace=nowarn', '--recount', patchFile], { cwd: work, encoding: 'utf8' });
 fs.rmSync(patchFile);
 step('差分を当てる', applied.status === 0, applied.stderr || 'ok');
+if (Object.keys(budgetDelta).length) {
+  const budgetPath = path.join(work, 'scripts/check-student-read-budget.mjs');
+  let budget = fs.readFileSync(budgetPath, 'utf8');
+  for (const [key, delta] of Object.entries(budgetDelta)) {
+    budget = budget.replace(new RegExp(`^(\\s+${key}: )(\\d+),`, 'm'), (_, head, value) => `${head}${Number(value) + delta},`);
+  }
+  fs.writeFileSync(budgetPath, budget);
+}
 
 // 4) 確かめる（読み取り量・型・テスト）
 fs.symlinkSync(path.join(repo, 'node_modules'), path.join(work, 'node_modules'));
