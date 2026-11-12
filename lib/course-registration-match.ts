@@ -488,6 +488,33 @@ const buildShiftClassOptions = (
   });
 };
 
+/** 同じ期（期の名前が同じ）の別IDの日付を、代表の期IDにまとめる。 */
+const mergeTermRangesByAlias = (
+  termRanges: Record<string, { start: string; end: string }>,
+  termAliases: Map<string, string>,
+) => Object.entries(termRanges).reduce((result, [key, range]) => {
+    const separator = key.indexOf('__');
+    const year = separator >= 0 ? key.slice(0, separator) : '';
+    const term = separator >= 0 ? key.slice(separator + 2) : key;
+    const canonicalTerm = termAliases.get(term) || term;
+    const canonicalKey = `${year}__${canonicalTerm}`;
+    const current = result[canonicalKey];
+    result[canonicalKey] = current
+      ? { start: current.start < range.start ? current.start : range.start, end: current.end > range.end ? current.end : range.end }
+      : range;
+    return result;
+  }, {} as Record<string, { start: string; end: string }>);
+
+/**
+ * 候補の期ID（代表の期）でも日付を引けるようにした期の範囲。
+ * 中3はカリキュラムを中3専用の期ID（term_custom_…）で登録しているが、候補は代表の期ID（term3 など）にまとめられる。
+ * 代表の期IDの範囲がないと「今の期」と判定できず、画面に期が出ない・保存の許可が出ない。
+ */
+export const registrationTermRanges = (options: any[], termRanges: Record<string, { start: string; end: string }>) => ({
+  ...mergeTermRangesByAlias(termRanges, canonicalTermAliases(options)),
+  ...termRanges,
+});
+
 export const buildRegistrationClassOptions = (
   options: any[],
   curriculumRows: any[],
@@ -502,18 +529,7 @@ export const buildRegistrationClassOptions = (
     const term = String(option.term || '').trim();
     return !term || !termAliases.has(term) || termAliases.get(term) === term;
   });
-  const canonicalRanges = Object.entries(termRanges).reduce((result, [key, range]) => {
-    const separator = key.indexOf('__');
-    const year = separator >= 0 ? key.slice(0, separator) : '';
-    const term = separator >= 0 ? key.slice(separator + 2) : key;
-    const canonicalTerm = termAliases.get(term) || term;
-    const canonicalKey = `${year}__${canonicalTerm}`;
-    const current = result[canonicalKey];
-    result[canonicalKey] = current
-      ? { start: current.start < range.start ? current.start : range.start, end: current.end > range.end ? current.end : range.end }
-      : range;
-    return result;
-  }, {} as Record<string, { start: string; end: string }>);
+  const canonicalRanges = mergeTermRangesByAlias(termRanges, termAliases);
   const activeCurriculum = curriculumRows
     .filter(row => row && row.grade && row.subject && (row.course_name || row.unit))
     .map(row => ({ ...row, term: termAliases.get(String(row.term || '').trim()) || row.term }))

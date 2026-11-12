@@ -476,6 +476,17 @@ export default function TrophyModal({ isOpen, onClose, userData, canUseShop = tr
                      </div>
                    ))}
                  </div>
+                 {(() => {
+                   const next = bonusList.find(item => item.isNext);
+                   const receivedToday = lastLoginBonusDate === getTodayString();
+                   return (
+                     <p className={`mt-2 rounded-btn px-3 py-2 text-sm font-bold ${receivedToday ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`} role="status">
+                       {receivedToday
+                         ? `今日のボーナスは受け取り済みです。${next ? `明日ホームを開くと +${next.amount} コインもらえます。` : ''}`
+                         : '今日のボーナスはまだです。ホームを開くと受け取れます。'}
+                     </p>
+                   );
+                 })()}
                  <p className="mt-2 text-xs text-fg-muted">※1日1回、ホーム表示時に自動でログインボーナスが付与されます</p>
                </div>
              </div>

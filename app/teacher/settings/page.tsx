@@ -4,7 +4,9 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useAuth } from '@/app/context/AuthContext';
 import { auth, db } from '@/lib/firebase';
-import { signInWithEmailAndPassword, signOut } from 'firebase/auth';
+import { signOut } from 'firebase/auth';
+import { changeOwnPassword, PasswordChangeError } from '@/lib/client-password-change';
+import { minPasswordLength, passwordPolicyError } from '@/lib/password-policy';
 import { PASSWORD_CHANGED_RELOGIN_MESSAGE, passwordChangedButReloginFailed } from '@/lib/password-change-error';
 import { doc, updateDoc } from 'firebase/firestore';
 import { 
@@ -44,6 +46,7 @@ export default function TeacherSettingsPage() {
   const [hasChanges, setHasChanges] = useState(false);
 
   // パスワード関連
+  const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [isPasswordExpanded, setIsPasswordExpanded] = useState(false);
@@ -137,28 +140,19 @@ export default function TeacherSettingsPage() {
   };
 
   const handleChangePassword = async () => {
+    if (!currentPassword) return showMessage('error', '今のパスワードを入力してください');
     if (!newPassword || newPassword !== confirmPassword) return showMessage('error', '新しいパスワードと確認用が一致しません');
-    if (newPassword.length < 6) return showMessage('error', 'パスワードは6文字以上で入力してください');
+    const policyError = passwordPolicyError(newPassword, profile?.role || 'teacher', [profile?.lifetime_id]);
+    if (policyError) return showMessage('error', policyError);
     if (!user) return showMessage('error', 'ログイン情報を確認できません');
     setLoading(true);
     try {
-      const token = await user.getIdToken();
-      const res = await fetch('/api/auth/change-password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ password: newPassword }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.ok) throw new Error(data.error || 'password-change-failed');
-      if (!user.email) throw new Error('missing-auth-email');
-      sessionStorage.removeItem(`classbase_profile_cache:${user.uid}`);
-      const refreshedCredential = await signInWithEmailAndPassword(auth, user.email, newPassword);
-      await refreshedCredential.user.getIdToken(true);
+      await changeOwnPassword(user, { password: newPassword, currentPassword });
       showMessage('success', 'パスワードを変更し、ログイン状態を更新しました');
-      setNewPassword(''); setConfirmPassword(''); setIsPasswordExpanded(false);
+      setCurrentPassword(''); setNewPassword(''); setConfirmPassword(''); setIsPasswordExpanded(false);
     } catch(e) {
       if (passwordChangedButReloginFailed(e)) { showMessage('success', PASSWORD_CHANGED_RELOGIN_MESSAGE); await signOut(auth).catch(() => undefined); window.setTimeout(() => window.location.replace('/'), 2500); return; }
-      showMessage('error', 'パスワードを変更できませんでした。もう一度お試しください。');
+      showMessage('error', e instanceof PasswordChangeError ? e.message : 'パスワードを変更できませんでした。もう一度お試しください。');
     }
     finally { setLoading(false); }
   };
@@ -365,10 +359,11 @@ export default function TeacherSettingsPage() {
             audience="teacher"
           />
           {!isPasswordExpanded ? (
-            <button type="button" onClick={() => setIsPasswordExpanded(true)} className="mt-2 flex min-h-11 w-full items-center justify-between py-3 text-left text-sm font-bold text-fg-muted hover:text-fg"><span>パスワードを変更する（今のパスワードは不要）</span><ChevronRight size={16} aria-hidden /></button>
+            <button type="button" onClick={() => setIsPasswordExpanded(true)} className="mt-2 flex min-h-11 w-full items-center justify-between py-3 text-left text-sm font-bold text-fg-muted hover:text-fg"><span>パスワードを変更する</span><ChevronRight size={16} aria-hidden /></button>
           ) : (
             <div className="mt-3 space-y-3">
-              <p className="text-xs font-medium text-fg-muted">新しいパスワード（6文字以上）を2回入力してください。今のパスワードは入力しなくて大丈夫です。</p>
+              <p className="text-xs font-medium text-fg-muted">今のパスワードと、新しいパスワード（{minPasswordLength(profile?.role || 'teacher')}文字以上）を2回入力してください。今のパスワードを忘れたときは、校舎で変更してもらってください。</p>
+              <input type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} className={inputClass} placeholder="今のパスワード" aria-label="今のパスワード" autoComplete="current-password" />
               <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className={inputClass} placeholder="新しいパスワード" aria-label="新しいパスワード" autoComplete="new-password" />
               <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className={inputClass} placeholder="確認用" aria-label="新しいパスワード（確認用）" autoComplete="new-password" />
               <div className="flex justify-end gap-2">

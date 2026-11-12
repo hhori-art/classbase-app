@@ -2,6 +2,7 @@
 
 import NumericNameNotice from '@/app/components/NumericNameNotice';
 import { useState, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { db } from '@/lib/firebase';
@@ -81,6 +82,9 @@ export default function StudentDashboard() {
   const [requiredTransferError, setRequiredTransferError] = useState(false);
   // 振替の選択・確認を後回しにした（授業の直前でも授業に入れるように）。ホームの上にお知らせを出し、押すと開き直す。
   const [transferDeferred, setTransferDeferred] = useState(false);
+  // 振替の画面は body の直下に出す（スマホのブラウザで、ページ内の重なり順に閉じ込められてボトムナビの下に隠れないように）。
+  const [portalReady, setPortalReady] = useState(false);
+  useEffect(() => { setPortalReady(true); }, []);
   const [requiredTransferReload, setRequiredTransferReload] = useState(0);
   const [selectedTransferId, setSelectedTransferId] = useState('');
   const [transferSubmitting, setTransferSubmitting] = useState(false);
@@ -425,8 +429,8 @@ export default function StudentDashboard() {
         </div>
       )}
 
-      {requiredTransferError && !transferDeferred && !isTeacherPreview && (
-        <div className="fixed inset-0 z-[270] flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
+      {portalReady && requiredTransferError && !transferDeferred && !isTeacherPreview && createPortal(
+        <div className="fixed inset-0 z-[270] flex items-center justify-center bg-slate-950/70 px-4 pb-[calc(88px+env(safe-area-inset-bottom))] pt-[calc(env(safe-area-inset-top)+1rem)]">
           <div role="alertdialog" aria-modal="true" aria-labelledby="required-transfer-error-title" className="w-full max-w-md rounded-hero bg-surface p-6 text-center shadow-2xl">
             <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-btn bg-danger-soft text-danger">
               <AlertTriangle size={28} aria-hidden />
@@ -449,11 +453,13 @@ export default function StudentDashboard() {
             </Button>
           </div>
         </div>
-      )}
+      , document.body)}
 
-      {requiredTransfer && !transferDeferred && !isTeacherPreview && (
-        <div className="fixed inset-0 z-[260] flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
-          <div role="dialog" aria-modal="true" aria-labelledby="required-transfer-title" className="relative max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-hero bg-surface p-6 shadow-2xl">
+      {portalReady && requiredTransfer && !transferDeferred && !isTeacherPreview && createPortal(
+        // 下のボトムナビ（約88px）にかからないよう、その分だけ下を空けて、確定ボタンは枠の下に固定する。
+        <div className="fixed inset-0 z-[260] flex items-center justify-center bg-slate-950/70 px-4 pb-[calc(88px+env(safe-area-inset-bottom))] pt-[calc(env(safe-area-inset-top)+1rem)]">
+          <div role="dialog" aria-modal="true" aria-labelledby="required-transfer-title" className="relative flex max-h-full w-full max-w-lg flex-col overflow-hidden rounded-hero bg-surface shadow-2xl">
+            <div className="min-h-0 flex-1 overflow-y-auto p-6 pb-4">
             {(!Array.isArray(requiredTransfer.options) || requiredTransfer.options.length === 0) && (
               <button
                 type="button"
@@ -512,10 +518,11 @@ export default function StudentDashboard() {
                 </div>
               )}
             </div>
+            </div>
+            <div className="shrink-0 border-t border-line bg-surface px-6 pb-4 pt-3">
             <Button
               size="lg"
               fullWidth
-              className="mt-5"
               onClick={submitRequiredTransfer}
               loading={transferSubmitting}
               disabled={!selectedTransferId || !requiredTransfer.options?.length}
@@ -528,9 +535,10 @@ export default function StudentDashboard() {
                 あとで選ぶ
               </Button>
             )}
+            </div>
           </div>
         </div>
-      )}
+      , document.body)}
 
       <div className={`${theme.heroBg} pt-10 ${density.heroBottom} px-6 ${headerStyle.heroShape} relative overflow-hidden`}>
         <div className={`absolute top-[-50px] right-[-50px] w-40 h-40 ${theme.heroAccent} rounded-full blur-2xl transition-transform ${headerStyle.decoration}`}></div>

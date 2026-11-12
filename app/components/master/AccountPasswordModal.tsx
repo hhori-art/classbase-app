@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { CheckCircle2, Eye, EyeOff, KeyRound, RefreshCw } from 'lucide-react';
 import { auth } from '@/lib/firebase';
 import { generateInitialPassword } from '@/lib/password';
+import { BASIC_PASSWORD_MIN_LENGTH, passwordPolicyError } from '@/lib/password-policy';
 import { Button, Modal, useConfirm, useToast } from '@/app/components/ui';
 import { userErrorMessage } from '@/lib/user-error';
 
@@ -17,7 +18,8 @@ type Props = {
   onChanged?: () => void;
 };
 
-const MIN_LENGTH = 6;
+// 生徒・保護者のパスワードのきまり（lib/password-policy.ts）。
+const MIN_LENGTH = BASIC_PASSWORD_MIN_LENGTH;
 
 /** 校舎管理者・マスターが、生徒または保護者アカウントのパスワードを変更する。 */
 export default function AccountPasswordModal({ student, onClose, onChanged }: Props) {
@@ -45,14 +47,42 @@ export default function AccountPasswordModal({ student, onClose, onChanged }: Pr
   };
 
   const fillGenerated = () => {
-    const generated = generateInitialPassword(8);
+    const generated = generateInitialPassword(10);
     setPassword(generated);
     setConfirmation(generated);
     setVisible(true);
   };
 
+  // ログインに続けて失敗してロックされたアカウントを解く（KDL診断 A.1.2）。
+  const [releasing, setReleasing] = useState(false);
+  const releaseLock = async () => {
+    if (!targetUserId) return;
+    setReleasing(true);
+    try {
+      const token = await auth.currentUser?.getIdToken(true);
+      if (!token) throw new Error('ログイン情報を確認できませんでした。再ログインしてください。');
+      const response = await fetch('/api/admin/accounts/login-lock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ user_id: targetUserId }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || body.ok === false) throw new Error(body.error || 'ロックを解けませんでした。');
+      toast.success(body.removed ? `${targetLabel}のロックを解きました。` : 'ロックはかかっていませんでした。');
+    } catch (error: any) {
+      toast.error(userErrorMessage(error, 'ロックを解けませんでした。'));
+    } finally {
+      setReleasing(false);
+    }
+  };
+
   const submit = async () => {
     if (!canSubmit) return;
+    const policyError = passwordPolicyError(password, target, [targetLoginId]);
+    if (policyError) {
+      toast.error(policyError);
+      return;
+    }
     if (!(await confirm({
       title: `「${targetLabel}」のパスワードを変更しますか？`,
       message: '変更すると、今ログインしている端末はログアウトされます。',
@@ -126,6 +156,10 @@ export default function AccountPasswordModal({ student, onClose, onChanged }: Pr
             ID：<span className="font-mono font-bold text-slate-900">{targetLoginId || '-'}</span>
             <span className="ml-2 text-slate-400">{activated ? '（ログイン済み）' : '（未ログイン）'}</span>
           </p>
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-btn border border-line bg-white px-4 py-3 text-xs font-bold text-slate-600">
+            <span>ログインに続けて失敗してロックされたときは、パスワードを変えずにロックだけ解けます。</span>
+            <Button variant="secondary" size="sm" onClick={() => void releaseLock()} loading={releasing} disabled={!targetUserId}>ロックを解く</Button>
+          </div>
           <p className="rounded-btn border border-amber-100 bg-amber-50 px-4 py-3 text-xs font-bold leading-5 text-amber-800">
             本人が設定したパスワードも上書きされます。変更すると、ログイン中の端末はログアウトされ、新しいパスワードでのログインが必要になります。
           </p>

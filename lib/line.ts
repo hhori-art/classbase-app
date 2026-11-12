@@ -154,6 +154,8 @@ export async function getNotificationSettings() {
     clock_out_missing_enabled: data.clock_out_missing_enabled !== false,
     transfer_reminder_enabled: data.transfer_reminder_enabled !== false,
     dedicated_report_reminder_enabled: data.dedicated_report_reminder_enabled !== false,
+    // 保護者への月のレポートの案内は、管理者がオンにするまで送らない。
+    parent_monthly_report_enabled: data.parent_monthly_report_enabled === true,
     student_line_enabled: data.student_line_enabled !== false,
     parent_line_enabled: data.parent_line_enabled !== false,
     teacher_line_enabled: data.teacher_line_enabled !== false,

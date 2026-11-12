@@ -1,13 +1,14 @@
 'use client';
 
 import { useState } from 'react';
-import { signInWithEmailAndPassword, signOut } from 'firebase/auth';
+import { signOut } from 'firebase/auth';
 import { PASSWORD_CHANGED_RELOGIN_MESSAGE, passwordChangedButReloginFailed } from '@/lib/password-change-error';
 import { Eye, EyeOff, Loader2, LockKeyhole } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
 import { auth } from '@/lib/firebase';
 import { targetPathForProfile } from '@/lib/auth-navigation';
-import { minPasswordLength } from '@/lib/password-policy';
+import { minPasswordLength, passwordPolicyError } from '@/lib/password-policy';
+import { changeOwnPassword, PasswordChangeError } from '@/lib/client-password-change';
 
 export default function RequiredPasswordChangePage() {
   const { user, profile, loading: authLoading } = useAuth();
@@ -21,28 +22,19 @@ export default function RequiredPasswordChangePage() {
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!user || !profile) return setMessage('ログイン情報を確認できません。画面を再読み込みしてください。');
-    if (password.length < minLength) return setMessage(`パスワードは${minLength}文字以上で入力してください。`);
+    const policyError = passwordPolicyError(password, profile.role, [profile.lifetime_id]);
+    if (policyError) return setMessage(policyError);
     if (password !== confirmation) return setMessage('確認用パスワードが一致しません。');
     setSaving(true);
     setMessage('');
     try {
-      const token = await user.getIdToken(true);
-      const response = await fetch('/api/auth/change-password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ password }),
-      });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok || body.ok === false) throw new Error(body.error || 'password-change-failed');
-      if (!user.email) throw new Error('missing-auth-email');
-      sessionStorage.removeItem(`classbase_profile_cache:${user.uid}`);
-      const credential = await signInWithEmailAndPassword(auth, user.email, password);
-      await credential.user.getIdToken(true);
+      // 初回ログインの直後なので、今のパスワードは聞かない（その場で入れたばかりのため）。
+      await changeOwnPassword(user, { password });
       window.location.replace(targetPathForProfile({ ...profile, isFirstLogin: false }));
     } catch (error) {
       console.error('Required password change failed:', error);
       if (passwordChangedButReloginFailed(error)) { setMessage(PASSWORD_CHANGED_RELOGIN_MESSAGE); await signOut(auth).catch(() => undefined); window.setTimeout(() => window.location.replace('/'), 2500); return; }
-      setMessage('パスワードを変更できませんでした。通信環境を確認して、もう一度お試しください。');
+      setMessage(error instanceof PasswordChangeError ? error.message : 'パスワードを変更できませんでした。通信環境を確認して、もう一度お試しください。');
       setSaving(false);
     }
   };

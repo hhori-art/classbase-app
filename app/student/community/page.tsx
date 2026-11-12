@@ -9,10 +9,10 @@ import {
 import { 
   MessageCircle, Heart, MessageSquare, Plus, Send, Loader2, 
   ChevronDown, ChevronUp, UserCircle, X, Trash2, PlusCircle,
-  BarChart2, MessagesSquare, LayoutGrid, Flag, Hourglass
+  BarChart2, MessagesSquare, LayoutGrid, Flag, Hourglass, Footprints
 } from 'lucide-react';
 import { formatDate } from '@/lib/format';
-import { Button, EmptyState, ErrorState, IconButton, ListSkeleton, Modal, PageHeader, StatusPill, useToast } from '@/app/components/ui';
+import { Button, ButtonLink, EmptyState, ErrorState, IconButton, ListSkeleton, Modal, PageHeader, StatusPill, useToast } from '@/app/components/ui';
 import { COMMUNITY_REPORT_REASONS, type CommunityReportReason } from '@/lib/community-reports';
 
 type ReportTarget = { type: 'topic' | 'comment'; topicId: string; commentId?: string; excerpt: string };
@@ -262,7 +262,7 @@ export default function CommunityPage() {
         )}
       </Modal>
 
-      <PageHeader tone="hero" title="交流掲示板" description="ここは参加者同士に公開される交流の場です。運営からの正式連絡は「お知らせ」、教室への個別連絡は専用画面で確認してください。" icon={MessageCircle} backHref="/student" />
+      <PageHeader tone="hero" title="交流掲示板" description="ここは参加者同士に公開される交流の場です。運営からの正式連絡は「お知らせ」、教室への個別連絡は専用画面で確認してください。" icon={MessageCircle} backHref="/student" actions={<ButtonLink href="/student/community/plaza" variant="secondary" icon={<Footprints size={18} aria-hidden />}>3Dの広場を歩く</ButtonLink>} />
 
       {/* レスポンシブレイアウト: PCでは2カラム、スマホでは1カラム */}
       <div className="flex flex-col items-start gap-6 lg:flex-row">

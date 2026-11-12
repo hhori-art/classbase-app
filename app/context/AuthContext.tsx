@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import {
   onAuthStateChanged,
+  onIdTokenChanged,
   User,
   signOut as firebaseSignOut,
   setPersistence,
@@ -14,7 +15,8 @@ import { auth, db } from '@/lib/firebase';
 import { passwordChangePathForRole, shouldRedirectToPasswordChange } from '@/lib/first-login-guard';
 import { AuthRole, isPublicAuthPath, isRoleScopedPath, profileMatchesPath, targetPathForProfile } from '@/lib/auth-navigation';
 import { loadAuthenticatedProfile } from '@/lib/client-auth-profile';
-import { signInWithNetworkRetry } from '@/lib/client-auth-login';
+import { loginWithServer } from '@/lib/client-auth-login';
+import { clearAdminBrowserSession, hasAdminBrowserSession, isAdminBrowserRole } from '@/lib/admin-browser-session';
 import { clearCourseRegistrationOptionsCache } from '@/lib/client-course-options';
 import { cleanupThisDevicePushOnLogout } from '@/app/hooks/useWebPush';
 
@@ -170,6 +172,23 @@ const touchLastLogin = async (uid: string) => {
     console.warn('Last login timestamp update failed:', error);
   }
 };
+
+/** サーバーでこのアカウントのログインを取り消す（ログアウトしたあと、前のトークンで操作できないように）。 */
+async function revokeServerSession() {
+  const current = auth.currentUser;
+  if (!current) return;
+  try {
+    const token = await current.getIdToken();
+    await fetch('/api/auth/logout', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      cache: 'no-store',
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch (error) {
+    console.warn('Server logout failed:', error);
+  }
+}
 
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const pathname = usePathname();
@@ -333,8 +352,11 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     clearAuthUiState(true);
 
     try {
-      // この端末の通知登録を外してからサインアウトする（失敗してもログアウトは続ける）。
+      // この端末の通知登録を外し、サーバーでもログインを取り消してからサインアウトする（KDL診断 B.3.1）。
+      // 取り消すと、ほかの端末のログインも切れる。失敗してもログアウトは続ける。
       await cleanupThisDevicePushOnLogout();
+      await revokeServerSession();
+      clearAdminBrowserSession();
       await firebaseSignOut(auth);
     } catch (error) {
       console.error('Logout error:', error);
@@ -356,6 +378,14 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     currentPath: string,
     options: { cache?: boolean } = {},
   ) => {
+    // 管理者・マスターは、ブラウザを閉じたらログアウトする（KDL診断 E.2.4）。
+    // この端末だけのログアウトなので、サーバーでの取り消し（ほかの端末も切れる）はしない。
+    if (isAdminBrowserRole(normalizedProfile.role) && !hasAdminBrowserSession()) {
+      logoutInProgressRef.current = true;
+      clearProfileCache(normalizedProfile.uid);
+      void firebaseSignOut(auth).catch(console.error).finally(() => window.location.replace('/admin/login?reason=session-ended'));
+      return true;
+    }
     if (options.cache !== false) writeCachedProfile(normalizedProfile);
     setProfile(normalizedProfile);
 
@@ -649,15 +679,25 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       }
     });
 
+    // 同じ人がログインし直したとき（パスワード変更のあとなど）は onAuthStateChanged が呼ばれない
+    // （Firebase は uid が変わったときだけ知らせる）。古い User のままだと、取り消されたトークンで
+    // API を呼び続けて 401 になるので、新しい User に入れ替える。1時間ごとのトークン更新では
+    // User は同じものなので、ここでは何も起きない。
+    const unsubToken = onIdTokenChanged(auth, (currentUser) => {
+      if (!currentUser || currentUser.uid !== lastAuthenticatedUidRef.current) return;
+      setUser(previous => (previous && previous.uid === currentUser.uid && previous !== currentUser ? currentUser : previous));
+    });
+
     return () => {
       window.clearTimeout(initWatchdog);
       unsub();
+      unsubToken();
     };
   }, []);
 
-  const login = async (email: string, pass: string) => {
+  const login = async (loginId: string, pass: string) => {
     if (typeof window !== 'undefined') sessionStorage.removeItem(FORCE_LOGOUT_KEY);
-    await signInWithNetworkRetry(auth, email, pass);
+    await loginWithServer(loginId, pass);
   };
 
   const renderPath = pathname || clientPath || '';

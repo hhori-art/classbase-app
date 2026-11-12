@@ -6,7 +6,9 @@ import { useAuth } from '@/app/context/AuthContext';
 import { useSettings } from '@/app/context/SettingsContext';
 import { auth, db } from '@/lib/firebase';
 import { doc, updateDoc } from 'firebase/firestore';
-import { signInWithEmailAndPassword, signOut } from 'firebase/auth';
+import { signOut } from 'firebase/auth';
+import { changeOwnPassword, PasswordChangeError } from '@/lib/client-password-change';
+import { BASIC_PASSWORD_MIN_LENGTH, passwordPolicyError } from '@/lib/password-policy';
 import { PASSWORD_CHANGED_RELOGIN_MESSAGE, passwordChangedButReloginFailed } from '@/lib/password-change-error';
 import {
   User, Lock, LogOut, ChevronRight,
@@ -80,6 +82,7 @@ export default function StudentSettingsPage() {
   const { play } = useSound(settings.sound_se !== false);
 
   // パスワード関連
+  const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [isPasswordExpanded, setIsPasswordExpanded] = useState(false);
@@ -350,7 +353,7 @@ export default function StudentSettingsPage() {
         '案内書面に記載されたログインURLを開きます。',
         'IDとパスワードを半角で入力します。前後に空白が入っていないか確認します。',
         'ログイン後にパスワード変更が必要な場合は、設定画面の「セキュリティ」から変更します。',
-        '新しいパスワードは6文字以上で、確認欄にも同じものを入力します。',
+        '今のパスワードと、新しいパスワード（8文字以上）を入力し、確認欄にも同じものを入力します。',
       ],
       trouble: [
         '何度試しても入れない場合は、ID書面の再発行またはパスワード初期化が必要です。',
@@ -360,28 +363,19 @@ export default function StudentSettingsPage() {
   ].filter(Boolean) as ManualItem[];
 
   const handleChangePassword = async () => {
+    if (!currentPassword) return showMessage('error', '今のパスワードを入力してください');
     if (!newPassword || newPassword !== confirmPassword) return showMessage('error', 'パスワードが一致しません');
-    if (newPassword.length < 6) return showMessage('error', 'パスワードは6文字以上で入力してください');
+    const policyError = passwordPolicyError(newPassword, 'student', [profile?.lifetime_id]);
+    if (policyError) return showMessage('error', policyError);
     if (!user) return showMessage('error', 'ログイン情報を確認できません');
     setLoading(true);
     try {
-      const token = await user.getIdToken();
-      const res = await fetch('/api/auth/change-password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ password: newPassword }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.ok) throw new Error(data.error || 'password-change-failed');
-      if (!user.email) throw new Error('missing-auth-email');
-      sessionStorage.removeItem(`classbase_profile_cache:${user.uid}`);
-      const refreshedCredential = await signInWithEmailAndPassword(auth, user.email, newPassword);
-      await refreshedCredential.user.getIdToken(true);
+      await changeOwnPassword(user, { password: newPassword, currentPassword });
       showMessage('success', 'パスワードを変更し、ログイン状態を更新しました');
-      setNewPassword(''); setConfirmPassword(''); setIsPasswordExpanded(false);
+      setCurrentPassword(''); setNewPassword(''); setConfirmPassword(''); setIsPasswordExpanded(false);
     } catch(e) {
       if (passwordChangedButReloginFailed(e)) { showMessage('success', PASSWORD_CHANGED_RELOGIN_MESSAGE); await signOut(auth).catch(() => undefined); window.setTimeout(() => window.location.replace('/'), 2500); return; }
-      showMessage('error', 'パスワードを変更できませんでした。もう一度お試しください。');
+      showMessage('error', e instanceof PasswordChangeError ? e.message : 'パスワードを変更できませんでした。もう一度お試しください。');
     }
     finally { setLoading(false); }
   };
@@ -839,11 +833,12 @@ export default function StudentSettingsPage() {
           audience="student"
         />
         {!isPasswordExpanded ? (
-          <button type="button" onClick={() => setIsPasswordExpanded(true)} className="mt-2 flex min-h-11 w-full items-center justify-between py-3 text-left font-bold text-fg-muted hover:text-fg"><span>パスワードを変更する（今のパスワードは不要）</span><ChevronRight size={18} aria-hidden /></button>
+          <button type="button" onClick={() => setIsPasswordExpanded(true)} className="mt-2 flex min-h-11 w-full items-center justify-between py-3 text-left font-bold text-fg-muted hover:text-fg"><span>パスワードを変更する</span><ChevronRight size={18} aria-hidden /></button>
         ) : (
           <div className="mt-4 space-y-4">
-            <p className="text-xs font-medium text-fg-muted">新しいパスワード（6文字以上）を2回入力してください。今のパスワードは入力しなくて大丈夫です。</p>
-            <input type="password" aria-label="新しいパスワード" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="min-h-11 w-full rounded-input border border-line bg-canvas p-3 font-medium text-fg outline-none focus:border-accent focus:ring-2 focus:ring-accent/20" placeholder="新しいパスワード" />
+            <p className="text-xs font-medium text-fg-muted">今のパスワードと、新しいパスワード（{BASIC_PASSWORD_MIN_LENGTH}文字以上）を2回入力してください。今のパスワードを忘れたときは、校舎で変更してもらってください。</p>
+            <input type="password" autoComplete="current-password" aria-label="今のパスワード" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} className="min-h-11 w-full rounded-input border border-line bg-canvas p-3 font-medium text-fg outline-none focus:border-accent focus:ring-2 focus:ring-accent/20" placeholder="今のパスワード" />
+            <input type="password" autoComplete="new-password" aria-label="新しいパスワード" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="min-h-11 w-full rounded-input border border-line bg-canvas p-3 font-medium text-fg outline-none focus:border-accent focus:ring-2 focus:ring-accent/20" placeholder="新しいパスワード" />
             <input type="password" aria-label="確認用" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className="min-h-11 w-full rounded-input border border-line bg-canvas p-3 font-medium text-fg outline-none focus:border-accent focus:ring-2 focus:ring-accent/20" placeholder="確認用" />
             <div className="flex justify-end gap-2">
               <Button variant="ghost" onClick={() => setIsPasswordExpanded(false)}>キャンセル</Button>

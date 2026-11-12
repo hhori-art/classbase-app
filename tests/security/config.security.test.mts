@@ -6,7 +6,7 @@ import nextConfig from '../../next.config.mjs';
 import { middleware } from '../../middleware.ts';
 
 test('全ルートに主要セキュリティヘッダーを設定する', async () => {
-  const entries = await nextConfig.headers();
+  const entries = (await nextConfig.headers?.()) ?? [];
   const allRoutes = entries.find(entry => entry.source === '/:path*');
   assert.ok(allRoutes);
   const headers = new Map<string, string>(allRoutes.headers.map(item => [item.key.toLowerCase(), String(item.value)]));
@@ -17,6 +17,22 @@ test('全ルートに主要セキュリティヘッダーを設定する', async
   assert.match(headers.get('content-security-policy') || '', /default-src 'self'/);
   assert.match(headers.get('content-security-policy') || '', /frame-ancestors 'none'/);
   assert.match(headers.get('permissions-policy') || '', /geolocation=\(\)/);
+  // 'unsafe-eval' なしの CSP を報告だけで試す（違反の受け口つき）。
+  const reportOnly = headers.get('content-security-policy-report-only') || '';
+  assert.match(reportOnly, /report-uri \/api\/security\/csp-report/);
+  assert.match(reportOnly, /frame-ancestors 'none'/);
+  if (process.env.NODE_ENV === 'production') assert.doesNotMatch(reportOnly, /'unsafe-eval'/);
+});
+
+test('API の応答はブラウザや途中の経路に保存させない', async () => {
+  const entries = (await nextConfig.headers?.()) ?? [];
+  const api = entries.find(entry => entry.source === '/api/:path*');
+  assert.ok(api);
+  assert.equal(api.headers.find(item => item.key.toLowerCase() === 'cache-control')?.value, 'no-store');
+  const apiResponse = middleware(new NextRequest('https://security.test/api/apps', { headers: { 'x-forwarded-for': '203.0.113.10' } }));
+  assert.equal(apiResponse.headers.get('cache-control'), 'no-store');
+  const pageResponse = middleware(new NextRequest('https://security.test/student', { headers: { 'x-forwarded-for': '203.0.113.10' } }));
+  assert.equal(pageResponse.headers.get('cache-control'), null);
 });
 
 test('通常本番は変動IPでもmaster画面を通し、認証と役割で制御する', () => {
@@ -100,6 +116,9 @@ test('API共通認証はトークン欠落を401へ変換する', () => {
   const source = fs.readFileSync('lib/server-auth.ts', 'utf8');
   // 攻撃の監視へ記録してから 401 にする（記録は書き込みだけで、応答は変えない）。
   assert.match(source, /if \(!token\)\s*\{\s*recordSecurityEvent\(\{ kind: 'unauthorized', request \}\);\s*throw new Error\('missing-token'\)/);
-  assert.match(source, /message === 'missing-token' \|\|/);
-  assert.match(source, /authenticationExpired \? 401/);
+  // エラー応答は lib/api-error.ts の jsonError にまとめた（server-auth はそれを公開するだけ）。
+  assert.match(source, /export \{ jsonError[^}]*\} from '@\/lib\/api-error'/);
+  const apiError = fs.readFileSync('lib/api-error.ts', 'utf8');
+  assert.match(apiError, /if \(message === 'missing-token' \|\| REAUTH_FIREBASE_CODES\.includes\(codeText\)\) \{\s*return \{ status: 401,/);
+  assert.match(apiError, /'auth\/id-token-revoked'/);
 });

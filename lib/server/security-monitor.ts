@@ -21,7 +21,10 @@ import {
  *  - しきい値を超えた IP・アカウント（1日あたり最大20件。短い期間では10件）
  *  - 期間内の管理操作の監査ログ（最大200件。短い期間では50件）
  *
- * いまは1日1回（Vercel Cron、毎朝7時）。有料プランに切り替えたら5分ごとに変え、hours=1 で直近だけを見る。
+ * Vercel Cron（Pro プラン）で2本動かす。
+ *  - 5分ごと（hours=1）：直近1時間を見て、攻撃に早く気づく。同じ1時間のうちに知らせた内容は繰り返さない
+ *    （新しい種類の出来事が見つかったときだけ知らせる）。
+ *  - 毎朝7時（hours=24）：1日分をまとめて見る（少しずつ続く攻撃や、Node.js の版の確認）。
  */
 
 /** しきい値（1日あたりの目安）。hours を短くしたときは時間の割合で下げる（最低値あり）。 */
@@ -129,6 +132,42 @@ export function evaluateAuditLogs(logs: Array<{ action: string; actor_name?: str
   return findings;
 }
 
+/** その日のその時（日本時間）の集計が、監視する期間に入るか。 */
+export function hourInWindow(day: string, hour: string, since: Date, now: Date) {
+  const at = new Date(`${day}T${hour}:59:59+09:00`);
+  return !(at < since || at.getTime() - 60 * 60 * 1000 > now.getTime());
+}
+
+/**
+ * IP・アカウント別の集計のうち、監視する期間に入る分。
+ * 集計は1日ごとなので、時間ごとの内訳（hours）から期間内の分だけを足す。これをしないと、1時間ごとの監視が
+ * その日の朝の出来事を、日付が変わるまで毎時間知らせ直してしまう。
+ * 時間ごとの内訳がない古い集計は、1日分の監視（wholeDayFallback）でだけ日の合計を使う。
+ */
+export function subjectCountsInWindow(
+  day: string,
+  data: { total?: unknown; kinds?: Record<string, unknown>; hours?: Record<string, Record<string, unknown>> },
+  since: Date,
+  now: Date,
+  wholeDayFallback: boolean,
+): { total: number; kinds: Partial<Record<SecurityEventKind, number>> } | null {
+  const kinds: Partial<Record<SecurityEventKind, number>> = {};
+  if (!data.hours || typeof data.hours !== 'object') {
+    if (!wholeDayFallback) return null;
+    Object.entries(data.kinds || {}).forEach(([kind, value]) => { kinds[kind as SecurityEventKind] = Number(value || 0); });
+    return { total: Number(data.total || 0), kinds };
+  }
+  let total = 0;
+  Object.entries(data.hours).forEach(([hour, perKind]) => {
+    if (!hourInWindow(day, hour, since, now)) return;
+    Object.entries(perKind || {}).forEach(([kind, value]) => {
+      kinds[kind as SecurityEventKind] = Number(kinds[kind as SecurityEventKind] || 0) + Number(value || 0);
+      total += Number(value || 0);
+    });
+  });
+  return { total, kinds };
+}
+
 /** 監視結果をメールでも受け取る宛先（Vercel の環境変数 SECURITY_ALERT_EMAILS、カンマ区切り）。 */
 /**
  * 実行中の Node.js が、既知の脆弱性を直した版より古くないか。Vercel は修正版を自動で配るが時期は選べないため、毎日確かめる。
@@ -170,6 +209,12 @@ async function emailSecurityAlert(runKey: string, subject: string, body: string)
   return { sent: results.filter(item => item.ok).length, failed: results.filter(item => !item.ok).map(item => item.error || 'unknown') };
 }
 
+/** まだ知らせていない出来事だけ（同じ1時間の記録に残した見出しと比べる）。 */
+export function newSecurityFindings(findings: SecurityFinding[], notifiedTitles: unknown) {
+  const already = new Set(Array.isArray(notifiedTitles) ? notifiedTitles.map(String) : []);
+  return findings.filter(item => !already.has(item.title));
+}
+
 /** 監視を1回実行する。結果を保存し、見つかったものがあればマスターへ（設定があればメールでも）知らせる。 */
 export async function runSecurityMonitor(options: { hours?: number; now?: Date; testEmail?: boolean } = {}) {
   const hours = Math.min(48, Math.max(1, Math.round(options.hours || 24)));
@@ -186,8 +231,7 @@ export async function runSecurityMonitor(options: { hours?: number; now?: Date; 
     // 期間の端の日は、時間ごとの集計から期間内の分だけを足す。
     const hoursMap = (data.hours || {}) as Record<string, Partial<Record<SecurityEventKind, number>>>;
     Object.entries(hoursMap).forEach(([hour, kinds]) => {
-      const at = new Date(`${snap.id}T${hour}:59:59+09:00`);
-      if (at < since || at.getTime() - 60 * 60 * 1000 > now.getTime()) return;
+      if (!hourInWindow(snap.id, hour, since, now)) return;
       Object.entries(kinds || {}).forEach(([kind, value]) => {
         counts[kind as SecurityEventKind] = Number(counts[kind as SecurityEventKind] || 0) + Number(value || 0);
       });
@@ -202,14 +246,16 @@ export async function runSecurityMonitor(options: { hours?: number; now?: Date; 
     .where('total', '>=', subjectFloor).orderBy('total', 'desc').limit(subjectLimit).get()));
   type Subject = { type: 'ip' | 'account'; value: string; total: number; kinds: Partial<Record<SecurityEventKind, number>>; last_path?: string };
   const subjects = new Map<string, Subject>();
-  subjectSnaps.flatMap(snap => snap.docs).forEach(doc => {
+  subjectSnaps.forEach((snap, index) => snap.docs.forEach(doc => {
     const data = doc.data() || {};
+    const inWindow = subjectCountsInWindow(days[index], data, since, now, hours >= 24);
+    if (!inWindow || inWindow.total <= 0) return;
     const key = `${data.type}:${data.value}`;
     const current: Subject = subjects.get(key) || { type: data.type === 'account' ? 'account' : 'ip', value: String(data.value || ''), total: 0, kinds: {} };
     const kinds = { ...current.kinds };
-    Object.entries(data.kinds || {}).forEach(([kind, value]) => { kinds[kind as SecurityEventKind] = Number(kinds[kind as SecurityEventKind] || 0) + Number(value || 0); });
-    subjects.set(key, { ...current, total: current.total + Number(data.total || 0), kinds, last_path: data.last_path || current.last_path });
-  });
+    Object.entries(inWindow.kinds).forEach(([kind, value]) => { kinds[kind as SecurityEventKind] = Number(kinds[kind as SecurityEventKind] || 0) + Number(value || 0); });
+    subjects.set(key, { ...current, total: current.total + inWindow.total, kinds, last_path: data.last_path || current.last_path });
+  }));
 
   const auditSnap = await db.collection('admin_audit_logs')
     .where('created_at', '>=', Timestamp.fromDate(since))
@@ -222,28 +268,41 @@ export async function runSecurityMonitor(options: { hours?: number; now?: Date; 
   const findings = [
     ...evaluateSecurityCounts({ hours, counts, subjects: Array.from(subjects.values()) }),
     ...evaluateAuditLogs(logs, hours),
-    ...evaluateRuntimeVersion(process.version),
+    // Node.js の版は1日1回の確認だけで知らせる（5分ごとの実行で毎時間知らせないため）。
+    ...(hours >= 24 ? evaluateRuntimeVersion(process.version) : []),
   ].sort((a, b) => (a.severity === b.severity ? 0 : a.severity === 'high' ? -1 : 1));
 
-  const runKey = `${jstDayKey(now)}_${String(jstHour(now)).padStart(2, '0')}`;
-  await db.collection('security_monitor_reports').doc(runKey).set({
+  // 結果は1時間ごとに1件（1日分の確認は別の記録）。5分ごとの実行は同じ記録を更新する。
+  const frequent = hours < 24;
+  const runKey = `${jstDayKey(now)}_${String(jstHour(now)).padStart(2, '0')}${frequent ? '' : '_daily'}`;
+  const reportRef = db.collection('security_monitor_reports').doc(runKey);
+  const previous: FirebaseFirestore.DocumentData = frequent && findings.length ? (await reportRef.get()).data() || {} : {};
+  const fresh = newSecurityFindings(findings, previous.notified_titles);
+  const notifiedTitles = Array.from(new Set([
+    ...(Array.isArray(previous.notified_titles) ? previous.notified_titles.map(String) : []),
+    ...fresh.map(item => item.title),
+  ]));
+  await reportRef.set({
     run_at: FieldValue.serverTimestamp(),
     hours,
     counts,
     findings,
+    // 知らせたものがないときは書かない（前の実行で知らせた記録を消さないため）。
+    ...(fresh.length ? { notified_titles: notifiedTitles } : {}),
     subjects_checked: subjects.size,
     audit_logs_checked: logs.length,
     expires_at: Timestamp.fromMillis(now.getTime() + 90 * 24 * 60 * 60 * 1000),
-  });
+  }, { merge: true });
 
   let notified = 0;
   let email = { sent: 0, failed: [] as string[] };
-  if (findings.length) {
+  if (fresh.length) {
+    // 同じ実行の再送で通知が重ならないよう、知らせる内容ごとにIDを固定する。
+    const notifyKey = frequent ? `${runKey}_${notifiedTitles.length}` : runKey;
     const recipients = (await loadSchoolStaffRecipients(null)).filter(item => item.isMaster);
     const high = findings.filter(item => item.severity === 'high').length;
     notified = await notifyStaff(recipients, {
-      // 同じ実行の再送で通知が重ならないよう、実行ごとにIDを固定する。
-      idPrefix: `security_monitor_${runKey}`,
+      idPrefix: `security_monitor_${notifyKey}`,
       title: high ? `セキュリティ監視：要確認 ${findings.length}件（重要 ${high}件）` : `セキュリティ監視：確認 ${findings.length}件`,
       message: [
         `直近${hours}時間の監視結果です。`,
@@ -256,7 +315,7 @@ export async function runSecurityMonitor(options: { hours?: number; now?: Date; 
       extra: { finding_count: findings.length, high_count: high },
     });
     email = await emailSecurityAlert(
-      runKey,
+      notifyKey,
       `【classbase】${high ? `セキュリティ監視：要確認 ${findings.length}件（重要 ${high}件）` : `セキュリティ監視：確認 ${findings.length}件`}`,
       [
         `classbase-app のセキュリティ監視で、直近${hours}時間に確認が必要な出来事が見つかりました。`,

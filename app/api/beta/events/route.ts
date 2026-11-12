@@ -2,6 +2,8 @@ import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, jsonError } from '@/lib/server-auth';
+import { currentUsageLevel } from '@/lib/server/usage-guard';
+import { shouldSkipInSavingMode } from '@/lib/usage-guard';
 
 export const runtime = 'nodejs';
 
@@ -46,6 +48,10 @@ const eventCountFields = (events: Array<{ type: string; feature: string }>) => {
 
 export async function POST(request: NextRequest) {
   try {
+    // 節約モードでは利用ログを受け取らない（ログイン確認もしないで返し、CPU を使わない）。
+    if (shouldSkipInSavingMode('beta_events', await currentUsageLevel(), new Date())) {
+      return Response.json({ ok: true, skipped: 'usage-saving' }, { status: 202 });
+    }
     const user = await getServerUser(request);
     const parsedBody: unknown = await request.json();
     const body = parsedBody && typeof parsedBody === 'object' && !Array.isArray(parsedBody)

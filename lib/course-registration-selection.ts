@@ -355,11 +355,28 @@ export const selectEffectiveCourseRegistration = (
 };
 
 /** 単元名の羅列を除き、登録済みの講座と曜日・時限を一度ずつ表示する。 */
+const COURSE_FIELD_PATTERN = /物理|化学|生物|地学|地理|歴史|公民/;
+const COURSE_NAME_KEEP_PATTERN = /^(?:[小中高]\d|理科|社会|数学|英語|国語)$/;
+
+/**
+ * 受講講座の名前（「/」の前）から、単元名（「植物の分類」など）を外す。
+ * 残すのは学年・教科・分野（物理・化学・生物・地学・地理・歴史・公民、「地理B」「公民①」なども含む）だけ。
+ * 外すと何も残らないときは、もとの名前のままにする。
+ */
+export const stripCourseUnitName = (name: string) => {
+  const tokens = String(name || '').trim().split(/\s+/).filter(Boolean);
+  const kept = tokens.filter(token => COURSE_NAME_KEEP_PATTERN.test(token.normalize('NFKC')) || COURSE_FIELD_PATTERN.test(token));
+  return kept.length > 0 ? kept.join(' ') : tokens.join(' ');
+};
+
 export const summarizeSelectedCourseLabels = (labels: Iterable<string>) => {
   const seen = new Set<string>();
   return Array.from(labels).map(label => String(label || '').trim())
     .filter(Boolean)
-    .map(label => label.split(/\s+\/\s+/).slice(0, 2).join(' / '))
+    .map(label => {
+      const [name = '', ...rest] = label.split(/\s+\/\s+/);
+      return [stripCourseUnitName(name), ...rest].slice(0, 2).join(' / ');
+    })
     .filter(label => {
       const key = label.normalize('NFKC').replace(/\s+/g, '').toLowerCase();
       if (seen.has(key)) return false;

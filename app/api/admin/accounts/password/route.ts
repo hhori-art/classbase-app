@@ -4,7 +4,8 @@ import { adminAuth, adminDb } from '@/lib/firebase-admin';
 import { canManageSchool, getServerUser, jsonError, requireRole } from '@/lib/server-auth';
 import { writeLearningEvent } from '@/lib/events';
 import { writeAuditLog } from '@/lib/server/audit-log';
-import { minPasswordLength } from '@/lib/password-policy';
+import { passwordPolicyError } from '@/lib/password-policy';
+import { clearInitialPasswordWrites, initialPasswordWrites } from '@/lib/server/account-secrets';
 
 export const runtime = 'nodejs';
 
@@ -19,10 +20,6 @@ export async function POST(request: NextRequest) {
     const userId = String(body.user_id || '').trim();
     const password = String(body.password || '');
     if (!userId) return Response.json({ ok: false, error: '対象アカウントを選択してください。' }, { status: 400 });
-    if (password.length < 6 || password.length > 128) {
-      return Response.json({ ok: false, error: '新しいパスワードは6〜128文字で入力してください。' }, { status: 400 });
-    }
-
     const db = adminDb();
     const userRef = db.collection('users').doc(userId);
     const snapshot = await userRef.get();
@@ -36,26 +33,27 @@ export async function POST(request: NextRequest) {
         return Response.json({ ok: false, error: '担当校舎の生徒・保護者アカウントのみ変更できます。' }, { status: 403 });
       }
     }
-    const minLength = minPasswordLength(targetRole);
-    if (password.length < minLength) {
-      return Response.json({ ok: false, error: `このアカウントのパスワードは${minLength}文字以上で入力してください。` }, { status: 400 });
-    }
+    const policyError = passwordPolicyError(password, targetRole, [profile.lifetime_id, profile.initial_login_id, profile.email]);
+    if (policyError) return Response.json({ ok: false, error: policyError }, { status: 400 });
 
     await adminAuth().updateUser(userId, { password });
     await adminAuth().revokeRefreshTokens(userId);
 
+    // 初回ログイン前なら、初期パスワードとしてハッシュで置く（KDL診断 A.3.1。平文はどこにも置かない）。
     const firstLoginCompleted = profile.isFirstLogin === false;
-    await userRef.set({
-      // 初回ログイン後のPWはFirestoreに保存しない。
-      initial_password: firstLoginCompleted ? FieldValue.delete() : password,
-      raw_password: firstLoginCompleted ? FieldValue.delete() : password,
-      password: FieldValue.delete(),
+    const secretWrites = firstLoginCompleted ? clearInitialPasswordWrites(userId) : initialPasswordWrites(userId, password, actor.uid);
+    const batch = db.batch();
+    if ('secret' in secretWrites) batch.set(secretWrites.secretRef, secretWrites.secret);
+    else batch.delete(secretWrites.secretRef);
+    batch.set(userRef, {
+      ...secretWrites.userPatch,
       password_changed_at: FieldValue.serverTimestamp(),
       password_changed_by: actor.uid,
       credentials_synced_at: FieldValue.serverTimestamp(),
       credentials_synced_by: actor.uid,
       updated_at: FieldValue.serverTimestamp(),
     }, { merge: true });
+    await batch.commit();
 
     try {
       await writeLearningEvent({

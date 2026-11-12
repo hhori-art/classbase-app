@@ -1533,7 +1533,9 @@ function SegmentCard({ recordId, segment, canReject, canUnlock, processing, onRe
   onToggleSelection: (recordId: string, segmentId: string) => void;
 }) {
   // バーから開いたときは、その勤務の編集を最初から開く（承認済み・閲覧のみは内容の表示だけ）。
-  const [editing, setEditing] = useState(() => focused && segment.can_review && segment.type !== 'break' && segment.approval_status !== 'approved');
+  // 休憩は承認しないが、間違えて入った休憩（自動で入ったものを含む）は校舎の承認者が直せる（can_edit）。
+  const breakEditable = segment.type === 'break' && segment.can_edit === true;
+  const [editing, setEditing] = useState(() => focused && (breakEditable || (segment.can_review && segment.type !== 'break' && segment.approval_status !== 'approved')));
   const [draft, setDraft] = useState<SegmentEdit>(() => segmentDraft(segment));
   const cardRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -1555,7 +1557,7 @@ function SegmentCard({ recordId, segment, canReject, canUnlock, processing, onRe
     if (await onSaveEdit(recordId, segment.id, draft)) setEditing(false);
   };
   return (
-    <div ref={cardRef} className={`overflow-hidden rounded-card border motion-safe:transition ${selected ? 'border-indigo-400 bg-indigo-50 ring-2 ring-indigo-200' : segmentToneClass(segment, 'card')} ${focused ? 'ring-2 ring-accent' : ''} ${reviewable ? '' : 'opacity-75'}`}>
+    <div ref={cardRef} className={`overflow-hidden rounded-card border motion-safe:transition ${selected ? 'border-indigo-400 bg-indigo-50 ring-2 ring-indigo-200' : segmentToneClass(segment, 'card')} ${focused ? 'ring-2 ring-accent' : ''} ${reviewable || breakEditable ? '' : 'opacity-75'}`}>
       <div className={`px-3 py-2.5 ${reviewable && (segment.approval_status || 'pending') === 'pending' ? 'border-l-4 border-l-amber-400' : reviewable && segment.approval_status === 'rejected' ? 'border-l-4 border-l-rose-400' : ''}`}>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex min-w-0 items-start gap-2.5">
@@ -1586,6 +1588,13 @@ function SegmentCard({ recordId, segment, canReject, canUnlock, processing, onRe
             setDraft(segmentDraft(segment));
             setEditing(false);
           }} />
+        )}
+        {breakEditable && !editing && (
+          <div className="mt-2 flex flex-wrap items-center justify-end gap-1.5">
+            <button type="button" disabled={editBusy} onClick={() => setEditing(true)} className={`inline-flex min-h-9 items-center gap-1 rounded-btn border border-indigo-200 bg-white px-2.5 text-xs font-bold text-indigo-700 motion-safe:transition hover:bg-indigo-50 disabled:opacity-50 ${focusRing}`}>
+              <Pencil size={13} />休憩を直す
+            </button>
+          </div>
         )}
         {reviewable && !editing && (
           <div className="mt-2 flex flex-wrap items-center justify-end gap-1.5">

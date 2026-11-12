@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server';
 import { unstable_cache } from 'next/cache';
 import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, isAdminLike, jsonError } from '@/lib/server-auth';
-import { enrichCourseOptionsWithShifts } from '@/lib/course-registration-match';
+import { enrichCourseOptionsWithShifts, registrationTermRanges } from '@/lib/course-registration-match';
 import { canStudentRegisterCourseOption, normalizeCourseGrade } from '@/lib/course-registration-rules';
 import { getAllQueryDocuments } from '@/lib/server/firestore-pagination';
 import { isTestPrepShift } from '@/lib/class-button-settings';
@@ -13,6 +13,7 @@ import { periodFromShift } from '@/lib/student-course-schedule';
 import { issueCourseRegistrationToken } from '@/lib/server/course-registration-token';
 import { canIssueCourseRegistrationGrantForContext } from '@/lib/course-registration-window';
 import { jstSchoolYear } from '@/lib/date-key';
+import { memoizeForInstance } from '@/lib/server/instance-memo';
 
 export const runtime = 'nodejs';
 
@@ -187,11 +188,13 @@ const getCachedCourseSourceData = unstable_cache(async (year: number) => {
       allShiftRows: shiftDocs.map(doc => compactShiftSource({ id: doc.id, ...doc.data() })),
     };
 }, ['course-registration-source-v3-term-start'], {
-  revalidate: 300,
+  // 講座・カリキュラム・配置を変えたときは tag で作り直すので、時間での作り直しは30分ごとで足りる（CPU を抑える）。
+  revalidate: 1800,
   tags: ['course-registration-options'],
 });
 
-const getCachedCourseOptions = unstable_cache(async (requestedGrade: string, year: number) => {
+// 共有キャッシュから大きな結果を取り出して組み立て直すと1回1秒以上の CPU を使うので、同じインスタンスでは60秒だけ手元で使い回す。
+const getCachedCourseOptions = memoizeForInstance(unstable_cache(async (requestedGrade: string, year: number) => {
     const {
       allOptions,
       allCurriculumRows,
@@ -237,7 +240,8 @@ const getCachedCourseOptions = unstable_cache(async (requestedGrade: string, yea
       options,
       test_prep_definitions: testPrepDefinitions
         .filter(definition => canStudentUseTestPrepDefinition(requestedGrade, definition)),
-      term_ranges: termRanges,
+      // 候補の期ID（代表の期）でも日付を引けるようにする（中3の期は別IDで登録されている）。
+      term_ranges: registrationTermRanges(rawOptions, termRanges),
       source_counts: {
         options: rawOptions.length,
         curriculum: curriculumRows.length,
@@ -253,10 +257,11 @@ const getCachedCourseOptions = unstable_cache(async (requestedGrade: string, yea
       },
     };
     return payload;
-}, ['course-registration-options-v27-chu3-term-period'], {
-  revalidate: 300,
+}, ['course-registration-options-v28-canonical-term-ranges'], {
+  // 講座・カリキュラム・配置を変えたときは tag で作り直すので、時間での作り直しは30分ごとで足りる（CPU を抑える）。
+  revalidate: 1800,
   tags: ['course-registration-options'],
-});
+}), 60_000);
 
 export async function GET(request: NextRequest) {
   try {

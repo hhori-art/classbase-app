@@ -1,7 +1,7 @@
 import 'server-only';
 import { cleanSecurityText, recordSecurityEvent, type SecurityEventKind } from '@/lib/server/security-events';
 
-const LOGIN_FAILURE_ERRORS = new Set(['wrong-password', 'wrong-initial-password', 'not-registered']);
+const LOGIN_FAILURE_ERRORS = new Set(['wrong-password', 'wrong-initial-password', 'not-registered', 'too-many-attempts']);
 
 /**
  * ログイン系の API を包み、回数制限での拒否（429）とログイン失敗（ID・パスワード違い）を記録する。

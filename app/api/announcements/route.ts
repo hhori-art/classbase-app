@@ -144,7 +144,7 @@ export async function POST(request: NextRequest) {
     const attachments = [];
     for (const file of files) {
       const attachmentId = crypto.randomUUID(), path = `announcement_attachments/${ref.id}/${attachmentId}-${safeName(file.name)}`;
-      await adminBucket().file(path).save(Buffer.from(await file.arrayBuffer()), { resumable: false, metadata: { contentType: file.type, cacheControl: 'private,max-age=300' } });
+      await adminBucket().file(path).save(Buffer.from(await file.arrayBuffer()), { resumable: false, metadata: { contentType: file.type, cacheControl: 'private, no-store' } });
       uploaded.push(path);
       attachments.push({ id: attachmentId, name: clean(file.name, 160), content_type: file.type, size: file.size, path });
     }

@@ -6,7 +6,7 @@ import { canonicalPeriodForGradeSubject, enrichCourseOptionsWithShifts, fixedPer
 import { courseOptionMatchesSelection, currentCourseTermIds, selectEffectiveCourseRegistration } from '@/lib/course-registration-selection';
 import { canStudentUseTransferOption } from '@/lib/course-registration-rules';
 import { getCourseSubjectGroup, normalizeCourseText, toAsciiDigits } from '@/lib/course-text';
-import { looksLikeZoomUrl, normalizeZoomMeetingId } from '@/lib/zoom-url';
+import { isZoomHostStartUrl, looksLikeZoomUrl, normalizeZoomMeetingId } from '@/lib/zoom-url';
 import { loadStudentClassMasters } from '@/lib/server/student-class-masters';
 import { issueTransferOptionToken } from '@/lib/server/transfer-option-token';
 import { normalizeClassButtonSettings } from '@/lib/class-button-settings';
@@ -78,16 +78,18 @@ const getShiftMeetingId = (shift: any) => normalizeZoomMeetingId(
   ''
 );
 
-const getShiftJoinUrl = (shift: any) => String(
-  shift.merge_join_url ||
-  shift.target_url ||
-  shift.zoom_url ||
-  shift.join_url ||
-  shift.meeting_url ||
-  shift.url ||
-  (looksLikeZoomUrl(shift.target_meeting_id) ? shift.target_meeting_id : '') ||
-  ''
-).trim();
+// ホスト開始用のURL（/s/・zak=）は生徒に渡さない。開くとホストのアカウントの名前で入ってしまう。
+const getShiftJoinUrl = (shift: any) => [
+  shift.merge_join_url,
+  shift.target_url,
+  shift.zoom_url,
+  shift.join_url,
+  shift.meeting_url,
+  shift.url,
+  looksLikeZoomUrl(shift.target_meeting_id) ? shift.target_meeting_id : '',
+]
+  .map(value => String(value || '').trim())
+  .find(value => value && !isZoomHostStartUrl(value)) || '';
 
 const isStudentVisibleShift = (shift: any) => (
   String(shift.role_type || 'main') === 'main' &&

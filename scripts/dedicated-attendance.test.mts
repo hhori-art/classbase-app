@@ -3,7 +3,7 @@ import test from 'node:test';
 import { extractOvertimeIntervals, lessonMinutes, normalizeDedicatedSchedule, totalOvertimeMinutes } from '../lib/dedicated-attendance.ts';
 
 test('dedicated schedule uses safe defaults', () => {
-  assert.deepEqual(normalizeDedicatedSchedule({}), { start_time: '09:00', end_time: '18:00', break_minutes: 60, work_days: [1, 2, 3, 4, 5] });
+  assert.deepEqual(normalizeDedicatedSchedule({}), { start_time: '09:00', end_time: '18:00', break_minutes: 60, work_days: [1, 2, 3, 4, 5], extend_side: 'before' });
 });
 
 test('overtime before and after prescribed hours is extracted', () => {

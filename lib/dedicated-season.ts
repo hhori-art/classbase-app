@@ -3,9 +3,9 @@
  * 各自が講習の授業コマを登録すると、授業時間を自動で合計し、基準授業時間を超えた分を手当として試算する。
  *
  *  過剰授業時間 ＝ 期間中の総授業時間 － 基準授業時間（－ 4等級以下は 時間外合計 ÷ 4 × 3）
- *  基準授業時間 ＝ 1日あたりの分 × 日曜とお盆を除いた講習日数（本部所属などは別に決めた分）
- *  手当 ＝ 過剰授業時間 × 等級ごとの時給
- * 5等級は時間外勤務手当と比べて多いほうだけを支給するので、ここでは両方を出し、支給の判断は給与担当が行う。
+ *  基準授業時間 ＝ 講習時の勤怠規則に書かれている分数（区分ごとに入れる。空のときだけ 1日あたりの分 × 講習日数）
+ *  手当 ＝ 過剰授業時間 × 本人の時間外単価（2026-10-26 給与担当の回答。等級ごとの時給は使わない）
+ * 5等級は時間外勤務手当と比べて多いほうを支給する（比べ方は dedicated-month の buildSeasonView）。
  */
 
 import type { DedicatedDivision } from './dedicated-overtime';
@@ -34,6 +34,7 @@ export type DedicatedSeason = {
   /** 基準授業時間（分）。空のときは 1日あたりの分 × 講習日数。 */
   baselines: Partial<Record<BaselineType, number>>;
   courses: SeasonCourse[];
+  /** 以前の等級ごとの時給。今は本人の時間外単価で計算するので使わない（保存済みのデータのために残す）。 */
   rates: SeasonRates;
   /** 4等級以下は時間外4時間につき180分を過剰授業に含めて差し引く。 */
   deduct_overtime_for_grade4_or_below: boolean;
@@ -191,9 +192,6 @@ export function seasonBaselineMinutes(season: DedicatedSeason, division: Dedicat
   return fixed != null ? fixed : season.per_day_minutes * seasonLessonDays(season, division);
 }
 
-export const seasonRateFor = (season: DedicatedSeason, grade: number | null) =>
-  grade == null ? 0 : grade >= 5 ? season.rates.grade5plus : grade >= 3 ? season.rates.grade3to4 : season.rates.grade1to2;
-
 export type SeasonAllowance = {
   lesson_minutes: number;
   pending_minutes: number;
@@ -206,6 +204,8 @@ export type SeasonAllowance = {
   /** 5等級は時間外勤務手当と比べて多いほうを支給する。 */
   compare_with_overtime: boolean;
   grade_missing: boolean;
+  /** 時間外単価が未設定（手当は0円で出る）。 */
+  rate_missing: boolean;
 };
 
 export function computeSeasonAllowance(input: {
@@ -213,6 +213,8 @@ export function computeSeasonAllowance(input: {
   division: DedicatedDivision;
   baselineType: BaselineType;
   grade: number | null;
+  /** 本人の時間外単価（円/時）。 */
+  unitRate: number | null | undefined;
   approvedLessonMinutes: number;
   pendingLessonMinutes?: number;
   /** 講習期間中の時間外（支給対象）の合計（分）。 */
@@ -223,7 +225,7 @@ export function computeSeasonAllowance(input: {
     ? Math.floor((input.overtimeMinutes / 4) * 3)
     : 0;
   const excess = Math.max(0, input.approvedLessonMinutes - baseline - deduct);
-  const rate = seasonRateFor(input.season, input.grade);
+  const rate = Math.max(0, Math.round(Number(input.unitRate) || 0));
   return {
     lesson_minutes: input.approvedLessonMinutes,
     pending_minutes: input.pendingLessonMinutes || 0,
@@ -231,8 +233,9 @@ export function computeSeasonAllowance(input: {
     overtime_deduction_minutes: deduct,
     excess_minutes: excess,
     rate,
-    amount: Math.floor((excess * rate) / 60),
+    amount: Math.ceil((excess * rate) / 60),
     compare_with_overtime: input.grade === 5,
     grade_missing: input.grade == null,
+    rate_missing: rate <= 0,
   };
 }

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { NextRequest } from 'next/server';
 import { adminDb } from '@/lib/firebase-admin';
-import { getServerUser, jsonError, requireScienceSocialStaff } from '@/lib/server-auth';
+import { getServerUser, internalErrorResponse, jsonError, requireScienceSocialStaff } from '@/lib/server-auth';
 import { consumeRateLimit } from '@/lib/server/password-recovery';
 import OpenAI from 'openai';
 
@@ -184,7 +184,6 @@ export async function POST(req: NextRequest) {
     const message = String(error?.message || '');
     const code = String(error?.code || '');
     if (['missing-token', 'forbidden', 'profile-not-found'].includes(message) || code.startsWith('auth/')) return jsonError(error);
-    console.error('API Error:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return internalErrorResponse(error, { message: '分析に失敗しました', context: 'teacher-analyze-risk' });
   }
 }

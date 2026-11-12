@@ -38,7 +38,7 @@ export default function PasswordRecoveryRequestsPage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [workingId, setWorkingId] = useState('');
-  const [issuedLink, setIssuedLink] = useState<{ code: string; url: string } | null>(null);
+  const [issuedLink, setIssuedLink] = useState<{ code: string; url: string; expiresAt: string } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -94,7 +94,7 @@ export default function PasswordRecoveryRequestsPage() {
       const data = await response.json();
       if (!response.ok || !data.token) throw new Error(data.error || 'リンクを発行できませんでした');
       const url = `${window.location.origin}/password-reset/confirm?token=${encodeURIComponent(data.token)}`;
-      setIssuedLink({ code: item.request_code, url });
+      setIssuedLink({ code: item.request_code, url, expiresAt: String(data.expires_at || '') });
       await updateStatus(item, 'resolved');
     } catch (error) {
       toast.error(userErrorMessage(error, 'リンクを発行できませんでした'));
@@ -119,7 +119,10 @@ export default function PasswordRecoveryRequestsPage() {
 
       {issuedLink && (
         <div className="mt-5 rounded-card border border-emerald-200 bg-emerald-50 p-4">
-          <p className="font-bold text-emerald-950">{issuedLink.code} の再設定リンクを発行しました（有効期限1時間）</p>
+          <p className="font-bold text-emerald-950">
+            {issuedLink.code} の再設定リンクを発行しました（有効期限10分{issuedLink.expiresAt ? `・${formatDateTime(issuedLink.expiresAt) || ''}まで` : ''}）
+          </p>
+          <p className="mt-1 text-xs font-bold leading-5 text-emerald-900">すぐに本人へ伝えてください。1回だけ使え、前に発行したリンクは使えなくなります。期限が切れたら、もう一度発行してください。</p>
           <div className="mt-3 flex gap-2">
             <input readOnly aria-label="再設定リンク" value={issuedLink.url} className="min-h-11 min-w-0 flex-1 rounded-input border border-line bg-white px-3 text-sm" />
             <Button variant="secondary" className="shrink-0" icon={<Clipboard size={16} aria-hidden />} onClick={() => navigator.clipboard.writeText(issuedLink.url).then(() => toast.success('リンクをコピーしました'), () => toast.error('コピーできませんでした。リンクを選択してコピーしてください。'))}>コピー</Button>

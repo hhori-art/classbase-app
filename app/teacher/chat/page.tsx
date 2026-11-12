@@ -23,7 +23,10 @@ export default function TeacherChatPage() {
   const authHeaders = useCallback(async () => ({ Authorization: `Bearer ${await user!.getIdToken()}` }), [user]);
   const loadOverview = useCallback(async () => {
     if (!user) return; setLoading(true); setOverviewError(false);
-    try { const res = await fetch('/api/teacher/chat', { headers: await authHeaders(), cache: 'no-store' }); const data = await res.json(); if (!res.ok || !data.ok) throw new Error(data.error); setStudents(data.students || []); setInquiries(data.inquiries || []); }
+    try { const res = await fetch('/api/teacher/chat', { headers: await authHeaders(), cache: 'no-store' }); const data = await res.json(); if (!res.ok || !data.ok) throw new Error(data.error); setStudents(data.students || []); setInquiries(data.inquiries || []);
+      // 声かけリストの「返信する」から来たときは、その生徒を開く（初回だけ）。
+      const requested = new URLSearchParams(window.location.search).get('student');
+      if (requested) { const target = (data.students || []).find((student: Student) => student.id === requested); if (target) setSelected(current => current || target); window.history.replaceState(null, '', window.location.pathname); } }
     catch (error) { console.error(error); setOverviewError(true); toast.error('担当生徒のチャット一覧を読み込めませんでした。'); } finally { setLoading(false); }
   }, [authHeaders, toast, user]);
   const loadMessages = useCallback(async (student: Student) => {

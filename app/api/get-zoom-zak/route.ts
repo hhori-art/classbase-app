@@ -207,7 +207,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (!zoomEmail || !requestedMeetingId) {
-      return NextResponse.json({ success: false, error: 'Email and meeting ID are required' }, { status: 400 });
+      return NextResponse.json({ success: false, error: 'メールアドレスとミーティングIDが必要です。' }, { status: 400 });
     }
 
     const emailAccess = adminAccess || authorizedByExplicitShift
@@ -254,7 +254,7 @@ export async function POST(request: NextRequest) {
       if (fallbackStartUrl) {
         return NextResponse.json({ success: true, start_url: fallbackStartUrl, fallback: 'start_url' });
       }
-      return NextResponse.json({ success: false, error: 'API Credentials missing' }, { status: 500 });
+      return NextResponse.json({ success: false, error: 'Zoom の接続設定がありません。管理者に連絡してください。' }, { status: 500 });
     }
 
 
@@ -275,9 +275,11 @@ export async function POST(request: NextRequest) {
       if (fallbackStartUrl) {
         return NextResponse.json({ success: true, start_url: fallbackStartUrl, fallback: 'start_url' });
       }
+      // Zoom の返した文言は見せず、ログにだけ残す。
+      console.error(JSON.stringify({ type: 'zoom_zak_token_error', status: tokenRes.status, reason: String(errorBody.reason || errorBody.message || '').slice(0, 300) }));
       return NextResponse.json({
         success: false,
-        error: `Zoom認証に失敗しました: ${errorBody.reason || errorBody.message || tokenRes.status}`,
+        error: 'Zoom の認証に失敗しました。時間をおいてもう一度お試しください。',
       }, { status: 500 });
     }
     const tokenData = await tokenRes.json();
@@ -300,10 +302,11 @@ export async function POST(request: NextRequest) {
       const scopeHint = zoomMessage.includes('user:read:token')
         ? 'Zoom Marketplaceで Server-to-Server OAuth アプリに user:read:token:admin または user:read:token のスコープを追加してください。'
         : '';
+      console.error(JSON.stringify({ type: 'zoom_zak_error', status: zakRes.status, message: zoomMessage.slice(0, 300) }));
       return NextResponse.json({
         success: false,
         error: `ZAKトークンを取得できません: ${zoomEmail}`,
-        detail: [zoomMessage || String(zakRes.status), scopeHint].filter(Boolean).join(' / '),
+        ...(scopeHint ? { detail: scopeHint } : {}),
       }, { status: 500 });
     }
     const zakData = await zakRes.json();

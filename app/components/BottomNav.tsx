@@ -3,11 +3,14 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { Bell, Home, Users, Settings } from 'lucide-react';
+import { useAuth } from '@/app/context/AuthContext';
 import { usePortalVisibility } from '@/app/hooks/usePortalVisibility';
+import { isStudentFeatureEnabled } from '@/lib/portal-feature-access';
 import { useUnreadNotificationCount } from '@/app/components/student/useUnreadNotificationCount';
 
 export default function BottomNav() {
   const pathname = usePathname();
+  const { profile } = useAuth();
   const { visibility } = usePortalVisibility('student');
   const unreadCount = useUnreadNotificationCount(visibility.notifications !== false);
 
@@ -23,7 +26,8 @@ export default function BottomNav() {
       label: '掲示板',
       path: '/student/community',
       icon: Users,
-      visible: visibility.community !== false,
+      // 全体設定でオフでも、マスターが個別に許可した生徒（テスト用アカウントなど）には出す。
+      visible: isStudentFeatureEnabled(visibility, profile, 'community'),
     },
     {
       label: '通知',

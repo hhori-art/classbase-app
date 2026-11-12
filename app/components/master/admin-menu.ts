@@ -1,6 +1,6 @@
 import {
-  Activity, AlertTriangle, Archive, BarChart2, Bell, BookOpen, BookOpenCheck, Briefcase, Calendar, CalendarRange,
-  CheckSquare, ClipboardList, Clock, Database, DollarSign, FileText, GraduationCap, History, Home, Inbox, KeyRound, Languages,
+  Activity, AlertTriangle, Archive, BarChart2, Bell, Camera, BookOpen, BookOpenCheck, Briefcase, Calendar, CalendarRange,
+  CheckSquare, ClipboardCheck, ClipboardList, Clock, Database, DollarSign, FileText, GraduationCap, History, Home, Inbox, KeyRound, Languages,
   ListChecks, Megaphone, Palette, MessageCircle, Printer, Send, Settings, ShieldCheck, ShoppingBag, Sparkles, Train, UserSearch, UsersRound, Video,
   type LucideIcon, MessageSquareWarning } from 'lucide-react';
 import {
@@ -75,6 +75,8 @@ export const ADMIN_MENU: AdminMenuSection[] = [
       { key: 'reviewPeriods', title: 'テスト対策（復習期間）', description: '期間・単元・対策講座の受講登録', icon: BookOpenCheck, href: '/master/review-periods', app: 'science_social' },
       { key: 'recordings', title: '授業録画', description: '録画の承認・公開', icon: Video, href: '/master/recordings', app: 'science_social' },
       { key: 'lessonLanguage', title: '授業の発言チェック', description: '文字起こしからNGワードを検知', icon: MessageSquareWarning, href: '/master/lesson-language', app: 'science_social' },
+      { key: 'lessonAnalysis', title: '授業の振り返り', description: '文字起こしとカメラON率から授業ごとに', icon: ClipboardCheck, href: '/master/lesson-analysis', app: 'science_social' },
+      { key: 'cameraRates', title: '授業のカメラON率', description: '先生ごと・授業ごとのON率と続けてオフの生徒', icon: Camera, href: '/master/camera-rates', app: 'science_social' },
       { key: 'slides', title: '授業スライド', description: 'スライドとAIクエスト', icon: FileText, href: '/master/slides', app: 'science_social' },
       { key: 'rewards', title: 'コイン・景品', description: 'コイン・景品・ガチャ・発送', icon: ShoppingBag, href: '/master/rewards', app: 'science_social' },
       { key: 'stats', title: '講座運用分析', description: '開始率・退会率・レポート送信', icon: BarChart2, href: '/master/stats', app: 'science_social' },
@@ -130,6 +132,7 @@ export const ADMIN_MENU: AdminMenuSection[] = [
     id: 'system', title: 'システム設定（マスター）', icon: ShieldCheck, tone: 'slate',
     items: [
       { key: 'settings', title: 'システム設定', description: 'Zoom・授業ボタン・表示・通知チャネル・メンテナンス', icon: Settings, href: '/master/settings', app: 'global' },
+      { key: 'famZoomRooms', title: 'FAMキャンパスの教室', description: '席から Zoom をホストで開始するURL', icon: Video, href: '/master/fam-zoom-rooms', app: 'global' },
       { key: 'auditLogs', title: '操作ログ', description: '管理者の重要な操作の記録', icon: History, href: '/master/audit-logs', app: 'global' },
       { key: 'uiGuide', title: 'UIガイド', description: '共通の色・形・文字・部品の見本', icon: Palette, href: '/master/ui-guide', app: 'global' },
     ],

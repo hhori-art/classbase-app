@@ -82,7 +82,9 @@ export async function POST(request: NextRequest) {
       const scopeHint = /scope|permission/i.test(message)
         ? ' Zoom Marketplaceで meeting:write:admin を追加してください。'
         : '';
-      return Response.json({ ok: false, success: false, error: `Zoomミーティングを発行できませんでした: ${message}${scopeHint}` }, { status: 502 });
+      // Zoom の返した文言は見せず、ログにだけ残す。
+      console.error(JSON.stringify({ type: 'zoom_create_meeting_error', status: zoomResponse.status, message }));
+      return Response.json({ ok: false, success: false, error: `Zoomミーティングを発行できませんでした。${scopeHint}`.trim() }, { status: 502 });
     }
 
     const meetingId = normalizeZoomMeetingId(zoom.id);

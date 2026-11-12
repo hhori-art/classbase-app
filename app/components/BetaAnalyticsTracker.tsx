@@ -17,7 +17,8 @@ type QueuedBetaEvent = {
 };
 
 const SESSION_KEY = 'classbase_beta_session_id';
-const FLUSH_INTERVAL_MS = 30_000;
+// 送信のたびにサーバー（Vercel の CPU）を使うため、2分ごとにまとめて送る。画面を閉じる・隠すときは即時に送る。
+const FLUSH_INTERVAL_MS = 120_000;
 const MAX_BATCH_SIZE = 25;
 const MAX_QUEUED_EVENTS = 100;
 

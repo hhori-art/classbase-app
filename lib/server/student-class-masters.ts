@@ -2,9 +2,10 @@ import 'server-only';
 
 import { unstable_cache } from 'next/cache';
 import { adminDb } from '@/lib/firebase-admin';
+import { memoizeForInstance } from '@/lib/server/instance-memo';
 
 /** 生徒向け授業・振替判定で共通利用する、更新頻度の低いマスタ。 */
-export const loadStudentClassMasters = unstable_cache(async () => {
+export const loadStudentClassMasters = memoizeForInstance(unstable_cache(async () => {
   const db = adminDb();
   const [optionSnap, curriculumSnap, testPrepOptionSnap, classButtonSettingsSnap] = await Promise.all([
     db.collection('course_registration_options').limit(1000).get(),
@@ -21,4 +22,4 @@ export const loadStudentClassMasters = unstable_cache(async () => {
 }, ['student-class-masters-v1'], {
   revalidate: 300,
   tags: ['course-registration-options', 'student-class-masters'],
-});
+}), 60_000);

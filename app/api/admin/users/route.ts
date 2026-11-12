@@ -5,6 +5,9 @@ import { adminAuth, adminDb } from '@/lib/firebase-admin';
 import { canManageSchool, getServerUser, jsonError, requireMaster, ServerUser } from '@/lib/server-auth';
 import { writeAuditLog } from '@/lib/server/audit-log';
 import { generateInitialPassword } from '@/lib/password';
+import { setInitialPassword } from '@/lib/server/account-secrets';
+import { minPasswordLength, passwordPolicyError } from '@/lib/password-policy';
+import { FieldValue } from 'firebase-admin/firestore';
 import {
   findAccountProfileDocs,
   normalizeAccountLoginId,
@@ -125,7 +128,8 @@ export async function GET(request: NextRequest) {
       .map(doc => ({ id: doc.id, uid: doc.id, ...doc.data() }))
       .filter((item: any) => actor.role === 'master' || canManageSchool(actor, item.school_id || item.school || item.classroom || null))
       .map((item: any) => {
-        const { raw_password, ...safe } = item;
+        // 初期パスワードは一覧に載せない（KDL診断 A.3.1）。書面を刷るときだけ、別の通信で取り出す。
+        const { raw_password: _raw, initial_password: _initial, password: _password, parent_initial_password: _parent, ...safe } = item;
         return safe;
       });
 
@@ -245,7 +249,13 @@ export async function POST(request: NextRequest) {
       const prescribedWorkDays = Array.isArray(user.prescribed_work_days)
         ? Array.from(new Set<number>(user.prescribed_work_days.map(Number).filter((value: number) => Number.isInteger(value) && value >= 0 && value <= 6)))
         : [1, 2, 3, 4, 5];
-      const password = normalizeInitialPassword(user.password || user.initial_password) || generateInitialPassword();
+      const suppliedPassword = normalizeInitialPassword(user.password || user.initial_password);
+      const passwordError = suppliedPassword ? passwordPolicyError(suppliedPassword, role, [strId]) : '';
+      if (passwordError) {
+        errors.push({ name: user.student_name, error: passwordError });
+        continue;
+      }
+      const password = suppliedPassword || generateInitialPassword(minPasswordLength(role) > 10 ? 16 : 10);
       const schoolId = String(user.school_id || user.school || actor.school_ids[0] || actor.school || '').trim();
       // 個人情報を入れずにテストしている校舎の生徒・保護者は、氏名の代わりに生徒番号を名前にする。
       const anonymous = (role === 'student' || role === 'parent') && isNoPersonalInfoSchool(schoolId);
@@ -324,9 +334,10 @@ export async function POST(request: NextRequest) {
           prescribed_break_minutes: employmentCategory === 'dedicated' ? prescribedBreakMinutes : null,
           prescribed_work_days: employmentCategory === 'dedicated' ? prescribedWorkDays : null,
 
-          // ★要件で必要なら残す。ただしセキュリティ上は非推奨。
-          initial_password: password,
-          raw_password: password,
+          // 初期パスワードは users に置かない（KDL診断 A.3.1）。下で account_secrets にハッシュで置く。
+          initial_password: FieldValue.delete(),
+          raw_password: FieldValue.delete(),
+          password: FieldValue.delete(),
 
           updated_at: new Date(),
         },
@@ -339,8 +350,9 @@ export async function POST(request: NextRequest) {
           .filter(profile => profile.id !== userId)
           .forEach(profile => {
             batch.set(profile.ref, {
-              initial_password: password,
-              raw_password: password,
+              initial_password: FieldValue.delete(),
+              raw_password: FieldValue.delete(),
+              password: FieldValue.delete(),
               credential_primary_uid: userId,
               credentials_synced_at: new Date(),
               updated_at: new Date(),
@@ -349,6 +361,7 @@ export async function POST(request: NextRequest) {
         await batch.commit();
       }
 
+      await setInitialPassword(userId, password, actor.uid);
       results.push(displayName);
     }
 

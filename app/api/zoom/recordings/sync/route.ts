@@ -1,6 +1,8 @@
 import { NextRequest } from 'next/server';
 import { getServerUser, isAdminLike, jsonError } from '@/lib/server-auth';
 import { isAuthorizedCronRequest } from '@/lib/server/cron-auth';
+import { currentUsageLevel } from '@/lib/server/usage-guard';
+import { shouldSkipInSavingMode } from '@/lib/usage-guard';
 import { attachRecordingsToBestShifts, recordingShareUrl, speakerViewFile } from '@/lib/zoom-recording-match';
 
 export const runtime = 'nodejs';
@@ -94,7 +96,9 @@ const listRecordings = async (accessToken: string, from: string, to: string, max
   } catch (accountError: any) {
     if (!(accountError instanceof ZoomApiError) || ![400, 404].includes(accountError.status)) throw accountError;
     const result = await listRecordingsFromEndpoint(accessToken, 'https://api.zoom.us/v2/users/me/recordings', from, to, maxMeetings);
-    return { ...result, scope: 'user', account_error: accountError?.message || String(accountError) };
+    // Zoom の返した文言は返さず、ログにだけ残す。
+    console.error(JSON.stringify({ type: 'zoom_account_recordings_error', status: accountError.status, message: String(accountError.message || '').slice(0, 300) }));
+    return { ...result, scope: 'user', account_error: 'アカウント全体の録画一覧は取得できなかったため、自分の録画だけを取り込みました。' };
   }
 };
 
@@ -177,6 +181,10 @@ export async function GET(request: NextRequest) {
     }
 
     const params = request.nextUrl.searchParams;
+    // 授業後の取り込み（evening=1）は、節約モードでは止める（毎朝の取り込みで拾える）。
+    if (params.get('evening') === '1' && shouldSkipInSavingMode('recordings_evening', await currentUsageLevel(), new Date())) {
+      return Response.json({ ok: true, skipped: 'usage-saving' });
+    }
     const result = await runRecordingSync({
       days: params.get('days') || 3,
       max_meetings: params.get('max_meetings') || 100,

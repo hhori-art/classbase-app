@@ -3,7 +3,9 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { auth } from '@/lib/firebase';
-import { signInWithEmailAndPassword, signOut } from 'firebase/auth';
+import { signOut } from 'firebase/auth';
+import { changeOwnPassword, PasswordChangeError } from '@/lib/client-password-change';
+import { BASIC_PASSWORD_MIN_LENGTH, passwordPolicyError } from '@/lib/password-policy';
 import { PASSWORD_CHANGED_RELOGIN_MESSAGE, passwordChangedButReloginFailed } from '@/lib/password-change-error';
 import { Bell, ChevronRight, Lock, Mail, MessageCircle, Settings, Shield, Smartphone } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
@@ -37,6 +39,7 @@ export default function ParentSettingsPage() {
     announcements: true,
   });
   const [savingKey, setSavingKey] = useState<PrefKey | ''>('');
+  const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [passwordMessage, setPasswordMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -75,31 +78,25 @@ export default function ParentSettingsPage() {
   };
 
 
+  const firstLogin = profile?.isFirstLogin === true;
   const changePassword = async () => {
-    if (newPassword.length < 6) return setPasswordMessage({ type: 'error', text: 'パスワードは6文字以上で入力してください。' });
+    if (!firstLogin && !currentPassword) return setPasswordMessage({ type: 'error', text: '今のパスワードを入力してください。' });
+    const policyError = passwordPolicyError(newPassword, 'parent', [profile?.lifetime_id, profile?.parent_login_id]);
+    if (policyError) return setPasswordMessage({ type: 'error', text: policyError });
     if (newPassword !== confirmPassword) return setPasswordMessage({ type: 'error', text: '確認用パスワードが一致しません。' });
     const currentUser = auth.currentUser;
-    if (!currentUser?.email) return setPasswordMessage({ type: 'error', text: 'ログイン情報を確認できません。' });
+    if (!currentUser) return setPasswordMessage({ type: 'error', text: 'ログイン情報を確認できません。' });
     setChangingPassword(true);
     try {
-      const token = await currentUser.getIdToken();
-      const res = await fetch('/api/auth/change-password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ password: newPassword }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.ok) throw new Error(data.error || 'password-change-failed');
-      sessionStorage.removeItem(`classbase_profile_cache:${currentUser.uid}`);
-      const credential = await signInWithEmailAndPassword(auth, currentUser.email, newPassword);
-      await credential.user.getIdToken(true);
+      await changeOwnPassword(currentUser, { password: newPassword, currentPassword: firstLogin ? undefined : currentPassword });
+      setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
       setPasswordMessage({ type: 'success', text: 'パスワードを変更しました。' });
       window.location.replace('/parent');
     } catch (e) {
       if (passwordChangedButReloginFailed(e)) { setPasswordMessage({ type: 'success', text: PASSWORD_CHANGED_RELOGIN_MESSAGE }); await signOut(auth).catch(() => undefined); window.setTimeout(() => window.location.replace('/'), 2500); return; }
-      setPasswordMessage({ type: 'error', text: 'パスワードを変更できませんでした。もう一度お試しください。' });
+      setPasswordMessage({ type: 'error', text: e instanceof PasswordChangeError ? e.message : 'パスワードを変更できませんでした。もう一度お試しください。' });
     } finally {
       setChangingPassword(false);
     }
@@ -124,8 +121,14 @@ export default function ParentSettingsPage() {
             hasVerifiedRecoveryEmail={Boolean(profile?.recovery_email && profile?.recovery_email_verified_at)}
             audience="parent"
           />
+          {!firstLogin && (
+            <label className="block text-sm font-bold text-fg">今のパスワード
+              <input type="password" autoComplete="current-password" value={currentPassword} onChange={event => setCurrentPassword(event.target.value)} placeholder="今のパスワード" className={`mt-1 ${inputClass}`} />
+              <span className="mt-1 block text-xs font-medium text-fg-muted">忘れたときは、校舎で変更してもらってください。</span>
+            </label>
+          )}
           <label className="block text-sm font-bold text-fg">新しいパスワード
-            <input type="password" autoComplete="new-password" value={newPassword} onChange={event => setNewPassword(event.target.value)} placeholder="6文字以上" className={`mt-1 ${inputClass}`} />
+            <input type="password" autoComplete="new-password" value={newPassword} onChange={event => setNewPassword(event.target.value)} placeholder={`${BASIC_PASSWORD_MIN_LENGTH}文字以上`} className={`mt-1 ${inputClass}`} />
           </label>
           <label className="block text-sm font-bold text-fg">もう一度入力
             <input type="password" autoComplete="new-password" value={confirmPassword} onChange={event => setConfirmPassword(event.target.value)} placeholder="確認のため同じものを入力" className={`mt-1 ${inputClass}`} />

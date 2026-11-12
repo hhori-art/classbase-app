@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { externalAttendanceConfigStatus, syncExternalAttendance } from '@/lib/server/external-attendance-sync';
 import { isAuthorizedCronRequest } from '@/lib/server/cron-auth';
+import { internalErrorResponse } from '@/lib/api-error';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -26,7 +27,6 @@ export async function GET(request: NextRequest) {
     const result = await syncExternalAttendance({ start, end: today, requestedBy: 'vercel-cron' });
     return Response.json({ ok: true, result });
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return Response.json({ ok: false, error: message }, { status: 500 });
+    return internalErrorResponse(error, { message: '勤怠の取り込みに失敗しました', context: 'attendance-integration-sync' });
   }
 }

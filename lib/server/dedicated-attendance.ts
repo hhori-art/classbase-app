@@ -1,9 +1,13 @@
 import 'server-only';
 import { FieldValue } from 'firebase-admin/firestore';
+import { revalidateTag, unstable_cache } from 'next/cache';
 import { adminDb } from '@/lib/firebase-admin';
 import { resolveAttendanceSchoolCode } from '@/lib/attendance-schools';
+import { normalizeLessonExclusions } from '@/lib/dedicated-lesson-term';
 import { normalizeSeason, type DedicatedSeason } from '@/lib/dedicated-season';
-import type { LessonDoc, PlanDoc, ReportDoc, SeasonLessonDoc, TransportDoc, WorkRecordLike } from '@/lib/dedicated-month';
+import { normalizeDayAdjustment } from '@/lib/dedicated-month';
+import { normalizeSpecialKind } from '@/lib/dedicated-overtime';
+import type { CompanyHoliday, LessonDoc, PlanDoc, ReportDoc, SeasonLessonDoc, TransportDoc, WorkRecordLike } from '@/lib/dedicated-month';
 import { loadSchoolStaffRecipients, type StaffRecipient } from '@/lib/server/staff-recipients';
 import { queuePushToUsers } from '@/lib/server/web-push';
 
@@ -14,6 +18,7 @@ import { queuePushToUsers } from '@/lib/server/web-push';
  *  - dedicated_monthly_reports/{uid_month}：月の提出（D08 実施予定・実施報告書）
  *  - dedicated_season_lessons：講習の授業コマ
  *  - settings/dedicated_seasons：講習期間の設定
+ *  - settings/dedicated_calendar：会社の休日（祝日・夏季休暇・年末年始など）
  * 通常期間の授業時間・交通費は、従来の dedicated_lesson_claims・dedicated_transport_claims を使う。
  */
 
@@ -24,6 +29,9 @@ export const SEASON_LESSONS = 'dedicated_season_lessons';
 export const LESSONS = 'dedicated_lesson_claims';
 export const TRANSPORT = 'dedicated_transport_claims';
 const SEASONS_DOC = 'dedicated_seasons';
+const CALENDAR_DOC = 'dedicated_calendar';
+
+export type { CompanyHoliday } from '@/lib/dedicated-month';
 
 export const monthlyReportId = (uid: string, month: string) => `${uid}_${month}`;
 export const reportId = (uid: string, date: string) => `${uid}_${date}`;
@@ -41,6 +49,7 @@ export const toRecord = (doc: FirebaseFirestore.DocumentSnapshot): WorkRecordLik
     status: text(data.status, 30),
     dedicated_break_minutes: data.dedicated_break_minutes == null ? null : num(data.dedicated_break_minutes),
     dedicated_day_off: typeof data.dedicated_day_off === 'boolean' ? data.dedicated_day_off : null,
+    dedicated_adjustment: normalizeDayAdjustment(data.dedicated_adjustment),
   };
 };
 
@@ -59,6 +68,7 @@ export const toPlan = (doc: FirebaseFirestore.DocumentSnapshot): PlanDoc => {
     source: data.source === 'bulk' ? 'bulk' : 'individual',
     late: data.late === true,
     day_off: data.day_off === true,
+    special_kind: normalizeSpecialKind(data.special_kind),
     status: ['approved', 'rejected', 'cancelled'].includes(data.status) ? data.status : 'pending',
     review_note: text(data.review_note),
     submitted_by: text(data.submitted_by, 128),
@@ -74,6 +84,7 @@ export const toReport = (doc: FirebaseFirestore.DocumentSnapshot): ReportDoc => 
     status: data.status === 'approved' || data.status === 'rejected' ? data.status : 'pending',
     actual_minutes: num(data.actual_minutes),
     planned_minutes: num(data.planned_minutes),
+    special_kind: normalizeSpecialKind(data.special_kind),
     reason: text(data.reason),
     details: text(data.details, 1000),
     review_note: text(data.review_note),
@@ -82,8 +93,15 @@ export const toReport = (doc: FirebaseFirestore.DocumentSnapshot): ReportDoc => 
 
 export const toLesson = (doc: FirebaseFirestore.DocumentSnapshot): LessonDoc => {
   const data = doc.data() || {};
-  return { id: doc.id, user_id: text(data.user_id, 128), lesson_date: text(data.lesson_date, 10), lesson_minutes: num(data.lesson_minutes), status: text(data.status, 20) || 'pending', school_name: text(data.school_name, 100), review_note: text(data.review_note) };
+  const minutes = num(data.lesson_minutes);
+  return { id: doc.id, user_id: text(data.user_id, 128), lesson_date: text(data.lesson_date, 10), lesson_minutes: minutes, status: text(data.status, 20) || 'pending', school_name: text(data.school_name, 100), review_note: text(data.review_note), excluded: normalizeLessonExclusions(data.excluded, minutes) || [] };
 };
+
+/** 期間内の授業時間の申請（全員分、最大8,000件）。月の照合と半期の授業分数に使う。 */
+export async function loadLessonsBetween(start: string, end: string) {
+  const snap = await adminDb().collection(LESSONS).where('lesson_date', '>=', start).where('lesson_date', '<=', end).limit(8000).get();
+  return snap.docs.map(toLesson);
+}
 
 export const toSeasonLesson = (doc: FirebaseFirestore.DocumentSnapshot): SeasonLessonDoc => {
   const data = doc.data() || {};
@@ -107,6 +125,17 @@ export const toTransport = (doc: FirebaseFirestore.DocumentSnapshot): TransportD
   return { id: doc.id, user_id: text(data.user_id, 128), expense_date: text(data.expense_date, 10), from: text(data.from, 100), to: text(data.to, 100), amount: num(data.amount), reason: text(data.reason), status: text(data.status, 20) || 'pending', review_note: text(data.review_note) };
 };
 
+/** 本人の勤務記録・時間外の予定・実施報告（各最大1,000件）。月の集計と、時間外の見込みの確認に使う。 */
+export async function loadOwnOvertimeInputs(uid: string) {
+  const db = adminDb();
+  const [recordSnap, planSnap, reportSnap] = await Promise.all([
+    db.collection('work_records').where('teacher_id', '==', uid).limit(1000).get(),
+    db.collection(PLANS).where('user_id', '==', uid).limit(1000).get(),
+    db.collection(REPORTS).where('user_id', '==', uid).limit(1000).get(),
+  ]);
+  return { records: recordSnap.docs.map(toRecord), plans: planSnap.docs.map(toPlan), reports: reportSnap.docs.map(toReport) };
+}
+
 export async function loadSeasons(): Promise<DedicatedSeason[]> {
   const snap = await adminDb().collection('settings').doc(SEASONS_DOC).get();
   const list = Array.isArray(snap.data()?.seasons) ? snap.data()!.seasons : [];
@@ -115,6 +144,24 @@ export async function loadSeasons(): Promise<DedicatedSeason[]> {
 
 export async function saveSeasons(seasons: DedicatedSeason[], uid: string) {
   await adminDb().collection('settings').doc(SEASONS_DOC).set({ seasons, updated_by: uid, updated_at: FieldValue.serverTimestamp() });
+}
+
+const CALENDAR_TAG = 'dedicated-calendar';
+
+/** 会社の休日表は全員で同じなので、5分の共有キャッシュから返す（保存したときはすぐ消す）。 */
+export const loadCompanyHolidays = unstable_cache(async (): Promise<CompanyHoliday[]> => {
+  const snap = await adminDb().collection('settings').doc(CALENDAR_DOC).get();
+  const list = Array.isArray(snap.data()?.holidays) ? snap.data()!.holidays : [];
+  return list
+    .map((item: any) => ({ date: text(item?.date, 10), name: text(item?.name, 40) }))
+    .filter((item: CompanyHoliday) => /^\d{4}-\d{2}-\d{2}$/.test(item.date));
+}, ['dedicated-calendar-v1'], { revalidate: 300, tags: [CALENDAR_TAG] });
+
+export const holidaySet = (holidays: CompanyHoliday[]) => new Set(holidays.map(item => item.date));
+
+export async function saveCompanyHolidays(holidays: CompanyHoliday[], uid: string) {
+  await adminDb().collection('settings').doc(CALENDAR_DOC).set({ holidays, updated_by: uid, updated_at: FieldValue.serverTimestamp() });
+  revalidateTag(CALENDAR_TAG);
 }
 
 /** 月の提出（D08）が「提出済み」「確認済み」なら、その月の予定・報告・休憩の変更はできない（差し戻されたら直せる）。 */
@@ -126,8 +173,16 @@ export async function isMonthLocked(uid: string, month: string) {
 
 const canonical = (value: unknown) => resolveAttendanceSchoolCode(value) || String(value || '').trim();
 
-/** 専任の申請を承認する人：同じ校舎の専任の校舎承認者、その校舎の勤怠管理者、マスター。 */
-export async function dedicatedApprovers(school: string, exceptUid: string): Promise<StaffRecipient[]> {
+/**
+ * 専任の申請を承認する人：承認者が指名されていればその人（部長など）、
+ * いなければ同じ校舎の専任の校舎承認者、その校舎の勤怠管理者、マスター。
+ */
+export async function dedicatedApprovers(school: string, exceptUid: string, approverIds: string[] = []): Promise<StaffRecipient[]> {
+  const designated = approverIds.filter(id => id && id !== exceptUid);
+  if (designated.length) {
+    const docs = await adminDb().getAll(...designated.map(id => adminDb().collection('users').doc(id)));
+    return docs.filter(doc => doc.exists).map(doc => ({ id: doc.id, data: doc.data() || {}, isMaster: false }));
+  }
   const target = canonical(school);
   const [admins, managers] = await Promise.all([
     loadSchoolStaffRecipients(school, { audience: 'attendance' }),
@@ -141,8 +196,8 @@ export async function dedicatedApprovers(school: string, exceptUid: string): Pro
   return Array.from(unique.values());
 }
 
-export async function notifyDedicatedApprovers(input: { school: string; exceptUid: string; idPrefix: string; title: string; message: string }) {
-  const recipients = (await dedicatedApprovers(input.school, input.exceptUid))
+export async function notifyDedicatedApprovers(input: { school: string; exceptUid: string; approverIds?: string[]; idPrefix: string; title: string; message: string }) {
+  const recipients = (await dedicatedApprovers(input.school, input.exceptUid, input.approverIds))
     .filter(item => item.data.notification_preferences?.in_app !== false);
   if (!recipients.length) return 0;
   const db = adminDb();

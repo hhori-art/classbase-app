@@ -9,7 +9,7 @@ import { BADGE_RARITY_LABELS, BADGE_RARITY_STYLES, MANUAL_BADGES } from '@/lib/g
 import { adminApi, inputClass, labelClass, newOperationId } from './api';
 import { userErrorMessage } from '@/lib/user-error';
 
-type Student = { id: string; name: string; grade: string; school: string; login_id: string; coins: number; total_coins: number; badge_count: number; inactive: boolean; shop_override: boolean };
+type Student = { id: string; name: string; grade: string; school: string; login_id: string; coins: number; total_coins: number; badge_count: number; inactive: boolean; shop_override: boolean; community_override?: boolean };
 type HistoryItem = { id: string; amount: number; reason: string; source: string; created_at: string | null };
 
 const REASON_PRESETS = ['授業での積極的な発言', 'テストの頑張り', 'イベント参加', '修正（誤付与の取り消し）'];
@@ -121,6 +121,27 @@ export default function StudentPointsPanel({ isMaster = false }: { isMaster?: bo
     }
   };
 
+  const toggleCommunityOverride = async () => {
+    if (!selected) return;
+    const enabled = !selected.community_override;
+    if (!(await confirm(enabled
+      ? { title: `${selected.name} さんにだけ交流掲示板を表示しますか？`, message: '全体設定がオフでも、下のメニューに「掲示板」が出て、交流広場（3D）も使えます。', confirmLabel: '表示する' }
+      : { title: `${selected.name} さんの交流掲示板の個別表示をやめますか？`, confirmLabel: 'やめる' }))) return;
+    setBusy(true);
+    try {
+      await adminApi('/api/admin/points', { body: { action: 'set_feature_override', feature: 'community', user_id: selected.id, enabled } });
+      const updated = { ...selected, community_override: enabled };
+      setSelected(updated);
+      setStudents(prev => prev.map(student => student.id === updated.id ? updated : student));
+      toast.success(enabled ? '交流掲示板を個別に表示しました（生徒は再読み込み後に反映）' : '個別表示をやめました');
+    } catch (error) {
+      console.error(error);
+      toast.error(userErrorMessage(error, '更新できませんでした'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const toggleBadge = async (badgeId: string) => {
     if (!selected) return;
     const granting = !earnedBadges.includes(badgeId);
@@ -150,7 +171,7 @@ export default function StudentPointsPanel({ isMaster = false }: { isMaster?: bo
               <button key={student.id} onClick={() => void openStudent(student)} aria-pressed={selected?.id === student.id} className={`flex min-h-11 w-full items-center gap-3 rounded-btn px-3 py-2 text-left ${selected?.id === student.id ? 'bg-accent-soft ring-2 ring-accent/40' : 'hover:bg-slate-50'}`}>
                 <UserRound size={18} className="shrink-0 text-slate-300" aria-hidden />
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-bold text-slate-800">{student.name}{student.inactive && <span className="ml-1 text-xs text-slate-400">（停止中）</span>}{student.shop_override && <span className="ml-1 rounded-full bg-amber-100 px-1.5 text-xs text-amber-700">景品表示</span>}</p>
+                  <p className="truncate text-sm font-bold text-slate-800">{student.name}{student.inactive && <span className="ml-1 text-xs text-slate-400">（停止中）</span>}{student.shop_override && <span className="ml-1 rounded-full bg-amber-100 px-1.5 text-xs text-amber-700">景品表示</span>}{student.community_override && <span className="ml-1 rounded-full bg-sky-100 px-1.5 text-xs text-sky-700">掲示板表示</span>}</p>
                   <p className="truncate text-xs font-medium text-slate-400">{attendanceSchoolName(student.school) || student.school || '校舎未設定'} {student.grade}</p>
                 </div>
                 <span className="flex items-center gap-1 text-xs font-bold text-amber-600"><Coins size={13} aria-hidden />{student.coins.toLocaleString()}</span>
@@ -196,6 +217,12 @@ export default function StudentPointsPanel({ isMaster = false }: { isMaster?: bo
                 <label className="mt-4 flex items-center justify-between gap-3 rounded-btn bg-amber-50 p-3 text-xs font-bold text-amber-900">
                   <span>この生徒にだけ景品交換・ガチャを表示する<br /><span className="text-xs font-medium text-amber-700">全体設定（設定 → 景品交換）がオフでも表示されます。テスト用アカウント向け。</span></span>
                   <input type="checkbox" checked={selected.shop_override} disabled={busy} onChange={() => void toggleShopOverride()} className="h-5 w-5" />
+                </label>
+              )}
+              {isMaster && (
+                <label className="mt-2 flex items-center justify-between gap-3 rounded-btn bg-sky-50 p-3 text-xs font-bold text-sky-900">
+                  <span>この生徒にだけ交流掲示板を表示する<br /><span className="text-xs font-medium text-sky-700">全体設定（設定 → 生徒画面のコミュニティ）がオフでも表示され、交流広場（3D）も使えます。テスト用アカウント向け。</span></span>
+                  <input type="checkbox" checked={Boolean(selected.community_override)} disabled={busy} onChange={() => void toggleCommunityOverride()} className="h-5 w-5" />
                 </label>
               )}
             </div>

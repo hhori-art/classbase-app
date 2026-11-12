@@ -81,6 +81,12 @@ export default function ParentReportPage() {
   const [studentsReload, setStudentsReload] = useState(0);
   const [reload, setReload] = useState(0);
 
+  // 通知の「月のレポートができました」から開いたときは、その月を選んだ状態にする（お子さまは pickChildId が URL から選ぶ）。
+  useEffect(() => {
+    const linkedMonth = new URLSearchParams(window.location.search).get('month') || '';
+    if (/^\d{4}-(0[1-9]|1[0-2])$/.test(linkedMonth) && linkedMonth <= currentMonthKey()) setMonth(linkedMonth);
+  }, []);
+
   useEffect(() => {
     if (!user) return;
     let active = true;

@@ -746,7 +746,8 @@ export default function UserManagementPage() {
                           </span>
                         </td>
 
-                        <td className="p-4 text-slate-400 text-xs font-mono">{user.initial_password || '********'}</td>
+                        {/* 初期パスワードは一覧に出さない（KDL診断 A.3.1）。ID書面を刷るときだけ取り出す。 */}
+                        <td className="p-4 text-slate-400 text-xs font-mono">********</td>
                         <td className="p-4">
                           <FirstLoginBadge value={user.isFirstLogin} />
                         </td>

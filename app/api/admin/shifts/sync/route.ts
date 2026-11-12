@@ -3,7 +3,7 @@ import { revalidateTag } from 'next/cache';
 import crypto from 'crypto';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
-import { canManageShifts, getServerUser } from '@/lib/server-auth';
+import { canManageShifts, getServerUser, jsonError } from '@/lib/server-auth';
 import { canonicalPeriodForGradeSubject, fixedPeriodForGradeCourse } from '@/lib/course-registration-match';
 import { isValidShiftDate, normalizeShiftCourseIdentity, normalizeShiftGrade, normalizeShiftIdentityText, normalizeShiftPeriod, normalizeShiftSubject, redirectedShiftDetailFromTeacher, shiftTeacherNameAfterChange, validateShiftSyncStructure } from '@/lib/shift-sync-normalization';
 
@@ -668,12 +668,13 @@ export async function POST(request: NextRequest) {
       cleaned_legacy_count: cleanedLegacyCount,
       last_success_at: FieldValue.serverTimestamp(),
     }, { merge: true });
-    revalidateTag('course-registration-options');
+    // 受講登録の候補のキャッシュは、配置が実際に変わったときだけ作り直す（GAS が数分ごとに同期しても毎回作り直さない）。
+    if (created + updated + deleted + cleanedLegacyCount > 0) revalidateTag('course-registration-options');
 
     return NextResponse.json({ ok: true, incoming: validShifts.length, created, updated, deleted, skipped, missing_teacher_count: missingTeacherCount, corrected_period_count: correctedPeriodCount, cleaned_legacy_count: cleanedLegacyCount, locked_dates: [...lockedDates] });
-  } catch (error: any) {
-    console.error('shift sync POST error:', error);
-    return NextResponse.json({ ok: false, error: error.message || 'sync failed' }, { status: error.message === 'forbidden' ? 403 : 400 });
+  } catch (error) {
+    // こちらのコード（forbidden など）以外の中身は見せない。
+    return jsonError(error);
   }
 }
 
@@ -738,8 +739,8 @@ export async function GET(request: NextRequest) {
     });
 
     return NextResponse.json({ ok: true, count: shifts.length, shifts });
-  } catch (error: any) {
-    console.error('shift sync GET error:', error);
-    return NextResponse.json({ ok: false, error: error.message || 'export failed' }, { status: error.message === 'forbidden' ? 403 : 400 });
+  } catch (error) {
+    // こちらのコード（forbidden など）以外の中身は見せない。
+    return jsonError(error);
   }
 }

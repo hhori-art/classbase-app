@@ -5,6 +5,7 @@ import { adminDb } from '@/lib/firebase-admin';
 import { requireStudentEnrollment } from '@/lib/eiken/access';
 import { getEikenWritingEvaluationService } from '@/lib/eiken/writing-evaluation';
 import { getServerUser, jsonError } from '@/lib/server-auth';
+import { preparedMessageOr } from '@/lib/api-error';
 
 export const runtime = 'nodejs';
 
@@ -76,7 +77,8 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
     if (submissionRef && processingStarted) {
       await submissionRef.set({
         evaluation_status: 'failed',
-        error_message: error instanceof Error ? error.message.slice(0, 300) : 'evaluation-failed',
+        // 画面に出るので、AI などの英語の文言は残さない（中身は jsonError がログへ出す）。
+        error_message: preparedMessageOr(error, '採点に失敗しました。もう一度提出してください。'),
         updated_at: FieldValue.serverTimestamp(),
       }, { merge: true }).catch(() => undefined);
     }

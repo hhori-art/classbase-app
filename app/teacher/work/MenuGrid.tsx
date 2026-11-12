@@ -126,11 +126,11 @@ export default function TeacherWorkMenu({ isInternalNetwork }: Props) {
       restricted: false // 許可
     },
     {
-      title: '退塾アラート',
+      title: '声かけリスト',
       href: '/teacher/risk-monitor',
       icon: <AlertTriangle size={28}/>,
       color: 'red',
-      desc: '要注意生徒',
+      desc: '声をかける順',
       animate: true,
       restricted: true // ★制限
     },

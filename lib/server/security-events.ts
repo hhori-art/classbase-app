@@ -70,6 +70,8 @@ async function writeSecurityEvent(input: { kind: SecurityEventKind; ip?: string;
       value,
       total: FieldValue.increment(1),
       kinds: { [input.kind]: FieldValue.increment(1) },
+      // 1時間ごとの監視が「直近1時間」の分だけで判定できるよう、時間ごとにも数える。
+      hours: { [hour]: { [input.kind]: FieldValue.increment(1) } },
       ...(input.path ? { last_path: input.path } : {}),
       last_seen: FieldValue.serverTimestamp(),
       expires_at: expiresAt,

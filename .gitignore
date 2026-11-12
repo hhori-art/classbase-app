@@ -58,3 +58,10 @@ next-env.d.ts
 
 # local visual QA output
 /.visual-qa/
+
+# local work files (presentations, generated documents, one-off scripts)
+/.codex-presentations/
+/.codex-tmp/
+/.codex_tmp/
+/artifacts/
+/outputs/

@@ -1,5 +1,6 @@
 import 'server-only';
 import crypto from 'node:crypto';
+import { gasMailConfigured, sendViaGas } from '@/lib/server/gas-mail';
 
 // LINE・メール（Web Push は lib/server/web-push.ts）の送信と、利用者ごとの受信設定の判定。
 // 一斉通知(/api/admin/notifications)と安全アラートの両方から使う。
@@ -64,6 +65,7 @@ export async function pushLine(lineUserId: string, text: string, retryKey: strin
 }
 
 export async function sendEmail(email: string, title: string, message: string, idempotencyKey: string): Promise<{ ok: boolean; error?: string }> {
+  if (gasMailConfigured()) return sendViaGas({ to: email, subject: title, text: message, id: idempotencyKey });
   const apiKey = String(process.env.RESEND_API_KEY || '').trim();
   const from = String(process.env.RESEND_FROM_EMAIL || '').trim();
   if (!apiKey || !from) return { ok: false, error: 'email-config-missing' };
@@ -73,7 +75,11 @@ export async function sendEmail(email: string, title: string, message: string, i
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
       body: JSON.stringify({ from, to: [email], subject: title, text: message }),
     });
-    if (!res.ok) return { ok: false, error: `email-${res.status}` };
+    if (!res.ok) {
+      // Resend の理由（ドメイン未確認など）を残す。宛先・本文は含めない。
+      const reason = await res.json().then((data: any) => String(data?.message || data?.name || ''), () => '');
+      return { ok: false, error: `email-${res.status}${reason ? `: ${reason.slice(0, 200)}` : ''}` };
+    }
     return { ok: true };
   } catch {
     return { ok: false, error: 'email-network-error' };

@@ -73,6 +73,8 @@ function harness({ profiles = {}, documents = {}, identity = { uid: 'actor', ema
     updateUser: async (uid, value) => { authWrites.push({ uid, ...value }); return { uid, ...authUsers[uid], ...value }; },
     createUser: async value => { authWrites.push({ uid: 'created', ...value }); return { uid: 'created', ...value }; },
     revokeRefreshTokens: async uid => { calls.push(`revoke:${uid}`); },
+    // ログインAPI（lib/server/login-service.ts）がブラウザへ返すトークン。
+    createCustomToken: async uid => { calls.push(`token:${uid}`); return `custom-token:${uid}`; },
   };
   const dependencies = {
     'server-only': {},
@@ -114,7 +116,7 @@ function harness({ profiles = {}, documents = {}, identity = { uid: 'actor', ema
   function load(relative) {
     const filename = path.resolve(sourceRoot, relative);
     if (cache.has(filename)) return cache.get(filename).exports;
-    const module = { exports: {} }; cache.set(filename, module);
+    const loaded = { exports: {} }; cache.set(filename, loaded);
     const code = ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
     const require = specifier => {
       if (Object.hasOwn(dependencies, specifier)) return dependencies[specifier];
@@ -129,14 +131,51 @@ function harness({ profiles = {}, documents = {}, identity = { uid: 'actor', ema
       constructor(...args) { super(args.length ? args[0] : now); }
       static now() { return new Date(now).getTime(); }
     } : Date;
-    const context = { exports: module.exports, module, require, process: { env: { NODE_ENV: 'test', ...env } }, console: { log() {}, warn() {}, error() {} }, Error, Date: ContextDate, Buffer, URL, URLSearchParams, Request, Response, Headers, File, Blob, FormData, AbortSignal, AbortController, crypto: globalThis.crypto, setTimeout, clearTimeout, fetch: fetchImpl || (async () => { throw new Error('Unexpected network request'); }) };
+    const context = { exports: loaded.exports, module: loaded, require, process: { env: { NODE_ENV: 'test', ...env } }, console: { log() {}, warn() {}, error() {} }, Error, Date: ContextDate, Buffer, URL, URLSearchParams, Request, Response, Headers, File, Blob, FormData, AbortSignal, AbortController, crypto: globalThis.crypto, setTimeout, clearTimeout, fetch: fetchImpl || (async () => { throw new Error('Unexpected network request'); }) };
     vm.runInNewContext(code, context, { filename });
-    return module.exports;
+    return loaded.exports;
   }
   return { load, data, writes, authWrites, calls, verifications, auth, db, rateLimitReleases, securityEvents };
 }
 const request = (url, body, token = 'valid', method = 'POST') => new NextRequest(`https://security.test${url}`, { method, headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, ...(method === 'GET' ? {} : { body: JSON.stringify(body) }) });
 const actor = { uid: 'actor', ...admin, profile: admin };
+
+// ---- ログイン（KDL診断 A.1.2・A.3.1）のテスト用 ----
+const LOGIN_ROUTE = 'app/api/auth/login/route.ts';
+const ADMIN_LOGIN_ROUTE = 'app/api/admin/login/route.ts';
+const loginEnv = { NEXT_PUBLIC_FIREBASE_API_KEY: 'test-api-key' };
+// ログインはトークンなしで呼ぶ。
+const loginRequest = body => request('/api/auth/login', body, null);
+// Firebase Auth の signInWithPassword（REST）の代わり。passwords は「メール → 今のパスワード」。checks に問い合わせを積む。
+function firebasePasswords(passwords, checks = []) {
+  return async (url, options) => {
+    const body = JSON.parse(String(options.body));
+    checks.push({ url: String(url), email: body.email, password: body.password });
+    return Object.hasOwn(passwords, body.email) && passwords[body.email] === body.password
+      ? Response.json({ localId: `uid-of-${body.email}` })
+      : Response.json({ error: { message: 'INVALID_LOGIN_CREDENTIALS' } }, { status: 400 });
+  };
+}
+// account_secrets/{docId} に置く初期パスワードのハッシュ（lib/initial-password-hash.ts と同じ計算。テストでは開発用の鍵）。
+function hashedSecret(password, salt = 'fixture-salt') {
+  const hash = createHmac('sha256', 'local-development-initial-password-secret').update(`initial-password:v1:${salt}:${password}`).digest('hex');
+  return { initial_password_hash: hash, initial_password_salt: salt, initial_password_version: 1 };
+}
+// login_locks のドキュメントID（テストの requestFingerprint は parts を | でつなぐ）。
+const lockPairKey = (account, ip = '203.0.113.10') => `login_locks/fingerprint:login-lock-pair|${account}|${ip}`;
+const lockAccountKey = account => `login_locks/fingerprint:login-lock-account|${account}`;
+const lockedUntil = (ms = 30 * 60 * 1000) => ({ toMillis: () => Date.now() + ms });
+const passwordRecoveryMock = (extra = {}) => ({
+  newSecretToken: () => 'fixture-token',
+  hashSecret: token => `hash:${token}`,
+  requestFingerprint: parts => `fingerprint:${parts.join('|')}`,
+  getClientIp: () => '203.0.113.10',
+  consumeRateLimit: async () => true,
+  releaseRateLimit: async () => {},
+  ...extra,
+});
+// 平文のパスワードが Firestore のどこにも残っていないか。
+const storedAnywhere = (h, secret) => JSON.stringify([...h.data]).includes(secret);
 
 test('bootstrap rejects domain-only and unverified allowlisted email identities', async () => {
   for (const [email, email_verified, allowlist] of [['stranger@sozogakuen.co.jp', true, ''], ['allowed@example.test', false, 'allowed@example.test']]) {
@@ -287,26 +326,49 @@ test('school admins cannot change staff passwords; master changes after first lo
 });
 test('school admins can change passwords only for students and parents of their own school', async () => {
   const route = 'app/api/admin/accounts/password/route.ts';
-  const ownStudent = { ...student, isFirstLogin: false };
-  const ownParent = { role: 'parent', school_id: '112', school: '112', isFirstLogin: true };
+  const ownStudent = { ...student, isFirstLogin: false, initial_password: 'old-printed-pass' };
+  const ownParent = { role: 'parent', school_id: '112', school: '112', isFirstLogin: true, initial_password: 'old-parent-pass' };
   const otherStudent = { ...student, school: '113', school_id: '113' };
   const noSchoolParent = { role: 'parent' };
   const otherAdmin = { ...admin };
-  const h = harness({ profiles: { actor: admin, ownStudent, ownParent, otherStudent, noSchoolParent, otherAdmin } });
+  const h = harness({
+    profiles: { actor: admin, ownStudent, ownParent, otherStudent, noSchoolParent, otherAdmin },
+    documents: { 'account_secrets/ownStudent': hashedSecret('old-printed-pass') },
+  });
   for (const userId of ['otherStudent', 'noSchoolParent', 'otherAdmin']) {
-    const denied = await h.load(route).POST(request('/api/admin/accounts/password', { user_id: userId, password: 'new-secret' }));
+    const denied = await h.load(route).POST(request('/api/admin/accounts/password', { user_id: userId, password: 'maple-river-77' }));
     assert.equal(denied.status, 403, userId);
   }
   assert.equal(h.authWrites.length, 0);
 
-  const changed = await h.load(route).POST(request('/api/admin/accounts/password', { user_id: 'ownStudent', password: 'abc123' }));
+  // 生徒・保護者は8文字以上。よく使われるパスワードは断る。
+  for (const weak of ['abc123', 'password1', '12345678']) {
+    const rejected = await h.load(route).POST(request('/api/admin/accounts/password', { user_id: 'ownStudent', password: weak }));
+    assert.equal(rejected.status, 400, weak);
+    assert.match((await rejected.json()).error, /パスワード/);
+  }
+  assert.equal(h.authWrites.length, 0);
+
+  // 初回ログイン済みの生徒：Auth だけを変え、初期パスワード（ハッシュ・前からの平文）は消す。
+  const changed = await h.load(route).POST(request('/api/admin/accounts/password', { user_id: 'ownStudent', password: 'maple-river-77' }));
   assert.equal(changed.status, 200);
   assert.equal(h.data.get('users/ownStudent').initial_password, 'deleted');
-  const parentChanged = await h.load(route).POST(request('/api/admin/accounts/password', { user_id: 'ownParent', password: 'parent1' }));
+  assert.equal(h.data.has('account_secrets/ownStudent'), false);
+  // 初回ログイン前の保護者：新しい初期パスワードはハッシュだけで置き、平文は users に残さない。
+  const parentChanged = await h.load(route).POST(request('/api/admin/accounts/password', { user_id: 'ownParent', password: 'parent-cedar-5' }));
   assert.equal(parentChanged.status, 200);
-  assert.equal(h.data.get('users/ownParent').initial_password, 'parent1');
+  assert.equal(h.data.get('users/ownParent').initial_password, 'deleted');
+  const secret = h.data.get('account_secrets/ownParent');
+  assert.match(secret.initial_password_hash, /^[0-9a-f]{64}$/);
+  assert.equal(secret.initial_password_issued_by, 'actor');
+  const secrets = h.load('lib/server/account-secrets.ts');
+  assert.equal(await secrets.verifyInitialPassword('ownParent', 'parent-cedar-5', h.data.get('users/ownParent')), true);
+  assert.equal(await secrets.verifyInitialPassword('ownParent', 'old-parent-pass', h.data.get('users/ownParent')), false);
+  assert.equal(storedAnywhere(h, 'parent-cedar-5'), false);
+  assert.equal(storedAnywhere(h, 'maple-river-77'), false);
   assert.deepEqual(h.authWrites.map(write => write.uid), ['ownStudent', 'ownParent']);
   assert.ok(h.calls.includes('revoke:ownStudent'));
+  assert.ok(h.calls.includes('revoke:ownParent'));
 });
 test('admin account passwords changed by master must meet the 10-character policy', async () => {
   const target = { ...admin, isFirstLogin: false };
@@ -315,15 +377,22 @@ test('admin account passwords changed by master must meet the 10-character polic
   assert.equal(short.status, 400);
   assert.equal(h.authWrites.length, 0);
 });
-test('master password change keeps a temporary password only until first login', async () => {
-  const target = { ...teacher, isFirstLogin: true, initial_password: 'old-secret' };
+test('master password change before first login keeps only a hash of the temporary password', async () => {
+  const target = { ...teacher, isFirstLogin: true, initial_password: 'old-secret', raw_password: 'old-secret' };
   const h = harness({ profiles: { actor: master, target } });
   const response = await h.load('app/api/admin/accounts/password/route.ts').POST(request('/api/admin/accounts/password', {
-    user_id: 'target', password: 'new-secret',
+    user_id: 'target', password: 'new-secret-pass',
   }));
   assert.equal(response.status, 200);
-  assert.equal(h.data.get('users/target').initial_password, 'new-secret');
-  assert.equal(h.data.get('users/target').raw_password, 'new-secret');
+  assert.equal((await response.json()).first_login_completed, false);
+  assert.deepEqual(h.authWrites, [{ uid: 'target', password: 'new-secret-pass' }]);
+  // 平文（initial_password・raw_password）は消し、account_secrets にハッシュだけを置く。
+  assert.equal(h.data.get('users/target').initial_password, 'deleted');
+  assert.equal(h.data.get('users/target').raw_password, 'deleted');
+  assert.equal(storedAnywhere(h, 'new-secret-pass'), false);
+  const secrets = h.load('lib/server/account-secrets.ts');
+  assert.equal(await secrets.verifyInitialPassword('target', 'new-secret-pass', h.data.get('users/target')), true);
+  assert.equal(await secrets.verifyInitialPassword('target', 'old-secret', h.data.get('users/target')), false);
 });
 test('demoted users cannot retain stored admin app permissions', () => {
   const h = harness(); const policy = h.load('lib/admin-app-permissions.ts');
@@ -1893,18 +1962,90 @@ test('common auth reports revoked, expired, and disabled Firebase identities as 
   }
 });
 test('first-login password change updates Auth, clears the initial secret, and completes onboarding', async () => {
-  const h = harness({ profiles: { actor: { ...teacher, isFirstLogin: true, initial_password: 'temporary-secret', raw_password: 'temporary-secret' } } });
+  const checks = [];
+  const h = harness({
+    profiles: { actor: { ...teacher, isFirstLogin: true, initial_password: 'temporary-secret', raw_password: 'temporary-secret' } },
+    documents: { 'account_secrets/actor': hashedSecret('temporary-secret') },
+    env: loginEnv, fetch: firebasePasswords({}, checks),
+  });
   const short = await h.load('app/api/auth/change-password/route.ts').POST(request('/api/auth/change-password', { password: 'five5' }));
   assert.equal(short.status, 400);
+  assert.equal((await short.json()).code, 'password-policy');
   assert.equal(h.authWrites.length, 0);
 
+  // 初回ログインの直後は、今のパスワード（入れたばかりの初期パスワード）を聞かない。
   const response = await h.load('app/api/auth/change-password/route.ts').POST(request('/api/auth/change-password', { password: 'new-secure-password' }));
   assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.token, 'custom-token:actor');
+  assert.equal(checks.length, 0);
   assert.deepEqual(h.authWrites, [{ uid: 'actor', password: 'new-secure-password' }]);
   assert.ok(h.calls.includes('revoke:actor'));
   assert.equal(h.data.get('users/actor').isFirstLogin, false);
   assert.equal(h.data.get('users/actor').initial_password, 'deleted');
   assert.equal(h.data.get('users/actor').raw_password, 'deleted');
+  assert.equal(h.data.has('account_secrets/actor'), false);
+});
+test('password change after onboarding requires the current password and the role-specific policy', async () => {
+  const route = 'app/api/auth/change-password/route.ts';
+  const profile = { ...student, lifetime_id: '30000004', email: '30000004@classbase.local', isFirstLogin: false };
+  const setup = (overrides = {}) => {
+    const checks = [];
+    const h = harness({
+      profiles: { actor: { ...profile, ...overrides } },
+      documents: { 'account_secrets/actor': hashedSecret('old-printed-pass') },
+      authUsers: { actor: { email: '30000004@classbase.local' } },
+      env: loginEnv, fetch: firebasePasswords({ '30000004@classbase.local': 'current-pass-1' }, checks),
+    });
+    return { h, checks, change: body => h.load(route).POST(request('/api/auth/change-password', body)) };
+  };
+
+  const { h, checks, change } = setup();
+  // isFirstLogin が true でない限り、今のパスワードが要る（未設定・古い記録も同じ）。
+  const missing = await change({ password: 'maple-river-77' });
+  assert.equal(missing.status, 400);
+  assert.equal((await missing.json()).code, 'current-password-required');
+  const wrong = await change({ password: 'maple-river-77', current_password: 'old-printed-pass' });
+  assert.equal(wrong.status, 401);
+  assert.equal((await wrong.json()).code, 'current-password-wrong');
+  assert.equal(checks.at(-1).email, '30000004@classbase.local');
+  // よく使われるパスワード・IDに近いパスワードは、今のパスワードを確かめる前に断る。
+  for (const weak of ['password1', '30000004a', 'short']) {
+    const rejected = await change({ password: weak, current_password: 'current-pass-1' });
+    assert.equal(rejected.status, 400, weak);
+    assert.equal((await rejected.json()).code, 'password-policy');
+  }
+  assert.equal(h.authWrites.length, 0);
+
+  const ok = await change({ password: 'maple-river-77', current_password: 'current-pass-1' });
+  assert.equal(ok.status, 200);
+  assert.equal((await ok.json()).token, 'custom-token:actor');
+  assert.deepEqual(h.authWrites, [{ uid: 'actor', password: 'maple-river-77' }]);
+  assert.ok(h.calls.includes('revoke:actor'));
+  assert.equal(h.data.has('account_secrets/actor'), false);
+  // 失敗の記録があったので、この接続元の記録は消える。
+  assert.equal(h.data.has(lockPairKey('30000004')), false);
+
+  // 管理系アカウントは15文字以上。
+  const adminCase = setup({ ...admin, lifetime_id: '30000004', email: '30000004@classbase.local', isFirstLogin: false });
+  const adminShort = await adminCase.change({ password: 'maple-river-77', current_password: 'current-pass-1' });
+  assert.equal(adminShort.status, 400);
+  assert.match((await adminShort.json()).error, /15文字以上/);
+  assert.equal((await adminCase.change({ password: 'maple-river-cedar-77', current_password: 'current-pass-1' })).status, 200);
+
+  // 今のパスワードの失敗は、ログインと同じロックで数える（5回目から待たされる）。
+  const guessing = setup();
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    assert.equal((await guessing.change({ password: 'maple-river-77', current_password: `guess-${attempt}` })).status, 401);
+  }
+  const slowed = await guessing.change({ password: 'maple-river-77', current_password: 'guess-5' });
+  assert.equal(slowed.status, 429);
+  assert.equal((await slowed.json()).code, 'too-many-attempts');
+  const checksBefore = guessing.checks.length;
+  assert.equal((await guessing.change({ password: 'maple-river-77', current_password: 'current-pass-1' })).status, 429);
+  assert.equal(guessing.checks.length, checksBefore);
+  assert.equal(guessing.h.authWrites.length, 0);
 });
 test('chat rejects anonymous callers before model invocation', async () => {
   const h = harness();
@@ -2236,7 +2377,9 @@ test('Zoom recording sync rejects costly ranges and does not retry throttling ag
     },
   });
   const throttledResponse = await throttled.load('app/api/zoom/recordings/sync/route.ts').POST(request('/api/zoom/recordings/sync', { days: 3 }));
-  assert.equal(throttledResponse.status, 400);
+  // Zoom 側の失敗は内部エラー（500・受付番号）として返し、Zoom の文言は見せない。
+  assert.equal(throttledResponse.status, 500);
+  assert.doesNotMatch(JSON.stringify(await throttledResponse.clone().json()), /rate limited/);
   assert.equal(calls.length, 2);
   assert.ok(calls[1].includes('/accounts/me/recordings'));
 });
@@ -2272,6 +2415,47 @@ test('Zoom live attendance is bound to an authorized current shift and scoped st
   const result = await accepted.json();
   assert.equal(result.participants.find(item => item.zoom_id === 'p1').matched_id, 'own');
   assert.equal(result.participants.find(item => item.zoom_id === 'p2').matched_id, null);
+});
+test('Zoom live attendance falls back to participant QoS when the participants scope is missing, and can include people who left', async () => {
+  const today = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Tokyo' }).format(new Date());
+  const calls = [];
+  const h = harness({
+    profiles: {
+      actor: teacher,
+      own: { ...student, school_id: '112', email: 'own@example.test', student_name: '自校生徒' },
+      left: { ...student, school_id: '112', email: 'left@example.test', student_name: '途中退出' },
+    },
+    documents: { 'shift_assignments/own-shift': { target_date: today, school_id: '112', target_meeting_id: '123456789', teacher_name: 'Teacher One' } },
+    env: { ZOOM_ACCOUNT_ID: 'account', ZOOM_CLIENT_ID: 'client', ZOOM_CLIENT_SECRET: 'secret' },
+    fetch: async url => {
+      const text = String(url);
+      calls.push(text);
+      if (text.startsWith('https://zoom.us/oauth/token')) return Response.json({ access_token: 'token' });
+      if (text.includes('/participants?')) return Response.json({ code: 4711, message: 'Invalid access token, does not contain scopes:[dashboard:read:list_meeting_participants:admin].' }, { status: 400 });
+      if (text.includes('/participants/qos?') && !text.includes('next_page_token')) {
+        return Response.json({ participants: [{ id: 'q1', user_name: '自校生徒', email: 'own@example.test' }], next_page_token: 'page2' });
+      }
+      return Response.json({ participants: [{ id: 'q2', user_name: '途中退出', email: 'left@example.test', leave_time: '2026-11-12T11:00:00Z' }], next_page_token: '' });
+    },
+  });
+  const route = h.load('app/api/get-zoom-live-status/route.ts');
+  const current = await (await route.POST(request('/api/get-zoom-live-status', { meetingId: '123456789', shiftId: 'own-shift' }))).json();
+  assert.equal(current.success, true);
+  // ふだん（出席中の表示）は、退出した人を除く
+  assert.deepEqual(current.participants.map(item => item.matched_id), ['own']);
+  assert.ok(calls.some(url => url.includes('/participants/qos?')));
+  const withLeft = await (await route.POST(request('/api/get-zoom-live-status', { meetingId: '123456789', shiftId: 'own-shift', include_left: true }))).json();
+  assert.deepEqual(withLeft.participants.map(item => item.matched_id).sort(), ['left', 'own']);
+  // Zoom の文言は画面に返さない
+  const failing = harness({
+    profiles: { actor: teacher },
+    documents: { 'shift_assignments/own-shift': { target_date: today, school_id: '112', target_meeting_id: '123456789', teacher_name: 'Teacher One' } },
+    env: { ZOOM_ACCOUNT_ID: 'account', ZOOM_CLIENT_ID: 'client', ZOOM_CLIENT_SECRET: 'secret' },
+    fetch: async url => String(url).startsWith('https://zoom.us/oauth/token') ? Response.json({ access_token: 'token' }) : Response.json({ code: 300, message: 'internal zoom detail' }, { status: 500 }),
+  });
+  const failed = await (await failing.load('app/api/get-zoom-live-status/route.ts').POST(request('/api/get-zoom-live-status', { meetingId: '123456789', shiftId: 'own-shift' }))).json();
+  assert.equal(failed.success, false);
+  assert.doesNotMatch(JSON.stringify(failed), /internal zoom detail/);
 });
 test('recording fetch rejects untrusted URL forms before any network request', async () => {
   let requests = 0;
@@ -2437,122 +2621,379 @@ test('dedicated science-social teachers can view and follow up only their own sc
 });
 
 test('initial login cannot restore a changed password or reactivate inactive accounts', async () => {
-  for (const filename of ['app/api/first-login/route.ts', 'app/api/admin/first-login/route.ts']) {
-    for (const state of [{ account_status: 'suspended' }, { status: 'withdrawn' }, { account_status: 'archived' }]) {
-      const h = harness({ profiles: { target: { ...master, lifetime_id: 'target', initial_password: 'old-password', ...state } }, authUsers: { target: { email: master.email } } });
-      const response = await h.load(filename).POST(request('/api/first-login', { login: 'target', lifetimeId: 'target', password: 'old-password' }));
-      assert.equal(response.status, 403); assert.equal(h.authWrites.length, 0);
+  const inactiveStates = [{ account_status: 'suspended' }, { status: 'withdrawn' }, { account_status: 'archived' }];
+  for (const route of [LOGIN_ROUTE, ADMIN_LOGIN_ROUTE]) {
+    // 停止・退会・アーカイブの登録データは、初期パスワードが合っていても初回ログインできない（Auth も作らない）。
+    for (const state of inactiveStates) {
+      const h = harness({
+        profiles: { target: { ...master, lifetime_id: 'target', isFirstLogin: true, initial_password: 'old-password', ...state } },
+        documents: { 'account_secrets/target': hashedSecret('old-password') },
+        env: loginEnv, fetch: firebasePasswords({}),
+      });
+      const response = await h.load(route).POST(loginRequest({ login: 'target', password: 'old-password' }));
+      assert.equal(response.status, 401, `${route} ${JSON.stringify(state)}`);
+      assert.equal((await response.json()).token, undefined);
+      assert.equal(h.authWrites.length, 0);
+      assert.ok(h.data.has('users/target'));
+      assert.equal(h.calls.some(call => String(call).startsWith('token:')), false);
     }
-  }
-  // 初回登録済みのアカウントは、古い初期パスワードでは入れない（現在のパスワードの確認で弾く）。
-  const studentFlow = harness({
-    profiles: { target: { ...master, lifetime_id: 'target', initial_password: 'old-password', isFirstLogin: false } },
-    authUsers: { target: { email: master.email } },
-    env: { NEXT_PUBLIC_FIREBASE_API_KEY: 'test-api-key' },
-    fetch: async () => Response.json({ error: { message: 'INVALID_LOGIN_CREDENTIALS' } }, { status: 400 }),
-  });
-  assert.equal((await studentFlow.load('app/api/first-login/route.ts').POST(request('/api/first-login', { lifetimeId: 'target', password: 'old-password' }))).status, 401);
-  assert.equal(studentFlow.authWrites.length, 0);
-  // 停止中のAuthアカウントは入れない。
-  const disabledFlow = harness({ profiles: { target: { ...master, lifetime_id: 'target', isFirstLogin: false } }, authUsers: { target: { email: master.email, disabled: true } } });
-  assert.equal((await disabledFlow.load('app/api/first-login/route.ts').POST(request('/api/first-login', { lifetimeId: 'target', password: 'any' }))).status, 403);
+    // Auth のアカウントがあっても、停止中の利用者は今のパスワードでも入れない。
+    for (const state of inactiveStates) {
+      const h = harness({
+        profiles: { target: { ...master, lifetime_id: 'target', isFirstLogin: false, ...state } },
+        authUsers: { target: { email: 'target@classbase.local' } },
+        env: loginEnv, fetch: firebasePasswords({ 'target@classbase.local': 'current-password-1' }),
+      });
+      const response = await h.load(route).POST(loginRequest({ login: 'target', password: 'current-password-1' }));
+      assert.equal(response.status, 403);
+      assert.deepEqual(await response.json(), { ok: false, error: 'account-inactive' });
+      assert.equal(h.calls.some(call => String(call).startsWith('token:')), false);
+    }
+    // Auth で無効にしたアカウントも入れない。停止中かどうかを知られないよう、パスワード違いと同じ401にし、Firebase には問い合わせない。
+    const disabled = harness({
+      profiles: { target: { ...master, lifetime_id: 'target', isFirstLogin: false } },
+      authUsers: { target: { email: 'target@classbase.local', disabled: true } },
+      env: loginEnv, fetch: firebasePasswords({ 'target@classbase.local': 'current-password-1' }),
+    });
+    const disabledResponse = await disabled.load(route).POST(loginRequest({ login: 'target', password: 'current-password-1' }));
+    assert.equal(disabledResponse.status, 401);
+    assert.equal((await disabledResponse.json()).error, 'wrong-password');
+    assert.equal(disabled.calls.some(call => String(call).startsWith('token:')), false);
 
-  const adminFlow = harness({
-    profiles: { target: { ...master, lifetime_id: 'target', initial_password: 'old-password', isFirstLogin: false } },
-    authUsers: { target: { email: master.email } },
-    env: { NEXT_PUBLIC_FIREBASE_API_KEY: 'test-api-key' },
-    fetch: async () => Response.json({ error: { message: 'INVALID_LOGIN_CREDENTIALS' } }, { status: 400 }),
+    // 初回登録済みのアカウントは、古い初期パスワード（ハッシュ・前からの平文のどちらが残っていても）では入れず、パスワードも戻らない。
+    const checks = [];
+    const changed = harness({
+      profiles: { target: { ...master, lifetime_id: 'target', initial_password: 'old-password', isFirstLogin: false } },
+      documents: { 'account_secrets/target': hashedSecret('old-password') },
+      authUsers: { target: { email: 'target@classbase.local' } },
+      env: loginEnv, fetch: firebasePasswords({ 'target@classbase.local': 'current-password-1' }, checks),
+    });
+    const rejected = await changed.load(route).POST(loginRequest({ login: 'target', password: 'old-password' }));
+    assert.equal(rejected.status, 401);
+    assert.equal((await rejected.json()).error, 'wrong-password');
+    assert.equal(changed.authWrites.length, 0);
+    assert.deepEqual(checks.map(check => check.email), ['target@classbase.local']);
+    const accepted = await changed.load(route).POST(loginRequest({ login: 'target', password: 'current-password-1' }));
+    assert.equal(accepted.status, 200);
+    assert.deepEqual(await accepted.json(), { ok: true, token: 'custom-token:target', role: 'master' });
+    assert.equal(changed.authWrites.length, 0);
+  }
+
+  // メールアドレスでのログインは、初期パスワードでの初回登録には使えない（生徒番号・職員番号だけ）。
+  const byEmail = harness({
+    profiles: { target: { ...teacher, lifetime_id: 'T200', email: 'new-staff@sozogakuen.co.jp', isFirstLogin: true } },
+    documents: { 'account_secrets/target': hashedSecret('initial-pass-9') },
+    env: loginEnv, fetch: firebasePasswords({}),
   });
-  const rejected = await adminFlow.load('app/api/admin/first-login/route.ts').POST(request('/api/admin/first-login', { login: 'target', password: 'old-password' }));
-  assert.equal(rejected.status, 401);
-  assert.equal(adminFlow.authWrites.length, 0);
+  const emailLogin = await byEmail.load(LOGIN_ROUTE).POST(loginRequest({ login: 'new-staff@sozogakuen.co.jp', password: 'initial-pass-9' }));
+  assert.equal(emailLogin.status, 401);
+  assert.equal(byEmail.authWrites.length, 0);
+  assert.ok(byEmail.data.has('account_secrets/target'));
+});
+test('first login accepts the hashed initial password, creates the Auth user and moves the secret to the uid', async () => {
+  const seed = { role: 'student', school_id: '112', school: '112', lifetime_id: '30000001', name: '生徒', isFirstLogin: true };
+  const h = harness({
+    profiles: { seed },
+    documents: { 'account_secrets/seed': hashedSecret('Init-pass-01') },
+    env: loginEnv, fetch: firebasePasswords({}),
+  });
+  const route = h.load(LOGIN_ROUTE);
+  const wrong = await route.POST(loginRequest({ login: '30000001', password: 'Init-pass-02' }));
+  assert.equal(wrong.status, 401);
+  assert.equal(h.authWrites.length, 0);
+
+  // 全角の番号でも同じIDとして扱う。lifetimeId（前の画面の名前）も受け付ける。
+  const ok = await route.POST(loginRequest({ lifetimeId: '３００００００１', password: 'Init-pass-01' }));
+  assert.equal(ok.status, 200);
+  assert.deepEqual(await ok.json(), { ok: true, token: 'custom-token:created', role: 'student' });
+  assert.equal(h.authWrites.length, 1);
+  assert.equal(h.authWrites[0].email, '30000001@classbase.local');
+  assert.equal(h.authWrites[0].password, 'Init-pass-01');
+  // 登録データは Auth の uid へ移り、初期パスワードのハッシュも一緒に移る（平文はどこにも書かない）。
+  assert.equal(h.data.has('users/seed'), false);
+  assert.equal(h.data.get('users/created').role, 'student');
+  assert.equal(h.data.get('users/created').isFirstLogin, true);
+  assert.equal(h.data.has('account_secrets/seed'), false);
+  assert.equal(h.data.get('account_secrets/created').initial_password_hash, hashedSecret('Init-pass-01').initial_password_hash);
+  assert.equal(storedAnywhere(h, 'Init-pass-01'), false);
+  // 1回失敗していたので、この接続元の失敗の記録は消える（IDごとの1時間の数は残す）。
+  assert.equal(h.data.has(lockPairKey('30000001')), false);
+  assert.ok(h.data.has(lockAccountKey('30000001')));
+
+  // 移行前から users に平文で残っている初期パスワードも、移行の手順で消すまでは照合に使える。
+  const legacy = harness({ profiles: { seed: { ...seed, initial_password: 'legacy-pass-1' } }, env: loginEnv, fetch: firebasePasswords({}) });
+  assert.equal((await legacy.load(LOGIN_ROUTE).POST(loginRequest({ login: '30000001', password: 'legacy-pass-1' }))).status, 200);
+  // ハッシュがあるときは、残っている平文では入れない。
+  const both = harness({ profiles: { seed: { ...seed, initial_password: 'legacy-pass-1' } }, documents: { 'account_secrets/seed': hashedSecret('Init-pass-01') }, env: loginEnv, fetch: firebasePasswords({}) });
+  assert.equal((await both.load(LOGIN_ROUTE).POST(loginRequest({ login: '30000001', password: 'legacy-pass-1' }))).status, 401);
+  assert.equal(both.authWrites.length, 0);
 });
 test('existing master can resolve a legacy login ID only after the current Firebase password is verified', async () => {
-  let passwordCheck = null;
+  const checks = [];
+  const profile = { ...master, lifetime_id: 'legacy-master-id', email: 'actual-admin@sozogakuen.co.jp', isFirstLogin: false };
   const h = harness({
-    profiles: { target: { ...master, lifetime_id: 'legacy-master-id', isFirstLogin: false } },
+    profiles: { target: profile },
     authUsers: { target: { email: 'actual-admin@sozogakuen.co.jp', disabled: false } },
-    env: { NEXT_PUBLIC_FIREBASE_API_KEY: 'test-api-key' },
-    fetch: async (url, options) => {
-      passwordCheck = { url: String(url), body: JSON.parse(String(options.body)) };
-      return Response.json({ localId: 'target' });
-    },
+    env: loginEnv, fetch: firebasePasswords({ 'actual-admin@sozogakuen.co.jp': 'current-password' }, checks),
   });
-  const response = await h.load('app/api/admin/first-login/route.ts').POST(request('/api/admin/first-login', {
-    login: 'legacy-master-id', password: 'current-password',
-  }));
+  const route = h.load(ADMIN_LOGIN_ROUTE);
+  const wrong = await route.POST(loginRequest({ login: 'legacy-master-id', password: 'guess' }));
+  assert.equal(wrong.status, 401);
+  assert.equal(JSON.stringify(await wrong.json()).includes('actual-admin'), false);
+
+  const response = await route.POST(loginRequest({ login: 'legacy-master-id', password: 'current-password' }));
   assert.equal(response.status, 200);
-  assert.equal((await response.json()).email, 'actual-admin@sozogakuen.co.jp');
-  assert.equal(passwordCheck.body.password, 'current-password');
-  assert.match(passwordCheck.url, /signInWithPassword/);
+  const body = await response.json();
+  assert.deepEqual(body, { ok: true, token: 'custom-token:target', role: 'master' });
+  assert.equal(checks.at(-1).email, 'actual-admin@sozogakuen.co.jp');
+  assert.equal(checks.at(-1).password, 'current-password');
+  assert.match(checks.at(-1).url, /signInWithPassword\?key=test-api-key/);
   assert.equal(h.authWrites.length, 0);
-  assert.equal(h.writes.length, 0);
+  assert.equal(h.writes.filter(key => !key.startsWith('login_locks/')).length, 0);
+
+  // 登録メールの Auth アカウントが別の利用者のものなら、そのパスワードでは入れない。
+  const foreign = harness({
+    profiles: { target: profile },
+    authUsers: { someoneElse: { email: 'actual-admin@sozogakuen.co.jp' } },
+    env: loginEnv, fetch: firebasePasswords({ 'actual-admin@sozogakuen.co.jp': 'current-password' }),
+  });
+  assert.equal((await foreign.load(ADMIN_LOGIN_ROUTE).POST(loginRequest({ login: 'legacy-master-id', password: 'current-password' }))).status, 401);
+  assert.equal(foreign.calls.some(call => String(call).startsWith('token:')), false);
 });
 test('staff registered with a real email can log in with the login ID after changing the password', async () => {
-  let passwordCheck = null;
+  const checks = [];
   const teacher = { role: 'teacher', name: '講師', lifetime_id: '142', initial_login_id: '142', email: 'y_staff@sozogakuen.co.jp', isFirstLogin: false, account_status: 'active' };
-  const h = harness({
+  const setup = () => harness({
     profiles: { target: teacher },
     authUsers: { target: { email: 'y_staff@sozogakuen.co.jp', disabled: false } },
-    env: { NEXT_PUBLIC_FIREBASE_API_KEY: 'test-api-key' },
-    fetch: async (url, options) => {
-      passwordCheck = JSON.parse(String(options.body));
-      return passwordCheck.password === 'changed-password'
-        ? Response.json({ localId: 'target' })
-        : Response.json({ error: { message: 'INVALID_LOGIN_CREDENTIALS' } }, { status: 400 });
-    },
+    env: loginEnv, fetch: firebasePasswords({ 'y_staff@sozogakuen.co.jp': 'changed-password' }, checks),
   });
-  const route = h.load('app/api/first-login/route.ts');
-  const ok = await route.POST(request('/api/first-login', { lifetimeId: '142', password: 'changed-password' }));
-  assert.equal(ok.status, 200);
-  assert.equal((await ok.json()).email, 'y_staff@sozogakuen.co.jp');
-  assert.equal(passwordCheck.email, 'y_staff@sozogakuen.co.jp');
-  // ログインできた試行は、IP・アカウントの回数制限から戻す（同じ回線の職員を巻き込まない）。
-  assert.equal(h.rateLimitReleases.length, 2);
-  // パスワードが違えば実メールを返さない。
-  const wrong = await route.POST(request('/api/first-login', { lifetimeId: '142', password: 'guess' }));
+  // 失敗がなければ、ログインできても何も書かない。
+  const clean = setup();
+  const first = await clean.load(LOGIN_ROUTE).POST(loginRequest({ login: '142', password: 'changed-password' }));
+  assert.equal(first.status, 200);
+  assert.deepEqual(await first.json(), { ok: true, token: 'custom-token:target', role: 'teacher' });
+  assert.equal(checks.at(-1).email, 'y_staff@sozogakuen.co.jp');
+  assert.equal(clean.writes.length, 0);
+
+  // パスワードが違えば実メールもトークンも返さず、失敗を記録する。
+  const h = setup();
+  const route = h.load(LOGIN_ROUTE);
+  const wrong = await route.POST(loginRequest({ login: '142', password: 'guess' }));
   assert.equal(wrong.status, 401);
-  assert.equal(h.rateLimitReleases.length, 2);
-  assert.equal((await wrong.json()).email, undefined);
+  const wrongBody = await wrong.json();
+  assert.deepEqual(wrongBody, { ok: false, error: 'wrong-password' });
+  assert.equal(h.data.get(lockPairKey('142')).failures, 1);
+  assert.equal(h.data.get(lockAccountKey('142')).window_failures, 1);
+  // ログインできたら、この接続元の失敗の記録を消す（同じ回線の職員を巻き込まない）。IDごとの1時間の数は残す。
+  const ok = await route.POST(loginRequest({ login: '142', password: 'changed-password' }));
+  assert.equal(ok.status, 200);
+  assert.equal(h.data.has(lockPairKey('142')), false);
+  assert.ok(h.data.has(lockAccountKey('142')));
   assert.equal(h.authWrites.length, 0);
-  assert.equal(h.writes.length, 0);
+  assert.equal(h.writes.filter(key => !key.startsWith('login_locks/')).length, 0);
 });
 test('real-email staff whose first-login flag was not cleared still log in with the current password', async () => {
   const teacher = { role: 'teacher', name: '講師', lifetime_id: '150', email: 'z_staff@sozogakuen.co.jp', initial_password: 'old-initial', account_status: 'active' };
   const h = harness({
     profiles: { target: teacher },
     authUsers: { target: { email: 'z_staff@sozogakuen.co.jp', disabled: false } },
-    env: { NEXT_PUBLIC_FIREBASE_API_KEY: 'test-api-key' },
-    fetch: async (url, options) => JSON.parse(String(options.body)).password === 'current-password'
-      ? Response.json({ localId: 'target' })
-      : Response.json({ error: { message: 'INVALID_LOGIN_CREDENTIALS' } }, { status: 400 }),
+    env: loginEnv, fetch: firebasePasswords({ 'z_staff@sozogakuen.co.jp': 'current-password' }),
   });
-  const route = h.load('app/api/first-login/route.ts');
-  const ok = await route.POST(request('/api/first-login', { lifetimeId: '150', password: 'current-password' }));
+  const ok = await h.load(LOGIN_ROUTE).POST(loginRequest({ lifetimeId: '150', password: 'current-password' }));
   assert.equal(ok.status, 200);
-  assert.equal((await ok.json()).email, 'z_staff@sozogakuen.co.jp');
+  assert.equal((await ok.json()).token, 'custom-token:target');
   assert.equal(h.authWrites.length, 0);
 });
-test('public initial-login endpoints stop credential attempts when either rate limit is exhausted', async () => {
-  for (const filename of ['app/api/first-login/route.ts', 'app/api/admin/first-login/route.ts']) {
-    let checks = 0;
-    const h = harness({
-      profiles: { target: { ...master, lifetime_id: 'target', initial_login_id: 'target', initial_password: 'old-password' } },
-      overrides: {
-        '@/lib/server/password-recovery': {
-          requestFingerprint: parts => `fingerprint:${parts.join('|')}`,
-          getClientIp: () => '203.0.113.10',
-          consumeRateLimit: async () => ++checks === 1,
-        },
-      },
-    });
-    const response = await h.load(filename).POST(request('/api/first-login', {
-      login: 'target', lifetimeId: 'target', password: 'old-password',
-    }));
-    assert.equal(response.status, 429);
-    assert.equal(h.authWrites.length, 0);
+test('login endpoints refuse a locked account or network before checking any password', async () => {
+  for (const route of [LOGIN_ROUTE, ADMIN_LOGIN_ROUTE]) {
+    // 「ID＋接続元」のロックと、IDごと（接続元をまたぐ）のロックのどちらでも止まる。
+    for (const lockDoc of [
+      { [lockPairKey('target')]: { scope: 'pair', failures: 0, locked_until: lockedUntil() } },
+      { [lockAccountKey('target')]: { scope: 'account', window_failures: 0, locked_until: lockedUntil() } },
+      { [lockPairKey('target')]: { scope: 'pair', failures: 6, next_allowed_at: lockedUntil(60_000) } },
+    ]) {
+      const checks = [];
+      const h = harness({
+        profiles: { target: { ...master, lifetime_id: 'target', initial_login_id: 'target', isFirstLogin: true, initial_password: 'old-password' } },
+        authUsers: { target: { email: 'target@classbase.local' } },
+        documents: { ...lockDoc, 'account_secrets/target': hashedSecret('old-password') },
+        env: loginEnv, fetch: firebasePasswords({ 'target@classbase.local': 'old-password' }, checks),
+      });
+      const response = await h.load(route).POST(loginRequest({ login: 'TARGET', password: 'old-password' }));
+      assert.equal(response.status, 429);
+      const body = await response.json();
+      assert.equal(body.error, 'too-many-attempts');
+      assert.ok(body.retry_after_seconds > 0 && body.retry_after_seconds <= 1800);
+      assert.equal(response.headers.get('retry-after'), String(body.retry_after_seconds));
+      assert.equal(checks.length, 0);
+      assert.equal(h.authWrites.length, 0);
+      assert.equal(h.writes.length, 0);
+    }
+  }
+});
+test('repeated login failures slow down, then lock the account on that network until staff unlock it', async () => {
+  const network = { ip: '203.0.113.10' };
+  const checks = [];
+  const h = harness({
+    profiles: { actor: admin, target: { ...student, lifetime_id: '30000002', email: '30000002@classbase.local', isFirstLogin: false } },
+    authUsers: { target: { email: '30000002@classbase.local' } },
+    env: loginEnv, fetch: firebasePasswords({ '30000002@classbase.local': 'correct-horse-9' }, checks),
+    overrides: { '@/lib/server/password-recovery': passwordRecoveryMock({ getClientIp: () => network.ip }) },
+  });
+  const route = h.load(LOGIN_ROUTE);
+  const attempt = password => route.POST(loginRequest({ login: '30000002', password }));
+  // 待ち時間が過ぎたことにする（ロックの locked_until はそのまま）。
+  const skipWait = () => {
+    for (const [key, value] of h.data) if (key.startsWith('login_locks/') && value.scope === 'pair') h.data.set(key, { ...value, next_allowed_at: { toMillis: () => 0 } });
+  };
+
+  for (let failure = 1; failure <= 4; failure += 1) assert.equal((await attempt('wrong-guess')).status, 401, `failure ${failure}`);
+  // 5回目から待ち時間（30秒から倍々）。
+  const slowed = await attempt('wrong-guess');
+  assert.equal(slowed.status, 429);
+  assert.deepEqual(await slowed.json(), { ok: false, error: 'too-many-attempts', retry_after_seconds: 30 });
+  // 待ち時間の間は、正しいパスワードでも Firebase に問い合わせずに断る。
+  const checksBefore = checks.length;
+  assert.equal((await attempt('correct-horse-9')).status, 429);
+  assert.equal(checks.length, checksBefore);
+
+  for (let failure = 6; failure <= 9; failure += 1) {
+    skipWait();
+    assert.equal((await attempt('wrong-guess')).status, 429, `failure ${failure}`);
+  }
+  // 10回で30分ロック。
+  skipWait();
+  const locked = await attempt('wrong-guess');
+  assert.equal(locked.status, 429);
+  assert.equal((await locked.json()).retry_after_seconds, 1800);
+  skipWait();
+  assert.equal((await attempt('correct-horse-9')).status, 429);
+  assert.equal(h.calls.some(call => String(call).startsWith('token:')), false);
+
+  // 生徒IDは推測しやすいので、他の回線からの失敗で本人が締め出されないよう、接続元ごとに数える。
+  network.ip = '198.51.100.7';
+  assert.equal((await attempt('correct-horse-9')).status, 200);
+  network.ip = '203.0.113.10';
+  assert.equal((await attempt('correct-horse-9')).status, 429);
+
+  // 担当校舎の管理者がロックを解くと、もとの回線からも入れる。
+  const lockRoute = h.load('app/api/admin/accounts/login-lock/route.ts');
+  const status = await lockRoute.GET(request('/api/admin/accounts/login-lock?user_id=target', null, 'valid', 'GET'));
+  assert.equal(status.status, 200);
+  assert.equal((await status.json()).locked, true);
+  const unlocked = await lockRoute.POST(request('/api/admin/accounts/login-lock', { user_id: 'target' }));
+  assert.equal(unlocked.status, 200);
+  assert.ok((await unlocked.json()).removed >= 2);
+  assert.equal([...h.data.keys()].some(key => key.startsWith('login_locks/')), false);
+  assert.equal((await attempt('correct-horse-9')).status, 200);
+});
+test('login locks an account across all networks after 50 failures within an hour', async () => {
+  const network = { ip: '192.0.2.1' };
+  const checks = [];
+  const h = harness({
+    profiles: { target: { ...student, lifetime_id: '30000003', email: '30000003@classbase.local', isFirstLogin: false } },
+    authUsers: { target: { email: '30000003@classbase.local' } },
+    documents: { [lockAccountKey('30000003')]: { scope: 'account', account_key: 'fingerprint:login-lock-account|30000003', window_failures: 49, window_started_at: { toMillis: () => Date.now() - 60_000 }, lock_count: 0 } },
+    env: loginEnv, fetch: firebasePasswords({ '30000003@classbase.local': 'correct-horse-9' }, checks),
+    overrides: { '@/lib/server/password-recovery': passwordRecoveryMock({ getClientIp: () => network.ip }) },
+  });
+  const route = h.load(LOGIN_ROUTE);
+  const failed = await route.POST(loginRequest({ login: '30000003', password: 'wrong-guess' }));
+  assert.equal(failed.status, 429);
+  assert.equal((await failed.json()).retry_after_seconds, 1800);
+  // 別の回線からでも、正しいパスワードでも止まる。
+  network.ip = '192.0.2.99';
+  const checksBefore = checks.length;
+  assert.equal((await route.POST(loginRequest({ login: '30000003', password: 'correct-horse-9' }))).status, 429);
+  assert.equal(checks.length, checksBefore);
+});
+test('admin login accepts only administrator roles', async () => {
+  const setup = profile => harness({
+    profiles: { target: profile },
+    authUsers: { target: { email: 'target@classbase.local' } },
+    env: loginEnv, fetch: firebasePasswords({ 'target@classbase.local': 'correct-horse-9' }),
+  });
+  for (const role of ['student', 'parent', 'teacher']) {
+    const h = setup({ role, school_id: '112', lifetime_id: 'target', isFirstLogin: false });
+    const response = await h.load(ADMIN_LOGIN_ROUTE).POST(loginRequest({ login: 'target', password: 'correct-horse-9' }));
+    assert.equal(response.status, 403, role);
+    assert.deepEqual(await response.json(), { ok: false, error: 'not-admin' });
+    assert.equal(h.calls.some(call => String(call).startsWith('token:')), false);
+    // 同じアカウントでも、ふつうのログインからは入れる。
+    const normal = await h.load(LOGIN_ROUTE).POST(loginRequest({ login: 'target', password: 'correct-horse-9' }));
+    assert.equal(normal.status, 200);
+    assert.equal((await normal.json()).role, role);
+  }
+  for (const role of ['master', 'admin', 'attendance_admin']) {
+    const h = setup({ role, school_id: '112', lifetime_id: 'target', isFirstLogin: false });
+    const response = await h.load(ADMIN_LOGIN_ROUTE).POST(loginRequest({ login: 'target', password: 'correct-horse-9' }));
+    assert.equal(response.status, 200, role);
+    assert.deepEqual(await response.json(), { ok: true, token: 'custom-token:target', role });
+  }
+  // 入力の形が違うものは、Firebase に問い合わせずに断る。
+  const checks = [];
+  const h = harness({ env: loginEnv, fetch: firebasePasswords({}, checks) });
+  for (const [body, error] of [[{ login: '', password: 'x' }, 'invalid-params'], [{ login: 'target' }, 'invalid-params'], [{ login: 'bad id!', password: 'x' }, 'id-invalid-format'], [{ login: 'target', password: 'x'.repeat(129) }, 'invalid-params']]) {
+    const response = await h.load(ADMIN_LOGIN_ROUTE).POST(loginRequest(body));
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error, error);
+  }
+  assert.equal(checks.length, 0);
+});
+test('logout revokes the refresh tokens of the signed-in account only', async () => {
+  const h = harness({ profiles: { actor: student } });
+  const response = await h.load('app/api/auth/logout/route.ts').POST(request('/api/auth/logout', {}));
+  assert.equal(response.status, 200);
+  assert.deepEqual(h.calls.filter(call => String(call).startsWith('revoke:')), ['revoke:actor']);
+  const anonymous = harness({ profiles: { actor: student } });
+  const rejected = await anonymous.load('app/api/auth/logout/route.ts').POST(request('/api/auth/logout', {}, null));
+  assert.equal(rejected.status, 401);
+  assert.equal(anonymous.calls.some(call => String(call).startsWith('revoke:')), false);
+});
+test('login lock release is limited to own-school students and parents for school admins', async () => {
+  const targets = {
+    ownStudent: { ...student, lifetime_id: '40000001', email: '40000001@classbase.local' },
+    ownParent: { role: 'parent', school_id: '112', school: '112', lifetime_id: '40000001P' },
+    otherStudent: { ...student, school: '113', school_id: '113', lifetime_id: '40000002', email: '40000002@classbase.local' },
+    ownTeacher: { ...teacher, lifetime_id: 'T300' },
+    otherAdmin: { ...admin, lifetime_id: 'A300' },
+  };
+  const lockDocs = () => Object.fromEntries(Object.values(targets).map(profile => [
+    lockPairKey(profile.lifetime_id.toLowerCase()),
+    { scope: 'pair', account_key: `fingerprint:login-lock-account|${profile.lifetime_id.toLowerCase()}`, failures: 0, locked_until: lockedUntil() },
+  ]));
+  const run = async (actorProfile, userId) => {
+    const h = harness({ profiles: { actor: actorProfile, ...targets }, documents: lockDocs() });
+    const response = await h.load('app/api/admin/accounts/login-lock/route.ts').POST(request('/api/admin/accounts/login-lock', { user_id: userId }));
+    return { h, response, stillLocked: h.data.has(lockPairKey(targets[userId].lifetime_id.toLowerCase())) };
+  };
+  for (const userId of ['otherStudent', 'ownTeacher', 'otherAdmin']) {
+    const { response, stillLocked, h } = await run(admin, userId);
+    assert.equal(response.status, 403, userId);
+    assert.equal(stillLocked, true);
     assert.equal(h.writes.length, 0);
   }
+  for (const userId of ['ownStudent', 'ownParent']) {
+    const { response, stillLocked } = await run(admin, userId);
+    assert.equal(response.status, 200, userId);
+    assert.equal(stillLocked, false);
+  }
+  // マスター（サポートセンター）はだれのロックでも解ける。
+  for (const userId of Object.keys(targets)) {
+    const { response, stillLocked } = await run(master, userId);
+    assert.equal(response.status, 200, userId);
+    assert.equal(stillLocked, false);
+  }
+  // 講師・生徒は使えない。ほかの校舎の状態も見えない。
+  for (const actorProfile of [teacher, student]) {
+    const { response, stillLocked } = await run(actorProfile, 'ownStudent');
+    assert.equal(response.status, 403);
+    assert.equal(stillLocked, true);
+  }
+  const h = harness({ profiles: { actor: admin, ...targets }, documents: lockDocs() });
+  const foreignStatus = await h.load('app/api/admin/accounts/login-lock/route.ts').GET(request('/api/admin/accounts/login-lock?user_id=otherStudent', null, 'valid', 'GET'));
+  assert.equal(foreignStatus.status, 403);
 });
 test('recording completion cannot mint rewards for an invented recording id', async () => {
   const h = harness({ profiles: { actor: student } });
@@ -3723,9 +4164,27 @@ test('CSV account import cannot change a protected existing identity', async () 
   const body = await response.json();
   assert.equal(body.count, 0);
   assert.equal(body.errors.length, 1);
-  assert.equal(body.errors[0].error, 'forbidden');
+  // 英語のコード（forbidden など）は画面に出さず、決まった日本語の文言にする（中身はサーバーのログに残す）。
+  assert.equal(body.errors[0].error, 'この行を登録できませんでした。');
+  assert.equal(JSON.stringify(body).includes('forbidden'), false);
   assert.equal(h.authWrites.length, 0);
   assert.equal(h.data.get('users/target').role, 'master');
+});
+
+test('school student list does not return initial passwords', async () => {
+  const h = harness({ profiles: {
+    actor: admin,
+    s1: { ...student, lifetime_id: '50000001', student_name: '生徒', initial_password: 'legacy-plain-1', raw_password: 'legacy-plain-1', parent_initial_password: 'legacy-parent-1', parent_uid: 'p1' },
+    p1: { role: 'parent', school_id: '112', lifetime_id: '50000001P', initial_password: 'legacy-parent-1' },
+  } });
+  const response = await h.load('app/api/admin/school-students/route.ts').GET(request('/api/admin/school-students?school=112', null, 'valid', 'GET'));
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.ok(body.students.some(item => item.lifetime_id === '50000001'));
+  const text = JSON.stringify(body);
+  assert.equal(text.includes('legacy-plain-1'), false);
+  assert.equal(text.includes('legacy-parent-1'), false);
+  assert.equal(/initial_password|raw_password/.test(text), false);
 });
 
 test('recording proxy rejects a stored foreign download URL before forwarding the Zoom bearer', async () => {
@@ -4355,15 +4814,20 @@ test('講師は勤怠画面から自分の当日シフトだけ取得できる',
   const h = harness({
     profiles: { actor: teacher },
     documents: {
-      'attendance_shift_plans/own': { date: '2026-10-09', teacher_id: 'actor', school_id: '112', start: '16:50', end: '18:00', category: 'individual' },
+      'attendance_shift_plans/own': { date: '2026-10-09', teacher_id: 'actor', school_id: '112', start: '16:50', end: '18:00', category: 'individual', teacher_name: 'Teacher One', student_ids: ['student1'], student_names: ['佐藤花子'], created_by: 'boss', employment_category: 'dedicated' },
       'attendance_shift_plans/other': { date: '2026-10-09', teacher_id: 'other', school_id: '112', start: '18:10', end: '19:20', category: 'group' },
+      'attendance_shift_room_settings/112': { school_id: '112', rooms: { group: ['A教室'] } },
     },
   });
   const response = await h.load('app/api/attendance-shifts/route.ts').GET(request('/api/attendance-shifts?start=2026-10-09&end=2026-10-09', null, 'valid', 'GET'));
   assert.equal(response.status, 200);
   const body = await response.json();
   assert.deepEqual(body.shifts.map(item => item.id), ['own']);
-  assert.deepEqual(body.staff, []);
+  // 講師には自分のシフトの必要な項目だけを返し、校舎全体の教室設定・職員一覧は返さない。
+  assert.equal(body.staff, undefined);
+  assert.equal(body.rooms, undefined);
+  assert.equal(body.settings, undefined);
+  assert.deepEqual(Object.keys(body.shifts[0]).sort(), ['category', 'date', 'end', 'id', 'school_id', 'start', 'student_names', 'teacher_id']);
 
   const dedicated = { ...teacher, employment_category: 'dedicated', attendance_school_manager: true };
   const managerView = harness({
@@ -4376,6 +4840,50 @@ test('講師は勤怠画面から自分の当日シフトだけ取得できる',
   const ownResponse = await managerView.load('app/api/attendance-shifts/route.ts').GET(request('/api/attendance-shifts?start=2026-10-09&end=2026-10-09&scope=mine', null, 'valid', 'GET'));
   assert.equal(ownResponse.status, 200);
   assert.deepEqual((await ownResponse.json()).shifts.map(item => item.id), ['own']);
+});
+
+test('マスターはシフトの一覧も POST と同じく任意の校舎を選んで見られる', async () => {
+  const unassignedMaster = { role: 'master', email: 'master@example.test' };
+  const h = harness({
+    profiles: { actor: unassignedMaster },
+    documents: {
+      'attendance_shift_plans/a': { date: '2026-10-09', teacher_id: 't1', school_id: '112', start: '16:50', end: '18:00', category: 'group' },
+      'attendance_shift_plans/b': { date: '2026-10-09', teacher_id: 't2', school_id: '147', start: '16:50', end: '18:00', category: 'group' },
+    },
+  });
+  const route = h.load('app/api/attendance-shifts/route.ts');
+  // 所属校舎がなく未指定なら、拒否せずに校舎の選択を求める。
+  const unselected = await route.GET(request('/api/attendance-shifts?start=2026-10-09&end=2026-10-09', null, 'valid', 'GET'));
+  assert.equal(unselected.status, 200);
+  const unselectedBody = await unselected.json();
+  assert.equal(unselectedBody.school_required, true);
+  assert.deepEqual(unselectedBody.shifts, []);
+  const selected = await route.GET(request('/api/attendance-shifts?start=2026-10-09&end=2026-10-09&school_id=112', null, 'valid', 'GET'));
+  assert.equal(selected.status, 200);
+  const selectedBody = await selected.json();
+  assert.equal(selectedBody.can_select_school, true);
+  assert.deepEqual(selectedBody.shifts.map(item => item.id), ['a']);
+
+  // 専任の承認者は担当外の校舎を指定しても見られない。
+  const dedicated = harness({ profiles: { actor: { ...teacher, employment_category: 'dedicated', attendance_school_manager: true } } });
+  const denied = await dedicated.load('app/api/attendance-shifts/route.ts').GET(request('/api/attendance-shifts?start=2026-10-09&end=2026-10-09&school_id=147', null, 'valid', 'GET'));
+  assert.equal(denied.status, 403);
+});
+
+test('CSP の違反報告は認証なしで受け、Firestore に書かない', async () => {
+  const h = harness();
+  const route = h.load('app/api/security/csp-report/route.ts');
+  const report = { 'csp-report': { 'document-uri': 'https://security.test/student?token=secret', 'effective-directive': 'script-src-elem', 'blocked-uri': 'eval', disposition: 'report' } };
+  const ok = await route.POST(new Request('https://security.test/api/security/csp-report', { method: 'POST', headers: { 'content-type': 'application/csp-report' }, body: JSON.stringify(report) }));
+  assert.equal(ok.status, 204);
+  const tooLarge = await route.POST(new Request('https://security.test/api/security/csp-report', { method: 'POST', body: 'x'.repeat(20 * 1024) }));
+  assert.equal(tooLarge.status, 413);
+  const broken = await route.POST(new Request('https://security.test/api/security/csp-report', { method: 'POST', body: '{' }));
+  assert.equal(broken.status, 400);
+  // ログに出す URL はクエリを落とす。
+  const source = fs.readFileSync(path.resolve(sourceRoot, 'app/api/security/csp-report/route.ts'), 'utf8');
+  assert.match(source, /url\.origin\}\$\{url\.pathname/);
+  assert.equal(h.writes.length, 0);
 });
 
 const gachaDoc = (overrides = {}) => ({ name: '夏ガチャ', cost: 20, active: true, items: [{ reward_id: 'prize', weight: 10000 }], miss_weight: 0, miss_refund_coins: 0, ...overrides });
@@ -4693,6 +5201,17 @@ test('CSV import appends chunks to one batch and keeps passwords of students who
   assert.equal(h.data.get('users/active').isFirstLogin, false);
   assert.equal(Array.from(body.students, item => item.lifetime_id).join(','), '20011962,12138090');
   assert.deepEqual(h.data.get('account_import_batches/actor_abc').success_count, { increment: 2 });
+  // 新しい生徒の初期パスワードは、account_secrets にハッシュだけで置く（users に平文を書かない）。
+  const issued = body.students.find(item => item.lifetime_id === '12138090');
+  assert.ok(issued.initial_password);
+  assert.match(h.data.get(`account_secrets/${issued.uid}`).initial_password_hash, /^[0-9a-f]{64}$/);
+  for (const [key, value] of h.data) {
+    if (!key.startsWith('users/')) continue;
+    for (const field of ['initial_password', 'raw_password', 'password', 'parent_initial_password']) {
+      assert.ok(value[field] === undefined || value[field] === 'deleted', `${key}.${field}`);
+    }
+  }
+  assert.equal(h.data.has('account_secrets/active'), false);
 
   const tooMany = ['生涯番号,氏名'];
   for (let n = 0; n < 41; n++) tooMany.push(`${30000000 + n},x`);
@@ -5371,9 +5890,12 @@ test('contact call marks are shared per date and student, scoped to accessible s
     [`contact_call_logs/${today}_foreign`]: { student_id: 'foreign', date: today, teacher_id: 'x', teacher_name: 'X', marked_at: '2026-01-01T00:00:00.000Z' },
   } });
   const route = h.load('app/api/teacher/contact-call-marks/route.ts');
-  const marked = await route.POST(request('/api/teacher/contact-call-marks', { student_id: 'local', date: today, note: '留守電' }));
+  const marked = await route.POST(request('/api/teacher/contact-call-marks', { student_id: 'local', date: today, note: '留守電', roster_status: 'no_contact', zoom_checked: true }));
   assert.equal(marked.status, 200);
   assert.equal(h.data.get(`contact_call_logs/${today}_local`)?.teacher_id, 'actor');
+  // 電話したときの名簿の状態を残す（不要な確認電話の数を測るため）。決まった値以外は残さない。
+  assert.equal(h.data.get(`contact_call_logs/${today}_local`)?.roster_status, 'no_contact');
+  assert.equal(h.data.get(`contact_call_logs/${today}_local`)?.zoom_checked, true);
   const again = await route.POST(request('/api/teacher/contact-call-marks', { student_id: 'local', date: today }));
   assert.equal(again.status, 409);
   assert.equal((await again.json()).mark.teacher_name, teacher.name);
@@ -5385,6 +5907,41 @@ test('contact call marks are shared per date and student, scoped to accessible s
   assert.deepEqual(body.marks.map(mark => mark.student_id), ['local']);
   const studentHarness = harness({ profiles: { actor: student } });
   assert.equal((await studentHarness.load('app/api/teacher/contact-call-marks/route.ts').GET(request(`/api/teacher/contact-call-marks?date=${today}&student_ids=actor`, null, 'valid', 'GET'))).status, 403);
+});
+
+test('today roster lessons are scoped to accessible students and refuse students/parents', async () => {
+  const today = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  const built = [];
+  const timetableOverride = {
+    '@/lib/server/student-timetable': {
+      buildStudentTimetable: async ({ id }) => {
+        built.push(id);
+        return { lessons: [
+          { date: today, period: 1, label: '中2 理科', status: 'scheduled' },
+          { date: today, period: 2, label: '休講', status: 'cancelled' },
+          { date: '2099-01-01', period: 1, label: '別の日', status: 'scheduled' },
+        ] };
+      },
+    },
+  };
+  const h = harness({ profiles: {
+    actor: teacher,
+    local: { ...student, student_name: 'Local Student' },
+    foreign: { ...student, school: '999', school_id: '999', student_name: 'Foreign Student' },
+  }, overrides: timetableOverride });
+  const route = h.load('app/api/teacher/today-roster/route.ts');
+  const response = await route.GET(request('/api/teacher/today-roster?student_ids=local,foreign', null, 'valid', 'GET'));
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  // 担当校舎の生徒だけ。休講と別の日の授業は返さない。
+  assert.deepEqual(Object.keys(body.lessons), ['local']);
+  assert.deepEqual(body.lessons.local, [{ period: 1, label: '中2 理科', status: 'scheduled' }]);
+  assert.deepEqual(built, ['local']);
+  for (const profile of [student, { role: 'parent', student_ids: ['local'], name: 'Parent' }]) {
+    const denied = harness({ profiles: { actor: profile, local: { ...student } }, overrides: timetableOverride });
+    assert.equal((await denied.load('app/api/teacher/today-roster/route.ts').GET(request('/api/teacher/today-roster?student_ids=local', null, 'valid', 'GET'))).status, 403);
+  }
+  assert.equal((await route.GET(request('/api/teacher/today-roster?student_ids=local', null, null, 'GET'))).status, 401);
 });
 
 test('absence cancel is limited to linked parents/the student and closes before the lesson day ends', async () => {
@@ -6715,6 +7272,31 @@ test('Vercel cron GET endpoints require Authorization: Bearer CRON_SECRET and fa
   }
 });
 
+test('GAS mail outbox requires an HMAC signature made with GAS_MAIL_SECRET within five minutes', async () => {
+  const file = 'app/api/internal/mail-outbox/route.ts';
+  const secret = 'gas-mail-secret-for-security-tests-0123456789';
+  const sign = (key, ts, payload) => createHmac('sha256', key).update(`${ts}\n${payload}`, 'utf8').digest('hex');
+  const post = body => new NextRequest('https://security.test/api/internal/mail-outbox', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const payload = JSON.stringify({ action: 'claim', limit: 5, remaining: 1500 });
+  const now = String(Date.now());
+
+  // 合言葉が未設定なら、どんな署名でも拒否する。
+  const unset = harness({ fetch: async () => { throw new Error('network must not be reached'); } });
+  assert.equal((await unset.load(file).POST(post({ ts: now, sig: sign('', now, payload), payload }))).status, 401);
+
+  const configured = harness({ env: { GAS_MAIL_SECRET: secret }, fetch: async () => { throw new Error('network must not be reached'); } });
+  const route = configured.load(file);
+  assert.equal((await route.POST(post({}))).status, 401);
+  assert.equal((await route.POST(post({ ts: now, sig: sign('wrong-secret-wrong-secret-wrong-secret', now, payload), payload }))).status, 401);
+  // 署名後に中身を書き換えたものは通さない。
+  assert.equal((await route.POST(post({ ts: now, sig: sign(secret, now, payload), payload: payload.replace('5', '50') }))).status, 401);
+  const old = String(Date.now() - 10 * 60 * 1000);
+  assert.equal((await route.POST(post({ ts: old, sig: sign(secret, old, payload), payload }))).status, 401);
+  assert.equal(configured.verifications.length, 0);
+  const accepted = await route.POST(post({ ts: now, sig: sign(secret, now, payload), payload }));
+  assert.notEqual(accepted.status, 401);
+});
+
 test('science-social staff tools reject admins without the science-social app and teachers assigned to other programs', async () => {
   const boosterOnlyAdmin = { ...admin, admin_permissions: { science_social: false, eiken: true, attendance: true, online_school: false } };
   const boosterTeacher = { ...teacher, enabled_programs: ['eiken'] };
@@ -7089,13 +7671,29 @@ test('today-grade transfer candidates and tokens are student only', async () => 
 // 依頼の画面は実物の照合・回数制限を使い、端末通知やメール送信は起こさない。
 function recoveryHarness({ profiles = {}, documents = {} } = {}) {
   const recovery = {};
-  const h = harness({ profiles, documents, identity: null, overrides: { '@/lib/server/password-recovery': recovery } });
+  const h = harness({ profiles, documents, identity: null, env: { NEXT_PUBLIC_PASSWORD_RESET_ENABLED: 'true' }, overrides: { '@/lib/server/password-recovery': recovery } });
   Object.assign(recovery, h.load('lib/server/password-recovery.ts'), { getClientIp: () => '203.0.113.20' });
   const route = h.load('app/api/auth/password-reset/request/route.ts');
   const send = body => route.POST(request('/api/auth/password-reset/request', body, ''));
   const notifications = () => [...h.data].filter(([key]) => key.startsWith('user_notifications/password_recovery_')).map(([key, value]) => ({ key, ...value }));
   return { h, send, notifications };
 }
+test('self-service password reset is paused until NEXT_PUBLIC_PASSWORD_RESET_ENABLED=true and touches no data', async () => {
+  const recovery = {};
+  const h = harness({ profiles: { student }, identity: null, overrides: { '@/lib/server/password-recovery': recovery } });
+  Object.assign(recovery, h.load('lib/server/password-recovery.ts'), { getClientIp: () => '203.0.113.21' });
+  const route = h.load('app/api/auth/password-reset/request/route.ts');
+  const before = h.data.size;
+  for (const mode of ['match', 'email', 'support']) {
+    const response = await route.POST(request('/api/auth/password-reset/request', { mode, login_id: 'student', name: 'x', email: 'someone@example.test' }, ''));
+    assert.equal(response.status, 503);
+    const body = await response.json();
+    assert.equal(body.error, 'paused');
+    assert.match(body.message, /078-321-4123/);
+  }
+  assert.equal(h.data.size, before);
+});
+
 const recoveryStaff = {
   boss: master,
   att112: { role: 'attendance_admin', school_id: '112', name: '勤怠112' },
@@ -7203,18 +7801,23 @@ test('admin inbox counts pending password recovery requests for masters only', a
 
 test('security monitor records login failures, rate limits and missing tokens without reading data', async () => {
   const teacher142 = { role: 'teacher', name: '講師', lifetime_id: '142', email: '142@classbase.local', isFirstLogin: false, account_status: 'active' };
-  const h = harness({ profiles: { target: teacher142 }, authUsers: { target: { email: '142@classbase.local' } } });
-  const wrong = await h.load('app/api/first-login/route.ts').POST(request('/api/first-login', { lifetimeId: '142', password: 'guess' }));
+  const h = harness({ profiles: { target: teacher142 }, authUsers: { target: { email: '142@classbase.local' } }, env: loginEnv, fetch: firebasePasswords({ '142@classbase.local': 'current-pass-1' }) });
+  const wrong = await h.load(LOGIN_ROUTE).POST(loginRequest({ lifetimeId: '142', password: 'guess' }));
   assert.equal(wrong.status, 401);
   assert.deepEqual(h.securityEvents.map(event => [event.kind, event.account]), [['login_failed', '142']]);
 
-  const limited = harness({ overrides: { '@/lib/server/password-recovery': { requestFingerprint: parts => parts.join('|'), getClientIp: () => '203.0.113.10', consumeRateLimit: async () => false, releaseRateLimit: async () => {} } } });
-  assert.equal((await limited.load('app/api/admin/first-login/route.ts').POST(request('/api/admin/first-login', { login: 'boss', password: 'x' }))).status, 429);
+  // ロック中で断った試行は「回数制限による拒否」として記録する。
+  const limited = harness({ documents: { [lockPairKey('boss')]: { scope: 'pair', failures: 0, locked_until: lockedUntil() } }, env: loginEnv, fetch: firebasePasswords({}) });
+  assert.equal((await limited.load(ADMIN_LOGIN_ROUTE).POST(loginRequest({ login: 'boss', password: 'x' }))).status, 429);
   assert.deepEqual(limited.securityEvents.map(event => [event.kind, event.account]), [['rate_limited', 'boss']]);
 
-  // 成功したログインは記録しない。
-  const ok = harness({ profiles: { target: { ...teacher142, isFirstLogin: true, initial_password: 'init-pass', email: '142@classbase.local' } }, authUsers: { target: { email: '142@classbase.local' } } });
-  await ok.load('app/api/first-login/route.ts').POST(request('/api/first-login', { lifetimeId: '142', password: 'init-pass' }));
+  // 成功したログイン（初期パスワードでの初回ログインを含む）は記録しない。
+  const ok = harness({
+    profiles: { target: { ...teacher142, isFirstLogin: true } },
+    documents: { 'account_secrets/target': hashedSecret('init-pass-1') },
+    env: loginEnv, fetch: firebasePasswords({}),
+  });
+  assert.equal((await ok.load(LOGIN_ROUTE).POST(loginRequest({ lifetimeId: '142', password: 'init-pass-1' }))).status, 200);
   assert.equal(ok.securityEvents.length, 0);
 
   // トークンなしのAPI呼び出しは「ログインなし」として記録し、従来どおり401。
@@ -7223,7 +7826,6 @@ test('security monitor records login failures, rate limits and missing tokens wi
   assert.equal(response.status, 401);
   assert.deepEqual(anonymous.securityEvents.map(event => event.kind), ['unauthorized']);
 });
-
 test('probe paths such as .php and wp-admin are detected and answered with 404', async () => {
   const { isProbePath } = harness().load('lib/security-probe.ts');
   for (const probe of ['/index.php', '/wp-login.php', '/wp-admin/setup-config.php', '/.env', '/.git/config', '/vendor/phpunit/src/Util/PHP/eval-stdin.php', '/cgi-bin/luci', '/backup.sql', '/phpmyadmin/']) {
@@ -7273,6 +7875,35 @@ test('security monitor flags attacks by thresholds and only cron or masters can 
   assert.equal((await route.POST(request('/api/security/monitor', {}))).status, 403);
 });
 
+test('5分ごとの監視は、同じ1時間に知らせた出来事を繰り返さない', () => {
+  const monitor = harness().load('lib/server/security-monitor.ts');
+  const findings = [
+    { severity: 'high', title: '特定のIPからの不審なアクセス', detail: '' },
+    { severity: 'medium', title: '脆弱性を探るアクセスが多い', detail: '' },
+  ];
+  assert.equal(monitor.newSecurityFindings(findings, undefined).length, 2);
+  assert.deepEqual(Array.from(monitor.newSecurityFindings(findings, ['特定のIPからの不審なアクセス']), item => item.title), ['脆弱性を探るアクセスが多い']);
+  assert.equal(monitor.newSecurityFindings(findings, ['特定のIPからの不審なアクセス', '脆弱性を探るアクセスが多い']).length, 0);
+});
+
+test('1時間ごとの監視は、IP別の集計も直近1時間の分だけで判定する（朝の出来事を毎時間知らせ直さない）', () => {
+  const monitor = harness().load('lib/server/security-monitor.ts');
+  const now = new Date('2026-11-06T13:05:00Z'); // 日本時間 22:05
+  const since = new Date(now.getTime() - 60 * 60 * 1000);
+  // 18時台に21回、22時台に2回。
+  const data = { total: 23, kinds: { unauthorized: 23 }, hours: { '18': { unauthorized: 21 }, '22': { unauthorized: 2 } } };
+  const hourly = monitor.subjectCountsInWindow('2026-11-06', data, since, now, false);
+  assert.equal(hourly.total, 2);
+  assert.equal(hourly.kinds.unauthorized, 2);
+  assert.equal(monitor.evaluateSecurityCounts({ hours: 1, counts: { unauthorized: 2 }, subjects: [{ type: 'ip', value: '192.0.2.1', ...hourly }] }).length, 0);
+  // 1日分の監視では18時台も入る。
+  const daily = monitor.subjectCountsInWindow('2026-11-06', data, new Date(now.getTime() - 24 * 3600e3), now, true);
+  assert.equal(daily.total, 23);
+  // 時間ごとの内訳がない古い集計は、1時間ごとの監視では使わない。1日分の監視では日の合計を使う。
+  assert.equal(monitor.subjectCountsInWindow('2026-11-06', { total: 21, kinds: { unauthorized: 21 } }, since, now, false), null);
+  assert.equal(monitor.subjectCountsInWindow('2026-11-06', { total: 21, kinds: { unauthorized: 21 } }, since, now, true).total, 21);
+});
+
 test('security monitor emails only valid addresses configured in SECURITY_ALERT_EMAILS', () => {
   const configured = harness({ env: { SECURITY_ALERT_EMAILS: ' Admin@Example.test, not-an-email ,admin@example.test;second@example.test ' } });
   assert.deepEqual(Array.from(configured.load('lib/server/security-monitor.ts').securityAlertEmails()), ['admin@example.test']);
@@ -7282,19 +7913,27 @@ test('security monitor emails only valid addresses configured in SECURITY_ALERT_
 
 test('automatic notifications: missed class is sent 10 minutes after each period starts, once per period, then summarized for admins', async () => {
   const lesson = (status, period) => ({ date: '2026-10-22', status, period, label: period === 1 ? '中2 理科' : '中3 社会', end: period === 1 ? '20:25' : '21:40' });
-  const timetables = { s1: [lesson('scheduled', 1)], s2: [lesson('scheduled', 1)], s3: [lesson('absent', 1)], s5: [lesson('scheduled', 2)] };
+  // s4 は振替なしで欠席連絡をした生徒。時間割は振替つきの欠席しか反映しないので「予定どおり」のまま。
+  const timetables = { s1: [lesson('scheduled', 1)], s2: [lesson('scheduled', 1)], s3: [lesson('absent', 1)], s4: [lesson('scheduled', 1)], s5: [lesson('scheduled', 2)], s6: [lesson('scheduled', 2)] };
   const h = harness({
     documents: {
       'users/s1': { role: 'student', name: '生徒一', parent_ids: ['p1'], school_id: '112', account_status: 'active' },
       'users/s2': { role: 'student', name: '生徒二', school_id: '112', account_status: 'active' },
       'users/s3': { role: 'student', name: '生徒三', school_id: '112', account_status: 'active' },
+      'users/s4': { role: 'student', name: '生徒四', parent_ids: ['p1'], school_id: '112', account_status: 'active' },
       'users/s5': { role: 'student', name: '生徒五', school_id: '112', account_status: 'active' },
+      'users/s6': { role: 'student', name: '生徒六', school_id: '112', account_status: 'active' },
       'users/p1': { role: 'parent', name: '保護者一', account_status: 'active' },
       'users/m1': { role: 'master', name: 'マスター', account_status: 'active' },
       'course_registrations/r1': { student_id: 's1', status: 'active' },
       'course_registrations/r2': { student_id: 's2', status: 'active' },
       'course_registrations/r3': { student_id: 's3', status: 'active' },
+      'course_registrations/r4': { student_id: 's4', status: 'active' },
       'course_registrations/r5': { student_id: 's5', status: 'active' },
+      'course_registrations/r6': { student_id: 's6', status: 'active' },
+      'requests/a4': { type: 'absence', student_id: 's4', target_date: '2026-10-22', absence_type: 'absent', status: 'pending' },
+      // 取り消した欠席連絡は数えない（s6 には知らせる）。
+      'requests/a6': { type: 'absence', student_id: 's6', target_date: '2026-10-22', absence_type: 'absent', status: 'cancelled' },
       'shift_assignments/shift1': { target_date: '2026-10-22', period: 1 },
       'attendance/s2_2026-10-22': { user_id: 's2', student_id: 's2', target_date: '2026-10-22', participations: [{ class_id: 'shift1' }] },
     },
@@ -7314,6 +7953,9 @@ test('automatic notifications: missed class is sent 10 minutes after each period
   assert.deepEqual(Array.from(first.periods), [1]);
   assert.ok(h.data.has('user_notifications/missed_class_s1_2026-10-22_p1'));
   assert.ok(h.data.has('user_notifications/missed_class_s1_2026-10-22_p1_parent_p1'));
+  // 振替なしの欠席連絡をした s4 と、その保護者にも送らない。
+  assert.equal(h.data.has('user_notifications/missed_class_s4_2026-10-22_p1'), false);
+  assert.equal(h.data.has('user_notifications/missed_class_s4_2026-10-22_p1_parent_p1'), false);
   assert.equal(notices().length, 2);
   // 同じ時限は二度送らない。
   assert.deepEqual(Array.from((await runMissedClassNotifications({ today: '2026-10-22', now: new Date('2026-10-22T10:40:00Z') })).periods), []);
@@ -7321,8 +7963,9 @@ test('automatic notifications: missed class is sent 10 minutes after each period
   const second = await runMissedClassNotifications({ today: '2026-10-22', now: new Date('2026-10-22T11:46:00Z') });
   assert.deepEqual(Array.from(second.periods), [2]);
   assert.ok(h.data.has('user_notifications/missed_class_s5_2026-10-22_p2'));
+  assert.ok(h.data.has('user_notifications/missed_class_s6_2026-10-22_p2'));
   const summary = h.data.get('user_notifications/missed_class_summary_2026-10-22_all_m1');
-  assert.match(summary.title, /未参加 2件/);
+  assert.match(summary.title, /未参加 3件/);
   assert.match(summary.message, /1限 生徒一/);
   assert.match(summary.message, /2限 生徒五/);
 

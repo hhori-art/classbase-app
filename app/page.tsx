@@ -2,14 +2,12 @@
 
 import { useRef, useState } from 'react';
 import { User as FirebaseUser } from 'firebase/auth';
-import { auth } from '@/lib/firebase';
 import { LogIn, Loader2, User, AlertCircle, Eye, EyeOff, Lock, ArrowRight, GraduationCap } from 'lucide-react';
 import Link from 'next/link';
 import { targetPathForProfile } from '@/lib/auth-navigation';
 import { loadAuthenticatedProfile } from '@/lib/client-auth-profile';
-import { signInWithNetworkRetry } from '@/lib/client-auth-login';
+import { LoginError, loginWithServer, retryAfterLabel } from '@/lib/client-auth-login';
 
-const EMAIL_DOMAINS = ['classbase.local', 'sozogakuen.co.jp'];
 const ADMIN_ROLE_ALIASES = [
   'admin',
   'school_admin',
@@ -40,8 +38,19 @@ const cacheProfileForAuthContext = (uid: string, profile: Record<string, any>) =
 const LOGIN_FLOW_LOCK_KEY = 'classbase_login_flow_lock';
 const LOGIN_CREDENTIAL_ERROR_MESSAGE =
   'ログインIDまたはパスワードが一致しません。\n案内書面に記載されているID・初期パスワードをもう一度確認してください。\n英数字は半角で入力し、余分なスペースが入っていないかも確認してください。';
-const INITIAL_LOGIN_COMPLETED_MESSAGE =
-  'このアカウントは初回登録済みです。\n初回登録後に設定したパスワードでログインしてください。\n忘れた場合は「パスワードを忘れた方」から再設定してください。';
+
+function loginErrorMessage(error: any) {
+  const code = error instanceof LoginError ? error.code : String(error?.code || '');
+  if (code === 'wrong-password' || code === 'not-registered' || code === 'auth/invalid-credential') return LOGIN_CREDENTIAL_ERROR_MESSAGE;
+  if (code === 'too-many-attempts') {
+    return `ログインに続けて失敗したため、しばらくログインできません。${retryAfterLabel(error?.retryAfterSeconds)}ほど待ってから、もう一度お試しください。\n急ぐときは、校舎またはサポート窓口（078-321-4123）でロックを解いてもらえます。`;
+  }
+  if (code === 'account-inactive' || code === 'auth/user-disabled') return 'このアカウントは停止中です。校舎または管理者へお問い合わせください。';
+  if (code === 'id-invalid-format') return 'ログインIDは半角英数字（またはメールアドレス）で入力してください';
+  if (code === 'auth/network-request-failed') return '認証サーバーへ接続できませんでした。通信環境を確認して、もう一度ログインしてください。改善しない場合は、校舎名・端末・発生時刻を管理者へお知らせください。';
+  if (error?.message === 'profile-service-unavailable' || error?.name === 'AbortError') return '認証は完了しましたが、ユーザー情報の取得に失敗しました。少し待ってからもう一度ログインしてください。';
+  return 'ログインの処理に失敗しました。少し待ってからもう一度お試しください。改善しない場合は、ログインIDと発生時刻を管理者へお知らせください。';
+}
 
 export default function LoginPage() {
   const [loginInput, setLoginInput] = useState('');
@@ -60,33 +69,6 @@ export default function LoginPage() {
   // 職員番号・生徒番号（半角英数字）か、メールアドレスで登録した職員のメールアドレス。
   const isEmailLogin = (s: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
   const isValidLoginId = (s: string) => /^[0-9A-Za-z_-]+$/.test(s) || isEmailLogin(s);
-  const buildLoginEmails = (id: string) => {
-    if (isEmailLogin(id)) return [id.toLowerCase()];
-    return EMAIL_DOMAINS.map(domain => `${id.toLowerCase()}@${domain}`);
-  };
-
-  const firstLoginViaApi = async (lifetimeId: string, pass: string) => {
-    const res = await fetch('/api/first-login', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ lifetimeId, password: pass }),
-    });
-
-    const data = await res.json().catch(() => ({}));
-
-    if (!res.ok || !data?.ok) {
-      // APIが返す理由をそのままユーザー向けに変換
-      if (data?.error === 'not-registered') throw new Error('登録データが見つかりません。');
-      if (data?.error === 'wrong-initial-password') throw new Error(LOGIN_CREDENTIAL_ERROR_MESSAGE);
-      if (data?.error === 'missing-initial-password') throw new Error('初回パスワードが未設定です。管理者に連絡してください。');
-      if (data?.error === 'initial-login-not-allowed') throw new Error(INITIAL_LOGIN_COMPLETED_MESSAGE);
-      if (data?.error === 'wrong-password') throw new Error(LOGIN_CREDENTIAL_ERROR_MESSAGE);
-      if (data?.error === 'too-many-attempts') throw new Error('ログインの試行回数が多すぎます。15分ほど待ってから、もう一度ログインしてください。');
-      throw new Error('ログインの処理に失敗しました。少し待ってからもう一度お試しください。改善しない場合は、ログインIDと発生時刻を管理者へお知らせください。');
-    }
-
-    return data; // { ok:true, uid, email }
-  };
 
   const redirectLoggedInUser = async (firebaseUser: FirebaseUser) => {
     const profile = await loadAuthenticatedProfile(firebaseUser);
@@ -117,65 +99,14 @@ export default function LoginPage() {
       return;
     }
 
-    const loginEmails = buildLoginEmails(id);
-
     try {
       sessionStorage.setItem(LOGIN_FLOW_LOCK_KEY, 'true');
-      let loggedInUser: FirebaseUser | null = null;
-      // 1) まず通常ログイン
-      try {
-        let lastSignInError: any = null;
-        for (const email of loginEmails) {
-          try {
-            const credential = await signInWithNetworkRetry(auth, email, resolvedPassword);
-            loggedInUser = credential.user;
-            break;
-          } catch (candidateError: any) {
-            lastSignInError = candidateError;
-            if (!['auth/invalid-credential', 'auth/user-not-found', 'auth/wrong-password'].includes(candidateError?.code)) {
-              throw candidateError;
-            }
-          }
-        }
-        if (!loggedInUser) throw lastSignInError;
-      } catch (signInError: any) {
-        const code = signInError?.code;
-
-        // 初回ユーザー・Auth側だけ古いユーザーは invalid-credential / wrong-password になることがある
-        // メールアドレスでのログインは初回登録（生徒番号・職員番号から作る）の対象外。パスワード違いとして扱う。
-        if (!isEmailLogin(id) && (code === 'auth/user-not-found' || code === 'auth/invalid-credential' || code === 'auth/wrong-password')) {
-          // 2) 初回登録APIを試す（ここで initial_password が一致しないなら弾かれる）
-          const restored = await firstLoginViaApi(id, resolvedPassword);
-
-          // 3) 作成/復旧できたら改めてログイン
-          const credential = await signInWithNetworkRetry(auth, restored.email || loginEmails[0], resolvedPassword);
-          loggedInUser = credential.user;
-        } else {
-          throw signInError;
-        }
-      }
-      if (loggedInUser) await redirectLoggedInUser(loggedInUser);
+      // パスワードはサーバーで確かめる（初回ログインもここで行う）。失敗が続くとロックされる。
+      const { user: loggedInUser } = await loginWithServer(id, resolvedPassword);
+      await redirectLoggedInUser(loggedInUser);
     } catch (e: any) {
-      console.error('Login Error:', e);
-
-      let message = 'ログイン中にエラーが発生しました。';
-      // Firebase Auth側エラー
-      if (e?.code === 'auth/invalid-credential' || e?.code === 'auth/user-not-found' || e?.code === 'auth/wrong-password') {
-        message = LOGIN_CREDENTIAL_ERROR_MESSAGE;
-      } else if (e?.code === 'auth/user-disabled') {
-        message = 'このアカウントは停止中です。校舎または管理者へお問い合わせください。';
-      } else if (e?.code === 'auth/too-many-requests') {
-        message = '試行回数が多すぎます。しばらく待ってください。';
-      } else if (e?.code === 'auth/network-request-failed') {
-        message = '認証サーバーへ接続できませんでした。通信環境を確認して、もう一度ログインしてください。改善しない場合は、校舎名・端末・発生時刻を管理者へお知らせください。';
-      } else if (e?.message === 'profile-service-unavailable' || e?.name === 'AbortError') {
-        message = '認証は完了しましたが、ユーザー情報の取得に失敗しました。少し待ってからもう一度ログインしてください。';
-      } else if (e?.message) {
-        // 初回API由来、または権限チェック時の分かりやすいメッセージ
-        message = e.message;
-      }
-
-      setErrorMsg(message);
+      console.error('Login Error:', e?.code || e?.message);
+      setErrorMsg(loginErrorMessage(e));
       setLoading(false);
       sessionStorage.removeItem(LOGIN_FLOW_LOCK_KEY);
     }

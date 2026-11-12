@@ -25,7 +25,7 @@ export default function AdminDashboard({ basePath = '/master/online-school', com
     const refreshIfVisible = () => {
       if (document.visibilityState === 'visible' && Date.now() - lastLoadedAt.current >= 120_000) void load();
     };
-    const id = window.setInterval(refreshIfVisible, 120_000);
+    const id = window.setInterval(refreshIfVisible, 300_000);
     document.addEventListener('visibilitychange', refreshIfVisible);
     return () => { window.clearInterval(id); document.removeEventListener('visibilitychange', refreshIfVisible); };
   }, [load]);

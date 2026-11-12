@@ -1,0 +1,6 @@
+.venv/
+models/
+out/
+__pycache__/
+*.mp4
+*.m4a

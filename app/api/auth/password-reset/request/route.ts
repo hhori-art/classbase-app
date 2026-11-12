@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import {
+  PASSWORD_RESET_TTL_LABEL,
   PASSWORD_RESET_TTL_MS,
   consumeRateLimit,
   getClientIp,
@@ -16,13 +17,19 @@ import {
   requestFingerprint,
   userDisplayNames,
 } from '@/lib/server/password-recovery';
+import { revokeOtherResetTokens } from '@/lib/server/password-reset-notice';
 import { notifyPasswordRecoveryRequest, recoveryTargetSchool } from '@/lib/server/password-recovery-notify';
+import { notifyInfoMatchPasswordReset } from '@/lib/server/password-recovery-alert';
+import { profilePhones, recoveryInfoMatches } from '@/lib/password-recovery-match';
+import { PASSWORD_SUPPORT_HOURS, PASSWORD_SUPPORT_PHONE, selfServicePasswordResetEnabled } from '@/lib/password-reset-availability';
 
 export const runtime = 'nodejs';
 
 // アカウントの有無・メール登録の有無が分からないよう、どの場合も同じ文面を返す。
 const GENERIC_MESSAGE =
   '確認済みメールを登録している場合だけ届きます。届かない場合は「メールが使えない」から申し込むか、教室へ連絡してください。';
+const MATCH_MESSAGE =
+  '入力した内容が登録と一致した場合は、入力したメールアドレスに再設定のリンクを送りました。届かない場合は、入力内容を確かめるか、「メールが使えない」から申し込んでください。';
 const SUPPORT_MESSAGE =
   '受付が完了しました。教室が確認して連絡します。問い合わせるときは受付番号を伝えてください。';
 // 管理者が後から確認できるよう、入力そのもの（一致しなかった場合も）を短く切って残す。
@@ -96,6 +103,33 @@ async function findLinkedParentRecovery(
   return null;
 }
 
+/** 生徒・保護者の照合に使う、つながっているアカウント（相互に紐づいているものだけ）。 */
+async function linkedAccounts(userId: string, role: string, profile: FirebaseFirestore.DocumentData) {
+  const db = adminDb();
+  if (role === 'student') {
+    const parentIds = new Set([
+      String(profile.parent_uid || '').trim(),
+      ...(Array.isArray(profile.parent_ids) ? profile.parent_ids.map((id: unknown) => String(id).trim()) : []),
+    ].filter(Boolean));
+    if (!parentIds.size) return [];
+    const snap = await db.collection('users').where('student_ids', 'array-contains', userId).limit(10).get();
+    return snap.docs
+      .filter(doc => parentIds.has(doc.id) && ['parent', 'guardian'].includes(String(doc.data()?.role || '').toLowerCase()))
+      .map(doc => ({ id: doc.id, role: 'parent', data: doc.data() || {} }));
+  }
+  const childIds = (Array.isArray(profile.student_ids) ? profile.student_ids.map((id: unknown) => String(id).trim()) : []).filter(Boolean).slice(0, 10);
+  if (!childIds.length) return [];
+  const snaps = await db.getAll(...childIds.map((id: string) => db.collection('users').doc(id)));
+  return snaps
+    .filter(snap => snap.exists && String(snap.data()?.role || '').toLowerCase() === 'student')
+    .filter(snap => {
+      const child = snap.data() || {};
+      const ids = [String(child.parent_uid || '').trim(), ...(Array.isArray(child.parent_ids) ? child.parent_ids.map(String) : [])];
+      return ids.includes(userId);
+    })
+    .map(snap => ({ id: snap.id, role: 'student', data: snap.data() || {} }));
+}
+
 async function createSupportRequest(
   loginId: string,
   name: string,
@@ -166,17 +200,25 @@ async function createSupportRequest(
 }
 
 export async function POST(request: NextRequest) {
+  // セキュリティチェックが終わるまでは受け付けない（何も読まず、何も書かない）。
+  if (!selfServicePasswordResetEnabled()) {
+    return Response.json({
+      ok: false,
+      error: 'paused',
+      message: `パスワードの再設定は現在お休みしています。サポートセンター（${PASSWORD_SUPPORT_PHONE}、${PASSWORD_SUPPORT_HOURS}）へお電話ください。`,
+    }, { status: 503 });
+  }
   const startedAt = Date.now();
   let responseMessage = GENERIC_MESSAGE;
   try {
     const body = await request.json();
-    const mode = body.mode === 'support' ? 'support' : 'email';
-    responseMessage = mode === 'support' ? SUPPORT_MESSAGE : GENERIC_MESSAGE;
+    const mode = body.mode === 'support' ? 'support' : body.mode === 'match' ? 'match' : 'email';
+    responseMessage = mode === 'support' ? SUPPORT_MESSAGE : mode === 'match' ? MATCH_MESSAGE : GENERIC_MESSAGE;
     const loginId = normalizeLoginId(body.login_id);
     const name = normalizeName(body.name);
     const email = normalizeEmail(body.email);
 
-    if (!loginId || !name || (mode === 'email' && !isUsableRecoveryEmail(email))) {
+    if (!loginId || !name || (mode !== 'support' && !isUsableRecoveryEmail(email))) {
       return Response.json({ ok: true, message: responseMessage });
     }
 
@@ -190,7 +232,11 @@ export async function POST(request: NextRequest) {
       mode === 'support' ? 2 : 3,
       mode === 'support' ? 24 * 60 * 60 * 1000 : 60 * 60 * 1000
     );
-    if (!ipAllowed || !accountAllowed) {
+    // 照合方式は、電話の下4桁を総当たりされないよう、同じアカウントへの申し込みを1日5回までにする。
+    const dailyAllowed = mode !== 'match' || await consumeRateLimit(
+      requestFingerprint(['match-account-day', loginId]), 5, 24 * 60 * 60 * 1000
+    );
+    if (!ipAllowed || !accountAllowed || !dailyAllowed) {
       return Response.json({ ok: true, message: responseMessage });
     }
 
@@ -208,6 +254,80 @@ export async function POST(request: NextRequest) {
       const remainingDelay = 700 - (Date.now() - startedAt);
       if (remainingDelay > 0) await new Promise(resolve => setTimeout(resolve, remainingDelay));
       return Response.json({ ok: true, message: SUPPORT_MESSAGE, request_code: requestCode });
+    }
+
+    if (mode === 'match') {
+      const studentSide = role === 'student' || role === 'parent' || role === 'guardian';
+      let matched = false;
+      let related: Array<{ id: string; role: string; data: FirebaseFirestore.DocumentData }> = [];
+      if (userDoc && studentSide && !adminRole && nameMatches) {
+        related = await linkedAccounts(userDoc.id, role, profile);
+        matched = recoveryInfoMatches(
+          { school: String(body.school || ''), grade: String(body.grade || ''), phoneLast4: String(body.phone_last4 || '') },
+          role === 'student'
+            ? { role: 'student', students: [profile], phones: [...profilePhones(profile), ...related.flatMap(item => profilePhones(item.data))] }
+            : { role: 'parent', students: related.map(item => item.data), phones: profilePhones(profile) },
+        );
+      }
+      await adminDb().collection('password_recovery_events').add({
+        kind: 'info_match_request',
+        matched,
+        target_user_id: userDoc && studentSide && !adminRole ? userDoc.id : null,
+        target_role: userDoc && studentSide && !adminRole ? (role === 'guardian' ? 'parent' : role) : null,
+        submitted_login_id: submittedText(body.login_id),
+        delivery_email: matched ? email : null,
+        request_fingerprint: requestFingerprint(['info-match', getClientIp(request)]),
+        created_at: FieldValue.serverTimestamp(),
+      }).catch(logError => console.error('Password recovery event log failed:', logError));
+
+      if (matched && userDoc) {
+        const token = newSecretToken();
+        const expiresAt = new Date(Date.now() + PASSWORD_RESET_TTL_MS);
+        const tokenRef = await adminDb().collection('password_reset_tokens').add({
+          user_id: userDoc.id,
+          token_hash: hashSecret(token),
+          purpose: 'self_service',
+          issued_role: role,
+          requested_via: 'info_match',
+          delivery_email: email,
+          recovery_owner_user_id: userDoc.id,
+          expires_at: Timestamp.fromDate(expiresAt),
+          used_at: null,
+          created_at: FieldValue.serverTimestamp(),
+        });
+        const actionUrl = `${getPublicBaseUrl(request)}/password-reset/confirm?token=${encodeURIComponent(token)}`;
+        try {
+          await queueRecoveryEmail({
+            to: email,
+            subject: '【創造学園アプリ】パスワード再設定',
+            heading: 'パスワードを再設定します',
+            body: `${profileDisplayName(profile)}さんのパスワード再設定を受け付けました。下のボタンから新しいパスワードを設定してください。心当たりがない場合は、このメールを破棄して教室へ連絡してください。`,
+            actionLabel: '新しいパスワードを設定する',
+            actionUrl,
+            expiresIn: PASSWORD_RESET_TTL_LABEL,
+            kind: 'password_reset',
+            userId: userDoc.id,
+          });
+        } catch (deliveryError) {
+          await tokenRef.delete().catch(cleanupError => {
+            console.error('Password reset token cleanup failed:', cleanupError);
+          });
+          throw deliveryError;
+        }
+        // 新しいリンクを送れたら、前に出したリンクは使えなくする。
+        await revokeOtherResetTokens(userDoc.id, tokenRef.id)
+          .catch(revokeError => console.error('Password reset token revoke failed:', revokeError));
+        await notifyInfoMatchPasswordReset({
+          tokenId: tokenRef.id,
+          target: { id: userDoc.id, role: role === 'student' ? 'student' : 'parent', data: profile },
+          related,
+          deliveryEmail: email,
+          targetName: profileDisplayName(profile),
+        }).catch(alertError => console.error('Password reset alert failed:', alertError));
+      }
+      const remainingDelay = 900 - (Date.now() - startedAt);
+      if (remainingDelay > 0) await new Promise(resolve => setTimeout(resolve, remainingDelay));
+      return Response.json({ ok: true, message: MATCH_MESSAGE });
     }
 
     const verifiedEmail = normalizeEmail(profile.recovery_email);
@@ -244,7 +364,7 @@ export async function POST(request: NextRequest) {
             : 'パスワード再設定を受け付けました。下のボタンから新しいパスワードを設定してください。',
           actionLabel: '新しいパスワードを設定する',
           actionUrl,
-          expiresIn: '30分',
+          expiresIn: PASSWORD_RESET_TTL_LABEL,
           kind: 'password_reset',
           userId: userDoc.id,
         });
@@ -254,6 +374,8 @@ export async function POST(request: NextRequest) {
         });
         throw deliveryError;
       }
+      await revokeOtherResetTokens(userDoc.id, tokenRef.id)
+        .catch(revokeError => console.error('Password reset token revoke failed:', revokeError));
     }
 
     const remainingDelay = 700 - (Date.now() - startedAt);

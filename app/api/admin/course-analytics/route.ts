@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
+import { gasMailConfigured, sendViaGas } from '@/lib/server/gas-mail';
 import { getServerUser, jsonError, requireRole } from '@/lib/server-auth';
 import { getAllQueryDocuments } from '@/lib/server/firestore-pagination';
 import { analyticsRange, analyticsRate, attendanceMatchesCourse, homeworkEligibleStudent } from '@/lib/course-analytics';
@@ -181,7 +182,10 @@ export async function POST(request: NextRequest) {
     const text = [`講座運用レポート（${report.range.label}）`, `受講人数: ${s.enrolled_students}人`, `出席率: ${s.attendance_rate ?? '-'}%`, `宿題提出率: ${s.homework_rate ?? '-'}%`, `開始率: ${s.start_rate ?? '-'}%`, `解除率: ${s.withdrawal_rate ?? '-'}%`, `要確認: ${report.exceptions.length}人`].join('\n');
     const html = `<div style="font-family:sans-serif;line-height:1.7"><h2>${escapeHtml(subject)}</h2><p>${escapeHtml(report.filters.school || '全校舎')}・${escapeHtml(report.filters.grade || '全学年')}</p><ul><li>受講人数: ${s.enrolled_students}人</li><li>出席率: ${s.attendance_rate ?? '-'}%</li><li>宿題提出率: ${s.homework_rate ?? '-'}%</li><li>開始率: ${s.start_rate ?? '-'}%</li><li>解除率: ${s.withdrawal_rate ?? '-'}%</li><li>要確認: ${report.exceptions.length}人</li></ul></div>`;
     const resendKey = clean(process.env.RESEND_API_KEY);
-    if (resendKey) {
+    if (gasMailConfigured()) {
+      const sent = await sendViaGas({ to: email, subject, text, html });
+      if (!sent.ok) throw new Error('email-delivery-failed');
+    } else if (resendKey) {
       const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${resendKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: clean(process.env.RESEND_FROM_EMAIL) || '創造学園アプリ <noreply@sozogakuen.co.jp>', to: [email], subject, text, html }) });
       if (!response.ok) throw new Error('email-delivery-failed');
     } else {

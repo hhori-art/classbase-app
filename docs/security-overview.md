@@ -12,7 +12,7 @@
 | データベース | Cloud Firestore（asia-northeast1）。サーバーは Firebase Admin SDK、ブラウザは Firebase JS SDK（セキュリティルールで制御） |
 | 認証 | Firebase Authentication（メールアドレス＋パスワード） |
 | ファイル | Cloud Storage for Firebase（us-central1）。ブラウザからの直接読み書きは原則禁止し、サーバーが権限を確認して発行する短時間の署名付きURLで配信 |
-| 定期処理 | Vercel Cron（`/api/zoom/recordings/sync` を毎日 1:00 UTC） |
+| 定期処理 | Vercel Cron（Pro プラン。一覧は `vercel.json` の `crons`） |
 | ミドルウェア | `middleware.ts`。診断環境（`SECURITY_DIAGNOSIS_MODE=true`）では許可IP（`ALLOWED_IPS`）以外を全画面・全APIで遮断。本番では無効 |
 
 ### 外部サービス
@@ -124,7 +124,7 @@ Firebase Auth のサインイン自体のブルートフォース対策は Fireb
   - ログインなし・無効なトークンでの API 呼び出し（`getServerUser`）
   - 脆弱性を探るアクセス（`.php`・`wp-admin`・`.env`・`.git` など。`middleware.ts` が `/api/security/probe` へ振り替え、404 を返す。判定は `lib/security-probe.ts`）
   - 署名が合わない Zoom の通知
-- **監視ジョブ**（`lib/server/security-monitor.ts`、`GET /api/security/monitor`）：Vercel Cron で毎朝7時（日本時間）に直近24時間を確認します。マスターは `POST` で手動実行できます。しきい値（`DAILY_THRESHOLDS`）を超えた出来事と、監査ログの深夜（0〜5時）の重要な操作・1人による大量の重要な操作を見つけると、マスターへアプリ内通知と端末通知を送り、結果を `security_monitor_reports` に残します（90日で期限切れ）。
+- **監視ジョブ**（`lib/server/security-monitor.ts`、`GET /api/security/monitor`）：Vercel Cron で5分ごとに直近1時間（同じ1時間に知らせた出来事は繰り返さない）、毎朝7時（日本時間）に直近24時間を確認します。マスターは `POST` で手動実行できます。しきい値（`DAILY_THRESHOLDS`）を超えた出来事と、監査ログの深夜（0〜5時）の重要な操作・1人による大量の重要な操作を見つけると、マスターへアプリ内通知と端末通知を送り、結果を `security_monitor_reports` に残します（90日で期限切れ）。
 - **メール通知**：Vercel の環境変数 `SECURITY_ALERT_EMAILS`（カンマ区切り、最大10件）に設定したアドレスへ、Resend で同じ内容をメールでも送ります。マスターが `POST /api/security/monitor?test_email=1` を実行すると、見つかったものがなくてもテストのメールを送ります。
 - **有料プランへの切り替え後**：`vercel.json` の監視の実行間隔を5分ごとにし、パスに `?hours=1` を付けます。短い期間では読み取りを最大60件程度に絞るので、5分ごとでも読み取り予算に収まります。
 - **期限切れの削除**：Firestore の TTL ポリシーを `security_monitor_days`（サブコレクション `subjects` を含む）と `security_monitor_reports` の `expires_at` に設定すると、古い集計が自動で消えます（未設定でも動作には影響しません）。
@@ -154,6 +154,9 @@ Firebase Auth のサインイン自体のブルートフォース対策は Fireb
 - `X-Frame-Options: DENY`、`X-Content-Type-Options: nosniff`
 - `Referrer-Policy: strict-origin-when-cross-origin`
 - `Permissions-Policy: geolocation=(), microphone=(self), camera=(self), fullscreen=(self)`
+- `Content-Security-Policy-Report-Only`：本番の CSP から `'unsafe-eval'` を外した版（WebAssembly 用の `'wasm-unsafe-eval'` のみ）。違反は止めずに `POST /api/security/csp-report` へ報告させます。受け口は認証なし・16KBまで・1回10件までで、要点（指令・URLの場所・行）を `console.warn('[csp-report]')` で Vercel のログに出すだけです（Firestore には書きません。URL のクエリは落とします）。
+
+API（`/api/*`）の応答はすべて `Cache-Control: no-store` です（`next.config.mjs` の headers と `middleware.ts` の両方で付けます。Next.js は設定側の値があるとき、ルートの値で上書きしません）。お知らせの添付ファイルの配信と、Storage に保存する添付のメタデータも `private, no-store` です。サーバー内のデータキャッシュ（`unstable_cache`）は HTTP ヘッダーとは別の仕組みで、影響を受けません。
 
 録画再生のリダイレクトには `Cache-Control: private, no-store` と `Referrer-Policy: no-referrer` を付けています。
 
@@ -161,7 +164,7 @@ Firebase Auth のサインイン自体のブルートフォース対策は Fireb
 
 | 項目 | 内容 |
 |---|---|
-| CSP | Zoom Meeting SDK のため `script-src` に `'unsafe-inline'` `'unsafe-eval'` を許可しています |
+| CSP | Zoom Meeting SDK（`/zoom-meeting`、`source.zoom.us` から読み込み）のため `script-src` に `'unsafe-inline'` `'unsafe-eval'` を許可しています。`'unsafe-eval'` なしの版を Report-Only で試験中で、Zoom の動作確認後に環境変数 `CSP_STRICT_EVAL=true` で本番の CSP からも外せます（開発サーバーは eval が必要なため、開発時だけは常に許可） |
 | 録画の再生URL | `<video>` 要素で再生するため、`/api/zoom/recordings/file` は ID トークンをクエリ（`?token=`）でも受け付けます（有効期限約1時間）。共有ボタン経由の再生は単回の再生チケットを使います |
 | 無操作タイムアウト | 画面側（ブラウザ）の仕組みです。サーバー側のセッション期限は Firebase の ID トークン（約1時間、自動更新）に従います |
 | Meeting SDK 署名 | `/api/zoom/meeting-sdk-signature` はログイン済みの利用者に参加者用の署名を発行します（会議番号の担当確認はしていません。会議への参加には Zoom 側のパスコードが必要）。ホスト用の署名は講師・管理者だけです |
@@ -244,7 +247,8 @@ Firebase Auth のサインイン自体のブルートフォース対策は Fireb
 | `/api/attendance-integration/import` | POST | 公開＋HMAC署名（ATTENDANCE_HMAC_SECRET、タイムスタンプ許容幅あり） | 外部勤怠システムからの取り込み |
 | `/api/attendance-integration/sync` | GET | Vercel Cron（Authorization: Bearer CRON_SECRET、定数時間比較） | 外部勤怠の定期同期 |
 | `/api/attendance-payroll` | GET, POST | IDトークン | 勤怠システム管理 |
-| `/api/attendance-shifts` | GET, POST | IDトークン | GET: 講師本人またはシフト管理／POST: シフト管理（担当校舎） |
+| `/api/attendance-shifts` | GET, POST | IDトークン | GET: 講師本人（自分のシフトだけを必要な項目に絞って返し、校舎の教室設定は返さない）またはシフト管理（担当校舎。マスターは POST と同じく `school_id` で任意の校舎）／POST: シフト管理（担当校舎） |
+| `/api/security/csp-report` | POST | なし（ブラウザの自動送信） | CSP 違反の報告を受けてログに出すだけ（16KBまで） |
 | `/api/auth/change-password` | POST | IDトークン | 本人 |
 | `/api/auth/password-reset/request` | POST | 公開 | 本人確認情報の照合、IP・アカウント単位のレート制限。結果は一律の応答 |
 | `/api/auth/password-reset` | PATCH, POST | POST: IDトークン／PATCH: 公開＋単回・有効期限付き再設定トークン（ハッシュ保存） | POST: 理社管理（担当校舎の対象のみ発行）／PATCH: トークン保持者 |

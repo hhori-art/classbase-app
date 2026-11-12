@@ -36,7 +36,12 @@ const ONLY_ROLE = argValue('--role');
 const ONLY_PAGE = argValue('--only');
 // 画面を開いたあと、この要素を押してから撮る（モーダルなど操作後の画面の確認用）。例: --click '[aria-label*="押すと詳細"]'
 const CLICK_SELECTOR = argValue('--click');
+// 画面の文字で押す・見せる（マニュアル用の撮影）。例: --click-text 'あとで選ぶ' --scroll-text '振替候補'
+const CLICK_TEXT = argValue('--click-text');
+const SCROLL_TEXT = argValue('--scroll-text');
 const ONLY_WIDTH = argValue('--width') ? Number(argValue('--width')) : null;
+// 画面の高さのまま撮る（固定表示のボタンやボトムナビとの重なりを、実機と同じ見え方で確かめる用）。
+const VIEWPORT_ONLY = args.includes('--viewport-only');
 const WIDTHS = ONLY_WIDTH ? [ONLY_WIDTH] : [375, 1280];
 
 // ---- safety: never point at anything but the local app ---------------------------------------
@@ -373,6 +378,17 @@ async function capturePage(session, { url, width, shotPath }) {
     console.log(`[visual-qa] click ${CLICK_SELECTOR}: ${clicked ? 'clicked' : 'not found'}`);
     await sleep(900);
   }
+  const findByText = (text, clickable) => `(() => { const want = ${JSON.stringify(text)}; const nodes = Array.from(document.querySelectorAll(${clickable ? "'button,a,[role=button],label'" : "'h1,h2,h3,h4,p,span,div,button,a,label,th,td,li'"})).filter(el => (el.textContent || '').replace(/\\s+/g, ' ').trim().includes(want) && el.offsetParent !== null); nodes.sort((a, b) => a.textContent.length - b.textContent.length); return nodes[0] || null; })()`;
+  if (CLICK_TEXT) {
+    const clicked = await session.evaluate(`(() => { const el = ${findByText(CLICK_TEXT, true)}; if (!el) return false; el.scrollIntoView({ block: 'center' }); el.click(); return true; })()`);
+    console.log(`[visual-qa] click text ${CLICK_TEXT}: ${clicked ? 'clicked' : 'not found'}`);
+    await sleep(1200);
+    await waitForNetworkIdle(session, { idleMs: 400, timeoutMs: 5_000 });
+  }
+  if (SCROLL_TEXT && VIEWPORT_ONLY) {
+    const found = await session.evaluate(`(() => { const el = ${findByText(SCROLL_TEXT, false)}; if (!el) return false; const y = el.getBoundingClientRect().top + window.scrollY - 70; window.__qaScrollY = Math.max(0, y); return true; })()`);
+    console.log(`[visual-qa] scroll text ${SCROLL_TEXT}: ${found ? 'found' : 'not found'}`);
+  }
   const finalPath = await session.evaluate('location.pathname + location.search');
 
   // Grow the viewport so that pages with an inner scroll container (h-screen layouts) are fully
@@ -390,7 +406,7 @@ async function capturePage(session, { url, width, shotPath }) {
     return Math.ceil(h);
   })()`);
   let captureHeight = viewportHeight;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
+  for (let attempt = 0; attempt < (VIEWPORT_ONLY ? 0 : 4); attempt += 1) {
     const wanted = Math.min(Math.max(viewportHeight, await measure()), 14_000);
     if (wanted <= captureHeight + 2) break;
     captureHeight = wanted;
@@ -405,6 +421,7 @@ async function capturePage(session, { url, width, shotPath }) {
   await session.evaluate('window.scrollTo(0, 0)');
   const geometry = await session.evaluate(`({ scrollY, innerHeight, docHeight: document.documentElement.scrollHeight, vvTop: visualViewport ? visualViewport.pageTop : 0 })`);
   if (process.env.VISUAL_QA_DEBUG) console.log('[visual-qa debug]', url, width, captureHeight, JSON.stringify(geometry));
+  if (SCROLL_TEXT && VIEWPORT_ONLY) { await session.evaluate('window.scrollTo(0, window.__qaScrollY || 0)'); await sleep(500); }
   const shot = await session.s('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false, clip: { x: 0, y: 0, width, height: captureHeight, scale: 1 } });
   fs.mkdirSync(path.dirname(shotPath), { recursive: true });
   fs.writeFileSync(shotPath, Buffer.from(shot.data, 'base64'));
@@ -496,8 +513,9 @@ async function main() {
       try {
         console.log(`[visual-qa] logging in as ${roleDef.role} (${account.login_id})`);
         await login(session, roleDef, account);
-        for (const page of roleDef.pages) {
-          if (ONLY_PAGE && page !== ONLY_PAGE && !page.startsWith(`${ONLY_PAGE}?`)) continue;
+        // --only は一覧にない画面（例：/student/change-request）も撮れる。一覧の「画面?条件」もまとめて撮る。
+        const listed = roleDef.pages.filter(page => !ONLY_PAGE || page === ONLY_PAGE || page.startsWith(`${ONLY_PAGE}?`));
+        for (const page of (ONLY_PAGE && !listed.length ? [ONLY_PAGE] : listed)) {
           for (const width of WIDTHS) {
             const rel = path.join(roleDef.role, `${slug(page)}-${width}.png`);
             const shotPath = path.join(runDir, rel);

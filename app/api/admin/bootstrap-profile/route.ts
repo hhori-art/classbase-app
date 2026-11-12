@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 import { adminAuth, adminDb } from '@/lib/firebase-admin';
+import { jsonError } from '@/lib/api-error';
 
 export const runtime = 'nodejs';
 
@@ -52,7 +53,7 @@ export async function POST(request: NextRequest) {
 
     return Response.json({ ok: true, exists: false, role: 'master' });
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return Response.json({ ok: false, error: message }, { status: 400 });
+    // Firebase のエラー文は見せず、受付番号だけ返す（中身はログ）。
+    return jsonError(error);
   }
 }

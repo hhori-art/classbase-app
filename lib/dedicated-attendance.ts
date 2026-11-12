@@ -10,6 +10,8 @@ export type DedicatedSchedule = {
   end_time: string;
   break_minutes: number;
   work_days: number[];
+  /** 所定が8時間に満たない日に、8時間までの枠を広げる側（教員は始業側、事務職員などは終業側のこともある）。 */
+  extend_side?: 'before' | 'after';
 };
 
 const TIME_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/;
@@ -26,6 +28,7 @@ export const normalizeDedicatedSchedule = (profile: Record<string, unknown> | nu
     end_time: TIME_PATTERN.test(end) ? end : '18:00',
     break_minutes: breakMinutes,
     work_days: Array.from(new Set(workDays)),
+    extend_side: profile?.prescribed_extend_side === 'after' ? 'after' : 'before',
   };
 };
 

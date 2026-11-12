@@ -118,7 +118,7 @@ function GuideSection({ guide }: { guide: ManualGuide }) {
 function CommonLoginManual() {
   const steps = [
     { icon: LogIn, title: 'ログインする', body: 'ID書面の「ログインID」と「はじめのパスワード」を入力し、「ログイン」を押します。保護者のIDはお子さまのIDの末尾に「P」が付いたものです。全角・半角や大文字・小文字を確認してください。' },
-    { icon: KeyRound, title: 'はじめてのパスワード変更', body: '初回ログイン後は「新しいパスワードを設定」画面が開きます。生徒・保護者・講師は6文字以上、管理者は10文字以上で、他の人に推測されないパスワードを設定します。' },
+    { icon: KeyRound, title: 'はじめてのパスワード変更', body: '初回ログイン後は「新しいパスワードを設定」画面が開きます。生徒・保護者・講師は8文字以上、管理者は15文字以上で、他の人に推測されないパスワードを設定します。' },
     { icon: HelpCircle, title: 'ログインできないとき', body: '画面を再読み込みし、通信を確認します。パスワードがわからない場合は「パスワードを忘れた方」を使うか、校舎へ連絡してください。' },
   ];
   return <main className="min-h-screen bg-slate-50 px-4 py-6 text-slate-900 sm:px-6"><div className="mx-auto max-w-3xl space-y-6">

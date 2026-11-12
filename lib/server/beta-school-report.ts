@@ -133,8 +133,8 @@ export async function runBetaSchoolReport(options: { now?: Date; dryRun?: boolea
 
   const emails = betaReportEmails();
   if (!emails.length) return { target_date: targetDate, rows, sent: 0, error: 'BETA_REPORT_EMAILS is not set' };
-  const results = await Promise.all(emails.map(async email => ({
-    ok: (await sendEmail(email, subject, body, `beta-report-${targetDate}-${email}`)).ok,
-  })));
-  return { target_date: targetDate, rows, sent: results.filter(item => item.ok).length, failed: results.filter(item => !item.ok).length };
+  const results = await Promise.all(emails.map(email => sendEmail(email, subject, body, `beta-report-${targetDate}-${email}`)));
+  const errors = results.filter(item => !item.ok).map(item => item.error || 'unknown');
+  if (errors.length) console.error('[beta-report] email failed', errors);
+  return { target_date: targetDate, rows, sent: results.length - errors.length, failed: errors.length, errors };
 }

@@ -32,6 +32,9 @@ export type SafeTeacherStudent = {
   risk_analyzed_at?: string | number | null;
   teacher_chat_unread_count?: number;
   teacher_inquiry_unread_count?: number;
+  account_status?: string;
+  is_active?: boolean;
+  course_start_month?: string;
 };
 
 const SAFE_STUDENT_FIELDS = [
@@ -66,6 +69,9 @@ const SAFE_STUDENT_FIELDS = [
   'risk_analyzed_at',
   'teacher_chat_unread_count',
   'teacher_inquiry_unread_count',
+  'account_status',
+  'is_active',
+  'course_start_month',
 ] as const;
 
 function normalizeFirestoreValue(value: unknown) {

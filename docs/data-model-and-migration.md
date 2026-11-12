@@ -21,7 +21,7 @@
 - `recording_views`: 生徒ごとの録画視聴開始・進捗・完了サマリ。
 - `coin_transactions`: コイン/ポイントの増減履歴。ユーザー本体の `coins` 更新と同じトランザクションで作る。
 - `notification_jobs`: メール、LINE、アプリ内通知の送信ジョブ。
-- `camera_session_summaries`: 授業終了時に送信するカメラON時間サマリ。
+- `camera_session_summaries`: 授業ごとのカメラON時間（毎晩 Zoom から読む。docs/camera-rate.md）。
 - `attendance_correction_requests`: 講師の勤怠修正依頼。
 
 ## 移行手順

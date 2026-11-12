@@ -53,7 +53,7 @@ async function fetchCounts(force = false) {
  * 対応待ちの件数。refreshKey（画面のパスなど）が変わったときと、intervalMs ごとに取り直す。
  * 同じ画面のサイドバーとホームでは取得を共有し、15秒以内の再取得はしない。
  */
-export function useAdminInboxCounts({ enabled = true, refreshKey, intervalMs = 120_000 }: { enabled?: boolean; refreshKey?: string; intervalMs?: number } = {}) {
+export function useAdminInboxCounts({ enabled = true, refreshKey, intervalMs = 300_000 }: { enabled?: boolean; refreshKey?: string; intervalMs?: number } = {}) {
   const snapshot = useSyncExternalStore(subscribe, () => state, () => state);
 
   useEffect(() => {

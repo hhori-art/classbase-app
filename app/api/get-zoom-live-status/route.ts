@@ -5,6 +5,7 @@ import { canManageSchool, getServerUser, isAdminLike, requireRole } from '@/lib/
 import { accessibleTeacherStudents } from '@/lib/server/teacher-student-access';
 import { jstDateKey } from '@/lib/date-key';
 import { normalizeMeetingId } from '@/lib/zoom-recording-match';
+import { fetchLiveParticipants } from '@/lib/server/zoom-live-participants';
 
 export const runtime = 'nodejs';
 
@@ -36,7 +37,7 @@ export async function POST(request: NextRequest) {
     const user = await getServerUser(request);
     if (!isAdminLike(user)) requireRole(user, ['teacher']);
 
-    const { meetingId, shiftId } = await request.json();
+    const { meetingId, shiftId, include_left: includeLeft } = await request.json();
     const cleanMeetingId = normalizeMeetingId(meetingId);
     const cleanShiftId = clean(shiftId).slice(0, 160);
 
@@ -75,29 +76,21 @@ export async function POST(request: NextRequest) {
     const tokenData = await tokenRes.json();
     const accessToken = tokenData.access_token;
 
-    // 2) Zoom Live Data (Metrics API)
-    const metricsRes = await fetch(
-      `https://api.zoom.us/v2/metrics/meetings/${cleanMeetingId}/participants?type=live&page_size=300&_t=${Date.now()}`,
-      {
-        method: 'GET',
-        headers: { Authorization: `Bearer ${accessToken}` },
-        cache: 'no-store',
-      }
-    );
-
-    if (metricsRes.status === 404) {
-      return NextResponse.json({ success: false, error: '会議が見つかりません。' });
+    // 2) Zoom Live Data（参加者一覧。権限がなければ参加者の品質情報から読む：lib/server/zoom-live-participants.ts）
+    const live = await fetchLiveParticipants(accessToken, cleanMeetingId);
+    if (!live.ok && live.notLive) {
+      // 会議がまだ始まっていない・終わった（今は開かれていない）
+      return NextResponse.json({ success: false, code: 'meeting-not-live', error: '会議が見つかりません。' });
     }
-    if (!metricsRes.ok) {
-      const err = await metricsRes.json().catch(() => ({}));
-      return NextResponse.json({ success: false, error: `Zoom API Error: ${err.message || 'unknown'}` });
+    if (!live.ok) {
+      // Zoom の返した文言は見せず、ログにだけ残す。
+      console.error(JSON.stringify({ type: 'zoom_live_status_error', status: live.status, code: live.code, message: String(live.message || '').slice(0, 300) }));
+      return NextResponse.json({ success: false, error: 'Zoom から出席状況を取得できませんでした。' });
     }
+    const rawParticipants: any[] = live.participants;
 
-    const metricsData = await metricsRes.json();
-    const rawParticipants = metricsData.participants || [];
-
-    // 退出済み除外
-    const participants = rawParticipants.filter((p: any) => {
+    // 退出済み除外（当日の対応名簿は「一度でも入室したか」を見るので、include_left のときは残す）
+    const participants = includeLeft === true ? rawParticipants : rawParticipants.filter((p: any) => {
       if (p.leave_time) return false;
       if (p.status && p.status !== 'in_meeting') return false;
       return true;

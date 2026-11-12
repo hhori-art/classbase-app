@@ -2,11 +2,10 @@
 
 import { useState } from 'react';
 import { User as FirebaseUser } from 'firebase/auth';
-import { auth } from '@/lib/firebase';
 import { Lock, Wrench, ArrowLeft } from 'lucide-react';
 import Link from 'next/link';
 import { loadAuthenticatedProfile } from '@/lib/client-auth-profile';
-import { signInWithNetworkRetry } from '@/lib/client-auth-login';
+import { LoginError, loginWithServer, retryAfterLabel } from '@/lib/client-auth-login';
 import { Button } from '@/app/components/ui';
 
 const normalizeLoginInput = (value: string) =>
@@ -26,42 +25,6 @@ const ADMIN_ROLE_ALIASES = [
   'super_admin',
 ];
 const ATTENDANCE_ADMIN_ROLE_ALIASES = ['attendance_admin', 'attendance_only', 'attendance_manager'];
-
-const buildLoginCandidates = (value: string) => {
-  const normalized = normalizeLoginInput(value);
-  if (!normalized) return [];
-
-  const candidates: string[] = [];
-  if (normalized.includes('@')) {
-    candidates.push(normalized);
-    const [localPart] = normalized.split('@');
-    if (localPart) {
-      candidates.push(`${localPart}@classbase.local`);
-      candidates.push(`${localPart}@sozogakuen.co.jp`);
-    }
-  } else {
-    candidates.push(`${normalized}@classbase.local`);
-    candidates.push(`${normalized}@sozogakuen.co.jp`);
-  }
-
-  return Array.from(new Set(candidates));
-};
-
-const adminFirstLogin = async (login: string, pass: string) => {
-  const res = await fetch('/api/admin/first-login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ login, password: pass }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || data.ok === false) {
-    if (data.error === 'not-registered') throw new Error('管理者登録データが見つかりません。');
-    if (data.error === 'not-admin') throw new Error('このアカウントは管理者権限ではありません。');
-    if (data.error === 'wrong-password') throw new Error(LOGIN_CREDENTIAL_ERROR_MESSAGE);
-    throw new Error(data.error || '管理者Auth復旧に失敗しました。');
-  }
-  return data as { ok: true; email: string };
-};
 
 const cacheProfileForAuthContext = (uid: string, profile: Record<string, any>) => {
   try {
@@ -92,43 +55,31 @@ export default function AutoFixLoginPage() {
     setStatus('');
 
     try {
-      // 1. Firebase Auth認証
-      const loginCandidates = buildLoginCandidates(email);
-      let userCredential;
-      let lastAuthError: any = null;
-
-      for (const candidate of loginCandidates) {
-        try {
-          userCredential = await signInWithNetworkRetry(auth, candidate, password);
-          break;
-        } catch (authError: any) {
-          lastAuthError = authError;
-          if (!['auth/invalid-credential', 'auth/user-not-found', 'auth/wrong-password'].includes(authError?.code)) {
-            throw authError;
-          }
-        }
-      }
-
-      if (!userCredential) {
-        const restored = await adminFirstLogin(email, password);
-        userCredential = await signInWithNetworkRetry(auth, restored.email, password);
-      }
+      // パスワードはサーバーで確かめる（初回ログインもここで行う）。失敗が続くとロックされる。
+      const userCredential = await loginWithServer(normalizeLoginInput(email), password, { admin: true });
       const normalizedRole = await loadAdminProfile(userCredential.user);
       window.location.replace(normalizedRole === 'attendance_admin' ? '/master/attendance' : '/master');
 
     } catch (error: any) {
       console.error('Login Error:', error);
       
-      if (error.code === 'auth/invalid-credential' || error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password') {
-        setStatus(`${LOGIN_CREDENTIAL_ERROR_MESSAGE}`);
-      } else if (error.code === 'auth/user-disabled') {
+      const code = error instanceof LoginError ? error.code : String(error?.code || '');
+      if (code === 'wrong-password' || code === 'not-registered') {
+        setStatus(LOGIN_CREDENTIAL_ERROR_MESSAGE);
+      } else if (code === 'not-admin') {
+        setStatus('このアカウントは管理者権限ではありません。');
+      } else if (code === 'too-many-attempts') {
+        setStatus(`ログインに続けて失敗したため、しばらくログインできません。${retryAfterLabel(error?.retryAfterSeconds)}ほど待ってから、もう一度お試しください。`);
+      } else if (code === 'account-inactive' || code === 'auth/user-disabled') {
         setStatus('このアカウントは停止中です。管理者に確認してください');
-      } else if (error.code === 'auth/network-request-failed') {
+      } else if (code === 'auth/network-request-failed') {
         setStatus('認証サーバーへ接続できませんでした。通信環境を確認して、もう一度お試しください。改善しない場合は、校舎名・端末・発生時刻をお知らせください。');
-      } else if (error.message === 'profile-service-unavailable' || error.name === 'AbortError') {
+      } else if (error?.message === 'profile-service-unavailable' || error?.name === 'AbortError') {
         setStatus('認証は完了しましたが、ユーザー情報の取得に失敗しました。少し待ってから、もう一度お試しください。');
+      } else if (error?.message === 'このアカウントは管理者権限ではありません。') {
+        setStatus(error.message);
       } else {
-        setStatus(`エラー: ${error.message || '不明なエラーが発生しました'}`);
+        setStatus('ログインの処理に失敗しました。少し待ってから、もう一度お試しください。');
       }
       setLoading(false);
     }

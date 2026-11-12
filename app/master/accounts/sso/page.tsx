@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import { minPasswordLength, passwordPolicyError } from '@/lib/password-policy';
 import { auth, db } from '@/lib/firebase';
 import { signOut as firebaseSignOut } from 'firebase/auth';
 import { collection, getDocs, orderBy, query, where } from 'firebase/firestore';
@@ -311,6 +312,7 @@ export default function SsoAccountConsolePage() {
     setForm(prev => ({ ...prev, school_ids: next.join(',') }));
   };
 
+  const [releasingLock, setReleasingLock] = useState(false);
   const openPasswordModal = (target: any) => {
     setPasswordTarget(target);
     setNewPassword('');
@@ -324,9 +326,31 @@ export default function SsoAccountConsolePage() {
     setNewPasswordConfirmation('');
   };
 
+  // ログインのロックを解く（KDL診断 A.1.2。校舎とサポートセンターが解ける）。
+  const releaseLoginLock = async () => {
+    if (!passwordTarget) return;
+    setReleasingLock(true);
+    try {
+      const token = await freshAdminToken();
+      const response = await fetch('/api/admin/accounts/login-lock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ user_id: passwordTarget.id }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || body.ok === false) throw new Error(body.error || 'ロックを解けませんでした。');
+      toast.success(body.removed ? 'ログインのロックを解きました。' : 'ロックはかかっていませんでした。');
+    } catch (error: any) {
+      toast.error(error?.message || 'ロックを解けませんでした。');
+    } finally {
+      setReleasingLock(false);
+    }
+  };
+
   const changePassword = async () => {
     if (!passwordTarget) return;
-    if (newPassword.length < 6) return toast.error('新しいパスワードは6文字以上で入力してください。');
+    const targetPolicyError = passwordPolicyError(newPassword, passwordTarget.role, [passwordTarget.lifetime_id, passwordTarget.email]);
+    if (targetPolicyError) return toast.error(targetPolicyError);
     if (newPassword !== newPasswordConfirmation) return toast.error('確認用パスワードが一致しません。');
     const targetName = passwordTarget.student_name || passwordTarget.parent_name || passwordTarget.name || passwordTarget.email || passwordTarget.id;
     if (!(await confirm({
@@ -403,7 +427,8 @@ export default function SsoAccountConsolePage() {
   const saveAccount = async () => {
     if (!form.display_name.trim()) return toast.error('氏名は必須です');
     if (!form.login_id.trim()) return toast.error('初期IDは必須です');
-    if (form.password.trim() && form.password.length < 6) return toast.error('パスワードは6文字以上で入力してください');
+    const formPolicyError = form.password.trim() ? passwordPolicyError(form.password.trim(), form.role, [form.login_id]) : '';
+    if (formPolicyError) return toast.error(formPolicyError);
     if (!form.user_id && form.role !== 'student' && !form.password.trim()) return toast.error('生徒以外はパスワードを入力してください');
     if (form.role !== 'master' && !resolveAttendanceSchoolCode(form.school_id)) return toast.error('所属校舎を選択してください');
     if ((form.role === 'admin' || form.role === 'master') && !form.school_ids.trim() && form.role === 'admin') {
@@ -809,7 +834,7 @@ export default function SsoAccountConsolePage() {
                     autoComplete="new-password"
                     value={form.password}
                     onChange={e => setForm(prev => ({ ...prev, password: e.target.value }))}
-                    placeholder={form.role === 'student' ? '空欄なら自動発行' : '6文字以上で入力'}
+                    placeholder={form.role === 'student' ? '空欄なら自動発行' : `${minPasswordLength(form.role)}文字以上で入力`}
                     className="w-full rounded-input border border-line bg-slate-50 px-4 py-3 font-mono text-sm font-bold outline-none"
                   />
                 </label> : <div className="rounded-card border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-bold leading-5 text-amber-800">パスワードは一覧の「PW変更」から個別に変更できます。</div>}
@@ -927,7 +952,7 @@ export default function SsoAccountConsolePage() {
         title="パスワード変更"
         description={passwordTarget ? (passwordTarget.student_name || passwordTarget.parent_name || passwordTarget.name || passwordTarget.email || passwordTarget.id) : undefined}
         footer={(
-          <Button variant="danger" fullWidth onClick={changePassword} loading={savingPassword} disabled={newPassword.length < 6 || newPassword !== newPasswordConfirmation} icon={<KeyRound size={16} aria-hidden />}>
+          <Button variant="danger" fullWidth onClick={changePassword} loading={savingPassword} disabled={newPassword.length < minPasswordLength(passwordTarget?.role) || newPassword !== newPasswordConfirmation} icon={<KeyRound size={16} aria-hidden />}>
             パスワードを変更
           </Button>
         )}
@@ -936,8 +961,12 @@ export default function SsoAccountConsolePage() {
               <div className="rounded-btn border border-amber-200 bg-amber-50 p-4 text-xs font-bold leading-6 text-amber-800">
                 初回ログイン済みのアカウントも変更できます。変更後は現在のログイン状態が失効し、新しいパスワードでの再ログインが必要です。
               </div>
-              <label className="block space-y-1"><span className="text-xs font-bold text-slate-600">新しいパスワード</span><input type="password" autoComplete="new-password" minLength={6} maxLength={128} value={newPassword} onChange={event => setNewPassword(event.target.value)} placeholder="6文字以上" className="w-full rounded-input border border-line bg-slate-50 px-4 py-3 font-mono outline-none focus:border-accent" /></label>
-              <label className="block space-y-1"><span className="text-xs font-bold text-slate-600">新しいパスワード（確認）</span><input type="password" autoComplete="new-password" minLength={6} maxLength={128} value={newPasswordConfirmation} onChange={event => setNewPasswordConfirmation(event.target.value)} placeholder="同じパスワードを再入力" className="w-full rounded-input border border-line bg-slate-50 px-4 py-3 font-mono outline-none focus:border-accent" /></label>
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-btn border border-line bg-white p-3 text-xs font-bold text-slate-600">
+                <span>ログインに続けて失敗してロックされたときは、ここで解けます。</span>
+                <Button variant="secondary" size="sm" onClick={releaseLoginLock} loading={releasingLock}>ロックを解く</Button>
+              </div>
+              <label className="block space-y-1"><span className="text-xs font-bold text-slate-600">新しいパスワード</span><input type="password" autoComplete="new-password" minLength={minPasswordLength(passwordTarget?.role)} maxLength={128} value={newPassword} onChange={event => setNewPassword(event.target.value)} placeholder={`${minPasswordLength(passwordTarget?.role)}文字以上`} className="w-full rounded-input border border-line bg-slate-50 px-4 py-3 font-mono outline-none focus:border-accent" /></label>
+              <label className="block space-y-1"><span className="text-xs font-bold text-slate-600">新しいパスワード（確認）</span><input type="password" autoComplete="new-password" minLength={minPasswordLength(passwordTarget?.role)} maxLength={128} value={newPasswordConfirmation} onChange={event => setNewPasswordConfirmation(event.target.value)} placeholder="同じパスワードを再入力" className="w-full rounded-input border border-line bg-slate-50 px-4 py-3 font-mono outline-none focus:border-accent" /></label>
             </div>
       </Modal>
     </div>

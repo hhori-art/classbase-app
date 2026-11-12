@@ -2,8 +2,10 @@ import { NextRequest } from 'next/server';
 import { adminDb } from '@/lib/firebase-admin';
 import { canViewSchoolStudents, getServerUser, jsonError } from '@/lib/server-auth';
 import { attendanceSchoolName, resolveAttendanceSchoolCode } from '@/lib/attendance-schools';
-import { courseOptionMatchesSelection, currentCourseTermIds, legacyCourseSelectionLabel, selectEffectiveCourseRegistration, summarizeSelectedCourseLabels } from '@/lib/course-registration-selection';
+import { courseOptionMatchesSelection, currentCourseTermIds, legacyCourseSelectionLabel, parseLegacyCourseOptionId, selectEffectiveCourseRegistration, summarizeSelectedCourseLabels } from '@/lib/course-registration-selection';
+import type { CourseSlot } from '@/lib/monoxer-course-export';
 import { getAllQueryDocuments } from '@/lib/server/firestore-pagination';
+import { ALL_SCHOOLS_VALUE, isSameSchool, masterSchoolOptions, schoolOptionLabel } from '@/lib/school-student-options';
 import { aggregateStudentParticipation, buildParticipationWeeksSince, buildRecentParticipationWeeks } from '@/lib/student-weekly-participation';
 
 export const runtime = 'nodejs';
@@ -215,6 +217,43 @@ const buildParticipationMaps = async (
   return { weeks, attendanceByStudent, followUpsByStudent };
 };
 
+/** 受講曜日・分野の出力（Monoxer の講座登録用）に使う、登録講座ごとの曜日・学年・科目・講座名・期。読取は増やさない。 */
+const buildSelectedCourseSlots = (registration: any, catalog: { options: any[] }, currentTermLabel = ''): CourseSlot[] => {
+  if (!registration) return [];
+  const selectedIds: string[] = (Array.isArray(registration.selected_course_ids) ? registration.selected_course_ids : [])
+    .map((id: any) => String(id || '').trim()).filter(Boolean);
+  // 旧形式IDの登録は term_label を持たないことがある（中3の第Ⅳ期など）。講座一覧の期名で補う。
+  const termLabel = String(registration.term_label || catalog.options
+    .find(option => String(option.term || option.term_id || '') === String(registration.term || '') && option.term_label)?.term_label || '');
+  const slots: CourseSlot[] = [];
+  const unresolved: string[] = [];
+  selectedIds.forEach(id => {
+    const legacy = parseLegacyCourseOptionId(id);
+    if (legacy) slots.push({ day: legacy.day, slot: legacy.slot, grade: legacy.grade, subject: legacy.subject, course: legacy.course, term: String(registration.term || ''), term_label: termLabel, current_term_label: currentTermLabel });
+    else unresolved.push(id);
+  });
+  catalog.options
+    .filter(option => String(option.term || option.term_id || '') === String(registration.term || ''))
+    .filter(option => courseOptionMatchesSelection(option, unresolved))
+    .forEach(option => slots.push({
+      day: String(option.resolved_day || option.day || option.day_of_week || '').replace('曜日', '').trim(),
+      slot: normalizeSlot(option.resolved_slot || option.slot || option.time_slot || option.period),
+      grade: String(option.grade || ''),
+      subject: String(option.subject || option.target_subject || ''),
+      course: String(option.course_name || option.title || option.detail_subject || option.target_detail_subject || ''),
+      term: String(option.term || registration.term || ''),
+      term_label: String(option.term_label || termLabel),
+      current_term_label: currentTermLabel,
+    }));
+  const seen = new Set<string>();
+  return slots.filter(slot => {
+    const key = [slot.grade, slot.subject, slot.course, slot.day, slot.slot].join('|');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
 const buildSelectedCourseLabels = (registration: any, catalog: { options: any[]; labels: Map<string, string> }) => {
   if (!registration) return [];
   const explicitLabels = Array.isArray(registration?.selected_course_labels)
@@ -257,24 +296,32 @@ export async function GET(request: NextRequest) {
       ].map(value => String(value || '').trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'ja', { numeric: true }));
     let allStudentDocs: FirebaseFirestore.QueryDocumentSnapshot[] | null = null;
 
+    let firstSchoolWithStudents = '';
     if (actor.role === 'master') {
       allStudentDocs = await getAllQueryDocuments(db.collection('users').where('role', '==', 'student'));
-      schoolOptions = Array.from(new Set(allStudentDocs
+      const studentSchools = allStudentDocs
         .map(doc => String(doc.data().school_id || doc.data().school || '').trim())
-        .filter(Boolean)))
-        .sort((a, b) => a.localeCompare(b, 'ja', { numeric: true }));
+        .filter(Boolean);
+      // マスターは理社講座の対象校舎をすべて選べる（生徒がまだいない校舎も選んで登録できる）。
+      // 先頭の「全校舎」で、すべての生徒をまとめて一覧・検索・CSV出力できる。
+      schoolOptions = [ALL_SCHOOLS_VALUE, ...masterSchoolOptions(studentSchools)];
+      firstSchoolWithStudents = schoolOptions.find(option => option !== ALL_SCHOOLS_VALUE && studentSchools.some(value => isSameSchool(value, option))) || '';
     }
+    const schoolLabels = Object.fromEntries(schoolOptions.map(option => [option, schoolOptionLabel(option)]));
 
-    const school = requestedSchool || schoolOptions[0] || '';
+    const school = requestedSchool || firstSchoolWithStudents || schoolOptions[0] || '';
 
     if (!school) {
-      return Response.json({ ok: true, school: '', schools: schoolOptions, students: [] });
+      return Response.json({ ok: true, school: '', schools: schoolOptions, school_labels: schoolLabels, students: [] });
     }
-    if (!canViewSchoolStudents(actor, school)) throw new Error('forbidden');
+    const allSchools = school === ALL_SCHOOLS_VALUE;
+    if (allSchools ? actor.role !== 'master' : !canViewSchoolStudents(actor, school)) throw new Error('forbidden');
 
     let studentDocs: FirebaseFirestore.QueryDocumentSnapshot[];
-    if (allStudentDocs) {
-      studentDocs = allStudentDocs.filter(doc => String(doc.data().school_id || doc.data().school || '').trim() === school);
+    if (allStudentDocs && allSchools) {
+      studentDocs = allStudentDocs;
+    } else if (allStudentDocs) {
+      studentDocs = allStudentDocs.filter(doc => isSameSchool(doc.data().school_id || doc.data().school, school));
     } else {
       const schoolCode = resolveAttendanceSchoolCode(school) || school;
       const schoolAliases = Array.from(new Set([school, schoolCode, attendanceSchoolName(schoolCode)].filter(Boolean)));
@@ -343,7 +390,6 @@ export async function GET(request: NextRequest) {
         uid: parentId,
         parent_name: parentData.parent_name || parentData.name || '',
         lifetime_id: parentData.lifetime_id || parentData.initial_login_id || '',
-        initial_password: parentData.initial_password || parentData.raw_password || '',
         isFirstLogin: parentData.isFirstLogin,
         email: parentData.email || '',
       } : null;
@@ -372,6 +418,7 @@ export async function GET(request: NextRequest) {
         subject_social: data.subject_social || data.social_subject || '',
         selected_course_ids: selectedCourseIds,
         selected_course_labels: selectedCourseLabels,
+        selected_course_slots: buildSelectedCourseSlots(currentRegistration, courseCatalog, currentTermLabel),
         current_course_label: currentCourseLabel,
         active_course_registration_id: currentRegistration?.id || '',
         course_registration_status: currentRegistration?.status || 'unregistered',
@@ -392,7 +439,7 @@ export async function GET(request: NextRequest) {
         attendance_warning: participation.warning,
         attendance_follow_ups: participationMaps.followUpsByStudent.get(doc.id) || [],
         lifetime_id: data.lifetime_id || data.initial_login_id || '',
-        initial_password: data.initial_password || data.raw_password || '',
+        // 初期パスワードは一覧に載せない（KDL診断 A.3.1）。書面を刷るときだけ、管理者が別の通信で取り出す。
         isFirstLogin: data.isFirstLogin,
         email: data.email || '',
         phone_number: data.phone_number || '',
@@ -401,7 +448,6 @@ export async function GET(request: NextRequest) {
         parent_uid: parentId || '',
         parent_name: parent?.parent_name || '',
         parent_login_id: parent?.lifetime_id || '',
-        parent_initial_password: parent?.initial_password || '',
         parent_isFirstLogin: parent?.isFirstLogin,
         parent_email: parent?.email || '',
         account_status: data.account_status || data.status || 'active',
@@ -411,7 +457,7 @@ export async function GET(request: NextRequest) {
       };
     });
 
-    return Response.json({ ok: true, school, schools: schoolOptions, attendance_weeks: participationMaps.weeks, students });
+    return Response.json({ ok: true, school, schools: schoolOptions, school_labels: schoolLabels, attendance_weeks: participationMaps.weeks, students });
   } catch (error) {
     return jsonError(error);
   }

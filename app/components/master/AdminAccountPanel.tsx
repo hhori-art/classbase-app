@@ -1,10 +1,10 @@
 'use client';
 
 import { useState } from 'react';
-import { signInWithEmailAndPassword } from 'firebase/auth';
 import { Lock, LogOut } from 'lucide-react';
 import { auth } from '@/lib/firebase';
-import { minPasswordLength } from '@/lib/password-policy';
+import { minPasswordLength, passwordPolicyError } from '@/lib/password-policy';
+import { changeOwnPassword, PasswordChangeError } from '@/lib/client-password-change';
 import { useAuth } from '@/app/context/AuthContext';
 import LineLinkPanel from '@/app/components/LineLinkPanel';
 import PushNotificationToggle from '@/app/components/PushNotificationToggle';
@@ -21,6 +21,7 @@ export default function AdminAccountPanel({ onPasswordChanged }: {
   const { profile, logout } = useAuth();
   const confirm = useConfirm();
   const toast = useToast();
+  const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [message, setMessage] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
@@ -32,34 +33,30 @@ export default function AdminAccountPanel({ onPasswordChanged }: {
       setMessage({ tone: 'error', text: 'パスワードが一致しません' });
       return;
     }
-    if (newPassword.length < minLength) {
-      setMessage({ tone: 'error', text: `パスワードは${minLength}文字以上で入力してください` });
+    if (!currentPassword) {
+      setMessage({ tone: 'error', text: '今のパスワードを入力してください' });
+      return;
+    }
+    const policyError = passwordPolicyError(newPassword, profile?.role, [profile?.lifetime_id, profile?.email]);
+    if (policyError) {
+      setMessage({ tone: 'error', text: policyError });
       return;
     }
     setSaving(true);
     setMessage(null);
     try {
       const currentUser = auth.currentUser;
-      if (!currentUser?.email) throw new Error('missing-auth-email');
-      const token = await currentUser.getIdToken();
-      const res = await fetch('/api/auth/change-password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ password: newPassword }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.ok) throw new Error(data.error || 'password-change-failed');
-      try { sessionStorage.removeItem(`classbase_profile_cache:${currentUser.uid}`); } catch { /* 保存できない環境 */ }
-      // 変更でほかの端末のログインは切れる。この端末は新しいパスワードで入り直す。
-      const credential = await signInWithEmailAndPassword(auth, currentUser.email, newPassword);
-      await credential.user.getIdToken(true);
+      if (!currentUser) throw new Error('missing-auth-user');
+      // 今のパスワードはサーバーで確かめる。変更でほかの端末のログインは切れ、この端末は入り直す。
+      await changeOwnPassword(currentUser, { password: newPassword, currentPassword });
+      setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
       setMessage({ tone: 'success', text: 'パスワードを変更しました' });
       toast.success('パスワードを変更しました');
       onPasswordChanged?.();
-    } catch {
-      setMessage({ tone: 'error', text: '変更できませんでした。いったんログアウトして入り直してから、もう一度お試しください。' });
+    } catch (error) {
+      setMessage({ tone: 'error', text: error instanceof PasswordChangeError ? error.message : '変更できませんでした。いったんログアウトして入り直してから、もう一度お試しください。' });
     } finally {
       setSaving(false);
     }
@@ -79,6 +76,11 @@ export default function AdminAccountPanel({ onPasswordChanged }: {
       <Card>
         <SectionTitle icon={Lock} title="パスワード変更" description={`${minLength}文字以上。変更するとほかの端末ではログインし直しになります。`} />
         <form className="space-y-3" onSubmit={event => { event.preventDefault(); void changePassword(); }}>
+          <label className="block">
+            <span className="mb-1 block text-xs font-bold text-fg-muted">今のパスワード</span>
+            <input type="password" autoComplete="current-password" value={currentPassword} onChange={event => setCurrentPassword(event.target.value)}
+              className="min-h-11 w-full rounded-input border border-line bg-slate-50 p-3 text-sm font-bold outline-none focus:border-accent" />
+          </label>
           <label className="block">
             <span className="mb-1 block text-xs font-bold text-fg-muted">新しいパスワード</span>
             <input type="password" autoComplete="new-password" value={newPassword} onChange={event => setNewPassword(event.target.value)}

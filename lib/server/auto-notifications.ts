@@ -14,6 +14,9 @@ import { loadSchoolStaffRecipients, notifyStaff } from '@/lib/server/staff-recip
 import { linkedParentIds } from '@/lib/server/linked-parents';
 import { userAllows } from '@/lib/server/notify-channels';
 import { queuePushToUsers } from '@/lib/server/web-push';
+import { MONTHLY_REPORT_DEADLINE_BUSINESS_DAYS, nthBusinessDay } from '@/lib/dedicated-overtime';
+import { activeAbsencesByStudent } from '@/lib/today-roster';
+import { holidaySet, loadCompanyHolidays } from '@/lib/server/dedicated-attendance';
 
 /**
  * 自動で送る通知（管理画面の「通知連携」の通知種別でオン・オフできる）。
@@ -133,9 +136,15 @@ export async function runMissedClassNotifications(options: { today?: string; now
       ids.forEach(id => periodsJoined.forEach(period => attended.add(`${id}_${period}`)));
     });
 
+    // その日に欠席・遅刻の連絡がある生徒には知らせない。時間割は「振替がついた欠席」しか反映しないので、
+    // ここで振替なしの欠席連絡も除く（連絡したのに「欠席のご連絡もありません」と届かないように）。
+    const absenceSnap = await db.collection('requests').where('target_date', '==', today).where('type', '==', 'absence').limit(2000).get();
+    const absenceNotified = activeAbsencesByStudent(absenceSnap.docs.map(doc => doc.data()));
+
     for (const studentId of studentIds) {
       const profile = profiles.get(studentId);
       if (!isActiveUser(profile) || clean(profile!.role) !== 'student') continue;
+      if (absenceNotified.has(studentId)) continue;
       if (periods.every(period => attended.has(`${studentId}_${period}`))) continue;
       // 時間割と同じ判定（欠席連絡・振替・休講を反映した今日の授業）。
       const timetable = await buildStudentTimetable({ id: studentId, profile }, { audience: 'parent', today }).catch(error => {
@@ -412,7 +421,7 @@ export async function notifyCorrectionResult(input: {
 
 /**
  * 専任の時間外の手続きの案内（毎朝8時台の実行に相乗りする）。
- *  - 1〜3日：前の月の時間外報告書（D08）をまだ出していない専任へ（翌月3日が締め切り）
+ *  - 1日〜2営業日目：前の月の時間外報告書（D08）をまだ出していない専任へ（翌月2営業日目が締め切り。土日と会社の休日を除く）
  *  - 20日：専任の校舎承認者へ、翌月の時間外の一括申請（D05）を25日までに入れるよう案内
  */
 export async function runDedicatedReportReminders(options: { today?: string; dryRun?: boolean } = {}) {
@@ -420,13 +429,15 @@ export async function runDedicatedReportReminders(options: { today?: string; dry
   if (!settings.dedicated_report_reminder_enabled || !settings.in_app_enabled) return { skipped: 'disabled' as const };
   const today = options.today || jstDateKey();
   const day = Number(today.slice(8, 10));
-  if (!(day >= 1 && day <= 3) && day !== 20) return { skipped: 'not-today' as const };
+  const deadline = nthBusinessDay(today.slice(0, 7), MONTHLY_REPORT_DEADLINE_BUSINESS_DAYS, holidaySet(await loadCompanyHolidays()));
+  const reportPeriod = today <= deadline;
+  if (!reportPeriod && day !== 20) return { skipped: 'not-today' as const };
   const db = adminDb();
   const staffSnap = await db.collection('users').where('employment_category', '==', 'dedicated').limit(1000).get();
   const staff = staffSnap.docs.filter(doc => isActiveUser(doc.data()) && clean(doc.data().role).toLowerCase() === 'teacher' && isDedicatedProfile(doc.data() || {}));
   const profiles = new Map(staff.map(doc => [doc.id, doc.data() || {}]));
   const notices: Notice[] = [];
-  if (day <= 3) {
+  if (reportPeriod) {
     const previous = jstDateKey(new Date(new Date(`${today.slice(0, 7)}-01T12:00:00+09:00`).getTime() - 86_400_000)).slice(0, 7);
     const reportSnap = await db.collection('dedicated_monthly_reports').where('month', '==', previous).limit(1000).get();
     const submitted = new Set(reportSnap.docs.filter(doc => ['submitted', 'confirmed'].includes(clean(doc.data().status))).map(doc => clean(doc.data().user_id)));
@@ -434,7 +445,7 @@ export async function runDedicatedReportReminders(options: { today?: string; dry
       id: `dedicated_month_reminder_${doc.id}_${previous}_${today}`,
       userId: doc.id, role: 'teacher', kind: 'attendance', link: '/teacher/attendance/dedicated',
       title: `${Number(previous.slice(5))}月の時間外報告書を提出してください`,
-      message: `${Number(previous.slice(5))}月の時間外勤務 実施予定・実施報告書（D08）がまだ提出されていません。専任勤怠の「勤務と時間外」から、${Number(today.slice(5, 7))}月3日までに提出してください。`,
+      message: `${Number(previous.slice(5))}月の時間外勤務 実施予定・実施報告書（D08）がまだ提出されていません。専任勤怠の「勤務と時間外」から、${Number(deadline.slice(5, 7))}月${Number(deadline.slice(8, 10))}日までに提出してください。`,
     }));
   } else {
     const next = jstDateKey(new Date(new Date(`${today.slice(0, 7)}-28T12:00:00+09:00`).getTime() + 7 * 86_400_000)).slice(0, 7);
@@ -447,4 +458,54 @@ export async function runDedicatedReportReminders(options: { today?: string; dry
   }
   if (options.dryRun) return { today, would_notify: notices.length };
   return { today, notified: await deliver(notices, profiles, 'attendance') };
+}
+
+/** 保護者の画面で「月のレポート」が見えるか（出欠・録画・宿題のどれかを保護者に公開している）。 */
+async function parentReportVisible() {
+  const snap = await adminDb().collection('settings').doc('portal_visibility').get();
+  const parent = (snap.data()?.parent || {}) as Record<string, boolean | undefined>;
+  return Boolean(parent.attendance || parent.recordings || parent.homework);
+}
+
+/**
+ * 保護者へ、前の月の学習レポートができたことを毎月1日の夕方に知らせる（アプリ内通知と端末通知。メールは送らない）。
+ * レポートの中身は保護者が開いたときに作るので、ここではお子さまごとに1通の案内だけを書く。
+ */
+export async function runParentMonthlyReportNotices(options: { today?: string; dryRun?: boolean } = {}) {
+  const settings = await getNotificationSettings();
+  if (!settings.parent_monthly_report_enabled || !settings.in_app_enabled) return { skipped: 'disabled' as const };
+  const today = options.today || jstDateKey();
+  if (!options.dryRun && today.slice(8, 10) !== '01') return { skipped: 'not-today' as const };
+  if (!(await parentReportVisible())) return { skipped: 'report-hidden' as const };
+  const month = jstDateKey(new Date(new Date(`${today.slice(0, 7)}-01T12:00:00+09:00`).getTime() - 86_400_000)).slice(0, 7);
+  const db = adminDb();
+  const parentSnap = await db.collection('users').where('role', '==', 'parent').limit(5000).get();
+  const parents = parentSnap.docs.filter(doc => isActiveUser(doc.data()));
+  const profiles = new Map(parents.map(doc => [doc.id, doc.data() || {}]));
+  const studentIds = Array.from(new Set<string>(parents.flatMap(doc => (Array.isArray(doc.data().student_ids) ? doc.data().student_ids : []).map(clean).filter(Boolean))));
+  const students = new Map<string, FirebaseFirestore.DocumentData>();
+  for (let index = 0; index < studentIds.length; index += 100) {
+    const snaps = await db.getAll(...studentIds.slice(index, index + 100).map(id => db.collection('users').doc(id)));
+    snaps.forEach(snap => { if (snap.exists && clean(snap.data()?.role) === 'student') students.set(snap.id, snap.data() || {}); });
+  }
+  const label = `${Number(month.slice(5, 7))}月`;
+  const notices: Notice[] = [];
+  parents.forEach(parent => {
+    const listed: string[] = (Array.isArray(parent.data().student_ids) ? parent.data().student_ids : []).map(clean);
+    Array.from(new Set(listed)).forEach(studentId => {
+      const student = students.get(studentId);
+      if (!isActiveUser(student)) return;
+      const name = clean(student!.student_name || student!.name) || 'お子さま';
+      notices.push({
+        id: `parent_monthly_report_${parent.id}_${studentId}_${month}`,
+        userId: parent.id, role: 'parent', kind: 'announcements',
+        link: `/parent/report?student_id=${encodeURIComponent(studentId)}&month=${month}`,
+        title: `${label}の学習レポートができました`,
+        message: `${name}さんの${label}の出席・録画の視聴・宿題などをまとめたレポートを見られます。「月のレポート」から開いてください。印刷やPDFでの保存もできます。`,
+        extra: { student_id: studentId, report_month: month },
+      });
+    });
+  });
+  if (options.dryRun) return { today, month, parents: parents.length, students: students.size, notified: 0, would_notify: notices.length };
+  return { today, month, notified: await deliver(notices, profiles, 'announcements') };
 }

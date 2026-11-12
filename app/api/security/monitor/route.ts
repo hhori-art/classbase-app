@@ -1,5 +1,7 @@
 import { NextRequest } from 'next/server';
 import { isAuthorizedCronRequest } from '@/lib/server/cron-auth';
+import { currentUsageLevel } from '@/lib/server/usage-guard';
+import { shouldSkipInSavingMode } from '@/lib/usage-guard';
 import { getServerUser, jsonError } from '@/lib/server-auth';
 import { runSecurityMonitor } from '@/lib/server/security-monitor';
 
@@ -10,11 +12,16 @@ const hoursOf = (request: NextRequest, fallback: number) => {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 };
 
-/** Vercel Cron から呼ぶ攻撃の監視（いまは毎朝7時に直近24時間。有料プランでは5分ごとに hours=1）。 */
+/** Vercel Cron から呼ぶ攻撃の監視（5分ごとに hours=1 で直近1時間、毎朝7時に直近24時間）。 */
 export async function GET(request: NextRequest) {
   if (!isAuthorizedCronRequest(request)) return Response.json({ ok: false, error: 'unauthorized' }, { status: 401 });
   try {
-    const result = await runSecurityMonitor({ hours: hoursOf(request, 24) });
+    const hours = hoursOf(request, 24);
+    // 5分ごとの確認は、節約モードでは1時間ごとにする（毎朝の1日分の確認は続ける）。
+    if (hours < 24 && shouldSkipInSavingMode('security_monitor_frequent', await currentUsageLevel(), new Date())) {
+      return Response.json({ ok: true, skipped: 'usage-saving' });
+    }
+    const result = await runSecurityMonitor({ hours });
     return Response.json({ ok: true, ...result });
   } catch (error) {
     console.error('[security-monitor] failed', error);

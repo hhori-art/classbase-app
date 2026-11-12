@@ -2,7 +2,7 @@ import { canonicalPeriodForGradeSubject, enrichCourseOptionsWithShifts, fixedPer
 import { courseOptionMatchesSelection, currentCourseTermIds, resolveSelectedCourseOptionIds, selectEffectiveCourseRegistration } from '@/lib/course-registration-selection';
 import { canStudentRegisterCourseOption } from '@/lib/course-registration-rules';
 import { getCourseSubjectGroup, normalizeCourseText, toAsciiDigits } from '@/lib/course-text';
-import { normalizeZoomMeetingId, looksLikeZoomUrl } from '@/lib/zoom-url';
+import { normalizeZoomMeetingId, looksLikeZoomJoinUrl, looksLikeZoomUrl } from '@/lib/zoom-url';
 import { weekdayFromDateKey } from '@/lib/date-key';
 import { applyChu3Rules, chu3SelectionsFromIds } from '@/lib/chu3-schedule';
 import {
@@ -89,7 +89,8 @@ export const getShiftJoinUrl = (shift: any) => {
     looksLikeZoomUrl(shift.target_meeting_id) ? shift.target_meeting_id : '',
   ]
     .map(value => String(value || '').trim())
-    .filter(value => looksLikeZoomUrl(value));
+    // ホスト開始用のURL（/s/・zak=）は生徒に渡さない。開くとホストのアカウントの名前で入ってしまう。
+    .filter(value => looksLikeZoomJoinUrl(value));
 
   // 講師配置の会議IDが変わった場合、以前取得した参加URLを誤って使わない。
   return candidates.find(url => !meetingId || normalizeZoomMeetingId(url) === meetingId) || '';

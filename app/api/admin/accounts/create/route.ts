@@ -5,6 +5,8 @@ import { canManageSchool, getServerUser, jsonError } from '@/lib/server-auth';
 import { writeLearningEvent } from '@/lib/events';
 import { writeAuditLog } from '@/lib/server/audit-log';
 import { generateInitialPassword } from '@/lib/password';
+import { minPasswordLength, passwordPolicyError } from '@/lib/password-policy';
+import { setInitialPassword } from '@/lib/server/account-secrets';
 import type { AdminAppPermissions } from '@/lib/admin-app-permissions';
 import { normalizeEmploymentCategory } from '@/lib/employment-category';
 import { attendanceSchoolName, resolveAttendanceSchoolCode } from '@/lib/attendance-schools';
@@ -52,7 +54,7 @@ export async function POST(request: NextRequest) {
     const loginId = normalizeAccountLoginId(body.login_id || body.lifetime_id);
     const requestedPassword = normalizeInitialPassword(body.password);
     // 既存アカウントの情報編集で空欄なら、現在のPWを変更しない。
-    const password = requestedPassword || (requestedUserId ? '' : generateInitialPassword());
+    const password = requestedPassword || (requestedUserId ? '' : generateInitialPassword(minPasswordLength(role) > 10 ? 16 : 10));
     const schoolId = resolveAttendanceSchoolCode(
       body.school_id || body.school_code || body.school_name || body.school || ''
     );
@@ -86,7 +88,10 @@ export async function POST(request: NextRequest) {
 
     if (!loginId) return Response.json({ ok: false, error: 'login_id is required' }, { status: 400 });
     if (!displayName) return Response.json({ ok: false, error: 'display_name is required' }, { status: 400 });
-    if (requestedPassword && requestedPassword.length < 6) return Response.json({ ok: false, error: 'password must be 6+ characters' }, { status: 400 });
+    if (requestedPassword) {
+      const policyError = passwordPolicyError(requestedPassword, role, [loginId]);
+      if (policyError) return Response.json({ ok: false, error: policyError }, { status: 400 });
+    }
     const loginIdIsEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(loginId);
     const loginIdIsStaffCode = /^(?:[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9])$/.test(loginId);
     if (!loginIdIsEmail && !loginIdIsStaffCode) {
@@ -177,7 +182,8 @@ export async function POST(request: NextRequest) {
       email,
       lifetime_id: loginId,
       initial_login_id: loginId,
-      ...(password ? { initial_password: password, raw_password: password } : {}),
+      // 初期パスワードは users に置かない（KDL診断 A.3.1）。下で account_secrets にハッシュで置く。
+      ...(password ? { initial_password: FieldValue.delete(), raw_password: FieldValue.delete(), password: FieldValue.delete() } : {}),
       account_status: status,
       status,
       school_id: schoolId || null,
@@ -276,7 +282,7 @@ export async function POST(request: NextRequest) {
       const batch = db.batch();
       duplicateProfiles.forEach(profile => {
         batch.set(profile.ref, {
-          ...(password ? { initial_password: password, raw_password: password } : {}),
+          ...(password ? { initial_password: FieldValue.delete(), raw_password: FieldValue.delete(), password: FieldValue.delete() } : {}),
           credential_primary_uid: uid,
           credentials_synced_at: FieldValue.serverTimestamp(),
           credentials_synced_by: actor.uid,
@@ -284,6 +290,13 @@ export async function POST(request: NextRequest) {
         }, { merge: true });
       });
       await batch.commit();
+    }
+
+    // 初回ログイン前なら、初期パスワードをハッシュで置く。
+    const primaryFirstLogin = existingProfile?.exists ? existingProfile.data()?.isFirstLogin !== false : true;
+    if (password && primaryFirstLogin) {
+      stage = 'store_initial_password';
+      await setInitialPassword(uid, password, actor.uid);
     }
 
     if (role === 'parent') {
@@ -308,8 +321,9 @@ export async function POST(request: NextRequest) {
         email: parentAuth.email,
         lifetime_id: parentLoginId,
         initial_login_id: parentLoginId,
-        initial_password: parentPassword,
-        raw_password: parentPassword,
+        initial_password: FieldValue.delete(),
+        raw_password: FieldValue.delete(),
+        password: FieldValue.delete(),
         parent_name: parentName,
         name: parentName,
         student_ids: FieldValue.arrayUnion(uid),
@@ -324,6 +338,8 @@ export async function POST(request: NextRequest) {
         updated_at: FieldValue.serverTimestamp(),
         updated_by: actor.uid,
       }, { merge: true });
+      const parentFirstLogin = parentSnap.exists ? parentSnap.data()?.isFirstLogin !== false : true;
+      if (parentFirstLogin) await setInitialPassword(parentAuth.uid, parentPassword, actor.uid);
       await userRef.set({
         parent_ids: FieldValue.arrayUnion(parentAuth.uid),
         parent_uid: parentAuth.uid,
@@ -383,7 +399,8 @@ export async function POST(request: NextRequest) {
       ok: true,
       uid,
       email,
-      initial_password: password || String(existingProfile?.data()?.initial_password || existingProfile?.data()?.raw_password || ''),
+      // 新しく決めた初期パスワードだけを、この応答で一度だけ返す（書面の印刷用）。今のものは返さない。
+      initial_password: password,
       isFirstLogin: before.exists ? before.data()?.isFirstLogin ?? false : true,
       parent: parentInfo,
       event_id: eventId,
@@ -411,7 +428,7 @@ export async function POST(request: NextRequest) {
       return Response.json({ ok: false, error: 'メールアドレスまたはログインIDの形式が正しくありません。' }, { status: 400 });
     }
     if (code === 'auth/invalid-password') {
-      return Response.json({ ok: false, error: 'パスワードは6文字以上で入力してください。' }, { status: 400 });
+      return Response.json({ ok: false, error: 'パスワードがきまりに合いません。文字数を増やして、もう一度入力してください。' }, { status: 400 });
     }
     if (message === 'forbidden') {
       return Response.json({ ok: false, error: 'このアカウントを登録する権限、または対象校舎の権限がありません。' }, { status: 403 });

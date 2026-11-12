@@ -150,6 +150,7 @@ export default function AccountGuidePrintView({ accounts, loginUrl, title, onClo
 
   return createPortal(
     <div id="guide-print-root" className="guide-print-root fixed inset-0 z-[9999] overflow-y-auto bg-slate-200 print:static print:overflow-visible print:bg-white">
+      {/* 中身は固定の印刷用CSSだけ（GUIDE_PRINT_CSS の埋め込みも定数の計算値のみ）で、利用者の入力は入らないため安全。 */}
       <style dangerouslySetInnerHTML={{ __html: `
         @media print { body > *:not(#guide-print-root) { display: none !important; } }
         ${GUIDE_PRINT_CSS}

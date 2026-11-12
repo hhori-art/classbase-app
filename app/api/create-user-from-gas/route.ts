@@ -2,6 +2,7 @@
 import crypto from 'crypto';
 import { NextResponse } from 'next/server';
 import { adminDb } from '@/lib/firebase-admin';
+import { internalErrorResponse } from '@/lib/api-error';
 
 function configuredSecret() {
   return process.env.CLASSBASE_GAS_USER_SECRET || process.env.CLASSBASE_SYNC_SECRET || process.env.SECRET_KEY || '';
@@ -55,7 +56,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ success: true, count: users.length, createdIds });
     
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+  } catch (error) {
+    return internalErrorResponse(error, { message: 'ユーザーの作成に失敗しました', context: 'create-user-from-gas' });
   }
 }

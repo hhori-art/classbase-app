@@ -24,6 +24,7 @@ import {
   normalizeClassButtonSettings,
   type ClassButtonSettings,
 } from '@/lib/class-button-settings';
+import { DEFAULT_CAMERA_MONITOR_RULE, normalizeCameraMonitorRule, type CameraMonitorRule } from '@/lib/camera-time';
 
 // --- 設定用定数 ---
 const GRADES = ['中1', '中2', '中3'];
@@ -127,6 +128,7 @@ const DEFAULT_NOTIFICATION_SETTINGS = {
   clock_out_missing_enabled: true,
   transfer_reminder_enabled: true,
   dedicated_report_reminder_enabled: true,
+  parent_monthly_report_enabled: false,
   student_line_enabled: true,
   parent_line_enabled: true,
   teacher_line_enabled: true,
@@ -266,6 +268,7 @@ export default function SettingsPage() {
   const [releasePhase, setReleasePhase] = useState<ReleasePhaseId | 'custom'>('custom');
   const [notificationSettings, setNotificationSettings] = useState(DEFAULT_NOTIFICATION_SETTINGS);
   const [missionSettings, setMissionSettings] = useState(DEFAULT_MISSION_SETTINGS);
+  const [cameraMonitor, setCameraMonitor] = useState<CameraMonitorRule>(DEFAULT_CAMERA_MONITOR_RULE);
   const [customMissions, setCustomMissions] = useState<CustomMission[]>([]);
   const [classButtonSettings, setClassButtonSettings] = useState<ClassButtonSettings>(DEFAULT_CLASS_BUTTON_SETTINGS);
   const [savingNotifications, setSavingNotifications] = useState(false);
@@ -326,6 +329,7 @@ export default function SettingsPage() {
             community: data.community ?? prev.community,
           }));
           setCustomMissions(Array.isArray(data.custom_missions) ? data.custom_missions.map(normalizeCustomMission) : []);
+          setCameraMonitor(normalizeCameraMonitorRule(data.camera_monitor));
         }
 
         // PWAチェック
@@ -423,6 +427,7 @@ export default function SettingsPage() {
       await setDoc(doc(db, 'settings', 'mission_control'), {
         ...missionSettings,
         custom_missions: customMissions.map(normalizeCustomMission),
+        camera_monitor: normalizeCameraMonitorRule(cameraMonitor),
         updated_at: new Date().toISOString(),
         updated_by: user?.uid || null,
       }, { merge: true });
@@ -849,6 +854,7 @@ export default function SettingsPage() {
                 onCustomChange={handleCustomMissionChange}
                 onCustomDelete={handleDeleteCustomMission}
               />
+              <CameraMonitorPanel value={cameraMonitor} onChange={setCameraMonitor} />
             </div>
 
             <div className="sticky bottom-6 z-20 flex justify-end">
@@ -911,6 +917,7 @@ export default function SettingsPage() {
                     { key: 'work_detail_reminder_enabled', label: '勤務詳細の未登録通知', description: '退勤したのに勤務の詳細が入っていない講師へ、翌朝（8時台）と3日後に知らせます。専任は対象外です。' },
                     { key: 'correction_result_enabled', label: '打刻修正の結果通知', description: '打刻修正が承認・差し戻しされたとき、申請した講師へすぐに知らせます。' },
                     { key: 'clock_out_missing_enabled', label: '打刻忘れ（退勤なし）通知', description: '出勤したまま退勤の打刻がない職員へ、翌朝（8時台）に打刻修正の申請を案内します。' },
+                    { key: 'parent_monthly_report_enabled', label: '保護者への月のレポートの案内', description: '毎月1日の夕方（18時台）に、前の月の学習レポートができたことを保護者へアプリ内通知と端末通知で知らせます（メールは送りません）。保護者の画面で出席・録画・宿題のどれかを公開しているときだけ送ります。' },
                     { key: 'dedicated_report_reminder_enabled', label: '専任の月の報告書・一括申請の通知', description: '専任へ、月初（1〜3日の朝）に前の月の時間外報告書（D08）の提出を、校舎の承認者へ毎月20日の朝に翌月の時間外の一括申請（D05）を知らせます。' },
                   ]}
                   values={notificationSettings}
@@ -1025,6 +1032,42 @@ function VisibilityPanel({
             />
           </label>
         ))}
+      </div>
+    </div>
+  );
+}
+
+/** 授業のカメラON率の見方（毎晩 Zoom から読む）。続けてオフの生徒を講師の声かけリストに出す。 */
+function CameraMonitorPanel({ value, onChange }: { value: CameraMonitorRule; onChange: (value: CameraMonitorRule) => void }) {
+  const set = (patch: Partial<CameraMonitorRule>) => onChange({ ...value, ...patch });
+  const number = (key: 'off_rate_percent' | 'streak_lessons' | 'min_present_minutes', label: string, unit: string, min: number, max: number) => (
+    <label className="grid gap-1 text-xs font-bold text-slate-500">
+      {label}
+      <span className="flex items-center gap-2">
+        <input type="number" inputMode="numeric" min={min} max={max} value={value[key]} disabled={!value.enabled}
+          onChange={event => set({ [key]: Number(event.target.value) } as Partial<CameraMonitorRule>)}
+          className="min-h-11 w-24 rounded-input border border-slate-200 bg-white px-3 text-sm font-bold text-slate-800 disabled:bg-slate-100" />
+        <span className="text-sm text-slate-600">{unit}</span>
+      </span>
+    </label>
+  );
+  return (
+    <div className={`mt-5 rounded-card border-2 p-5 shadow-sm ${value.enabled ? 'border-amber-200 bg-amber-50' : 'border-slate-100 bg-slate-50'}`}>
+      <label className="flex items-start justify-between gap-4">
+        <span>
+          <span className="block text-sm font-bold text-slate-800">授業のカメラON率を見る</span>
+          <span className="mt-2 block text-xs font-bold leading-relaxed text-slate-500">
+            毎晩22時50分に、その日の授業でカメラがオンだった分数をZoomから読みます（授業ボタンから入った生徒だけ）。
+            ON率が低い授業が続いた生徒を、講師の声かけリストに出します。先生ごと・授業ごとのON率は「授業のカメラON率」で見られます。
+            コインは付けません（カメラを隠してオンにもできるため）。
+          </span>
+        </span>
+        <input type="checkbox" checked={value.enabled} onChange={event => set({ enabled: event.target.checked })} className="mt-1 h-5 w-5 shrink-0 accent-amber-500" />
+      </label>
+      <div className="mt-4 flex flex-wrap items-end gap-4">
+        {number('off_rate_percent', 'オフとみなすON率', '%未満', 1, 100)}
+        {number('streak_lessons', '声かけに出す回数', '回続けて', 2, 10)}
+        {number('min_present_minutes', '判定に入れる参加', '分以上', 1, 120)}
       </div>
     </div>
   );

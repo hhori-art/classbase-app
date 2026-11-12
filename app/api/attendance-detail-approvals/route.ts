@@ -3,6 +3,7 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { canManageAttendance, canManageAttendanceSchool, canManageAttendanceSystem, getServerUser, jsonError, type ServerUser } from '@/lib/server-auth';
 import { writeAuditLog } from '@/lib/server/audit-log';
+import { preparedMessageOr } from '@/lib/api-error';
 import {
   attendanceSegmentNeedsSchool,
   normalizeAttendanceSegment,
@@ -163,6 +164,17 @@ const canReviewSegment = (
   return canManageAttendanceSchool(actor, effectiveSchool(segment, record, profile));
 };
 
+// 休憩は承認の対象ではないが、講師が間違えて入れた休憩（自動で入った休憩を含む）は、その校舎の承認者が直せる。
+const canEditBreakSegment = (
+  actor: ServerUser,
+  segment: Partial<AttendanceWorkSegment>,
+  record: Record<string, any>,
+  profile: Record<string, any>,
+) => {
+  if (actor.role !== 'master' && String(record.teacher_id || '') === actor.uid) return false;
+  return canManageAttendanceSchool(actor, effectiveSchool(segment, record, profile));
+};
+
 const recordSegments = (record: Record<string, any>) =>
   Array.isArray(record.work_segments) ? record.work_segments as Array<Record<string, any>> : [];
 
@@ -261,6 +273,7 @@ export async function GET(request: NextRequest) {
             school_name: schoolId ? attendanceSchoolName(schoolId) : undefined,
             approval_status: segmentStatus(raw, record),
             can_review: canReviewSegment(actor, raw, record, profile),
+            ...(raw.type === 'break' ? { can_edit: canEditBreakSegment(actor, raw, record, profile) } : {}),
           };
         });
         const detailMissing = !workSegments.some((segment: Record<string, any>) => segment.type !== 'break');
@@ -383,7 +396,7 @@ export async function POST(request: NextRequest) {
       try {
         transportationInput = normalizedTransportationInput(body);
       } catch (error) {
-        return Response.json({ ok: false, error: error instanceof Error ? error.message : '交通費を確認してください。' }, { status: 400 });
+        return Response.json({ ok: false, error: preparedMessageOr(error, '交通費を確認してください。') }, { status: 400 });
       }
 
       let segments: AttendanceWorkSegment[] = [];
@@ -399,7 +412,7 @@ export async function POST(request: NextRequest) {
         try {
           segment = normalizeEditedSegment(body.segment || { start: requestedStart, end: requestedEnd, type: 'office', office_task: 'lesson_preparation', school_id: schoolId }, crypto.randomUUID());
         } catch (error) {
-          return Response.json({ ok: false, error: error instanceof Error ? error.message : '勤務詳細を確認してください。' }, { status: 400 });
+          return Response.json({ ok: false, error: preparedMessageOr(error, '勤務詳細を確認してください。') }, { status: 400 });
         }
         segments = [segment];
       }
@@ -441,7 +454,7 @@ export async function POST(request: NextRequest) {
       try {
         transportationInput = normalizedTransportationInput(body);
       } catch (error) {
-        return Response.json({ ok: false, error: error instanceof Error ? error.message : '交通費を確認してください。' }, { status: 400 });
+        return Response.json({ ok: false, error: preparedMessageOr(error, '交通費を確認してください。') }, { status: 400 });
       }
       const db = adminDb();
       const ref = db.doc(`work_records/${recordId}`);
@@ -487,7 +500,7 @@ export async function POST(request: NextRequest) {
           if (requestedSegments[index].start < requestedSegments[index - 1].end) throw new Error('勤務詳細の時間帯が重複しています。');
         }
       } catch (error) {
-        return Response.json({ ok: false, error: error instanceof Error ? error.message : '勤務詳細を確認してください。' }, { status: 400 });
+        return Response.json({ ok: false, error: preparedMessageOr(error, '勤務詳細を確認してください。') }, { status: 400 });
       }
       const db = adminDb();
       const ref = db.doc(`work_records/${recordId}`);
@@ -549,7 +562,7 @@ export async function POST(request: NextRequest) {
       try {
         requestedSegment = normalizeEditedSegment(body.segment, requestedSegmentId);
       } catch (error) {
-        return Response.json({ ok: false, error: error instanceof Error ? error.message : '入力内容を確認してください。' }, { status: 400 });
+        return Response.json({ ok: false, error: preparedMessageOr(error, '入力内容を確認してください。') }, { status: 400 });
       }
 
       const db = adminDb();
@@ -568,9 +581,18 @@ export async function POST(request: NextRequest) {
         const index = segments.findIndex(segment => segment.id === requestedSegmentId);
         if (index < 0) throw new Error('work segment not found');
         const previous = segments[index];
-        if (!canReviewSegment(actor, previous, record, profile)) throw new Error('forbidden');
-        if (!canReviewSegment(actor, requestedSegment, record, profile)) throw new Error('forbidden');
-        if (segmentStatus(previous, record) === 'approved') throw new Error('承認済みの勤務は、先に承認を解除してください。');
+        const canEdit = (segment: Partial<AttendanceWorkSegment>) => segment.type === 'break'
+          ? canEditBreakSegment(actor, segment, record, profile)
+          : canReviewSegment(actor, segment, record, profile);
+        if (!canEdit(previous)) throw new Error('forbidden');
+        if (!canEdit(requestedSegment)) throw new Error('forbidden');
+        // 休憩はいつも「承認済み」扱いなので、承認の解除はいらない。
+        if (previous.type !== 'break' && segmentStatus(previous, record) === 'approved') throw new Error('承認済みの勤務は、先に承認を解除してください。');
+        const clockStart = clockLabel(record.start_time);
+        const clockEnd = clockLabel(record.end_time);
+        if (clockStart && clockEnd && (requestedSegment.start < clockStart || requestedSegment.end > clockEnd)) {
+          throw new Error(`勤務詳細は打刻時間（${clockStart}〜${clockEnd}）内で入力してください。`);
+        }
 
         const nextSegment = { ...requestedSegment } as Record<string, any>;
         segments[index] = nextSegment;
@@ -595,7 +617,8 @@ export async function POST(request: NextRequest) {
         transaction.set(ref, {
           work_segments: segments,
           detail_approval_status: detailStatus,
-          status: 'pending',
+          // 休憩だけを直したときは、承認済みの日を承認待ちに戻さない。
+          status: detailStatus === 'approved' ? 'approved' : 'pending',
           updated_at: updatedAt,
         }, { merge: true });
       });

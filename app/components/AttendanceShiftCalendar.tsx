@@ -24,6 +24,7 @@ import {
 } from '@/lib/attendance-shift-plan';
 import { minutesToShiftTime, movedShiftTimes, shiftTimeMinutes } from '@/lib/attendance-shift-timeline';
 import { userErrorMessage } from '@/lib/user-error';
+import { ATTENDANCE_SCHOOL_OPTION_GROUPS } from '@/lib/attendance-schools';
 
 type Staff = {
   id: string;
@@ -135,6 +136,10 @@ export default function AttendanceShiftCalendar() {
   const [weekLayout, setWeekLayout] = useState<'rooms' | 'compact'>('rooms');
   const [category, setCategory] = useState<AttendanceShiftCategory>('group');
   const [school, setSchool] = useState<{ id: string; name: string; mode: 'group' | 'individual' }>({ id: '', name: '', mode: 'group' });
+  // master は所属校舎がないため、表示する校舎をここで選ぶ（サーバーが can_select_school を返したときだけ表示）。
+  const [schoolChoice, setSchoolChoice] = useState('');
+  const [canSelectSchool, setCanSelectSchool] = useState(false);
+  const [schoolRequired, setSchoolRequired] = useState(false);
   const [staff, setStaff] = useState<Staff[]>([]);
   const [students, setStudents] = useState<Student[]>([]);
   const [shifts, setShifts] = useState<AttendanceShiftPlan[]>([]);
@@ -184,10 +189,13 @@ export default function AttendanceShiftCalendar() {
     setLoadError(false);
     try {
       const params = new URLSearchParams({ start: range.start, end: range.end, include_students: category === 'individual' ? 'true' : 'false' });
+      if (schoolChoice) params.set('school_id', schoolChoice);
       const body = await api(undefined, params);
       const nextSchool = body.school || { id: '', name: '', mode: 'group' };
       setSchool(nextSchool);
-      if (!categoryInitialized.current) {
+      setCanSelectSchool(body.can_select_school === true);
+      setSchoolRequired(body.school_required === true);
+      if (!categoryInitialized.current && nextSchool.id) {
         setCategory(nextSchool.mode === 'individual' ? 'individual' : 'group');
         categoryInitialized.current = true;
       }
@@ -201,7 +209,7 @@ export default function AttendanceShiftCalendar() {
     } finally {
       setLoading(false);
     }
-  }, [api, category, range.end, range.start, user]);
+  }, [api, category, range.end, range.start, schoolChoice, user]);
 
   useEffect(() => { void load(); }, [load]);
   useEffect(() => { setSelectedDate(focusDate); }, [focusDate, view]);
@@ -412,8 +420,16 @@ export default function AttendanceShiftCalendar() {
         icon={CalendarDays}
         description={`${school.name || '所属校舎'}の勤務予定を作成・管理`}
         className="mx-auto max-w-[1600px]"
-        actions={<Button icon={<Plus size={18} />} onClick={() => openCreate(selectedDate, selectedRoom)}>新規シフト</Button>}
+        actions={<Button icon={<Plus size={18} />} disabled={!school.id} onClick={() => openCreate(selectedDate, selectedRoom)}>新規シフト</Button>}
       />
+
+      {canSelectSchool && <div className="mx-auto mt-3 flex max-w-[1600px] flex-wrap items-center gap-2">
+        <label htmlFor="shift-school" className="text-xs font-bold text-slate-500">表示する校舎</label>
+        <select id="shift-school" value={schoolChoice || school.id} onChange={event => { categoryInitialized.current = false; setSelectedRoom(''); setSchoolChoice(event.target.value); }} className="min-h-10 min-w-[220px] rounded-input border border-slate-200 bg-white px-3 text-sm">
+          <option value="">校舎を選択</option>
+          {ATTENDANCE_SCHOOL_OPTION_GROUPS.map(group => <optgroup key={group.label} label={group.label}>{group.schools.map(item => <option key={item.code} value={item.code}>{item.name}</option>)}</optgroup>)}
+        </select>
+      </div>}
 
       <section className="cb-card mx-auto mt-4 max-w-[1600px] overflow-visible">
         <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 p-3 sm:p-4">
@@ -481,7 +497,7 @@ export default function AttendanceShiftCalendar() {
         {message && <div className="border-b border-accent/15 bg-accent-soft px-4 py-2 text-xs font-bold text-accent">{message}</div>}
         <div className={`min-h-[660px] ${detailOpen ? 'grid xl:grid-cols-[minmax(0,1fr)_360px]' : ''}`}>
           <div className={`min-w-0 ${view === 'month' ? 'overflow-auto' : 'overflow-hidden'}`}>
-            {loading ? <div className="grid min-h-[620px] place-items-center"><Spinner size={32} /></div> : loadError ? <ErrorState className="m-4" onRetry={() => void load()} /> : view === 'month' ? (
+            {loading ? <div className="grid min-h-[620px] place-items-center"><Spinner size={32} /></div> : schoolRequired ? <EmptyState icon={CalendarDays} title="校舎を選んでください" description="上の「表示する校舎」から、シフトを見る校舎を選びます。" /> : loadError ? <ErrorState className="m-4" onRetry={() => void load()} /> : view === 'month' ? (
               <div className="min-w-[840px]">
                 <div className="grid grid-cols-7 border-b border-slate-200 bg-slate-50 text-center text-xs font-bold text-slate-500">{['月', '火', '水', '木', '金', '土', '日'].map((day, index) => <div key={day} className={`py-3 ${index === 5 ? 'text-sky-600' : index === 6 ? 'text-rose-600' : ''}`}>{day}</div>)}</div>
                 <div className="grid grid-cols-7">{monthDays.map(day => {

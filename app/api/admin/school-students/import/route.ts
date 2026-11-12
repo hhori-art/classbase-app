@@ -6,6 +6,8 @@ import { writeAuditLog } from '@/lib/server/audit-log';
 import { prepareAuthAccountCredentials } from '@/lib/server/account-credentials';
 import { writeLearningEvent } from '@/lib/events';
 import { generateInitialPassword } from '@/lib/password';
+import { passwordPolicyError } from '@/lib/password-policy';
+import { setInitialPassword } from '@/lib/server/account-secrets';
 import { anonymousParentName, anonymousStudentName, isNoPersonalInfoSchool } from '@/lib/no-personal-info-schools';
 
 export const runtime = 'nodejs';
@@ -107,7 +109,8 @@ export async function POST(request: NextRequest) {
     if (!csvText.trim()) return Response.json({ ok: false, error: 'csv_text is required' }, { status: 400 });
     if (!school) return Response.json({ ok: false, error: 'school is required' }, { status: 400 });
     if (!canManageSchool(actor, school)) throw new Error('forbidden');
-    if (requestedDefaultPassword && requestedDefaultPassword.length < 6) return Response.json({ ok: false, error: 'password must be 6+ characters' }, { status: 400 });
+    const defaultPasswordError = requestedDefaultPassword ? passwordPolicyError(requestedDefaultPassword, 'student') : '';
+    if (defaultPasswordError) return Response.json({ ok: false, error: defaultPasswordError }, { status: 400 });
 
     const rows = parseCsv(csvText.replace(/^\uFEFF/, ''));
     const headerIndex = findHeaderIndex(rows);
@@ -198,9 +201,8 @@ export async function POST(request: NextRequest) {
         const parentPassword = idx.parentPassword !== -1 && cleanCell(cols[idx.parentPassword])
           ? cleanCell(cols[idx.parentPassword])
           : requestedDefaultPassword || generateInitialPassword();
-        if (studentPassword.length < 6 || parentPassword.length < 6) {
-          throw new Error('初期パスワードは6文字以上にしてください');
-        }
+        const passwordError = passwordPolicyError(studentPassword, 'student', [loginId]) || passwordPolicyError(parentPassword, 'parent', [parentLoginId]);
+        if (passwordError) throw new Error(`初期パスワード：${passwordError}`);
 
         const syncStudent = await prepareAuthAccountCredentials({ actor, loginId, password: studentPassword, displayName: studentName, preserveActivatedPassword: true });
         const syncParent = await prepareAuthAccountCredentials({ actor, loginId: parentLoginId, password: parentPassword, displayName: parentName, preserveActivatedPassword: true });
@@ -208,8 +210,9 @@ export async function POST(request: NextRequest) {
         const parentAuth = await syncParent();
         const now = FieldValue.serverTimestamp();
         // ログイン済みで本人がパスワードを変えているアカウントは、初期パスワードを書き戻さない。
-        const studentCredentials = studentAuth.password_preserved ? {} : { initial_password: studentPassword, raw_password: studentPassword, isFirstLogin: true };
-        const parentCredentials = parentAuth.password_preserved ? {} : { initial_password: parentPassword, raw_password: parentPassword, isFirstLogin: true };
+        // 初期パスワードは users に置かず、下で account_secrets にハッシュで置く（KDL診断 A.3.1）。
+        const studentCredentials = studentAuth.password_preserved ? {} : { isFirstLogin: true };
+        const parentCredentials = parentAuth.password_preserved ? {} : { isFirstLogin: true };
         if (studentAuth.password_preserved) preserved.push({ row: rowOffset + i + 1, login_id: loginId });
 
         await db.collection('users').doc(studentAuth.uid).set({
@@ -264,6 +267,9 @@ export async function POST(request: NextRequest) {
           updated_by: actor.uid,
         }, { merge: true });
 
+        if (!studentAuth.password_preserved) await setInitialPassword(studentAuth.uid, studentPassword, actor.uid);
+        if (!parentAuth.password_preserved) await setInitialPassword(parentAuth.uid, parentPassword, actor.uid);
+
         results.push({
           id: studentAuth.uid,
           uid: studentAuth.uid,
@@ -295,7 +301,10 @@ export async function POST(request: NextRequest) {
           siblingGroups.set(siblingGroup, [...(siblingGroups.get(siblingGroup) || []), { uid: studentAuth.uid, twin }]);
         }
       } catch (error: any) {
-        errors.push({ row: rowOffset + i + 1, login_id: loginId, error: error.message || String(error) });
+        // こちらで用意した日本語の理由だけを返し、それ以外は記録に残す。
+        const message = String(error?.message || '');
+        if (!/[ぁ-んァ-ン一-龥]/.test(message)) console.error(JSON.stringify({ level: 'error', message: 'student import row failed', row: rowOffset + i + 1, error: message.slice(0, 300) }));
+        errors.push({ row: rowOffset + i + 1, login_id: loginId, error: /[ぁ-んァ-ン一-龥]/.test(message) ? message : 'この行を登録できませんでした。' });
       }
     });
     // 並列処理で順番が入れ替わるので、CSVの行順に戻す。

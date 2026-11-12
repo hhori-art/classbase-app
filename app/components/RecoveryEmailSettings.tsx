@@ -13,6 +13,7 @@ type Props = {
 
 export default function RecoveryEmailSettings({ currentEmail, verified, compact = false }: Props) {
   const [email, setEmail] = useState(currentEmail || '');
+  const [currentPassword, setCurrentPassword] = useState('');
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
@@ -38,17 +39,19 @@ export default function RecoveryEmailSettings({ currentEmail, verified, compact 
           'content-type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ email }),
+        body: JSON.stringify({ email, current_password: currentPassword }),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok || data.ok === false) {
+        if (data.error === 'current-password-required' || data.error === 'current-password-wrong' || data.error === 'too-many-attempts') throw new Error(String(data.message || '今のパスワードを確認してください。'));
         if (response.status === 401) throw new Error('ログイン期限が切れています。一度ログアウトし、もう一度ログインしてください。');
         if (data.error === 'too-many-requests') throw new Error('送信回数が多いため、1時間ほど空けてお試しください。');
         if (data.error === 'email-sender-not-verified') throw new Error('確認メールの送信元設定を確認中です。少し時間を空けてもう一度お試しください。');
         if (data.error === 'email-delivery-failed') throw new Error('確認メールの送信に失敗しました。時間を空けてもう一度お試しください。');
         if (data.error === 'invalid-email') throw new Error('受信可能なメールアドレスを入力してください。');
-        throw new Error(`確認メールを送信できませんでした（${String(data.error || response.status)}）。管理者へお知らせください。`);
+        throw new Error('確認メールを送信できませんでした。管理者へお知らせください。');
       }
+      setCurrentPassword('');
       setMessage('創造学園アプリの確認メールを送信しました。30分以内にメール内のリンクを押してください。見つからない場合は迷惑メールもご確認ください。');
     } catch (cause) {
       setError(userErrorMessage(cause, '確認メールを送信できませんでした。'));
@@ -96,10 +99,19 @@ export default function RecoveryEmailSettings({ currentEmail, verified, compact 
             className="w-full rounded-xl border border-slate-200 bg-white py-3 pl-10 pr-3 text-base font-bold text-slate-800 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
           />
         </div>
+        <input
+          type="password"
+          autoComplete="current-password"
+          aria-label="今のパスワード"
+          value={currentPassword}
+          onChange={event => setCurrentPassword(event.target.value)}
+          placeholder="今のパスワード"
+          className="w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base font-bold text-slate-800 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 sm:w-44"
+        />
         <button
           type="button"
           onClick={sendVerification}
-          disabled={saving || !email}
+          disabled={saving || !email || !currentPassword}
           className="flex shrink-0 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 py-3 text-sm font-bold text-white hover:bg-indigo-700 disabled:opacity-50"
         >
           {saving && <Loader2 size={16} className="animate-spin" />}

@@ -3,6 +3,8 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, jsonError, requireScienceSocialStaff } from '@/lib/server-auth';
 import { jstDateKey } from '@/lib/date-key';
+
+const ROSTER_STATUSES = new Set(['joined', 'absence_notified', 'absent_recorded', 'no_contact', 'unconfirmed']);
 import { accessibleTeacherStudents } from '@/lib/server/teacher-student-access';
 
 export const runtime = 'nodejs';
@@ -97,6 +99,9 @@ export async function POST(request: NextRequest) {
       teacher_id: user.uid,
       teacher_name: teacherName,
       note: rawNote,
+      // 電話したときの名簿の状態（lib/today-roster.ts）。不要な確認電話がどれだけ減ったかを測るために残す。
+      roster_status: ROSTER_STATUSES.has(clean(body.roster_status, 40)) ? clean(body.roster_status, 40) : null,
+      zoom_checked: body.zoom_checked === true,
       marked_at: new Date().toISOString(),
       created_at: FieldValue.serverTimestamp(),
     };

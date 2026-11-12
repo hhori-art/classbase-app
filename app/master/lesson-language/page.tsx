@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { CheckCircle2, Flag, MessageSquareWarning, PlayCircle, Plus, RefreshCw, RotateCcw, Save, Trash2 } from 'lucide-react';
+import { CheckCircle2, Download, Flag, MessageSquareWarning, PlayCircle, Plus, RefreshCw, RotateCcw, Save, Trash2 } from 'lucide-react';
 import { useAuth } from '@/app/context/AuthContext';
 import AdminPageHeader from '@/app/components/master/AdminPageHeader';
 import AdminTabs from '@/app/components/master/AdminTabs';
@@ -16,6 +16,7 @@ import {
   type LanguageSeverity,
 } from '@/lib/lesson-language';
 import { userErrorMessage } from '@/lib/user-error';
+import { downloadCsv } from '@/lib/csv-export';
 
 type Check = {
   id: string;
@@ -42,6 +43,28 @@ const LEAD_IN_SECONDS = 5;
 const SEVERITY_ORDER: LanguageSeverity[] = ['high', 'medium', 'low'];
 const sortFindings = (findings: LanguageFinding[]) =>
   [...findings].sort((a, b) => SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity) || a.time - b.time);
+
+const REVIEW_LABELS = { ok: '問題なし', follow_up: '要フォロー' } as const;
+const CSV_HEADERS = ['授業日', '時限', '講師', '学年', '教科', '科目', '単元', 'チェックした発言数', '確認', 'メモ', '時刻', '重要度', '種類', '言葉', '話者', '発言', '前の発言', '後の発言'] as const;
+
+/** 見つかった発言を1行ずつ書き出す（見つからなかった授業は発言の欄を空けて1行）。 */
+function downloadChecksCsv(checks: Check[]) {
+  const rows = checks.flatMap(check => {
+    const lesson = [
+      check.target_date, check.period, check.teacher_name, check.grade, check.subject, check.detail_subject, check.unit,
+      check.cue_count, check.review_status ? REVIEW_LABELS[check.review_status] : '未確認', check.review_note,
+    ];
+    const findings = [...check.findings].sort((a, b) => a.time - b.time);
+    if (findings.length === 0) return [[...lesson, '', '', '', '', '', '', '', '']];
+    return findings.map(finding => [
+      ...lesson,
+      lessonTimeLabel(finding.time), LANGUAGE_SEVERITY_LABELS[finding.severity], LANGUAGE_CATEGORY_LABELS[finding.category],
+      finding.label, finding.speaker, finding.text, finding.before, finding.after,
+    ]);
+  });
+  const today = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Tokyo' }).format(new Date()).replace(/-/g, '');
+  downloadCsv(`授業の発言チェック_${today}.csv`, CSV_HEADERS, rows);
+}
 
 const SEVERITY_TONES: Record<LanguageSeverity, string> = {
   high: 'bg-rose-100 text-rose-800',
@@ -180,6 +203,7 @@ export default function LessonLanguagePage() {
             <label className="ml-auto inline-flex items-center gap-2 text-xs">
               <input type="checkbox" checked={onlyFlagged} onChange={event => setOnlyFlagged(event.target.checked)} className="h-4 w-4 accent-accent" />重大・要注意がある授業だけ
             </label>
+            <Button size="sm" variant="secondary" icon={<Download size={15} aria-hidden />} disabled={visible.length === 0} onClick={() => downloadChecksCsv(visible)}>CSVで保存</Button>
           </Card>
           {visible.length === 0 ? (
             <EmptyState icon={CheckCircle2} title={checks.length ? '確認が必要な発言はありません' : 'まだチェックした授業はありません'} description={checks.length ? undefined : 'Zoomの録画に文字起こしが付くと、自動でチェックします。'} />

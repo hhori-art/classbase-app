@@ -43,6 +43,9 @@ const usage = {
   allClientReads: count(allProductFiles, /\b(?:getDoc|getDocs|onSnapshot)\s*\(/g),
   unboundedClientCollections: count(allProductFiles, /getDocs\s*\(\s*collection\s*\(/g),
   serverFirestoreReads: count(allServerFiles, /\.collection\([\s\S]{0,220}?\.get\s*\(/g),
+  // getAll（文書をまとめて読む）は上の .collection(...).get( に当たらないため別に数える。
+  // FormData・URLSearchParams・Headers の getAll は Firestore の読取ではないので除く。
+  serverBatchReads: count(allServerFiles, /\b(?!(?:form|formData|searchParams|params|headers)\.)[A-Za-z_$][\w$]*(?:\(\))?\.getAll\s*\(/g),
 };
 
 // 現行機能を基準線とし、新機能は既存取得の共有・置換またはAPIキャッシュで実装する。
@@ -138,7 +141,7 @@ const limits = {
   // 依頼の新しい順40件と、依頼を受けた時に保護者の校舎を最初のお子さま1件から求める読取
   // （lib/server/password-recovery-notify.ts）。ログイン画面の依頼と管理者の対応待ちでだけ実行され、生徒画面には影響しない。
   // +2: 攻撃の監視ジョブ（lib/server/security-monitor.ts）。しきい値以上の IP・アカウントの集計（1日あたり最大20件）と、
-  // 期間内の管理操作の監査ログ（最大200件）。Vercel Cron から1日1回（有料プラン後は5分ごと）だけ実行され、
+  // 期間内の管理操作の監査ログ（最大200件）。Vercel Cron から5分ごと（直近1時間）と毎朝（直近24時間）に実行され、
   // 利用者の画面からは呼ばれない。出来事の記録（lib/server/security-events.ts）は increment の書き込みだけで読まない。
   // +4: 自動の通知（lib/server/auto-notifications.ts）。授業の未参加（毎晩1回）：受講登録の生徒ID（select・最大5000件）と
   // 今日の参加記録（select）。生徒ごとの時間割は既存の buildStudentTimetable（講師配置・年間予定は共有キャッシュ）を使う。
@@ -161,7 +164,46 @@ const limits = {
   // +1: 専任の授業時間の申請で、同じ日の申請1件を読む（承認済みを黙って承認待ちに戻さないため）。申請の操作のときだけ。
   // +4: βテスト校の日次レポート（lib/server/beta-school-report.ts）。毎朝の Vercel Cron で1回だけ、3校の在籍生徒・
   // 受講登録の有無・前日の講師配置と参加記録を読む（2026年11月21日まで）。生徒・保護者の画面からは呼ばれない。
-  serverFirestoreReads: 450,
+  // +2: 専任の勤怠。会社の休日表1件（settings/dedicated_calendar、全員で共有する5分キャッシュ・保存時に消す）は
+  // 専任の画面・月の報告・督促の自動通知で使う。承認者を外したとき、その人がまだほかの人の承認者かを1件だけ確かめる
+  // 読取は、管理者が承認者を変えたときだけ実行される。どちらも生徒・保護者の画面からは呼ばれない。
+  // -5: 専任の勤怠（本人）の勤務記録・時間外の予定・実施報告の取得を loadOwnOvertimeInputs にまとめた
+  // （画面・予定の申請・実施報告・月の提出で同じ関数を使う。予定の申請では月75時間の見込みの確認に使う）。
+  // +1: 講師の声かけリスト（app/api/teacher/attention）。担当生徒の直近16週の出席などを、講師が画面を開いたときだけ読む。
+  // +1: 生徒・保護者のパスワード再設定（登録情報の照合）。照合と通知のため、親子でつながっている相手を読む。申し込みのときだけ。
+  // +2: Apps Script でのメール送信の待ち行列（lib/server/gas-mail.ts）。GAS が1分ごとに送るメールを取り出す（最大50件）
+  // ときと、送れなかったメールの試行回数を確かめるときだけ。生徒・保護者の画面からは呼ばれない。
+  // +1: FAMキャンパスの席URL（app/zoom/start）。席を開いたときに教室キー1件を読む。管理画面（/api/admin/fam-zoom-rooms）は
+  // マスターが開いたときだけ一覧（6件程度）を読む。生徒・保護者の画面からは呼ばれない。
+  // +1: 攻撃の監視ジョブを Pro プランで5分ごとにしたため、知らせる出来事があったときだけ、同じ1時間の結果1件を読む
+  // （すでに知らせた出来事を繰り返さないため）。ふだん（出来事なし）は読まない。
+  // +2: Vercel の使用額の見張り（lib/server/usage-guard.ts）。節約モードかどうか（settings/usage_guard 1件）を
+  // 共有キャッシュ5分＋インスタンス内60秒で読む。Cron（1時間ごと）は同じ1件を読んで書き直す。生徒ごとの読み取りは増えない。
+  // +2: 保護者への月のレポートの案内（runParentMonthlyReportNotices）。毎月1日の Cron で、保護者の表示設定1件と
+  // 保護者の一覧（最大5000件）を1回読む。管理画面でオンにしたときだけで、生徒・保護者の画面からは呼ばれない。
+  // +4: 授業のカメラの記録（lib/server/zoom-camera-time.ts）。毎晩1回の Cron で、ミッション設定1件・今日の講師配置・
+  // 今日の参加記録を読む（コインはやめたので、付与の重複確認の読み取りはなくなった）。生徒・保護者の画面からは呼ばれない。
+  // +2: 同じカメラの記録を、講師の声かけリスト（直近8週・担当生徒の分だけ使う）と、マスターの「授業のカメラON率」で読む。
+  // どちらも先生が画面を開いたときだけで、生徒・保護者の画面からは呼ばれない。
+  // +10: 授業の振り返り（lib/server/lesson-analysis.ts・/api/admin/lesson-analysis）。毎晩と翌朝の Cron で、その日の文字起こしの一覧と、
+  // 授業ごとに講師配置・文字起こし・発言チェック・カメラの記録・設定を読む。管理画面は一覧と1件を、理社講座の管理者が開いたときだけ読む。
+  // 生徒・保護者の画面からは呼ばれない。
+  // +4: KDL診断の修正（2026-11-12）。ログインのロック解除と状態（管理者が押したときだけ）、パスワード変更の対象者、
+  // 初期パスワードのハッシュ（初回ログインで照合するときと、移すときだけ）。ふだんのログインはロックの2件を getAll で読むだけ。
+  // +1: 未参加通知（毎晩の Cron）で、その日の欠席・遅刻連絡を1回だけ読み、連絡のある生徒に「参加できていません」を送らない。
+  serverFirestoreReads: 478,
+  // getAll の箇所数（2026-10-26 に数え始めた基準線 68）。
+  // +2: 専任の勤怠で、指名された承認者のプロフィール（1人の職員につき最大5人）と、承認者に指名する人が在籍中の専任かの確認
+  // （最大5人）。前者は申請・報告の通知を送るとき、後者は管理者が承認者を変えたときだけ実行され、生徒・保護者の画面からは呼ばれない。
+  // +2: 講師の声かけリスト。担当生徒の学習記録・対応記録を、生徒ごとの個別読取の代わりにまとめて読む（講師が画面を開いたときだけ）。
+  // +1: パスワード再設定（登録情報の照合）で、つながっている保護者・お子さまのプロフィールをまとめて読む（申し込みのときだけ）。
+  // +1: 同じ月のレポートの案内で、保護者につながるお子さまのプロフィールを100件ずつまとめて読む（毎月1日の Cron だけ）。
+  // +1: 同じカメラの記録で、授業ボタンから入った生徒のプロフィールを100件ずつまとめて読む（毎晩の Cron だけ）。
+  // +1: 「授業のカメラON率」で、続けてオフの生徒の名前を100件ずつまとめて読む（マスターが開いたときだけ）。
+  // +2: KDL診断の修正（2026-11-12）。ログインのたびに、ロックの記録（ID＋接続元・IDごと）の2件をまとめて読み、
+  // 失敗したときだけトランザクションで同じ2件を読み直して書く。成功が続くあいだは書き込みはない。
+  // +1: 講師の「今日の対応名簿」で、名簿の生徒のプロフィールを100件ずつまとめて読み、時間割（何限か）を求める（講師が開いたときだけ）。
+  serverBatchReads: 79,
 };
 const exceeded = Object.entries(limits).filter(([key, max]) => usage[key] > max);
 
@@ -172,4 +214,4 @@ if (exceeded.length > 0) {
   process.exit(1);
 }
 
-console.log(`Firestore read budget OK: student-client=${usage.clientReads}/${limits.clientReads}, student-api=${usage.studentApiReads}/${limits.studentApiReads}, all-client=${usage.allClientReads}/${limits.allClientReads}, unbounded=${usage.unboundedClientCollections}/${limits.unboundedClientCollections}, server=${usage.serverFirestoreReads}/${limits.serverFirestoreReads}`);
+console.log(`Firestore read budget OK: student-client=${usage.clientReads}/${limits.clientReads}, student-api=${usage.studentApiReads}/${limits.studentApiReads}, all-client=${usage.allClientReads}/${limits.allClientReads}, unbounded=${usage.unboundedClientCollections}/${limits.unboundedClientCollections}, server=${usage.serverFirestoreReads}/${limits.serverFirestoreReads}, server-getAll=${usage.serverBatchReads}/${limits.serverBatchReads}`);

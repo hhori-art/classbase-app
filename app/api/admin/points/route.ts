@@ -3,7 +3,7 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, jsonError } from '@/lib/server-auth';
 import { findBadge } from '@/lib/gamification';
-import { hasStudentFeatureOverride } from '@/lib/portal-feature-access';
+import { STUDENT_FEATURE_OVERRIDE_LABELS, hasStudentFeatureOverride, isStudentFeatureOverrideKey } from '@/lib/portal-feature-access';
 import { canManageStudentRewards, requireRewardCatalogManager, studentSchoolOf } from '@/lib/server/reward-store';
 
 export const runtime = 'nodejs';
@@ -51,6 +51,7 @@ export async function GET(request: NextRequest) {
         badge_count: Array.isArray(data.earned_badges) ? data.earned_badges.length : 0,
         inactive: ['suspended', 'withdrawn', 'archived'].includes(String(data.account_status || data.status || '').toLowerCase()),
         shop_override: hasStudentFeatureOverride(data, 'shop'),
+        community_override: hasStudentFeatureOverride(data, 'community'),
       }))
       .sort((a, b) => a.school.localeCompare(b.school, 'ja') || a.grade.localeCompare(b.grade, 'ja') || a.name.localeCompare(b.name, 'ja'));
     return Response.json({ ok: true, students }, { headers: { 'Cache-Control': 'private, no-store' } });
@@ -130,19 +131,21 @@ export async function POST(request: NextRequest) {
       return Response.json({ ok: true, ...result });
     }
 
-    if (action === 'set_shop_override') {
-      // 全体設定でオフでも個別に景品交換・ガチャを見せる（テスト生徒など）。全体に影響するためマスター限定。
+    if (action === 'set_shop_override' || action === 'set_feature_override') {
+      // 全体設定でオフでも個別に機能を見せる（景品交換・ガチャ、交流掲示板。テスト生徒など）。マスター限定。
       if (actor.role !== 'master') throw new Error('forbidden');
       if (typeof body.enabled !== 'boolean') return badRequest('enabled is required');
+      const feature = action === 'set_shop_override' ? 'shop' : body.feature;
+      if (!isStudentFeatureOverrideKey(feature)) return badRequest(`feature must be one of ${Object.keys(STUDENT_FEATURE_OVERRIDE_LABELS).join(', ')}`);
       const result = await db.runTransaction(async tx => {
         const userSnap = await tx.get(userRef);
         if (!userSnap.exists || userSnap.data()?.role !== 'student') throw new Error('student-not-found');
-        tx.set(userRef, { feature_overrides: { shop: body.enabled }, updated_at: FieldValue.serverTimestamp() }, { merge: true });
+        tx.set(userRef, { feature_overrides: { [feature]: body.enabled }, updated_at: FieldValue.serverTimestamp() }, { merge: true });
         tx.set(db.collection('admin_audit_logs').doc(), {
-          action: 'feature_override.shop', target_type: 'user', target_id: userId, actor_uid: actor.uid, actor_role: actor.role,
+          action: `feature_override.${feature}`, target_type: 'user', target_id: userId, actor_uid: actor.uid, actor_role: actor.role,
           metadata: { enabled: body.enabled }, created_at: FieldValue.serverTimestamp(),
         });
-        return { shop_override: body.enabled };
+        return { [`${feature}_override`]: body.enabled };
       });
       return Response.json({ ok: true, ...result });
     }

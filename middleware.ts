@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { isProbePath } from '@/lib/security-probe';
+import { isIpRestrictedPath } from '@/lib/admin-ip-restriction';
 
 function getClientIp(request: NextRequest) {
   // Vercel が付与するヘッダーを優先し、一般的なProxyヘッダーへフォールバックする。
@@ -36,9 +37,18 @@ function parseAllowedIps(envValue: string | undefined) {
     .filter(Boolean); // ★ '' を除外
 }
 
+// API の応答は個人情報を含むため保存させない（next.config.mjs の headers と同じ値。どちらかが外れても効くよう二重にする）。
+function withApiNoStore<T extends Response>(response: T, pathname: string): T {
+  if (pathname === '/api' || pathname.startsWith('/api/')) response.headers.set('Cache-Control', 'no-store');
+  return response;
+}
+
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
+  return withApiNoStore(handle(request, pathname), pathname);
+}
 
+function handle(request: NextRequest, pathname: string) {
   if (pathname !== '/api/security/probe' && isProbePath(pathname)) {
     const headers = new Headers(request.headers);
     headers.set('x-probe-path', pathname);
@@ -68,8 +78,18 @@ export function middleware(request: NextRequest) {
     return NextResponse.redirect(new URL('/403', request.url));
   }
 
-  // 通常本番はログイン後の役割・API権限で制御する。変動する携帯回線IPでは画面を遮断しない。
-  // 診断環境の許可IP制限は上の SECURITY_DIAGNOSIS_MODE 分岐で維持する。
+  // 管理者・教室管理の画面と API は、許可ネットワーク（ALLOWED_IPS）以外から遮断する。
+  // 生徒・保護者・ログイン・勤怠は対象外（lib/admin-ip-restriction.ts）。ALLOWED_IPS 未設定の環境では全員を締め出さないよう無効。
+  if (!isInternalNetwork && allowedIps.length > 0 && isIpRestrictedPath(pathname)) {
+    console.log(`[Middleware] Blocked admin access from outside network: ${ip} -> ${pathname}`);
+    if (pathname.startsWith('/api/')) {
+      return NextResponse.json(
+        { ok: false, error: 'ip_restricted', message: '管理機能は、教室・オフィスのネットワークからだけ使えます。' },
+        { status: 403 },
+      );
+    }
+    return NextResponse.redirect(new URL('/403', request.url));
+  }
 
   return NextResponse.next({
     request: { headers: requestHeaders },

@@ -6,6 +6,7 @@ import { getServerUser, jsonError } from '@/lib/server-auth';
 import { GACHA_RATE_SCALE } from '@/lib/rewards';
 import { normalizeGachaItems, REWARD_CATALOG_TAG, requireRewardCatalogEditor, validateGachaRates } from '@/lib/server/reward-store';
 import { saveRewardImage } from '@/lib/server/reward-uploads';
+import { preparedMessageOr } from '@/lib/api-error';
 
 export const runtime = 'nodejs';
 
@@ -97,7 +98,7 @@ export async function POST(request: NextRequest) {
         updates.image_url = saved.url;
         updates.image_path = saved.path;
       } catch (error) {
-        return badRequest(error instanceof Error ? error.message : '画像を保存できませんでした');
+        return badRequest(preparedMessageOr(error, '画像を保存できませんでした', 'admin-gachas-upload'));
       }
     }
     if (id) await ref.update(updates);

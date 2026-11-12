@@ -12,14 +12,16 @@ import {
   type ServerUser,
 } from '@/lib/server-auth';
 import { jstDateKey } from '@/lib/date-key';
-import { buildMonth, buildSeasonView, dedicatedStaffFromProfile, type DedicatedStaff } from '@/lib/dedicated-month';
+import { buildMonth, buildSeasonView, dedicatedStaffFromProfile, normalizeUnitRate, type DedicatedStaff } from '@/lib/dedicated-month';
 import {
   checkOvertimePlan,
   monthDates,
   nextMonthOf,
   normalizeDivision,
   normalizeJobGrade,
+  normalizeSpecialKind,
 } from '@/lib/dedicated-overtime';
+import { lessonTerm, needsLessonMinutes, summarizeLessonTerm, termSeasonDates } from '@/lib/dedicated-lesson-term';
 import { normalizeBaselineType, normalizeSeason, seasonRange } from '@/lib/dedicated-season';
 import { writeAuditLog } from '@/lib/server/audit-log';
 import {
@@ -29,10 +31,13 @@ import {
   REPORTS,
   SEASON_LESSONS,
   TRANSPORT,
+  holidaySet,
+  loadCompanyHolidays,
+  loadLessonsBetween,
   loadSeasons,
   notifyOwner,
+  saveCompanyHolidays,
   saveSeasons,
-  toLesson,
   toPlan,
   toRecord,
   toReport,
@@ -49,7 +54,7 @@ export const dynamic = 'force-dynamic';
  *  GET ?season=    講習期間の過剰授業手当の一覧（試算）
  *  POST review     承認・差し戻し（予定・実施報告・授業・講習の授業コマ・交通費・月の提出）
  *  POST bulk_plans D05 一括申請（校長が翌月の時間外の予定をまとめて入れる）
- *  POST staff_update / season_save / season_delete（勤怠システムの管理者だけ）
+ *  POST staff_update / season_save / season_delete / calendar_save（勤怠システムの管理者だけ）
  */
 
 const clean = (value: unknown, max = 500) => String(value ?? '').normalize('NFKC').trim().slice(0, max);
@@ -75,37 +80,54 @@ const KIND_LABELS: Record<Kind, string> = {
   monthly: '月の時間外報告書',
 };
 
-/** 担当校舎の専任（在籍中の講師アカウントだけ）。 */
-async function loadStaff(user: ServerUser) {
+const isSystem = (user: ServerUser) => canManageAttendanceSystem(user);
+
+/** 承認者として指名された人（部長など）。校舎の承認者でなくても、指名された職員の分だけ使える。 */
+const isDesignatedApprover = (user: ServerUser) => user.role === 'teacher' && user.profile.dedicated_designated_approver === true;
+const canUseApprovals = (user: ServerUser) => canManageAttendance(user) || isDesignatedApprover(user);
+
+/** 承認者が指名されている職員は、その人（と勤怠システムの管理者）だけが承認する。いなければ校舎の承認者。 */
+const canReviewStaff = (user: ServerUser, staff: DedicatedStaff) => staff.approver_ids.length
+  ? staff.approver_ids.includes(user.uid) || isSystem(user)
+  : canManageAttendanceSchool(user, staff.school);
+const canSeeStaff = (user: ServerUser, staff: DedicatedStaff) => canManageAttendanceSchool(user, staff.school) || staff.approver_ids.includes(user.uid);
+
+const activeDedicated = (data: Record<string, any>) => String(data.role || '').toLowerCase() === 'teacher'
+  && isDedicatedProfile(data)
+  && !INACTIVE.includes(String(data.account_status || data.status || ''));
+
+/** 全校の在籍中の専任（講師アカウントだけ）。 */
+async function loadAllStaff() {
   const snap = await adminDb().collection('users').where('employment_category', '==', 'dedicated').limit(1000).get();
   return snap.docs
-    .filter(doc => {
-      const data = doc.data() || {};
-      return String(data.role || '').toLowerCase() === 'teacher'
-        && isDedicatedProfile(data)
-        && !INACTIVE.includes(String(data.account_status || data.status || ''));
-    })
-    .map(doc => ({ staff: dedicatedStaffFromProfile(doc.id, doc.data() || {}), profile: doc.data() || {} }))
-    .filter(item => canManageAttendanceSchool(user, item.staff.school));
+    .filter(doc => activeDedicated(doc.data() || {}))
+    .map(doc => ({ staff: dedicatedStaffFromProfile(doc.id, doc.data() || {}), profile: doc.data() || {} }));
 }
 
-const isSystem = (user: ServerUser) => canManageAttendanceSystem(user);
+/** 担当校舎の専任と、承認者に指名されている専任。 */
+async function loadStaff(user: ServerUser) {
+  return (await loadAllStaff()).filter(item => canSeeStaff(user, item.staff));
+}
 
 export async function GET(request: NextRequest) {
   try {
     const user = await getServerUser(request);
-    if (!canManageAttendance(user)) throw new Error('forbidden');
+    if (!canUseApprovals(user)) throw new Error('forbidden');
     const db = adminDb();
-    const staffList = await loadStaff(user);
+    const allStaff = await loadAllStaff();
+    const staffList = allStaff.filter(item => canSeeStaff(user, item.staff));
     const staffIds = new Set(staffList.map(item => item.staff.uid));
     const mine = <T extends { user_id: string }>(items: T[]) => items.filter(item => staffIds.has(item.user_id));
-    const seasons = await loadSeasons();
+    const [seasons, companyHolidays] = await Promise.all([loadSeasons(), loadCompanyHolidays()]);
+    const holidays = holidaySet(companyHolidays);
 
     const seasonId = clean(request.nextUrl.searchParams.get('season'), 60);
     if (seasonId) {
       const season = seasons.find(item => item.id === seasonId);
       if (!season) return Response.json({ ok: false, error: '講習期間が見つかりません。' }, { status: 404 });
-      const range = seasonRange(season)!;
+      const seasonDates = seasonRange(season)!;
+      // 5等級の比較は月単位の時間外勤務手当を使うので、講習期間にかかる月の初めから終わりまで読む。
+      const range = { start: `${seasonDates.start.slice(0, 7)}-01`, end: monthDates(seasonDates.end.slice(0, 7)).slice(-1)[0] };
       const [recordSnap, planSnap, reportSnap, lessonSnap] = await Promise.all([
         db.collection('work_records').where('date', '>=', range.start).where('date', '<=', range.end).limit(8000).get(),
         db.collection(PLANS).where('date', '>=', range.start).where('date', '<=', range.end).limit(8000).get(),
@@ -125,9 +147,30 @@ export async function GET(request: NextRequest) {
           plans: plans.filter(plan => plan.user_id === staff.uid),
           reports: reports.filter(report => report.user_id === staff.uid),
           seasonLessons: lessons.filter(lesson => lesson.user_id === staff.uid),
+          holidays,
         }),
       }));
       return Response.json({ ok: true, season, rows }, { headers: { 'Cache-Control': 'no-store' } });
+    }
+
+    // 担当加算給の半期の授業分数（4等級以下・等級未設定の人）。
+    const termParam = request.nextUrl.searchParams.get('term');
+    if (termParam) {
+      const term = lessonTerm(termParam);
+      if (!term) return bad('半期を選び直してください。');
+      const termLessons = mine(await loadLessonsBetween(term.start, term.end));
+      const rows = staffList
+        .filter(({ staff }) => needsLessonMinutes(staff.grade))
+        .map(({ staff }) => {
+          const lessons = termLessons.filter(item => item.user_id === staff.uid);
+          return {
+            staff,
+            summary: summarizeLessonTerm({ term, lessons, seasons, division: staff.division }),
+            lessons: lessons.filter(item => item.status === 'approved' || item.status === 'pending').sort((a, b) => a.lesson_date.localeCompare(b.lesson_date)),
+            season_dates: termSeasonDates(term, seasons, staff.division),
+          };
+        });
+      return Response.json({ ok: true, term, rows }, { headers: { 'Cache-Control': 'no-store' } });
     }
 
     const month = monthValue(request.nextUrl.searchParams.get('month'));
@@ -135,11 +178,11 @@ export async function GET(request: NextRequest) {
     const end = monthDates(month).slice(-1)[0];
     // 一括申請（翌月分）も見られるよう、予定は翌月末まで読む。
     const planEnd = monthDates(nextMonthOf(month)).slice(-1)[0];
-    const [recordSnap, planSnap, reportSnap, lessonSnap, seasonLessonSnap, transportSnap, monthlySnap, pendingSnaps] = await Promise.all([
+    const [recordSnap, planSnap, reportSnap, monthLessons, seasonLessonSnap, transportSnap, monthlySnap, pendingSnaps] = await Promise.all([
       db.collection('work_records').where('date', '>=', start).where('date', '<=', end).limit(8000).get(),
       db.collection(PLANS).where('date', '>=', start).where('date', '<=', planEnd).limit(8000).get(),
       db.collection(REPORTS).where('date', '>=', start).where('date', '<=', end).limit(4000).get(),
-      db.collection(LESSONS).where('lesson_date', '>=', start).where('lesson_date', '<=', end).limit(4000).get(),
+      loadLessonsBetween(start, end),
       db.collection(SEASON_LESSONS).where('date', '>=', start).where('date', '<=', end).limit(4000).get(),
       db.collection(TRANSPORT).where('expense_date', '>=', start).where('expense_date', '<=', end).limit(4000).get(),
       db.collection(MONTHLY).where('month', '==', month).limit(1000).get(),
@@ -152,7 +195,7 @@ export async function GET(request: NextRequest) {
     const records = recordSnap.docs.filter(doc => staffIds.has(String(doc.data()?.teacher_id || ''))).map(doc => ({ ...toRecord(doc), user_id: String(doc.data()?.teacher_id || '') }));
     const plans = mine(planSnap.docs.map(toPlan));
     const reports = mine(reportSnap.docs.map(toReport));
-    const lessons = mine(lessonSnap.docs.map(toLesson));
+    const lessons = mine(monthLessons);
     const seasonLessons = mine(seasonLessonSnap.docs.map(toSeasonLesson));
     const transport = mine(transportSnap.docs.map(toTransport));
     const monthly = new Map(monthlySnap.docs.map(doc => [String(doc.data()?.user_id || ''), doc.data() || {}]));
@@ -167,12 +210,14 @@ export async function GET(request: NextRequest) {
         lessons: lessons.filter(item => item.user_id === staff.uid),
         seasonLessons: seasonLessons.filter(item => item.user_id === staff.uid),
         transport: transport.filter(item => item.user_id === staff.uid),
+        holidays,
       });
       const report = monthly.get(staff.uid);
       return {
         staff,
         days: view.days,
         summary: view.summary,
+        pay: view.pay,
         lesson_minutes: view.days.reduce((sum, day) => sum + day.lesson_minutes, 0),
         season_lesson_minutes: view.days.reduce((sum, day) => sum + day.season_lesson_minutes, 0),
         transport_amount: view.days.reduce((sum, day) => sum + day.transport_amount, 0),
@@ -189,6 +234,7 @@ export async function GET(request: NextRequest) {
       if (!staff) return;
       const own = data.user_id === user.uid && user.role !== 'master';
       const bulkByManager = kind === 'plan' && data.source === 'bulk' && data.submitted_by_system !== true;
+      const reviewer = canReviewStaff(user, staff);
       queue.push({
         kind,
         id: doc.id,
@@ -199,12 +245,13 @@ export async function GET(request: NextRequest) {
         data: {
           start: data.start, end: data.end, break_minutes: data.break_minutes, minutes: data.minutes, night_minutes: data.night_minutes,
           reason: data.reason, details: data.details, source: data.source, late: data.late === true, warnings: data.warnings || [],
+          special_kind: normalizeSpecialKind(data.special_kind), over_limit: data.over_limit === true, projected_month_minutes: data.projected_month_minutes,
           actual_minutes: data.actual_minutes, planned_minutes: data.planned_minutes, actual_start: data.actual_start, actual_end: data.actual_end,
-          lesson_minutes: data.lesson_minutes, school_name: data.school_name, course_label: data.course_label, count: data.count,
+          lesson_minutes: data.lesson_minutes, excluded: Array.isArray(data.excluded) ? data.excluded : [], school_name: data.school_name, course_label: data.course_label, count: data.count,
           from: data.from, to: data.to, amount: data.amount, summary: data.summary,
         },
         // 校長が入れた一括申請は、上長（勤怠システムの管理者）が承認する。
-        can_review: !own && (!bulkByManager || isSystem(user)),
+        can_review: reviewer && !own && (!bulkByManager || isSystem(user)),
         needs_system: bulkByManager,
       });
     };
@@ -218,7 +265,14 @@ export async function GET(request: NextRequest) {
       rows,
       queue,
       seasons,
+      holidays: companyHolidays,
+      // 承認者に指名できる人（全校の専任）。勤怠システムの管理者だけに返す。
+      approver_candidates: isSystem(user)
+        ? allStaff.map(item => ({ uid: item.staff.uid, name: item.staff.name, school: item.staff.school })).sort((a, b) => a.name.localeCompare(b.name, 'ja'))
+        : [],
       can_manage_system: isSystem(user),
+      // 指名された承認者（部長など）は承認だけ。一括申請は校舎の承認者と勤怠の管理者が行う。
+      can_bulk: canManageAttendance(user),
       viewer: user.uid,
     }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {
@@ -229,7 +283,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const user = await getServerUser(request);
-    if (!canManageAttendance(user)) throw new Error('forbidden');
+    if (!canUseApprovals(user)) throw new Error('forbidden');
     const body = await request.json() as Record<string, unknown>;
     const action = clean(body.action, 40);
     const db = adminDb();
@@ -251,7 +305,7 @@ export async function POST(request: NextRequest) {
         const data = snap.data();
         if (!snap.exists || !data) return Response.json({ ok: false, error: '申請が見つかりません。画面を読み込み直してください。' }, { status: 404 });
         const staff = staffById.get(String(data.user_id || ''));
-        if (!staff || !canManageAttendanceSchool(user, staff.school)) throw new Error('forbidden');
+        if (!staff || !canReviewStaff(user, staff)) throw new Error('forbidden');
         if (data.user_id === user.uid && user.role !== 'master') throw new Error('forbidden');
         const kind = items[index].kind;
         if (kind === 'plan' && data.source === 'bulk' && data.submitted_by_system !== true && !isSystem(user)) throw new Error('forbidden');
@@ -348,6 +402,7 @@ export async function POST(request: NextRequest) {
           break_minutes: Math.max(0, Math.floor(Number(entry?.break_minutes) || 0)),
           day_off: entry?.day_off === true,
           reason: clean(entry?.reason, 300),
+          special_kind: normalizeSpecialKind(entry?.special_kind),
         };
         const check = checkOvertimePlan(plan, { today, endLimit: staff.end_limit, individual: false });
         if (!check.ok) { errors.push(`${staff.name} ${plan.date}：${check.errors.join('、')}`); return; }
@@ -396,8 +451,30 @@ export async function POST(request: NextRequest) {
       if (body.prescribed_work_start !== undefined && time(body.prescribed_work_start)) patch.prescribed_work_start = time(body.prescribed_work_start);
       if (body.prescribed_work_end !== undefined && time(body.prescribed_work_end)) patch.prescribed_work_end = time(body.prescribed_work_end);
       if (body.prescribed_break_minutes !== undefined) patch.prescribed_break_minutes = Math.max(0, Math.min(240, Math.floor(Number(body.prescribed_break_minutes) || 0)));
+      if (body.prescribed_extend_side !== undefined) patch.prescribed_extend_side = body.prescribed_extend_side === 'after' ? 'after' : 'before';
+      if (body.overtime_unit_rate !== undefined) patch.overtime_unit_rate = normalizeUnitRate(body.overtime_unit_rate);
+      if (body.short_time_work !== undefined) patch.short_time_work = body.short_time_work === true;
+      let approverChange: { added: string[]; removed: string[] } | null = null;
+      if (Array.isArray(body.dedicated_approver_ids)) {
+        const ids = Array.from(new Set(body.dedicated_approver_ids.map(id => clean(id, 128)).filter(Boolean))).slice(0, 5);
+        if (ids.includes(uid)) return bad('本人を承認者にはできません。');
+        const docs = ids.length ? await db.getAll(...ids.map(id => db.collection('users').doc(id))) : [];
+        if (docs.some(doc => !doc.exists || !activeDedicated(doc.data() || {}))) return bad('承認者には在籍中の専任を選んでください。');
+        patch.dedicated_approver_ids = ids;
+        approverChange = { added: ids.filter(id => !staff.approver_ids.includes(id)), removed: staff.approver_ids.filter(id => !ids.includes(id)) };
+      }
       if (Array.isArray(body.prescribed_work_days)) patch.prescribed_work_days = Array.from(new Set(body.prescribed_work_days.map(Number).filter(day => Number.isInteger(day) && day >= 0 && day <= 6)));
       await ref.set(patch, { merge: true });
+      if (approverChange) {
+        // 承認者に指名された人は、講師の画面から「専任の承認」を開けるようにする。外れて誰の承認者でもなくなったら戻す。
+        const batch = db.batch();
+        approverChange.added.forEach(id => batch.set(db.collection('users').doc(id), { dedicated_designated_approver: true }, { merge: true }));
+        for (const id of approverChange.removed) {
+          const still = await db.collection('users').where('dedicated_approver_ids', 'array-contains', id).limit(1).get();
+          if (still.empty) batch.set(db.collection('users').doc(id), { dedicated_designated_approver: false }, { merge: true });
+        }
+        await batch.commit();
+      }
       await writeAuditLog({ actor: user, action: 'dedicated_staff_update', target_type: 'user', target_id: uid, target_label: staff.name, details: { ...patch, updated_at: null } });
       return Response.json({ ok: true });
     }
@@ -414,11 +491,21 @@ export async function POST(request: NextRequest) {
       const raw = (body.season || {}) as Record<string, any>;
       const season = normalizeSeason(raw, clean(raw.id, 60) || `season_${Date.now().toString(36)}`);
       if (!seasonRange(season)) return bad('講習の期間（開始日・終了日）を入れてください。');
-      if (!season.courses.length) return bad('授業の一覧を1つ以上入れてください。');
       const next = [...seasons.filter(item => item.id !== season.id), season].sort((a, b) => (seasonRange(b)?.start || '').localeCompare(seasonRange(a)?.start || ''));
       await saveSeasons(next.slice(0, 30), user.uid);
       await writeAuditLog({ actor: user, action: 'dedicated_season_save', target_type: 'settings', target_id: season.id, target_label: season.name, details: { courses: season.courses.length } });
       return Response.json({ ok: true, season });
+    }
+
+    if (action === 'calendar_save') {
+      if (!isSystem(user)) throw new Error('forbidden');
+      const list = (Array.isArray(body.holidays) ? body.holidays : []).slice(0, 1000)
+        .map((item: any) => ({ date: clean(item?.date, 10), name: clean(item?.name, 40) }))
+        .filter(item => /^\d{4}-\d{2}-\d{2}$/.test(item.date) && !Number.isNaN(Date.parse(`${item.date}T00:00:00Z`)));
+      const unique = Array.from(new Map(list.map(item => [item.date, item])).values()).sort((a, b) => a.date.localeCompare(b.date));
+      await saveCompanyHolidays(unique, user.uid);
+      await writeAuditLog({ actor: user, action: 'dedicated_calendar_save', target_type: 'settings', target_id: 'dedicated_calendar', details: { count: unique.length } });
+      return Response.json({ ok: true, holidays: unique });
     }
 
     return bad('操作が不正です。');

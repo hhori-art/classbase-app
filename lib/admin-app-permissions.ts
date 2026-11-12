@@ -28,6 +28,7 @@ const MASTER_ONLY_ADMIN_PATHS = [
   '/master/users',
   '/master/delete',
   '/master/settings',
+  '/master/fam-zoom-rooms',
   '/master/ui-guide',
   '/master/stats',
   '/master/announcements',
@@ -39,6 +40,7 @@ const MASTER_ONLY_ADMIN_PATHS = [
   '/master/audit-logs',
   // 講師の授業の評価にあたるため、マスターだけ。
   '/master/lesson-language',
+  '/master/camera-rates',
 ] as const;
 
 export const ADMIN_APP_LABELS: Record<AdminAppId, string> = {
@@ -78,6 +80,8 @@ const SCHOOL_ADMIN_ALLOWED_PATHS = [
   '/master/rewards',
   // 自分宛ての通知（APIは本人の通知だけを返す）。
   '/master/notifications',
+  // 授業の振り返り（文字起こしとカメラON率から決まりで作る）。理社講座の管理者が見る。設定の変更はマスターだけ。
+  '/master/lesson-analysis',
 ] as const;
 
 // どの管理者でも開ける画面（自分のホーム・自分宛ての通知・自分のアカウント）。

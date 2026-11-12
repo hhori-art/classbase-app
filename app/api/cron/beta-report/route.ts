@@ -9,7 +9,10 @@ export async function GET(request: Request) {
   if (!isAuthorizedCronRequest(request)) return Response.json({ ok: false, error: 'unauthorized' }, { status: 401 });
   try {
     const result = await runBetaSchoolReport();
-    return Response.json({ ok: true, ...result, body: undefined });
+    // 1通も送れなかったときは失敗として返す（Vercel の記録で気づけるように）。
+    const failed = 'sent' in result && result.sent === 0;
+    if (failed) console.error('[cron beta-report] no email sent', 'error' in result ? result.error : result.errors);
+    return Response.json({ ok: !failed, ...result, body: undefined }, { status: failed ? 500 : 200 });
   } catch (error) {
     console.error('[cron beta-report] failed', error);
     return Response.json({ ok: false, error: 'beta-report-failed' }, { status: 500 });

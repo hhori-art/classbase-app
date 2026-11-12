@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { getServerUser, jsonError } from '@/lib/server-auth';
+import { verifyCurrentPassword } from '@/lib/server/current-password';
 import {
   EMAIL_VERIFICATION_TTL_MS,
   consumeRateLimit,
@@ -24,6 +25,12 @@ export async function POST(request: NextRequest) {
     const email = normalizeEmail(body.email);
     if (!isUsableRecoveryEmail(email)) {
       return Response.json({ ok: false, error: 'invalid-email' }, { status: 400 });
+    }
+
+    // 再設定用メールを変える前に、今のパスワードを確かめる（KDL診断 E.2.2）。初回ログインの直後は聞かない。
+    if (user.profile.isFirstLogin !== true) {
+      const check = await verifyCurrentPassword(request, user, body.current_password);
+      if (!check.ok) return Response.json({ ok: false, error: check.code, message: check.message, retry_after_seconds: check.retryAfterSeconds }, { status: check.status });
     }
 
     const rateLimitKey = requestFingerprint(['verify-email', user.uid]);

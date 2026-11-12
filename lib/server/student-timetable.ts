@@ -9,6 +9,7 @@ import { isTestPrepShift } from '@/lib/class-button-settings';
 import { parseLegacyCourseOptionId } from '@/lib/course-registration-selection';
 import { normalizeCourseText } from '@/lib/course-text';
 import { loadStudentClassMasters } from '@/lib/server/student-class-masters';
+import { memoizeForInstance } from '@/lib/server/instance-memo';
 import {
   collectSelectedCourseIds,
   isMainLessonShift,
@@ -59,7 +60,7 @@ const plainShift = (id: string, data: FirebaseFirestore.DocumentData) => {
 };
 
 /** 14日分の講師配置。全生徒で共有し、5分ごとに読み直す。 */
-const loadUpcomingShifts = unstable_cache(async (start: string, end: string) => {
+const loadUpcomingShifts = memoizeForInstance(unstable_cache(async (start: string, end: string) => {
   const snapshot = await adminDb().collection('shift_assignments')
     .where('target_date', '>=', start)
     .where('target_date', '<=', end)
@@ -67,10 +68,10 @@ const loadUpcomingShifts = unstable_cache(async (start: string, end: string) => 
     .limit(SHIFT_LIMIT)
     .get();
   return snapshot.docs.map(doc => plainShift(doc.id, doc.data()));
-}, ['student-timetable-shifts-v1'], { revalidate: 300, tags: ['student-timetable'] });
+}, ['student-timetable-shifts-v1'], { revalidate: 300, tags: ['student-timetable'] }), 60_000);
 
 /** 期間にかかる年間予定（休み・休講の判定用）。開始日が2か月以内の予定だけを読む。 */
-const loadScheduleWindow = unstable_cache(async (start: string, end: string) => {
+const loadScheduleWindow = memoizeForInstance(unstable_cache(async (start: string, end: string) => {
   const snapshot = await adminDb().collection('monthly_schedules')
     .where('start_date', '>=', addDays(start, -62))
     .where('start_date', '<=', end)
@@ -91,7 +92,7 @@ const loadScheduleWindow = unstable_cache(async (start: string, end: string) => 
       archived: data.archived === true,
     };
   });
-}, ['student-timetable-schedules-v1'], { revalidate: 300, tags: ['student-timetable'] });
+}, ['student-timetable-schedules-v1'], { revalidate: 300, tags: ['student-timetable'] }), 60_000);
 
 const clean = (value: unknown) => String(value || '').normalize('NFKC').trim();
 

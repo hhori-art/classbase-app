@@ -54,3 +54,16 @@ test('common and admin login entrypoints preserve attendance administrator routi
   assert.match(adminLogin, /normalizedRole === 'attendance_admin'/);
   assert.match(authContext, /return 'attendance_admin'/);
 });
+
+test('login screens send the password only to the server login APIs (KDL A.1.2)', () => {
+  const client = fs.readFileSync('lib/client-auth-login.ts', 'utf8');
+  assert.match(client, /options\.admin \? '\/api\/admin\/login' : '\/api\/auth\/login'/);
+  assert.match(client, /signInWithCustomToken/);
+  for (const file of ['lib/client-auth-login.ts', 'app/page.tsx', 'app/admin/login/page.tsx', 'app/context/AuthContext.tsx']) {
+    const source = fs.readFileSync(file, 'utf8');
+    // 画面から Firebase へ直接パスワードを送ると、サーバーのロックを通らない。
+    assert.doesNotMatch(source, /signInWithEmailAndPassword|\/api\/first-login|\/api\/admin\/first-login/, file);
+  }
+  assert.match(fs.readFileSync('app/admin/login/page.tsx', 'utf8'), /loginWithServer\(.*\{ admin: true \}\)/);
+  assert.match(fs.readFileSync('app/context/AuthContext.tsx', 'utf8'), /\/api\/auth\/logout/);
+});

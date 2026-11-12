@@ -105,6 +105,18 @@ const serialize = (doc: FirebaseFirestore.QueryDocumentSnapshot | FirebaseFirest
   ...(doc.data() || {}),
 } as AttendanceShiftPlan & Record<string, any>);
 
+// 講師が自分の予定として受け取る項目（勤怠画面の表示と勤務詳細の下書きに使う分だけ）。
+const OWN_SHIFT_FIELDS = [
+  'date', 'start', 'end', 'category', 'teacher_id', 'school_id', 'school_name', 'title', 'grade', 'subject',
+  'individual_ratio', 'individual_level', 'office_task', 'room', 'note', 'student_names', 'reflect_to_attendance',
+] as const;
+
+const ownShiftView = (shift: Record<string, any>) => {
+  const view: Record<string, unknown> = { id: shift.id };
+  for (const field of OWN_SHIFT_FIELDS) if (shift[field] !== undefined) view[field] = shift[field];
+  return view;
+};
+
 export async function GET(request: NextRequest) {
   try {
     const actor = await getServerUser(request);
@@ -116,22 +128,38 @@ export async function GET(request: NextRequest) {
     if (!DATE_KEY_PATTERN.test(start) || !DATE_KEY_PATTERN.test(end) || start > end) {
       return Response.json({ ok: false, error: '表示期間を確認してください。' }, { status: 400 });
     }
-    const schoolId = manager ? actorSchool(actor, request.nextUrl.searchParams.get('school_id')) : profileSchool(actor.profile);
-    const includeStudents = request.nextUrl.searchParams.get('include_students') === 'true';
+    const requestedSchool = request.nextUrl.searchParams.get('school_id');
+    // master は POST と同じく、どの校舎も選べる。所属校舎がなく未指定なら、画面で校舎を選んでもらう。
+    const canSelectSchool = actor.role === 'master';
+    if (manager && canSelectSchool && !resolveAttendanceSchoolCode(requestedSchool) && !profileSchool(actor.profile)) {
+      return Response.json({ ok: true, school: null, school_required: true, can_select_school: true, settings: { allow_individual_view: true }, staff: [], students: [], shifts: [], rooms: {} });
+    }
+    const schoolId = manager ? actorSchool(actor, requestedSchool) : profileSchool(actor.profile);
     const docs = await getAllQueryDocuments(
       adminDb().collection(COLLECTION).where('date', '>=', start).where('date', '<=', end).limit(5000)
     );
-    const shifts = docs.map(serialize).filter(item => item.school_id === schoolId && ((manager && !ownOnly) || item.teacher_id === actor.uid));
-    const schoolEntry = resolveAttendanceSchoolEntry(schoolId);
-    const individualViewEnabled = true;
-    const roomSettingsPromise = getDocument(adminDb().collection(ROOM_SETTINGS_COLLECTION).doc(schoolId));
-    const [staff, students, roomSettings] = manager && !ownOnly
-      ? await Promise.all([staffForSchool(schoolId), includeStudents ? studentsForSchool(actor, schoolId) : Promise.resolve([]), roomSettingsPromise])
-      : [[], [], await roomSettingsPromise];
+    const school = { id: schoolId, name: attendanceSchoolName(schoolId), mode: resolveAttendanceSchoolEntry(schoolId)?.group === '個別' ? 'individual' : 'group' };
+
+    // 講師（と管理者の「自分の分」）には、自分のシフトだけを必要な項目に絞って返す。校舎全体の教室設定は返さない。
+    if (!manager || ownOnly) {
+      const shifts = docs.map(serialize)
+        .filter(item => item.school_id === schoolId && item.teacher_id === actor.uid)
+        .map(ownShiftView);
+      return Response.json({ ok: true, school, shifts });
+    }
+
+    const includeStudents = request.nextUrl.searchParams.get('include_students') === 'true';
+    const shifts = docs.map(serialize).filter(item => item.school_id === schoolId);
+    const [staff, students, roomSettings] = await Promise.all([
+      staffForSchool(schoolId),
+      includeStudents ? studentsForSchool(actor, schoolId) : Promise.resolve([]),
+      getDocument(adminDb().collection(ROOM_SETTINGS_COLLECTION).doc(schoolId)),
+    ]);
     return Response.json({
       ok: true,
-      school: { id: schoolId, name: attendanceSchoolName(schoolId), mode: schoolEntry?.group === '個別' ? 'individual' : 'group' },
-      settings: { allow_individual_view: individualViewEnabled },
+      school,
+      can_select_school: canSelectSchool,
+      settings: { allow_individual_view: true },
       staff,
       students,
       shifts,

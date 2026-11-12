@@ -3,6 +3,7 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { adminDb } from '@/lib/firebase-admin';
 import { canManageShifts, getServerUser, jsonError } from '@/lib/server-auth';
 import { fetchOfficialZoomJoinUrl, getZoomServerAccessToken } from '@/lib/zoom-meeting';
+import { preparedMessageOr } from '@/lib/api-error';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -59,7 +60,9 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ s
       const scopeHint = /scope|permission/i.test(message)
         ? ' Zoom MarketplaceでこのServer-to-Server OAuthアプリに meeting:write:admin の権限を追加してください。'
         : '';
-      return NextResponse.json({ ok: false, error: `Zoomの会議パスコードを変更できませんでした: ${message}${scopeHint}` }, { status: 502 });
+      // Zoom の返した文言は見せず、ログにだけ残す。
+      console.error(JSON.stringify({ type: 'zoom_passcode_update_error', status: zoomResponse.status, message: message.slice(0, 300) }));
+      return NextResponse.json({ ok: false, error: `Zoomの会議パスコードを変更できませんでした。${scopeHint}`.trim() }, { status: 502 });
     }
 
     let officialJoinUrl = '';
@@ -69,8 +72,8 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ s
       if (!officialJoinUrl) {
         joinUrlWarning = 'Zoomから暗号化済みパスコード付きの参加URLを取得できませんでした。';
       }
-    } catch (error: any) {
-      joinUrlWarning = error?.message || 'Zoomの参加URL取得に失敗しました。';
+    } catch (error) {
+      joinUrlWarning = preparedMessageOr(error, 'Zoomの参加URL取得に失敗しました。', 'zoom-join-url');
     }
 
     await shiftRef.update({

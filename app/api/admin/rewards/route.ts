@@ -6,6 +6,7 @@ import { revalidateTag } from 'next/cache';
 import { REWARD_CATALOG_TAG, requireRewardCatalogEditor, rewardKindOf, stockOf } from '@/lib/server/reward-store';
 import { saveDigitalRewardFile, saveRewardImage } from '@/lib/server/reward-uploads';
 import { findRewardPreset, presetRewardKind } from '@/lib/reward-presets';
+import { preparedMessageOr } from '@/lib/api-error';
 
 export const runtime = 'nodejs';
 
@@ -93,7 +94,7 @@ export async function POST(request: NextRequest) {
         updates.digital_content_type = saved.contentType;
       }
     } catch (error) {
-      return badRequest(error instanceof Error ? error.message : 'ファイルを保存できませんでした');
+      return badRequest(preparedMessageOr(error, 'ファイルを保存できませんでした', 'admin-rewards-upload'));
     }
     if (id) {
       await ref.update(updates);

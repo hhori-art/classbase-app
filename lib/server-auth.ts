@@ -190,25 +190,5 @@ export function canViewSchoolStudents(user: ServerUser, targetSchool?: string | 
   );
 }
 
-export function jsonError(error: unknown, status = 400) {
-  const message = error instanceof Error ? error.message : String(error);
-  const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
-  const authenticationExpired = message === 'missing-token' ||
-    ['auth/id-token-revoked', 'auth/id-token-expired', 'auth/user-disabled', 'auth/argument-error'].includes(code);
-  const normalizedStatus =
-    authenticationExpired ? 401 :
-    message === 'profile-not-found' ? 403 :
-    message === 'forbidden' ? 403 :
-    status;
-
-  // 画面にそのまま出る文言なので、どの画面でも同じ意味になる汎用のコードだけ日本語にする（元のコードは code に残す）。
-  const GENERIC_MESSAGES: Record<string, string> = {
-    forbidden: 'この操作を行う権限がありません。',
-    'profile-not-found': 'アカウントの情報が見つかりません。管理者に連絡してください。',
-  };
-  return Response.json({
-    ok: false,
-    error: authenticationExpired ? 'ログイン情報が失効しています。再度ログインしてください。' : GENERIC_MESSAGES[message] || message,
-    code: authenticationExpired ? 'reauth-required' : message,
-  }, { status: normalizedStatus });
-}
+// APIのエラー応答は lib/api-error.ts にまとめた（日本語の文言・こちらのコード以外は受付番号だけ見せる）。
+export { jsonError, UserFacingError, internalErrorResponse } from '@/lib/api-error';

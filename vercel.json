@@ -7,6 +7,12 @@
   "functions": {
     "app/api/**/*.ts": {
       "maxDuration": 60
+    },
+    "app/api/cron/camera-time/route.ts": {
+      "maxDuration": 300
+    },
+    "app/api/cron/lesson-analysis/route.ts": {
+      "maxDuration": 300
     }
   },
   "crons": [
@@ -19,20 +25,16 @@
       "schedule": "0 22 * * *"
     },
     {
+      "path": "/api/security/monitor?hours=1",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/zoom/recordings/sync?days=1&max_meetings=60&evening=1",
+      "schedule": "30 13-15 * * *"
+    },
+    {
       "path": "/api/cron/work-detail-reminders",
       "schedule": "0 23 * * *"
-    },
-    {
-      "path": "/api/cron/missed-class?slot=1",
-      "schedule": "0 11 * * *"
-    },
-    {
-      "path": "/api/cron/missed-class?slot=2",
-      "schedule": "0 12 * * *"
-    },
-    {
-      "path": "/api/cron/missed-class?slot=3",
-      "schedule": "0 13 * * *"
     },
     {
       "path": "/api/cron/transfer-reminders",
@@ -41,6 +43,26 @@
     {
       "path": "/api/cron/beta-report",
       "schedule": "0 23 * * *"
+    },
+    {
+      "path": "/api/cron/missed-class",
+      "schedule": "*/5 10-13 * * *"
+    },
+    {
+      "path": "/api/cron/camera-time",
+      "schedule": "50 13 * * *"
+    },
+    {
+      "path": "/api/cron/lesson-analysis",
+      "schedule": "20 14 * * *"
+    },
+    {
+      "path": "/api/cron/lesson-analysis?yesterday=1",
+      "schedule": "40 1 * * *"
+    },
+    {
+      "path": "/api/cron/usage-guard",
+      "schedule": "7 * * * *"
     }
   ]
 }

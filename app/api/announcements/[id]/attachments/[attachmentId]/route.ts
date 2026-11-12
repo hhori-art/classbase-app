@@ -28,6 +28,6 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const [buffer] = await adminBucket().file(attachment.path).download();
     const filename = String(attachment.name || 'attachment').replace(/["\r\n]/g, '_');
     const body = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
-    return new Response(body, { headers: { 'Content-Type': attachment.content_type || 'application/octet-stream', 'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`, 'Cache-Control': 'private, max-age=300' } });
+    return new Response(body, { headers: { 'Content-Type': attachment.content_type || 'application/octet-stream', 'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`, 'Cache-Control': 'private, no-store' } });
   } catch (error) { return jsonError(error); }
 }

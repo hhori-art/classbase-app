@@ -73,6 +73,9 @@ service cloud.firestore {
           'school_code', 'schoolCode', 'school_name', 'schoolName', 'school_number', 'affiliation', 'department',
           'tp_serial', 'tpSerial', 'tp_number', 'tpNumber', 'tp',
           'prescribed_work_start', 'prescribed_work_end', 'prescribed_break_minutes', 'prescribed_work_days',
+          // 専任の給与計算・承認に使う設定（勤怠の管理画面からサーバーだけが書く）。
+          'prescribed_extend_side', 'job_grade', 'dedicated_division', 'dedicated_baseline_type',
+          'overtime_unit_rate', 'short_time_work', 'dedicated_approver_ids', 'dedicated_designated_approver',
           'school', 'school_id', 'classroom',
           'employment_category', 'employment_type', 'worker_type', 'attendance_school_manager',
           'zoom_email', 'zoomEmail', 'target_signin_address', 'signin_address', 'teacher_zoom_email',
@@ -147,6 +150,9 @@ service cloud.firestore {
           'school_code', 'schoolCode', 'school_name', 'schoolName', 'school_number', 'affiliation', 'department',
           'tp_serial', 'tpSerial', 'tp_number', 'tpNumber', 'tp',
           'prescribed_work_start', 'prescribed_work_end', 'prescribed_break_minutes', 'prescribed_work_days',
+          // 専任の給与計算・承認に使う設定（勤怠の管理画面からサーバーだけが書く）。
+          'prescribed_extend_side', 'job_grade', 'dedicated_division', 'dedicated_baseline_type',
+          'overtime_unit_rate', 'short_time_work', 'dedicated_approver_ids', 'dedicated_designated_approver',
           'school', 'school_id', 'classroom',
           'employment_category', 'employment_type', 'worker_type', 'attendance_school_manager',
           'zoom_email', 'zoomEmail', 'target_signin_address', 'signin_address', 'teacher_zoom_email',
@@ -275,6 +281,31 @@ service cloud.firestore {
     }
 
     match /password_recovery_rate_limits/{limitId} {
+      allow read, write: if false;
+    }
+
+    // 初期パスワードのハッシュ（KDL診断 A.3.1）。サーバー専用。
+    match /account_secrets/{userId} {
+      allow read, write: if false;
+    }
+
+    // ログインのロック（KDL診断 A.1.2）。サーバー専用。
+    match /login_locks/{lockId} {
+      allow read, write: if false;
+    }
+
+    // 登録情報の照合による再設定の申し込み記録（宛先メールを含む）。サーバー専用。
+    match /password_recovery_events/{eventId} {
+      allow read, write: if false;
+    }
+
+    // Apps Script でのメール送信の残り通数（1日1,500通）。サーバー専用。
+    match /mail_delivery_status/{statusId} {
+      allow read, write: if false;
+    }
+
+    // Apps Script が取りに来るメールの待ち行列（再設定リンクを含む）。サーバー専用。
+    match /mail_outbox/{mailId} {
       allow read, write: if false;
     }
 
@@ -812,6 +843,15 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // 講師の声かけリスト（理由ごとの対応記録）。サーバーAPIで担当範囲を確かめてから読み書きする。
+    match /student_attention_state/{studentId} {
+      allow read, write: if false;
+    }
+
+    match /student_attention_actions/{actionId} {
+      allow read, write: if false;
+    }
+
     match /security_monitor_reports/{reportId} {
       allow read, write: if false;
     }
@@ -827,6 +867,11 @@ service cloud.firestore {
     }
 
     match /lesson_transcript_checks/{shiftId} {
+      allow read, write: if false;
+    }
+
+    // 授業の振り返り（文字起こしとカメラON率から作る）。理社講座の管理者がAPI経由で見る。サーバー専用。
+    match /lesson_analyses/{shiftId} {
       allow read, write: if false;
     }
 
@@ -869,6 +914,9 @@ service cloud.firestore {
         'email_verification_tokens',
         'password_recovery_rate_limits',
         'password_recovery_requests',
+        'password_recovery_events',
+        'mail_delivery_status',
+        'mail_outbox',
         'mail',
         'monthly_schedules',
         'annual_lesson_schedules',
@@ -954,10 +1002,15 @@ service cloud.firestore {
         'auto_notification_runs',
         'lesson_transcripts',
         'lesson_transcript_checks',
+        'lesson_analyses',
+        'account_secrets',
+        'login_locks',
         'dedicated_overtime_plans',
         'dedicated_overtime_reports',
         'dedicated_monthly_reports',
-        'dedicated_season_lessons'
+        'dedicated_season_lessons',
+        'student_attention_state',
+        'student_attention_actions'
       ];
     }
 

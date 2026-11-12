@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { auth } from '@/lib/firebase';
 import { Loader2, ClipboardCheck, ExternalLink } from 'lucide-react';
-import { normalizeZoomMeetingId } from '@/lib/zoom-url';
+import { isMobileOrTabletDevice, isZoomHostStartUrl, normalizeZoomMeetingId } from '@/lib/zoom-url';
 import { classLiveStatus } from '@/lib/class-live-status';
 import { useConfirm, useToast } from '@/app/components/ui';
 
@@ -81,7 +81,7 @@ const DEFAULT_LABEL = 'Zoomに参加する';
 
 const isMobileOrTablet = () => {
   if (typeof navigator === 'undefined') return false;
-  return /iPhone|iPad|iPod|Android|Mobile|Tablet|Line|CriOS|FxiOS|EdgiOS/i.test(navigator.userAgent);
+  return isMobileOrTabletDevice(navigator.userAgent, navigator.maxTouchPoints || 0);
 };
 
 const cleanMeetingId = normalizeZoomMeetingId;
@@ -106,8 +106,10 @@ const withStudentName = (rawUrl: string, formattedName?: string) => {
   }
 };
 
-const buildZoomTargets = (baseUrl: string, meetingId?: string | null, formattedName?: string) => {
-  const id = extractMeetingId(baseUrl, meetingId);
+const buildZoomTargets = (rawBaseUrl: string, meetingId?: string | null, formattedName?: string) => {
+  const id = extractMeetingId(rawBaseUrl, meetingId);
+  // ホスト開始用のURL（/s/・zak=）だったら使わない。開くとホストのアカウントの名前で入ってしまう。
+  const baseUrl = isZoomHostStartUrl(rawBaseUrl) ? '' : rawBaseUrl;
   const webUrl = withStudentName(baseUrl || (id ? `https://zoom.us/j/${id}` : ''), formattedName);
   if (!id) return { webUrl, appUrl: '' };
 
@@ -130,7 +132,8 @@ const buildZoomTargets = (baseUrl: string, meetingId?: string | null, formattedN
 };
 
 const openWithAppFallback = (appUrl: string, webUrl: string) => {
-  if (!appUrl) {
+  // スマホ・タブレットは https の参加URLから Zoom アプリに渡す（zoommtg:// は「アドレスが無効です」になることがある）。
+  if (!appUrl || (webUrl && isMobileOrTablet())) {
     window.location.href = webUrl;
     return;
   }
@@ -148,7 +151,7 @@ const openWithAppFallback = (appUrl: string, webUrl: string) => {
   };
   timer = window.setTimeout(() => {
     if (!completed && !document.hidden) window.location.href = webUrl;
-  }, isMobileOrTablet() ? 1500 : 2200);
+  }, 2200);
 
   window.addEventListener('pagehide', cleanup, { once: true });
   document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -201,7 +204,8 @@ export default function ZoomButton(props: {
     if (loading) return;
     const fallbackId = cleanMeetingId(meetingId || url);
     const fallbackUrl = fallbackId ? `https://zoom.us/j/${fallbackId}` : '';
-    const baseUrl = url || fallbackUrl;
+    // ホスト開始用のURL（/s/・zak=）は開かない。開くとホストのアカウントの名前で入ってしまう。
+    const baseUrl = (url && !isZoomHostStartUrl(url) ? url : '') || fallbackUrl;
     if (!baseUrl) {
       toast.error('この授業のZoom情報がまだ準備できていません。時間をおいて再度お試しください。解決しない場合はサポートセンターへご連絡ください。');
       return;
