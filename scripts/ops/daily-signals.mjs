@@ -68,13 +68,18 @@ const signals = {
     return { calls: snap.size, by_roster_status: tally(snap.docs, 'roster_status'), zoom_checked: snap.docs.filter(doc => doc.get('zoom_checked') === true).length };
   }),
   mail: await safe('mail', async () => {
+    // GAS が取りに来た時刻と、今日あと何通送れるか（lib/server/gas-mail.ts の recordQuota が書く）。
     const data = (await db.collection('mail_delivery_status').doc('gas').get()).data() || {};
-    const pending = await count(db.collection('mail_outbox').where('status', '==', 'pending')).catch(() => null);
-    return { last_pull_at: data.last_pull_at?.toDate?.().toISOString?.() || data.updated_at?.toDate?.().toISOString?.() || null, remaining_quota: data.remaining_quota ?? null, pending_outbox: pending };
+    const [pending, failed] = await Promise.all([
+      count(db.collection('mail_outbox').where('status', '==', 'pending')).catch(() => null),
+      count(db.collection('mail_outbox').where('status', '==', 'failed')).catch(() => null),
+    ]);
+    return { last_poll_at: data.last_poll_at?.toDate?.().toISOString?.() || null, checked_at: data.checked_at?.toDate?.().toISOString?.() || null, remaining: data.remaining ?? null, low: data.low ?? null, pending_outbox: pending, failed_outbox: failed };
   }),
   security_monitor: await safe('security', async () => {
+    // 件数は counts.{種類} の入れ子にある（lib/server/security-events.ts）。
     const data = (await db.collection('security_monitor_days').doc(day).get()).data() || {};
-    const counts = Object.fromEntries(Object.entries(data).filter(([, value]) => typeof value === 'number'));
+    const counts = Object.fromEntries(Object.entries(data.counts || {}).filter(([, value]) => typeof value === 'number'));
     return { exists: Object.keys(data).length > 0, counts };
   }),
   ops_decisions_pending: await safe('ops', async () => count(db.collection('ops_decisions').where('status', '==', 'pending'))),
