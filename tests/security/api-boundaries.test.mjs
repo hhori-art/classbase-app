@@ -2457,6 +2457,64 @@ test('Zoom live attendance falls back to participant QoS when the participants s
   assert.equal(failed.success, false);
   assert.doesNotMatch(JSON.stringify(failed), /internal zoom detail/);
 });
+test('daily ops reports: agent secret required, signed one-time phone replies, GET never acts', async () => {
+  const secret = 'o'.repeat(40);
+  const lineCalls = [];
+  const h = harness({
+    documents: { 'users/owner': { role: 'master', name: 'Owner', line_user_id: 'U-owner' } },
+    env: { OPS_AGENT_SECRET: secret, OPS_REPORT_UID: 'owner', LINE_CHANNEL_ACCESS_TOKEN: 'line-token' },
+    fetch: async (url, init) => { lineCalls.push({ url: String(url), body: String(init?.body || '') }); return new Response('{}', { status: 200 }); },
+  });
+  const agent = (path, body, method = 'POST', token = secret) => new NextRequest(`https://security.test${path}`, { method, headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, ...(method === 'GET' ? {} : { body: JSON.stringify(body) }) });
+  const reportRoute = h.load('app/api/ops/report/route.ts');
+  // 鍵がない・違う呼び出しは断る
+  assert.equal((await reportRoute.POST(agent('/api/ops/report', { id: '2026-11-13' }, 'POST', null))).status, 401);
+  assert.equal((await reportRoute.POST(agent('/api/ops/report', { id: '2026-11-13' }, 'POST', 'x'.repeat(40)))).status, 401);
+  const sent = await reportRoute.POST(agent('/api/ops/report', { id: '2026-11-13', title: '点検', severity: 'warning', summary: '要点', body: '全文', fix_branch: 'ops/fix-2026-11-13', fix_summary: '修正の説明' }));
+  assert.equal(sent.status, 200);
+  assert.equal((await sent.json()).channel, 'line');
+  const pushed = JSON.parse(lineCalls.at(-1).body);
+  assert.equal(pushed.to, 'U-owner');
+  const link = pushed.messages[0].text.match(/https:\/\/\S+\/api\/ops\/decision\?t=(\S+)/);
+  assert.ok(link, 'link in message');
+  const token = decodeURIComponent(link[1]);
+
+  const decisionRoute = h.load('app/api/ops/decision/route.ts');
+  // 開いただけでは何も起きない（LINE の先読み対策）
+  const view = await decisionRoute.GET(new NextRequest(`https://security.test/api/ops/decision?t=${encodeURIComponent(token)}`));
+  assert.equal(view.status, 200);
+  assert.match(await view.text(), /本番に反映する/);
+  assert.equal(h.data.has('ops_decisions/2026-11-13'), false);
+  // 署名が違う・形が違うリンクは使えない
+  const tampered = token.replace(/.$/, ch => (ch === 'A' ? 'B' : 'A'));
+  assert.equal((await decisionRoute.GET(new NextRequest(`https://security.test/api/ops/decision?t=${encodeURIComponent(tampered)}`))).status, 400);
+  const form = (fields) => new NextRequest('https://security.test/api/ops/decision', { method: 'POST', body: new URLSearchParams(fields) });
+  const first = await decisionRoute.POST(form({ t: token, action: 'deploy', comment: '授業後に' }));
+  assert.equal(first.status, 200);
+  assert.equal(h.data.get('ops_decisions/2026-11-13').action, 'deploy');
+  assert.equal(h.data.get('ops_decisions/2026-11-13').status, 'pending');
+  // 2回目は受け付けない
+  await decisionRoute.POST(form({ t: token, action: 'skip' }));
+  assert.equal(h.data.get('ops_decisions/2026-11-13').action, 'deploy');
+
+  // Mac が未対応の返事を読み、結果を残す
+  const queue = h.load('app/api/ops/decisions/route.ts');
+  assert.equal((await queue.GET(agent('/api/ops/decisions', null, 'GET', null))).status, 401);
+  const pending = await (await queue.GET(agent('/api/ops/decisions', null, 'GET'))).json();
+  assert.deepEqual(pending.decisions.map(item => [item.report_id, item.action, item.fix_branch]), [['2026-11-13', 'deploy', 'ops/fix-2026-11-13']]);
+  assert.equal((await queue.POST(agent('/api/ops/decisions', { report_id: '2026-11-13', status: 'done', message: '反映しました' }))).status, 200);
+  assert.equal(h.data.get('ops_decisions/2026-11-13').status, 'done');
+
+  // 修正のない報告では「反映する」は選べない
+  await reportRoute.POST(agent('/api/ops/report', { id: '2026-11-14', title: '異常なし', summary: '問題なし', notify: false }));
+  const { signDecisionToken } = h.load('lib/server/ops-reports.ts');
+  const noFix = await decisionRoute.POST(form({ t: signDecisionToken('2026-11-14'), action: 'deploy' }));
+  assert.equal(noFix.status, 400);
+  assert.equal(h.data.has('ops_decisions/2026-11-14'), false);
+  // 期限切れ
+  const expired = signDecisionToken('2026-11-14', Date.now() - 4 * 24 * 60 * 60 * 1000);
+  assert.equal((await decisionRoute.GET(new NextRequest(`https://security.test/api/ops/decision?t=${encodeURIComponent(expired)}`))).status, 400);
+});
 test('recording fetch rejects untrusted URL forms before any network request', async () => {
   let requests = 0;
   const h = harness({ fetch: async () => { requests++; return new Response('video'); } });

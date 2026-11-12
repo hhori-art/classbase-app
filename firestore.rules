@@ -289,6 +289,14 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // 毎日の点検の報告と、スマホからの返事。サーバー専用（lib/server/ops-reports.ts）。
+    match /ops_reports/{reportId} {
+      allow read, write: if false;
+    }
+    match /ops_decisions/{reportId} {
+      allow read, write: if false;
+    }
+
     // ログインのロック（KDL診断 A.1.2）。サーバー専用。
     match /login_locks/{lockId} {
       allow read, write: if false;
@@ -1005,6 +1013,8 @@ service cloud.firestore {
         'lesson_analyses',
         'account_secrets',
         'login_locks',
+        'ops_reports',
+        'ops_decisions',
         'dedicated_overtime_plans',
         'dedicated_overtime_reports',
         'dedicated_monthly_reports',
